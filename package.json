@@ -1,0 +1,28 @@
+{
+  "name": "claude-code-slack",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "prod": "node dist/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^24.0.4",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "^1.0.35",
+    "@modelcontextprotocol/sdk": "^1.13.2",
+    "@slack/bolt": "^4.4.0",
+    "@types/node-fetch": "^2.6.12",
+    "dotenv": "^16.6.0",
+    "node-fetch": "^3.3.2"
+  }
+}
