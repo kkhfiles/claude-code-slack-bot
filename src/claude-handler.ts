@@ -102,7 +102,8 @@ export class ClaudeHandler {
     }
   }
 
-  cleanupInactiveSessions(maxAge: number = 30 * 60 * 1000) {
+  cleanupInactiveSessions(maxAge: number = 0) {
+    if (maxAge <= 0) return; // Disabled by default
     const now = Date.now();
     let cleaned = 0;
     for (const [key, session] of this.sessions.entries()) {

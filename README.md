@@ -70,28 +70,32 @@ BASE_DIRECTORY=P:\bitbucket
 
 ## 실행
 
-### 시작 / 중지 (권장)
+[pm2](https://pm2.keymetrics.io/)로 백그라운드 실행. 별도 CMD 창 불필요, 크래시 시 자동 재시작.
 
 ```bash
-start.bat          # 기존 프로세스 자동 종료 → 빌드 → 시작
-stop.bat           # 종료 + 고아 프로세스 정리
-type bot.log       # 로그 확인
+npm install -g pm2   # 최초 1회
+
+start.bat            # 빌드 → pm2로 시작 (이미 실행 중이면 재시작)
+stop.bat             # 중지
 ```
 
-`start.bat`은 PID 파일로 프로세스를 추적하여 항상 **하나의 인스턴스만** 실행됨을 보장.
-
-### 수동 실행
+### pm2 명령어
 
 ```bash
-# 프로덕션
+pm2 logs claude-slack-bot     # 실시간 로그 보기
+pm2 logs claude-slack-bot --lines 50  # 최근 50줄
+pm2 status                    # 프로세스 상태
+pm2 restart claude-slack-bot  # 재시작
+pm2 stop claude-slack-bot     # 중지
+pm2 delete claude-slack-bot   # 제거
+```
+
+### 수동 실행 (pm2 없이)
+
+```bash
 npm run build
-npm run prod        # = node dist/index.js
-
-# 개발 (TypeScript 직접 실행, 파일 변경 시 자동 재시작)
-npm run dev
+node dist/index.js            # 포그라운드 실행 (Ctrl+C로 종료)
 ```
-
-> **주의**: `npm run dev` 사용 시 종료가 불완전할 수 있음. `stop.bat`으로 정리하거나 `start.bat` 사용 권장.
 
 ## Slack 사용법
 
@@ -132,8 +136,8 @@ cwd                             # 현재 설정 확인
 |------|------|
 | 같은 쓰레드에서 대화 | 세션 자동 이어짐 (`--resume`) |
 | 새 메시지 (쓰레드 외) | 새 세션 시작 |
-| 30분 비활성 | 세션 자동 정리, 이후 새 세션 |
 
+세션 타임아웃 없음 — 같은 쓰레드에서는 시간이 지나도 대화가 이어집니다.
 SDK는 `resume` (세션 ID로 이어가기)과 `continue` (마지막 대화 이어가기) 모두 지원.
 현재 구현에서는 Slack 쓰레드 기반으로 `resume`을 자동 적용합니다.
 
