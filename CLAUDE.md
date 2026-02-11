@@ -26,12 +26,15 @@ stop.bat                      # pm2 중지
 - 새 기능은 기존 클래스에 메서드 추가 또는 별도 Manager 클래스로 분리
 
 ### Command Pattern
-- 모든 사용자 명령어는 `-` 접두사 필수 (`-cwd`, `-help`, `-sessions` 등)
+- 모든 사용자 명령어는 `-` 접두사 필수 (`-cwd`, `-stop`, `-sessions` 등)
+- 예외: `help`는 `-` 없이도 동작 (메타 명령어)
 - 명령어 파싱은 정규식 기반, `slack-handler.ts`의 `is*Command()` / `parse*Command()` 패턴
+- `-stop`: 진행 중인 쿼리를 `AbortController.abort()`로 즉시 중단
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
-  2. `handleMessage()`의 명령어 분기에 추가
+  2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)
   3. `getHelpText()`에 도움말 추가
+  4. `README.md`에도 반영
 
 ### Error Handling
 - Claude SDK 에러는 `try/catch`로 감싸고, Slack 메시지로 사용자에게 전달

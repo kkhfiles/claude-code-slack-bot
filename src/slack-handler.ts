@@ -157,6 +157,20 @@ export class SlackHandler {
       return;
     }
 
+    // Check if this is a stop command
+    if (text && this.isStopCommand(text)) {
+      const sessionKey = this.claudeHandler.getSessionKey(user, channel, thread_ts || ts);
+      const controller = this.activeControllers.get(sessionKey);
+      if (controller) {
+        controller.abort();
+        this.activeControllers.delete(sessionKey);
+        await say({ text: `⏹️ Stopped.`, thread_ts: thread_ts || ts });
+      } else {
+        await say({ text: `ℹ️ No active query to stop.`, thread_ts: thread_ts || ts });
+      }
+      return;
+    }
+
     // Check if this is a help command
     if (text && this.isHelpCommand(text)) {
       await say({ text: this.getHelpText(), thread_ts: thread_ts || ts });
@@ -809,8 +823,12 @@ export class SlackHandler {
     await this.updateMessageReaction(sessionKey, emoji);
   }
 
+  private isStopCommand(text: string): boolean {
+    return /^-(stop|cancel|중단)$/i.test(text.trim());
+  }
+
   private isHelpCommand(text: string): boolean {
-    return /^-(help|commands|도움말)(\?)?$/i.test(text.trim());
+    return /^-?(help|commands|도움말)(\?)?$/i.test(text.trim());
   }
 
   private getHelpText(): string {
@@ -819,20 +837,23 @@ export class SlackHandler {
     help += `\`-cwd <path>\` — Set working directory (relative or absolute)\n`;
     help += `\`-cwd\` — Show current working directory\n\n`;
     help += `*Session*\n`;
-    help += `\`-sessions\` — List recent sessions for current working directory\n`;
-    help += `\`-continue\` — Resume the last CLI session\n`;
-    help += `\`-resume <session-id>\` — Resume a specific session\n`;
-    help += `\`-resume <session-id> <message>\` — Resume with a follow-up message\n`;
-    help += `\`-reset\` — End current session (next message starts a new one)\n\n`;
+    help += `\`-sessions\` — List recent sessions for current cwd\n`;
+    help += `\`-continue [message]\` — Resume last CLI session\n`;
+    help += `\`-resume <session-id> [message]\` — Resume a specific session\n`;
+    help += `\`-stop\` — Cancel the running query\n`;
+    help += `\`-reset\` — End current session (next message starts fresh)\n\n`;
     help += `*Settings*\n`;
-    help += `\`-model [name]\` — Get/set model (\`sonnet\`, \`opus\`, \`haiku\`, or full name)\n`;
-    help += `\`-budget [amount]\` — Get/set max budget per query (USD)\n`;
+    help += `\`-model [name]\` — Get/set model (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
+    help += `\`-budget [amount|off]\` — Get/set/remove max budget per query (USD)\n`;
     help += `\`-cost\` — Show last query cost and session ID\n\n`;
     help += `*MCP*\n`;
     help += `\`-mcp\` — Show MCP server status\n`;
     help += `\`-mcp reload\` — Reload MCP configuration\n\n`;
-    help += `*Other*\n`;
-    help += `\`-help\` — Show this help message\n`;
+    help += `*Tips*\n`;
+    help += `• Same thread = session auto-continues (no command needed)\n`;
+    help += `• Drag & drop files to upload and analyze\n`;
+    help += `• Rate limit → bot offers scheduled retry\n`;
+    help += `• \`help\` or \`-help\` — Show this message\n`;
     return help;
   }
 
