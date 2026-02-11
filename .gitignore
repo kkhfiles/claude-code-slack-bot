@@ -7,6 +7,9 @@ node_modules/
 .env.local
 .env.*.local
 
+# Working directory configs (per-user local state)
+.working-dirs.json
+
 mcp-servers.json
 
 # Build output
