@@ -10,6 +10,9 @@ node_modules/
 # Working directory configs (per-user local state)
 .working-dirs.json
 
+# Bot runtime files
+bot.pid
+
 mcp-servers.json
 
 # Build output
