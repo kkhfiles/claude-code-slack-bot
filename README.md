@@ -133,15 +133,16 @@ node dist/index.js            # 포그라운드 실행 (Ctrl+C로 종료)
 | 명령어 | 설명 |
 |--------|------|
 | `-sessions` | 현재 cwd의 최근 세션 목록 (ID + 요약) |
-| `-continue` | 마지막 CLI 세션 이어가기 |
-| `-resume <session-id>` | 특정 세션 이어가기 |
-| `-resume <session-id> <메시지>` | 특정 세션에 메시지 추가하며 이어가기 |
+| `-continue [메시지]` | 마지막 CLI 세션 이어가기 |
+| `-resume <session-id> [메시지]` | 특정 세션 이어가기 |
+| `-stop` | 진행 중인 쿼리 중단 |
 | `-reset` | 현재 세션 초기화 (다음 메시지는 새 세션) |
 
 ```
 -sessions                        # 세션 목록 확인
 -resume 6449c0ab-4aa1-4de4-89ca-88ffcfc7c334   # 특정 세션 이어가기
 -continue 현재 상태를 요약해줘    # 마지막 세션에 메시지 추가
+-stop                            # 진행 중인 작업 중단
 -reset                           # 세션 초기화
 ```
 
@@ -152,7 +153,7 @@ node dist/index.js            # 포그라운드 실행 (Ctrl+C로 종료)
 | 명령어 | 설명 |
 |--------|------|
 | `-model [name]` | 모델 조회/설정 (`sonnet`, `opus`, `haiku`, 또는 전체 이름) |
-| `-budget [amount]` | 쿼리당 비용 상한 조회/설정 (USD) |
+| `-budget [amount\|off]` | 쿼리당 비용 상한 조회/설정/해제 (USD) |
 | `-cost` | 마지막 쿼리 비용, 세션 ID 확인 |
 
 ```
@@ -180,7 +181,7 @@ cp mcp-servers.example.json mcp-servers.json
 
 | 명령어 | 설명 |
 |--------|------|
-| `-help` | 전체 명령어 목록 |
+| `help` 또는 `-help` | 전체 명령어 목록 |
 
 ### 대화
 
