@@ -1,9 +1,9 @@
-import { query, type SDKMessage } from '@anthropic-ai/claude-code';
+import { query, type SDKMessage, type Query, type CanUseTool, type PermissionMode, type PermissionResult } from '@anthropic-ai/claude-code';
 import { ConversationSession } from './types';
 import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
 
-export { type SDKMessage };
+export { type SDKMessage, type Query, type CanUseTool, type PermissionMode, type PermissionResult };
 
 export class ClaudeHandler {
   private sessions: Map<string, ConversationSession> = new Map();
@@ -39,32 +39,37 @@ export class ClaudeHandler {
     return this.sessions.delete(key);
   }
 
-  async *streamQuery(
+  /**
+   * Build and return a Query object for direct iteration.
+   * The caller is responsible for iterating the Query, handling session init,
+   * and storing the Query reference for interrupt().
+   */
+  buildQuery(
     prompt: string,
-    session?: ConversationSession,
-    abortController?: AbortController,
-    workingDirectory?: string,
-    slackContext?: { channel: string; threadTs?: string; user: string },
-    resumeOptions?: { continueLastSession?: boolean; resumeSessionId?: string },
-    extraOptions?: { model?: string; maxBudgetUsd?: number }
-  ): AsyncGenerator<SDKMessage, void, unknown> {
+    opts: {
+      session?: ConversationSession;
+      abortController?: AbortController;
+      workingDirectory?: string;
+      resumeOptions?: { continueLastSession?: boolean; resumeSessionId?: string };
+      model?: string;
+      maxBudgetUsd?: number;
+      permissionMode?: PermissionMode;
+      canUseTool?: CanUseTool;
+    } = {}
+  ): Query {
     const options: any = {
       outputFormat: 'stream-json',
-      // Permission MCP server not supported on Windows; bypass for now
-      permissionMode: 'bypassPermissions',
+      permissionMode: opts.permissionMode || 'bypassPermissions',
+      includePartialMessages: true,
     };
 
-    if (extraOptions?.model) {
-      options.model = extraOptions.model;
+    if (opts.model) options.model = opts.model;
+    if (opts.maxBudgetUsd && opts.maxBudgetUsd > 0) {
+      options.maxBudgetUsd = opts.maxBudgetUsd;
     }
-
-    if (extraOptions?.maxBudgetUsd && extraOptions.maxBudgetUsd > 0) {
-      options.maxBudgetUsd = extraOptions.maxBudgetUsd;
-    }
-
-    if (workingDirectory) {
-      options.cwd = workingDirectory;
-    }
+    if (opts.workingDirectory) options.cwd = opts.workingDirectory;
+    if (opts.canUseTool) options.canUseTool = opts.canUseTool;
+    if (opts.abortController) options.abortController = opts.abortController;
 
     // Add MCP server configuration if available
     const mcpServers = this.mcpManager.getServerConfiguration();
@@ -84,6 +89,7 @@ export class ClaudeHandler {
     }
 
     // Resume priority: explicit resumeOptions > Slack session
+    const { session, resumeOptions } = opts;
     if (resumeOptions?.resumeSessionId) {
       options.resume = resumeOptions.resumeSessionId;
       this.logger.info('Resuming external session', { sessionId: resumeOptions.resumeSessionId });
@@ -99,29 +105,7 @@ export class ClaudeHandler {
 
     this.logger.debug('Claude query options', options);
 
-    options.abortController = abortController || new AbortController();
-
-    try {
-      for await (const message of query({
-        prompt,
-        options,
-      })) {
-        if (message.type === 'system' && message.subtype === 'init') {
-          if (session) {
-            session.sessionId = message.session_id;
-            this.logger.info('Session initialized', {
-              sessionId: message.session_id,
-              model: (message as any).model,
-              tools: (message as any).tools?.length || 0,
-            });
-          }
-        }
-        yield message;
-      }
-    } catch (error) {
-      this.logger.error('Error in Claude query', error);
-      throw error;
-    }
+    return query({ prompt, options });
   }
 
   cleanupInactiveSessions(maxAge: number = 0) {

@@ -11,6 +11,9 @@ Slack에서 로컬 머신의 Claude Code를 원격으로 실행하고 결과를 
 - CLI 세션 resume/continue (`-sessions`, `-resume`, `-continue`)
 - 작업 디렉터리 관리 (디스크 영속화, 재시작 후 유지)
 - 모델 선택 / 비용 제어 (`-model`, `-budget`, `-cost`)
+- Plan 모드 (`-plan`) — 실행 없이 계획만 확인 후 실행 결정
+- Safe/Trust 모드 — Bash 명령 승인 요청 또는 전체 자동 승인
+- 실시간 진행 표시 (현재 실행 중인 도구명 표시)
 - Rate limit 시 예약 메시지로 자동 재시도
 - MCP 서버 연동
 - AWS Bedrock / Google Vertex AI 지원 (선택)
@@ -21,6 +24,10 @@ Slack에서 로컬 머신의 Claude Code를 원격으로 실행하고 결과를 
 - 모든 명령어에 `-` 접두사 (`-cwd`, `-help`, `-sessions` 등)
 - CLI 세션 resume/continue 지원 (Slack 외부에서 시작한 세션도 이어가기)
 - 모델 선택, 비용 제한, 비용 조회
+- Plan 모드: 계획만 보고 Execute 버튼으로 실행
+- Safe/Trust 모드: Bash 승인 요청 vs 전체 자동 승인
+- `-stop`: SDK `Query.interrupt()`로 정상 중단 (세션 상태 보존)
+- 실시간 진행 표시 (`stream_event`로 현재 도구명 표시)
 - Rate limit 감지 → Slack 예약 메시지로 자동 재시도 제안
 - 작업 디렉터리 디스크 영속화 (`.working-dirs.json`)
 - DM 쓰레드에서 `-cwd` 설정 시 DM 레벨 폴백 자동 생성
@@ -97,6 +104,18 @@ pm2 stop claude-slack-bot          # 중지
 pm2 delete claude-slack-bot        # 제거
 ```
 
+### Windows 재부팅 시 자동 시작
+
+```bash
+# 관리자 권한으로 실행 (최초 1회)
+autostart-setup.bat
+```
+
+이 스크립트는 Windows Task Scheduler에 `pm2-resurrect` 작업을 등록합니다.
+로그인 시 `pm2 resurrect`가 자동 실행되어 봇이 복원됩니다.
+
+제거: `schtasks /delete /tn "pm2-resurrect" /f`
+
 ### 수동 실행 (pm2 없이)
 
 ```bash
@@ -135,7 +154,7 @@ node dist/index.js            # 포그라운드 실행 (Ctrl+C로 종료)
 | `-sessions` | 현재 cwd의 최근 세션 목록 (ID + 요약) |
 | `-continue [메시지]` | 마지막 CLI 세션 이어가기 |
 | `-resume <session-id> [메시지]` | 특정 세션 이어가기 |
-| `-stop` | 진행 중인 쿼리 중단 |
+| `-stop` | 진행 중인 쿼리 중단 (graceful interrupt) |
 | `-reset` | 현재 세션 초기화 (다음 메시지는 새 세션) |
 
 ```
@@ -147,6 +166,30 @@ node dist/index.js            # 포그라운드 실행 (Ctrl+C로 종료)
 ```
 
 같은 쓰레드에서의 대화는 자동으로 세션이 이어집니다 (별도 명령 불필요).
+
+### Plan & Permissions
+
+| 명령어 | 설명 |
+|--------|------|
+| `-plan <프롬프트>` | 읽기 전용으로 계획만 생성 (실행 안함) |
+| `-safe` | Safe 모드: Bash 명령 실행 시 Slack 버튼으로 승인 요청 |
+| `-trust` | Trust 모드: 모든 도구 자동 승인 (기본값) |
+
+```
+-plan pom.xml 의존성 정리 방법 알려줘   # 계획만 보기 → Execute 버튼
+-safe                                    # Bash 승인 모드 전환
+-trust                                   # 자동 승인 모드 복귀
+```
+
+**Plan 모드 흐름:**
+1. `-plan <프롬프트>` → Claude가 계획만 작성 (파일 수정 없음)
+2. 계획 확인 후 **Execute** 버튼 → 세션 이어서 실제 실행
+3. 또는 **Cancel** 버튼으로 취소
+
+**Safe 모드:**
+- 파일 읽기/편집: 자동 승인
+- Bash 명령: Slack 버튼으로 승인/거부 요청
+- 2분 내 응답 없으면 자동 승인
 
 ### 설정
 
