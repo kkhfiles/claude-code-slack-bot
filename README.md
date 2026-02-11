@@ -8,17 +8,23 @@ Slack에서 로컬 머신의 Claude Code를 원격으로 실행하고 결과를 
 - DM / 채널 멘션 / 쓰레드 대화 (세션 자동 유지)
 - 스트리밍 응답 (실시간 메시지 갱신)
 - 파일 업로드 (이미지, 텍스트, PDF, 코드 파일)
+- CLI 세션 resume/continue (`-sessions`, `-resume`, `-continue`)
 - 작업 디렉터리 관리 (디스크 영속화, 재시작 후 유지)
+- 모델 선택 / 비용 제어 (`-model`, `-budget`, `-cost`)
+- Rate limit 시 예약 메시지로 자동 재시도
 - MCP 서버 연동
 - AWS Bedrock / Google Vertex AI 지원 (선택)
 
 ### 포크 변경사항
 
 - Windows 호환성 (permission MCP 서버 제외, `bypassPermissions`)
+- 모든 명령어에 `-` 접두사 (`-cwd`, `-help`, `-sessions` 등)
+- CLI 세션 resume/continue 지원 (Slack 외부에서 시작한 세션도 이어가기)
+- 모델 선택, 비용 제한, 비용 조회
+- Rate limit 감지 → Slack 예약 메시지로 자동 재시도 제안
 - 작업 디렉터리 디스크 영속화 (`.working-dirs.json`)
-- DM 쓰레드에서 `cwd` 설정 시 DM 레벨 폴백 자동 생성
-- DM에서 `@bot cwd` 명령 인식 (봇 멘션 자동 제거)
-- 프로세스 관리 스크립트 (`start.bat`, `stop.bat`)
+- DM 쓰레드에서 `-cwd` 설정 시 DM 레벨 폴백 자동 생성
+- pm2 기반 프로세스 관리 (`start.bat`, `stop.bat`)
 
 ## 사전 요구사항
 
@@ -31,7 +37,6 @@ Slack에서 로컬 머신의 Claude Code를 원격으로 실행하고 결과를 
 ### 1. 클론 및 패키지 설치
 
 ```bash
-cd P:\github
 git clone https://github.com/kkhfiles/claude-code-slack-bot.git
 cd claude-code-slack-bot
 git checkout custom
@@ -41,6 +46,8 @@ npm install --ignore-scripts
 > `--ignore-scripts`: `@anthropic-ai/claude-code` 패키지의 Windows 플랫폼 체크를 우회.
 
 ### 2. Slack App 생성
+
+**각 사용자가 자신의 Slack App을 생성해야 합니다** (Socket Mode 특성상 앱당 하나의 연결만 유지).
 
 1. [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From an app manifest**
 2. 워크스페이스 선택 후 `slack-app-manifest.json` 내용 붙여넣기
@@ -82,12 +89,12 @@ stop.bat             # 중지
 ### pm2 명령어
 
 ```bash
-pm2 logs claude-slack-bot     # 실시간 로그 보기
+pm2 logs claude-slack-bot          # 실시간 로그 보기
 pm2 logs claude-slack-bot --lines 50  # 최근 50줄
-pm2 status                    # 프로세스 상태
-pm2 restart claude-slack-bot  # 재시작
-pm2 stop claude-slack-bot     # 중지
-pm2 delete claude-slack-bot   # 제거
+pm2 status                         # 프로세스 상태
+pm2 restart claude-slack-bot       # 재시작
+pm2 stop claude-slack-bot          # 중지
+pm2 delete claude-slack-bot        # 제거
 ```
 
 ### 수동 실행 (pm2 없이)
@@ -97,17 +104,21 @@ npm run build
 node dist/index.js            # 포그라운드 실행 (Ctrl+C로 종료)
 ```
 
-## Slack 사용법
+## Slack 명령어
 
-### 작업 디렉터리 설정
+모든 명령어는 `-` 접두사로 시작합니다. `-help`로 전체 목록을 볼 수 있습니다.
 
-봇에게 질문하기 전에 반드시 작업 디렉터리를 설정해야 합니다.
+### 작업 디렉터리
+
+| 명령어 | 설명 |
+|--------|------|
+| `-cwd <경로>` | 작업 디렉터리 설정 (상대/절대 경로) |
+| `-cwd` | 현재 설정 확인 |
 
 ```
-cwd ct-maven/ct-maven          # BASE_DIRECTORY 기준 상대 경로
-cwd P:\bitbucket\ct-cert        # 절대 경로
-set directory /path/to/project  # 대체 문법
-cwd                             # 현재 설정 확인
+-cwd ct-maven/ct-maven          # BASE_DIRECTORY 기준 상대 경로
+-cwd P:\bitbucket\ct-cert        # 절대 경로
+-cwd                             # 현재 설정 확인
 ```
 
 **적용 범위:**
@@ -116,6 +127,60 @@ cwd                             # 현재 설정 확인
 - **쓰레드**: 해당 쓰레드에만 적용 (DM 폴백도 자동 생성)
 
 설정은 디스크에 저장되어 봇 재시작 후에도 유지됩니다.
+
+### 세션 관리
+
+| 명령어 | 설명 |
+|--------|------|
+| `-sessions` | 현재 cwd의 최근 세션 목록 (ID + 요약) |
+| `-continue` | 마지막 CLI 세션 이어가기 |
+| `-resume <session-id>` | 특정 세션 이어가기 |
+| `-resume <session-id> <메시지>` | 특정 세션에 메시지 추가하며 이어가기 |
+| `-reset` | 현재 세션 초기화 (다음 메시지는 새 세션) |
+
+```
+-sessions                        # 세션 목록 확인
+-resume 6449c0ab-4aa1-4de4-89ca-88ffcfc7c334   # 특정 세션 이어가기
+-continue 현재 상태를 요약해줘    # 마지막 세션에 메시지 추가
+-reset                           # 세션 초기화
+```
+
+같은 쓰레드에서의 대화는 자동으로 세션이 이어집니다 (별도 명령 불필요).
+
+### 설정
+
+| 명령어 | 설명 |
+|--------|------|
+| `-model [name]` | 모델 조회/설정 (`sonnet`, `opus`, `haiku`, 또는 전체 이름) |
+| `-budget [amount]` | 쿼리당 비용 상한 조회/설정 (USD) |
+| `-cost` | 마지막 쿼리 비용, 세션 ID 확인 |
+
+```
+-model                # 현재 모델 확인
+-model sonnet         # sonnet으로 변경 (빠름/저렴)
+-model opus           # opus로 변경 (고성능)
+-budget 1.00          # 쿼리당 $1.00 상한
+-budget off           # 상한 해제
+-cost                 # 마지막 비용 확인
+```
+
+### MCP 서버
+
+| 명령어 | 설명 |
+|--------|------|
+| `-mcp` | MCP 서버 상태 확인 |
+| `-mcp reload` | MCP 설정 다시 로드 |
+
+`mcp-servers.json` 파일로 설정:
+```bash
+cp mcp-servers.example.json mcp-servers.json
+```
+
+### 기타
+
+| 명령어 | 설명 |
+|--------|------|
+| `-help` | 전체 명령어 목록 |
 
 ### 대화
 
@@ -130,17 +195,6 @@ cwd                             # 현재 설정 확인
 의존성 충돌이 있는지 확인해줘
 ```
 
-### 세션 관리
-
-| 동작 | 결과 |
-|------|------|
-| 같은 쓰레드에서 대화 | 세션 자동 이어짐 (`--resume`) |
-| 새 메시지 (쓰레드 외) | 새 세션 시작 |
-
-세션 타임아웃 없음 — 같은 쓰레드에서는 시간이 지나도 대화가 이어집니다.
-SDK는 `resume` (세션 ID로 이어가기)과 `continue` (마지막 대화 이어가기) 모두 지원.
-현재 구현에서는 Slack 쓰레드 기반으로 `resume`을 자동 적용합니다.
-
 ### 파일 업로드
 
 드래그 앤 드롭 또는 첨부 버튼으로 파일 업로드 후 분석 요청:
@@ -150,28 +204,23 @@ SDK는 `resume` (세션 ID로 이어가기)과 `continue` (마지막 대화 이�
 - **문서**: PDF, DOCX (제한적)
 - **코드**: 대부분의 프로그래밍 언어
 
-### MCP 서버
+### Rate Limit 재시도
 
-`mcp-servers.json` 파일로 MCP 서버를 설정하여 Claude의 기능을 확장할 수 있습니다.
+Claude 사용량 한도에 도달하면 봇이 자동으로 감지하고 Slack 예약 메시지를 통한 재시도를 제안합니다:
 
-```bash
-cp mcp-servers.example.json mcp-servers.json
-```
+1. Rate limit 에러 발생 → 예상 대기 시간 표시
+2. "예약" 버튼 클릭 → Slack이 지정 시간에 메시지 전달
+3. 봇이 예약된 메시지를 수신하여 자동 실행
 
-```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/files"]
-    }
-  }
-}
-```
+## 멀티유저 설정
 
-**명령어:**
-- `mcp` 또는 `servers` — 설정된 서버 확인
-- `mcp reload` — 설정 다시 로드
+같은 Slack 워크스페이스의 여러 사용자가 각각 봇을 실행하려면:
+
+1. **각 사용자가 자신의 Slack App을 생성** (Socket Mode는 앱당 단일 연결)
+2. 각자의 머신에서 봇을 실행 (`claude login` → `.env` 설정 → `start.bat`)
+3. 각자의 Claude 구독에서 사용량 차감
+
+> 팀 공유 서버에서 하나의 봇을 운영하는 것도 가능합니다. 이 경우 모든 팀원이 하나의 Claude 구독을 공유하게 됩니다.
 
 ## 고급 설정
 
@@ -207,18 +256,12 @@ src/
 
 ### 봇이 응답하지 않음
 1. `stop.bat` → `start.bat`으로 재시작
-2. `bot.log` 확인
+2. `pm2 logs claude-slack-bot`으로 로그 확인
 3. `.env` 토큰 유효성 확인
 4. 채널에 봇이 추가되었는지 확인
 
-### 여러 봇 프로세스가 동시에 실행됨
-```bash
-stop.bat    # 모든 봇 프로세스 종료 + 고아 프로세스 정리
-start.bat   # 깨끗한 상태로 재시작
-```
-
 ### "No working directory set" 오류
-`cwd <경로>` 명령으로 작업 디렉터리를 먼저 설정하세요.
+`-cwd <경로>` 명령으로 작업 디렉터리를 먼저 설정하세요.
 
 ### Windows에서 `npm install` 실패
 ```bash

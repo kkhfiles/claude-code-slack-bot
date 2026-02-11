@@ -1,4 +1,7 @@
 import { App } from '@slack/bolt';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import { ClaudeHandler } from './claude-handler';
 import { SDKMessage } from './claude-handler';
 import { Logger } from './logger';
@@ -41,6 +44,10 @@ export class SlackHandler {
   private todoMessages: Map<string, string> = new Map(); // sessionKey -> messageTs
   private originalMessages: Map<string, { channel: string; ts: string }> = new Map(); // sessionKey -> original message info
   private currentReactions: Map<string, string> = new Map(); // sessionKey -> current emoji
+  private channelModels: Map<string, string> = new Map(); // channelId -> model name
+  private channelBudgets: Map<string, number> = new Map(); // channelId -> max budget USD
+  private lastQueryCosts: Map<string, { cost: number; duration: number; model: string; sessionId: string }> = new Map(); // channelId -> last cost
+  private pendingRetries: Map<string, { prompt: string; channel: string; threadTs: string; user: string }> = new Map(); // approvalId -> retry info
   private botUserId: string | null = null;
 
   constructor(app: App, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
@@ -150,6 +157,98 @@ export class SlackHandler {
       return;
     }
 
+    // Check if this is a help command
+    if (text && this.isHelpCommand(text)) {
+      await say({ text: this.getHelpText(), thread_ts: thread_ts || ts });
+      return;
+    }
+
+    // Check if this is a reset command
+    if (text && this.isResetCommand(text)) {
+      const sessionKey = this.claudeHandler.getSessionKey(user, channel, thread_ts || ts);
+      const removed = this.claudeHandler.removeSession(user, channel, thread_ts || ts);
+      this.lastQueryCosts.delete(channel);
+      await say({
+        text: removed
+          ? `🔄 Session reset. Next message will start a new conversation.`
+          : `ℹ️ No active session to reset.`,
+        thread_ts: thread_ts || ts,
+      });
+      return;
+    }
+
+    // Check if this is a model command
+    if (text) {
+      const modelArg = this.parseModelCommand(text);
+      if (modelArg !== null) {
+        if (modelArg === '') {
+          const current = this.channelModels.get(channel) || 'default (determined by Claude Code)';
+          await say({ text: `🤖 Current model: \`${current}\``, thread_ts: thread_ts || ts });
+        } else {
+          this.channelModels.set(channel, modelArg);
+          await say({ text: `🤖 Model set to \`${modelArg}\``, thread_ts: thread_ts || ts });
+        }
+        return;
+      }
+    }
+
+    // Check if this is a budget command
+    if (text) {
+      const budgetArg = this.parseBudgetCommand(text);
+      if (budgetArg !== null) {
+        if (budgetArg === -1) {
+          const current = this.channelBudgets.get(channel);
+          await say({
+            text: current ? `💰 Max budget: $${current.toFixed(2)} per query` : `💰 No budget limit set`,
+            thread_ts: thread_ts || ts,
+          });
+        } else if (budgetArg === 0) {
+          this.channelBudgets.delete(channel);
+          await say({ text: `💰 Budget limit removed`, thread_ts: thread_ts || ts });
+        } else {
+          this.channelBudgets.set(channel, budgetArg);
+          await say({ text: `💰 Max budget set to $${budgetArg.toFixed(2)} per query`, thread_ts: thread_ts || ts });
+        }
+        return;
+      }
+    }
+
+    // Check if this is a sessions command
+    if (text && this.isSessionsCommand(text)) {
+      const isDMForSessions = channel.startsWith('D');
+      const cwdForSessions = this.workingDirManager.getWorkingDirectory(
+        channel,
+        thread_ts,
+        isDMForSessions ? user : undefined
+      );
+      if (cwdForSessions) {
+        const sessions = this.listSessions(cwdForSessions);
+        await say({ text: this.formatSessionsList(sessions), thread_ts: thread_ts || ts });
+      } else {
+        await say({ text: `⚠️ Set a working directory first (\`-cwd <path>\`) to list sessions.`, thread_ts: thread_ts || ts });
+      }
+      return;
+    }
+
+    // Check if this is a cost command
+    if (text && this.isCostCommand(text)) {
+      const costInfo = this.lastQueryCosts.get(channel);
+      if (costInfo) {
+        let msg = `💵 *Last query*\n`;
+        msg += `• Cost: $${costInfo.cost.toFixed(4)}\n`;
+        msg += `• Duration: ${(costInfo.duration / 1000).toFixed(1)}s\n`;
+        msg += `• Model: \`${costInfo.model}\`\n`;
+        msg += `• Session ID: \`${costInfo.sessionId}\``;
+        await say({ text: msg, thread_ts: thread_ts || ts });
+      } else {
+        await say({ text: `ℹ️ No query cost data yet.`, thread_ts: thread_ts || ts });
+      }
+      return;
+    }
+
+    // Check if this is a resume/continue command (only if there's text)
+    const resumeParsed = text ? this.parseResumeCommand(text) : null;
+
     // Check if we have a working directory set
     const isDM = channel.startsWith('D');
     const workingDirectory = this.workingDirManager.getWorkingDirectory(
@@ -163,24 +262,18 @@ export class SlackHandler {
       let errorMessage = `⚠️ No working directory set. `;
       
       if (!isDM && !this.workingDirManager.hasChannelWorkingDirectory(channel)) {
-        // No channel default set
         errorMessage += `Please set a default working directory for this channel first using:\n`;
         if (config.baseDirectory) {
-          errorMessage += `\`cwd project-name\` or \`cwd /absolute/path\`\n\n`;
+          errorMessage += `\`-cwd project-name\` or \`-cwd /absolute/path\`\n\n`;
           errorMessage += `Base directory: \`${config.baseDirectory}\``;
         } else {
-          errorMessage += `\`cwd /path/to/directory\``;
+          errorMessage += `\`-cwd /path/to/directory\``;
         }
       } else if (thread_ts) {
-        // In thread but no thread-specific directory
         errorMessage += `You can set a thread-specific working directory using:\n`;
-        if (config.baseDirectory) {
-          errorMessage += `\`@claudebot cwd project-name\` or \`@claudebot cwd /absolute/path\``;
-        } else {
-          errorMessage += `\`@claudebot cwd /path/to/directory\``;
-        }
+        errorMessage += `\`-cwd /path/to/directory\``;
       } else {
-        errorMessage += `Please set one first using:\n\`cwd /path/to/directory\``;
+        errorMessage += `Please set one first using:\n\`-cwd /path/to/directory\``;
       }
       
       await say({
@@ -217,17 +310,19 @@ export class SlackHandler {
     let currentMessages: string[] = [];
     let statusMessageTs: string | undefined;
 
-    try {
-      // Prepare the prompt with file attachments
-      const finalPrompt = processedFiles.length > 0 
-        ? await this.fileHandler.formatFilePrompt(processedFiles, text || '')
-        : text || '';
+    // Prepare the prompt outside try so it's accessible in catch for retry
+    const basePrompt = resumeParsed ? (resumeParsed.prompt || 'Continue where you left off.') : (text || '');
+    const finalPrompt = processedFiles.length > 0
+      ? await this.fileHandler.formatFilePrompt(processedFiles, basePrompt)
+      : basePrompt;
 
-      this.logger.info('Sending query to Claude Code SDK', { 
-        prompt: finalPrompt.substring(0, 200) + (finalPrompt.length > 200 ? '...' : ''), 
+    try {
+      this.logger.info('Sending query to Claude Code SDK', {
+        prompt: finalPrompt.substring(0, 200) + (finalPrompt.length > 200 ? '...' : ''),
         sessionId: session.sessionId,
         workingDirectory,
         fileCount: processedFiles.length,
+        resumeOptions: resumeParsed?.resumeOptions,
       });
 
       // Send initial status message
@@ -247,7 +342,14 @@ export class SlackHandler {
         user
       };
       
-      for await (const message of this.claudeHandler.streamQuery(finalPrompt, session, abortController, workingDirectory, slackContext)) {
+      // Gather extra options (model, budget)
+      const extraOptions: { model?: string; maxBudgetUsd?: number } = {};
+      const channelModel = this.channelModels.get(channel);
+      if (channelModel) extraOptions.model = channelModel;
+      const channelBudget = this.channelBudgets.get(channel);
+      if (channelBudget) extraOptions.maxBudgetUsd = channelBudget;
+
+      for await (const message of this.claudeHandler.streamQuery(finalPrompt, session, abortController, workingDirectory, slackContext, resumeParsed?.resumeOptions, extraOptions)) {
         if (abortController.signal.aborted) break;
 
         this.logger.debug('Received message from Claude SDK', {
@@ -305,15 +407,26 @@ export class SlackHandler {
             }
           }
         } else if (message.type === 'result') {
+          const resultData = message as any;
           this.logger.info('Received result from Claude SDK', {
             subtype: message.subtype,
-            hasResult: message.subtype === 'success' && !!(message as any).result,
-            totalCost: (message as any).total_cost_usd,
-            duration: (message as any).duration_ms,
+            hasResult: message.subtype === 'success' && !!resultData.result,
+            totalCost: resultData.total_cost_usd,
+            duration: resultData.duration_ms,
           });
-          
-          if (message.subtype === 'success' && (message as any).result) {
-            const finalResult = (message as any).result;
+
+          // Store cost info for the `cost` command
+          if (resultData.total_cost_usd !== undefined && session?.sessionId) {
+            this.lastQueryCosts.set(channel, {
+              cost: resultData.total_cost_usd,
+              duration: resultData.duration_ms || 0,
+              model: channelModel || 'default',
+              sessionId: session.sessionId,
+            });
+          }
+
+          if (message.subtype === 'success' && resultData.result) {
+            const finalResult = resultData.result;
             if (finalResult && !currentMessages.includes(finalResult)) {
               const formatted = this.formatMessage(finalResult, true);
               await say({
@@ -349,7 +462,7 @@ export class SlackHandler {
     } catch (error: any) {
       if (error.name !== 'AbortError') {
         this.logger.error('Error handling message', error);
-        
+
         // Update status to error
         if (statusMessageTs) {
           await this.app.client.chat.update({
@@ -359,13 +472,63 @@ export class SlackHandler {
           });
         }
 
-        // Update reaction to show error
         await this.updateMessageReaction(sessionKey, '❌');
-        
-        await say({
-          text: `Error: ${error.message || 'Something went wrong'}`,
-          thread_ts: thread_ts || ts,
-        });
+
+        // Check if this is a rate limit error → offer scheduled retry
+        if (this.isRateLimitError(error)) {
+          const retryAfter = this.parseRetryAfterSeconds(error);
+          const retryTime = new Date(Date.now() + retryAfter * 1000);
+          const retryTimeStr = retryTime.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' });
+          const retryId = `retry-${Date.now()}`;
+
+          // Store retry info
+          this.pendingRetries.set(retryId, {
+            prompt: finalPrompt,
+            channel,
+            threadTs: thread_ts || ts,
+            user,
+          });
+
+          // Auto-clean after 10 minutes
+          setTimeout(() => this.pendingRetries.delete(retryId), 10 * 60 * 1000);
+
+          await say({
+            thread_ts: thread_ts || ts,
+            text: `⏳ *Rate limit reached.* Estimated retry: ${retryTimeStr} (${Math.round(retryAfter / 60)}분 후)`,
+            blocks: [
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: `⏳ *Rate limit reached.*\nEstimated retry: *${retryTimeStr}* (${Math.round(retryAfter / 60)}분 후)\n\n다음 세션에 예약 메시지로 재실행할까요?`,
+                },
+              },
+              {
+                type: 'actions',
+                elements: [
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: `예약 (${retryTimeStr})` },
+                    action_id: 'schedule_retry',
+                    value: JSON.stringify({ retryId, retryAfter }),
+                    style: 'primary',
+                  },
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: '취소' },
+                    action_id: 'cancel_retry',
+                    value: retryId,
+                  },
+                ],
+              },
+            ],
+          });
+        } else {
+          await say({
+            text: `Error: ${error.message || 'Something went wrong'}`,
+            thread_ts: thread_ts || ts,
+          });
+        }
       } else {
         this.logger.debug('Request was aborted', { sessionKey });
         
@@ -646,12 +809,207 @@ export class SlackHandler {
     await this.updateMessageReaction(sessionKey, emoji);
   }
 
+  private isHelpCommand(text: string): boolean {
+    return /^-(help|commands|도움말)(\?)?$/i.test(text.trim());
+  }
+
+  private getHelpText(): string {
+    let help = `*Claude Code Bot — Commands*\n\n`;
+    help += `*Working Directory*\n`;
+    help += `\`-cwd <path>\` — Set working directory (relative or absolute)\n`;
+    help += `\`-cwd\` — Show current working directory\n\n`;
+    help += `*Session*\n`;
+    help += `\`-sessions\` — List recent sessions for current working directory\n`;
+    help += `\`-continue\` — Resume the last CLI session\n`;
+    help += `\`-resume <session-id>\` — Resume a specific session\n`;
+    help += `\`-resume <session-id> <message>\` — Resume with a follow-up message\n`;
+    help += `\`-reset\` — End current session (next message starts a new one)\n\n`;
+    help += `*Settings*\n`;
+    help += `\`-model [name]\` — Get/set model (\`sonnet\`, \`opus\`, \`haiku\`, or full name)\n`;
+    help += `\`-budget [amount]\` — Get/set max budget per query (USD)\n`;
+    help += `\`-cost\` — Show last query cost and session ID\n\n`;
+    help += `*MCP*\n`;
+    help += `\`-mcp\` — Show MCP server status\n`;
+    help += `\`-mcp reload\` — Reload MCP configuration\n\n`;
+    help += `*Other*\n`;
+    help += `\`-help\` — Show this help message\n`;
+    return help;
+  }
+
+  private isResetCommand(text: string): boolean {
+    return /^-(reset|새로시작)$/i.test(text.trim());
+  }
+
+  private parseModelCommand(text: string): string | null {
+    const match = text.trim().match(/^-model(?:\s+(\S+))?$/i);
+    if (match) return match[1] || ''; // empty string = show current
+    return null;
+  }
+
+  private parseBudgetCommand(text: string): number | null {
+    const match = text.trim().match(/^-budget(?:\s+([\d.]+|off|reset))?$/i);
+    if (!match) return null;
+    const val = match[1];
+    if (!val) return -1; // show current
+    if (val === 'off' || val === 'reset') return 0; // disable
+    return parseFloat(val);
+  }
+
+  private isCostCommand(text: string): boolean {
+    return /^-cost$/i.test(text.trim());
+  }
+
+  private isSessionsCommand(text: string): boolean {
+    return /^-sessions?(\s+list)?$/i.test(text.trim());
+  }
+
+  private getProjectsDir(cwd: string): string {
+    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+    return path.join(os.homedir(), '.claude', 'projects', encoded);
+  }
+
+  private listSessions(cwd: string, limit: number = 10): Array<{ id: string; date: Date; summary: string; preview: string }> {
+    const projectsDir = this.getProjectsDir(cwd);
+
+    if (!fs.existsSync(projectsDir)) {
+      return [];
+    }
+
+    const files = fs.readdirSync(projectsDir)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => {
+        const fullPath = path.join(projectsDir, f);
+        return {
+          name: f,
+          path: fullPath,
+          mtime: fs.statSync(fullPath).mtime,
+        };
+      })
+      .sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
+      .slice(0, limit);
+
+    const sessions: Array<{ id: string; date: Date; summary: string; preview: string }> = [];
+
+    for (const file of files) {
+      const sessionId = file.name.replace('.jsonl', '');
+      let summary = '';
+      let preview = '';
+
+      try {
+        const content = fs.readFileSync(file.path, 'utf-8');
+        const lines = content.split('\n').slice(0, 100);
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line);
+
+            // Extract summary title
+            if (msg.type === 'summary' && msg.summary && !summary) {
+              summary = msg.summary;
+            }
+
+            // Extract first user message as preview
+            if (msg.type === 'user' && !msg.isMeta && !preview) {
+              const msgContent = msg.message?.content;
+              if (Array.isArray(msgContent)) {
+                const textPart = msgContent.find((p: any) => p.type === 'text' && p.text);
+                if (textPart) preview = textPart.text;
+              } else if (typeof msgContent === 'string') {
+                preview = msgContent;
+              }
+            }
+
+            if (summary && preview) break;
+          } catch { /* skip unparseable lines */ }
+        }
+      } catch { /* skip unreadable files */ }
+
+      sessions.push({
+        id: sessionId,
+        date: file.mtime,
+        summary,
+        preview: preview.substring(0, 100) + (preview.length > 100 ? '...' : ''),
+      });
+    }
+
+    return sessions;
+  }
+
+  private formatSessionsList(sessions: Array<{ id: string; date: Date; summary: string; preview: string }>): string {
+    if (sessions.length === 0) {
+      return `ℹ️ No sessions found for this working directory.`;
+    }
+
+    let msg = `*Recent Sessions*\n\n`;
+    for (const s of sessions) {
+      const dateStr = s.date.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      const title = s.summary || s.preview || '(no preview)';
+      msg += `• \`${s.id}\`\n`;
+      msg += `  ${dateStr} — ${title}\n\n`;
+    }
+    msg += `_Use \`-resume <session-id>\` to resume a session._`;
+    return msg;
+  }
+
+  private parseResumeCommand(text: string): { resumeOptions: { continueLastSession?: boolean; resumeSessionId?: string }; prompt?: string } | null {
+    const trimmed = text.trim();
+
+    // "-continue" or "-continue <prompt>"
+    const continueMatch = trimmed.match(/^-continue(?:\s+(.+))?$/is);
+    if (continueMatch) {
+      return {
+        resumeOptions: { continueLastSession: true },
+        prompt: continueMatch[1]?.trim() || undefined,
+      };
+    }
+
+    // "-resume <session-id>" or "-resume <session-id> <prompt>" or just "-resume"
+    // Allow optional backticks around UUID (Slack inline code formatting)
+    const resumeMatch = trimmed.match(/^-resume(?:\s+`?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`?)?(?:\s+(.+))?$/is);
+    if (resumeMatch) {
+      const sessionId = resumeMatch[1];
+      const prompt = resumeMatch[2]?.trim() || undefined;
+
+      if (sessionId) {
+        return {
+          resumeOptions: { resumeSessionId: sessionId },
+          prompt,
+        };
+      }
+      // "resume" without session ID → same as "continue"
+      return {
+        resumeOptions: { continueLastSession: true },
+        prompt,
+      };
+    }
+
+    return null;
+  }
+
+  private isRateLimitError(error: any): boolean {
+    const msg = error?.message || '';
+    return /rate.?limit|overloaded|429|too many requests|capacity|usage limit/i.test(msg);
+  }
+
+  private parseRetryAfterSeconds(error: any): number {
+    const msg = error?.message || '';
+    // Try to extract retry-after from error message (e.g., "retry after 300 seconds")
+    const match = msg.match(/retry.?after[:\s]+(\d+)/i);
+    if (match) return parseInt(match[1], 10);
+    // Try to find minutes (e.g., "try again in 5 minutes")
+    const minMatch = msg.match(/(\d+)\s*minutes?/i);
+    if (minMatch) return parseInt(minMatch[1], 10) * 60;
+    // Default: suggest 5 hours (Claude Pro session window)
+    return 5 * 60 * 60;
+  }
+
   private isMcpInfoCommand(text: string): boolean {
-    return /^(mcp|servers?)(\s+(info|list|status))?(\?)?$/i.test(text.trim());
+    return /^-mcp(\s+(info|list|status))?(\?)?$/i.test(text.trim());
   }
 
   private isMcpReloadCommand(text: string): boolean {
-    return /^(mcp|servers?)\s+(reload|refresh)$/i.test(text.trim());
+    return /^-mcp\s+(reload|refresh)$/i.test(text.trim());
   }
 
   private async getBotUserId(): Promise<string> {
@@ -681,16 +1039,16 @@ export class SlackHandler {
       
       if (config.baseDirectory) {
         welcomeMessage += `You can use:\n`;
-        welcomeMessage += `• \`cwd project-name\` (relative to base directory: \`${config.baseDirectory}\`)\n`;
-        welcomeMessage += `• \`cwd /absolute/path/to/project\` (absolute path)\n\n`;
+        welcomeMessage += `• \`-cwd project-name\` (relative to base directory: \`${config.baseDirectory}\`)\n`;
+        welcomeMessage += `• \`-cwd /absolute/path/to/project\` (absolute path)\n\n`;
       } else {
         welcomeMessage += `Please set it using:\n`;
-        welcomeMessage += `• \`cwd /path/to/project\` or \`set directory /path/to/project\`\n\n`;
+        welcomeMessage += `• \`-cwd /path/to/project\`\n\n`;
       }
-      
+
       welcomeMessage += `This will be the default working directory for this channel. `;
-      welcomeMessage += `You can always override it for specific threads by mentioning me with a different \`cwd\` command.\n\n`;
-      welcomeMessage += `Once set, you can ask me to help with code reviews, file analysis, debugging, and more!`;
+      welcomeMessage += `You can always override it for specific threads with \`-cwd\`.\n\n`;
+      welcomeMessage += `Type \`-help\` to see all available commands.`;
 
       await say({
         text: welcomeMessage,
@@ -783,6 +1141,49 @@ export class SlackHandler {
         response_type: 'ephemeral',
         text: '❌ Tool execution denied'
       });
+    });
+
+    // Handle scheduled retry button clicks
+    this.app.action('schedule_retry', async ({ ack, body, respond }) => {
+      await ack();
+      try {
+        const actionValue = JSON.parse((body as any).actions[0].value);
+        const retryInfo = this.pendingRetries.get(actionValue.retryId);
+
+        if (!retryInfo) {
+          await respond({ response_type: 'ephemeral', text: '⚠️ Retry info expired. Please resend your message manually.' });
+          return;
+        }
+
+        const postAt = Math.floor(Date.now() / 1000) + actionValue.retryAfter;
+
+        await this.app.client.chat.scheduleMessage({
+          channel: retryInfo.channel,
+          text: retryInfo.prompt,
+          post_at: postAt,
+          thread_ts: retryInfo.threadTs,
+        });
+
+        const retryTime = new Date(postAt * 1000).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' });
+        this.pendingRetries.delete(actionValue.retryId);
+
+        await respond({
+          response_type: 'in_channel',
+          text: `✅ ${retryTime}에 재실행이 예약되었습니다.`,
+        });
+
+        this.logger.info('Scheduled retry message', { retryTime, channel: retryInfo.channel });
+      } catch (error) {
+        this.logger.error('Failed to schedule retry', error);
+        await respond({ response_type: 'ephemeral', text: `❌ Failed to schedule: ${(error as any).message}` });
+      }
+    });
+
+    this.app.action('cancel_retry', async ({ ack, body, respond }) => {
+      await ack();
+      const retryId = (body as any).actions[0].value;
+      this.pendingRetries.delete(retryId);
+      await respond({ response_type: 'ephemeral', text: '취소되었습니다.' });
     });
 
     // Cleanup inactive sessions periodically
