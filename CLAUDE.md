@@ -29,7 +29,10 @@ stop.bat                      # pm2 중지
 - 모든 사용자 명령어는 `-` 접두사 필수 (`-cwd`, `-stop`, `-sessions` 등)
 - 예외: `help`는 `-` 없이도 동작 (메타 명령어)
 - 명령어 파싱은 정규식 기반, `slack-handler.ts`의 `is*Command()` / `parse*Command()` 패턴
-- `-stop`: 진행 중인 쿼리를 `AbortController.abort()`로 즉시 중단
+- `-stop`: `Query.interrupt()`로 정상 중단 (세션 상태 보존), fallback으로 `AbortController.abort()`
+- `-plan <prompt>`: `permissionMode: 'plan'`으로 읽기 전용 실행 → Execute 버튼으로 세션 resume
+- `-safe`/`-trust`: `acceptEdits` / `bypassPermissions` 전환
+- Safe 모드 시 `canUseTool` 콜백으로 Bash 승인 요청 (2분 타임아웃 후 자동 승인)
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
   2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)
