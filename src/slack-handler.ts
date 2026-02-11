@@ -1,12 +1,15 @@
 import { App } from '@slack/bolt';
 import { ClaudeHandler } from './claude-handler';
-import { SDKMessage } from '@anthropic-ai/claude-code';
+import { SDKMessage } from './claude-handler';
 import { Logger } from './logger';
 import { WorkingDirectoryManager } from './working-directory-manager';
 import { FileHandler, ProcessedFile } from './file-handler';
 import { TodoManager, Todo } from './todo-manager';
 import { McpManager } from './mcp-manager';
-import { permissionServer } from './permission-mcp-server';
+// Permission server disabled on Windows - stub out the approval calls
+const permissionServer = {
+  resolveApproval: (_id: string, _approved: boolean) => {},
+};
 import { config } from './config';
 
 interface MessageEvent {
@@ -717,7 +720,12 @@ export class SlackHandler {
     this.app.message(async ({ message, say }) => {
       if (message.subtype === undefined && 'user' in message) {
         this.logger.info('Handling direct message event');
-        await this.handleMessage(message as MessageEvent, say);
+        // Strip bot mentions in DMs (same as app_mention handler)
+        const msg = message as MessageEvent;
+        if (msg.text) {
+          msg.text = msg.text.replace(/<@[^>]+>/g, '').trim();
+        }
+        await this.handleMessage(msg, say);
       }
     });
 

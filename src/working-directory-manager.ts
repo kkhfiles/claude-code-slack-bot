@@ -4,9 +4,45 @@ import { config } from './config';
 import * as path from 'path';
 import * as fs from 'fs';
 
+const PERSISTENCE_FILE = path.join(__dirname, '..', '.working-dirs.json');
+
 export class WorkingDirectoryManager {
   private configs: Map<string, WorkingDirectoryConfig> = new Map();
   private logger = new Logger('WorkingDirectoryManager');
+
+  constructor() {
+    this.loadFromDisk();
+  }
+
+  private saveToDisk(): void {
+    try {
+      const data: Record<string, WorkingDirectoryConfig> = {};
+      for (const [key, value] of this.configs.entries()) {
+        data[key] = { ...value, setAt: value.setAt };
+      }
+      fs.writeFileSync(PERSISTENCE_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (error) {
+      this.logger.error('Failed to save working directory configs to disk', error);
+    }
+  }
+
+  private loadFromDisk(): void {
+    try {
+      if (fs.existsSync(PERSISTENCE_FILE)) {
+        const raw = fs.readFileSync(PERSISTENCE_FILE, 'utf-8');
+        const data: Record<string, WorkingDirectoryConfig> = JSON.parse(raw);
+        for (const [key, value] of Object.entries(data)) {
+          this.configs.set(key, { ...value, setAt: new Date(value.setAt) });
+        }
+        this.logger.info('Loaded working directory configs from disk', {
+          count: this.configs.size,
+          keys: Array.from(this.configs.keys()),
+        });
+      }
+    } catch (error) {
+      this.logger.error('Failed to load working directory configs from disk', error);
+    }
+  }
 
   getConfigKey(channelId: string, threadTs?: string, userId?: string): string {
     if (threadTs) {
@@ -21,16 +57,16 @@ export class WorkingDirectoryManager {
   setWorkingDirectory(channelId: string, directory: string, threadTs?: string, userId?: string): { success: boolean; resolvedPath?: string; error?: string } {
     try {
       const resolvedPath = this.resolveDirectory(directory);
-      
+
       if (!resolvedPath) {
-        return { 
-          success: false, 
-          error: `Directory not found: "${directory}"${config.baseDirectory ? ` (checked in base directory: ${config.baseDirectory})` : ''}` 
+        return {
+          success: false,
+          error: `Directory not found: "${directory}"${config.baseDirectory ? ` (checked in base directory: ${config.baseDirectory})` : ''}`
         };
       }
 
       const stats = fs.statSync(resolvedPath);
-      
+
       if (!stats.isDirectory()) {
         this.logger.warn('Path is not a directory', { directory: resolvedPath });
         return { success: false, error: 'Path is not a directory' };
@@ -46,6 +82,8 @@ export class WorkingDirectoryManager {
       };
 
       this.configs.set(key, workingDirConfig);
+      this.saveToDisk();
+
       this.logger.info('Working directory set', {
         key,
         directory: resolvedPath,
@@ -53,6 +91,16 @@ export class WorkingDirectoryManager {
         isThread: !!threadTs,
         isDM: channelId.startsWith('D'),
       });
+
+      // Also set DM-level fallback when setting from a thread in DM
+      if (threadTs && channelId.startsWith('D') && userId) {
+        const dmKey = this.getConfigKey(channelId, undefined, userId);
+        if (!this.configs.has(dmKey)) {
+          this.configs.set(dmKey, { ...workingDirConfig, threadTs: undefined });
+          this.saveToDisk();
+          this.logger.info('Also set DM-level fallback', { dmKey, directory: resolvedPath });
+        }
+      }
 
       return { success: true, resolvedPath };
     } catch (error) {
@@ -129,6 +177,7 @@ export class WorkingDirectoryManager {
     const key = this.getConfigKey(channelId, threadTs, userId);
     const result = this.configs.delete(key);
     if (result) {
+      this.saveToDisk();
       this.logger.info('Working directory removed', { key });
     }
     return result;
