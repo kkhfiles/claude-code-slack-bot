@@ -34,18 +34,33 @@ export class ClaudeHandler {
     return session;
   }
 
+  removeSession(userId: string, channelId: string, threadTs?: string): boolean {
+    const key = this.getSessionKey(userId, channelId, threadTs);
+    return this.sessions.delete(key);
+  }
+
   async *streamQuery(
     prompt: string,
     session?: ConversationSession,
     abortController?: AbortController,
     workingDirectory?: string,
-    slackContext?: { channel: string; threadTs?: string; user: string }
+    slackContext?: { channel: string; threadTs?: string; user: string },
+    resumeOptions?: { continueLastSession?: boolean; resumeSessionId?: string },
+    extraOptions?: { model?: string; maxBudgetUsd?: number }
   ): AsyncGenerator<SDKMessage, void, unknown> {
     const options: any = {
       outputFormat: 'stream-json',
       // Permission MCP server not supported on Windows; bypass for now
       permissionMode: 'bypassPermissions',
     };
+
+    if (extraOptions?.model) {
+      options.model = extraOptions.model;
+    }
+
+    if (extraOptions?.maxBudgetUsd && extraOptions.maxBudgetUsd > 0) {
+      options.maxBudgetUsd = extraOptions.maxBudgetUsd;
+    }
 
     if (workingDirectory) {
       options.cwd = workingDirectory;
@@ -68,9 +83,16 @@ export class ClaudeHandler {
       });
     }
 
-    if (session?.sessionId) {
+    // Resume priority: explicit resumeOptions > Slack session
+    if (resumeOptions?.resumeSessionId) {
+      options.resume = resumeOptions.resumeSessionId;
+      this.logger.info('Resuming external session', { sessionId: resumeOptions.resumeSessionId });
+    } else if (resumeOptions?.continueLastSession) {
+      options.continue = true;
+      this.logger.info('Continuing last CLI session');
+    } else if (session?.sessionId) {
       options.resume = session.sessionId;
-      this.logger.debug('Resuming session', { sessionId: session.sessionId });
+      this.logger.debug('Resuming Slack session', { sessionId: session.sessionId });
     } else {
       this.logger.debug('Starting new Claude conversation');
     }

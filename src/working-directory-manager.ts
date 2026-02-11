@@ -188,21 +188,16 @@ export class WorkingDirectoryManager {
   }
 
   parseSetCommand(text: string): string | null {
-    const cwdMatch = text.match(/^cwd\s+(.+)$/i);
+    const cwdMatch = text.match(/^-cwd\s+(.+)$/i);
     if (cwdMatch) {
       return cwdMatch[1].trim();
-    }
-
-    const setMatch = text.match(/^set\s+(?:cwd|dir|directory|working[- ]?directory)\s+(.+)$/i);
-    if (setMatch) {
-      return setMatch[1].trim();
     }
 
     return null;
   }
 
   isGetCommand(text: string): boolean {
-    return /^(get\s+)?(cwd|dir|directory|working[- ]?directory)(\?)?$/i.test(text.trim());
+    return /^-cwd(\?)?$/i.test(text.trim());
   }
 
   formatDirectoryMessage(directory: string | undefined, context: string): string {
@@ -210,18 +205,18 @@ export class WorkingDirectoryManager {
       let message = `Current working directory for ${context}: \`${directory}\``;
       if (config.baseDirectory) {
         message += `\n\nBase directory: \`${config.baseDirectory}\``;
-        message += `\nYou can use relative paths like \`cwd project-name\` or absolute paths.`;
+        message += `\nYou can use relative paths like \`-cwd project-name\` or absolute paths.`;
       }
       return message;
     }
-    
+
     let message = `No working directory set for ${context}. Please set one using:`;
     if (config.baseDirectory) {
-      message += `\n\`cwd project-name\` (relative to base directory)`;
-      message += `\n\`cwd /absolute/path/to/directory\` (absolute path)`;
+      message += `\n\`-cwd project-name\` (relative to base directory)`;
+      message += `\n\`-cwd /absolute/path/to/directory\` (absolute path)`;
       message += `\n\nBase directory: \`${config.baseDirectory}\``;
     } else {
-      message += `\n\`cwd /path/to/directory\` or \`set directory /path/to/directory\``;
+      message += `\n\`-cwd /path/to/directory\``;
     }
     return message;
   }
@@ -244,16 +239,15 @@ export class WorkingDirectoryManager {
     
     if (hasBaseDir) {
       message += `**Options:**\n`;
-      message += `• \`cwd project-name\` (relative to: \`${config.baseDirectory}\`)\n`;
-      message += `• \`cwd /absolute/path/to/project\` (absolute path)\n\n`;
+      message += `• \`-cwd project-name\` (relative to: \`${config.baseDirectory}\`)\n`;
+      message += `• \`-cwd /absolute/path/to/project\` (absolute path)\n\n`;
     } else {
       message += `**Usage:**\n`;
-      message += `• \`cwd /path/to/project\`\n`;
-      message += `• \`set directory /path/to/project\`\n\n`;
+      message += `• \`-cwd /path/to/project\`\n\n`;
     }
-    
+
     message += `This becomes the default for all conversations in this channel.\n`;
-    message += `Individual threads can override this by mentioning me with a different \`cwd\` command.`;
+    message += `Individual threads can override this by mentioning me with a different \`-cwd\` command.`;
     
     return message;
   }
