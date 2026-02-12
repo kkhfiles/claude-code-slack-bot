@@ -1014,8 +1014,8 @@ export class SlackHandler {
       return { mode: 'uuid', resumeOptions: { resumeSessionId: resumeUuidMatch[1] }, prompt: resumeUuidMatch[2]?.trim() || undefined };
     }
 
-    // -r or -resume (no args) → session picker
-    if (/^-(r|resume)$/i.test(trimmed)) {
+    // -r, -resume, resume, 계속 (no args) → session picker
+    if (/^-(r|resume)$/i.test(trimmed) || /^(resume|계속)$/i.test(trimmed)) {
       return { mode: 'picker' };
     }
 
@@ -1084,75 +1084,40 @@ export class SlackHandler {
       grouped.get(key)!.push(s);
     }
 
-    // Build BlockKit blocks
+    // Build BlockKit blocks — button (left) + details below for each session
     const blocks: any[] = [
       { type: 'section', text: { type: 'mrkdwn', text: '📂 *Recent Sessions*' } },
     ];
 
     let index = 0;
     for (const [projectPath, projectSessions] of grouped) {
-      const label = projectSessions[0].projectLabel;
-      const branch = projectSessions[0].gitBranch;
-      const headerText = branch ? `*${label}* · \`${branch}\`` : `*${label}*`;
-      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: headerText }] });
-
-      let sessionLines = '';
       for (const s of projectSessions) {
-        const num = index + 1;
         const title = s.summary || s.firstPrompt || '(no title)';
-        const truncTitle = title.length > 50 ? title.substring(0, 50) + '...' : title;
+        const label = s.projectLabel;
+        const branch = s.gitBranch;
         const relTime = formatRelativeTime(s.modified);
-        sessionLines += `\`${num}\` ${truncTitle} — _${relTime}_\n`;
+        const projectInfo = branch ? `*${label}* · \`${branch}\`` : `*${label}*`;
+
+        blocks.push({ type: 'divider' });
+        blocks.push({
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: `${projectInfo} · _${relTime}_\n${title}\n\`${s.projectPath}\`` }],
+        });
+        blocks.push({
+          type: 'actions',
+          elements: [{
+            type: 'button',
+            text: { type: 'plain_text', text: `▶ Resume` },
+            action_id: `pick_${index + 1}`,
+            value: JSON.stringify({ pickerId, index }),
+          }],
+        });
         index++;
       }
-      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: sessionLines.trim() } });
     }
 
-    // Action buttons (max 5 per actions block)
-    const totalSessions = sessions.length;
-    const firstRowCount = Math.min(totalSessions, 5);
-    const firstRowButtons: any[] = [];
-    for (let i = 0; i < firstRowCount; i++) {
-      firstRowButtons.push({
-        type: 'button',
-        text: { type: 'plain_text', text: `${i + 1}` },
-        action_id: `pick_${i + 1}`,
-        value: JSON.stringify({ pickerId, index: i }),
-      });
-    }
-    blocks.push({ type: 'actions', elements: firstRowButtons });
-
-    if (totalSessions > 5) {
-      const secondRowButtons: any[] = [];
-      for (let i = 5; i < totalSessions; i++) {
-        secondRowButtons.push({
-          type: 'button',
-          text: { type: 'plain_text', text: `${i + 1}` },
-          action_id: `pick_${i + 1}`,
-          value: JSON.stringify({ pickerId, index: i }),
-        });
-      }
-      secondRowButtons.push({
-        type: 'button',
-        text: { type: 'plain_text', text: 'Cancel' },
-        action_id: 'pick_cancel',
-        value: pickerId,
-      });
-      blocks.push({ type: 'actions', elements: secondRowButtons });
-    } else {
-      // Add cancel to first row's block as a separate actions block
-      blocks.push({
-        type: 'actions',
-        elements: [{
-          type: 'button',
-          text: { type: 'plain_text', text: 'Cancel' },
-          action_id: 'pick_cancel',
-          value: pickerId,
-        }],
-      });
-    }
-
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_`-continue`: 마지막 세션 재개_' }] });
+    blocks.push({ type: 'divider' });
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_`-continue`: 마지막 세션 재개 · 5분 후 자동 만료_' }] });
 
     const result = await say({ text: '📂 Recent Sessions', blocks, thread_ts: threadTs });
 
@@ -1247,7 +1212,7 @@ export class SlackHandler {
     help += `\`-cwd <path>\` — Set working directory (relative or absolute)\n`;
     help += `\`-cwd\` — Show current working directory\n\n`;
     help += `*Session*\n`;
-    help += `\`-r\` / \`-resume\` — Recent sessions picker (mobile-friendly)\n`;
+    help += `\`-r\` / \`resume\` / \`계속\` — Recent sessions picker (mobile-friendly)\n`;
     help += `\`-continue [message]\` — Resume last CLI session\n`;
     help += `\`-resume <session-id>\` — Resume a specific session\n`;
     help += `\`-sessions\` — List sessions for current cwd\n`;
@@ -1474,25 +1439,6 @@ export class SlackHandler {
       }
     });
 
-    this.app.action('pick_cancel', async ({ ack, body }) => {
-      await ack();
-      try {
-        const pickerId = (body as any).actions[0].value;
-        const picker = this.pendingPickers.get(pickerId);
-        if (picker) {
-          clearTimeout(picker.timeout);
-          this.pendingPickers.delete(pickerId);
-          await this.app.client.chat.update({
-            channel: picker.channel,
-            ts: picker.messageTs,
-            text: '📂 _Cancelled._',
-            blocks: [],
-          }).catch(() => {});
-        }
-      } catch (error) {
-        this.logger.error('Error handling picker cancel', error);
-      }
-    });
 
     // Rate limit retry — open modal with editable prompt
     this.app.action('schedule_retry', async ({ ack, body }) => {
