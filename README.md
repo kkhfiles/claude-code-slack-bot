@@ -1,47 +1,49 @@
 # Claude Code Slack Bot
 
-Slack에서 로컬 머신의 Claude Code를 원격으로 실행하고 결과를 받아보는 봇.
-[mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot) 포크에 Windows 호환성 및 기능 개선을 추가.
+Run Claude Code on your local machine remotely from Slack and receive results in real time.
+Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot) with Windows compatibility and additional features.
 
-## 주요 기능
+## Features
 
-- DM / 채널 멘션 / 쓰레드 대화 (세션 자동 유지)
-- 스트리밍 응답 (실시간 메시지 갱신)
-- 파일 업로드 (이미지, 텍스트, PDF, 코드 파일)
-- CLI 세션 resume/continue (`-sessions`, `-resume`, `-continue`)
-- 작업 디렉터리 관리 (디스크 영속화, 재시작 후 유지)
-- 모델 선택 / 비용 제어 (`-model`, `-budget`, `-cost`)
-- Plan 모드 (`-plan`) — 실행 없이 계획만 확인 후 실행 결정
-- Safe/Trust 모드 — Bash 명령 승인 요청 또는 전체 자동 승인
-- 실시간 진행 표시 (현재 실행 중인 도구명 표시)
-- Rate limit 시 예약 메시지로 자동 재시도
-- MCP 서버 연동
-- AWS Bedrock / Google Vertex AI 지원 (선택)
+- DM / channel mention / threaded conversations (automatic session continuity)
+- Streaming responses (real-time message updates)
+- File uploads (images, text, PDF, code files)
+- CLI session resume/continue (`-sessions`, `-resume`, `-continue`)
+- Mobile-friendly session picker (`resume`, `계속`) — browse and resume recent sessions with buttons
+- Working directory management (persisted to disk, survives restarts)
+- Model selection / cost control (`-model`, `-budget`, `-cost`)
+- Plan mode (`-plan`) — review plans before execution
+- Permission modes (Default / Safe / Trust) — interactive tool approval via Slack buttons
+- Real-time progress display (current tool name + usage summary on completion)
+- Rate limit detection with scheduled retry and automatic reset-time mention notification
+- MCP server integration
+- AWS Bedrock / Google Vertex AI support (optional)
 
-### 포크 변경사항
+### Fork Changes
 
-- Windows 호환성 (permission MCP 서버 제외, `bypassPermissions`)
-- 모든 명령어에 `-` 접두사 (`-cwd`, `-help`, `-sessions` 등)
-- CLI 세션 resume/continue 지원 (Slack 외부에서 시작한 세션도 이어가기)
-- 모델 선택, 비용 제한, 비용 조회
-- Plan 모드: 계획만 보고 Execute 버튼으로 실행
-- Safe/Trust 모드: Bash 승인 요청 vs 전체 자동 승인
-- `-stop`: SDK `Query.interrupt()`로 정상 중단 (세션 상태 보존)
-- 실시간 진행 표시 (`stream_event`로 현재 도구명 표시)
-- Rate limit 감지 → Slack 예약 메시지로 자동 재시도 제안
-- 작업 디렉터리 디스크 영속화 (`.working-dirs.json`)
-- DM 쓰레드에서 `-cwd` 설정 시 DM 레벨 폴백 자동 생성
-- pm2 기반 프로세스 관리 (`start.bat`, `stop.bat`)
+- Windows compatibility (`--ignore-scripts`, pm2-based process management)
+- All commands use `-` prefix (`-cwd`, `-help`, `-sessions`, etc.)
+- CLI session resume/continue (resume sessions started outside Slack)
+- Mobile-friendly session picker across all projects (button selection, auto cwd switch)
+- Model selection, cost limits, cost inquiry
+- Plan mode: review-only plan → Execute button to proceed
+- Permission modes: Default (interactive approval) / Safe (auto-approve edits) / Trust (auto-approve all)
+- `-stop`: graceful interrupt via SDK `Query.interrupt()` (preserves session state)
+- Real-time progress (`stream_event` for current tool name, usage summary on completion)
+- Rate limit → Slack scheduled message retry + automatic mention notification at reset time
+- Working directory persistence (`.working-dirs.json`)
+- DM thread `-cwd` creates DM-level fallback automatically
+- pm2-based process management (`start.bat`, `stop.bat`)
 
-## 사전 요구사항
+## Prerequisites
 
 - Node.js 18+
-- Claude Code CLI 설치 및 로그인 (`claude login`)
-- Slack 워크스페이스 관리자 권한
+- Claude Code CLI installed and logged in (`claude login`)
+- Slack workspace admin access
 
-## 설치
+## Installation
 
-### 1. 클론 및 패키지 설치
+### 1. Clone and Install
 
 ```bash
 git clone https://github.com/kkhfiles/claude-code-slack-bot.git
@@ -50,281 +52,289 @@ git checkout custom
 npm install --ignore-scripts
 ```
 
-> `--ignore-scripts`: `@anthropic-ai/claude-agent-sdk` 패키지의 플랫폼별 스크립트를 우회 (Windows 호환).
+> `--ignore-scripts`: Bypasses platform-specific scripts in `@anthropic-ai/claude-agent-sdk` (Windows compatibility).
 
-### 2. Slack App 생성
+### 2. Create a Slack App
 
-**각 사용자가 자신의 Slack App을 생성해야 합니다** (Socket Mode 특성상 앱당 하나의 연결만 유지).
+**Each user must create their own Slack App** (Socket Mode maintains one connection per app).
 
-1. [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From an app manifest**
-2. 워크스페이스 선택 후 `slack-app-manifest.json` 내용 붙여넣기
-3. 앱 생성 후:
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From an app manifest**
+2. Select your workspace and paste the contents of `slack-app-manifest.json`
+3. After creating the app:
 
-**토큰 생성:**
-- **OAuth & Permissions** → 워크스페이스에 앱 설치 → Bot User OAuth Token 복사 (`xoxb-...`)
-- **Basic Information** → App-Level Tokens → `connections:write` 스코프로 생성 (`xapp-...`)
-- **Basic Information** → Signing Secret 복사
+**Generate tokens:**
+- **OAuth & Permissions** → Install app to workspace → Copy Bot User OAuth Token (`xoxb-...`)
+- **Basic Information** → App-Level Tokens → Create with `connections:write` scope (`xapp-...`)
+- **Basic Information** → Copy Signing Secret
 
-### 3. 환경 변수 설정
+### 3. Configure Environment Variables
 
 ```bash
 cp .env.example .env
 ```
 
-`.env` 편집:
+Edit `.env`:
 ```env
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_APP_TOKEN=xapp-your-app-token
 SLACK_SIGNING_SECRET=your-signing-secret
-BASE_DIRECTORY=P:\bitbucket
+BASE_DIRECTORY=P:\your\base\directory
 # DEBUG=true
 ```
 
-> API 키 불필요: Claude Code SDK는 로컬 `claude login` 인증을 사용. Claude 구독(Pro/Max)에서 사용량 차감.
+> No API key needed: Claude Code SDK uses local `claude login` authentication. Usage is billed to your Claude subscription (Pro/Max).
 
-## 실행
+## Running
 
-[pm2](https://pm2.keymetrics.io/)로 백그라운드 실행. 별도 CMD 창 불필요, 크래시 시 자동 재시작.
+Uses [pm2](https://pm2.keymetrics.io/) for background execution. No separate terminal window needed, auto-restarts on crash.
 
 ```bash
-npm install -g pm2   # 최초 1회
+npm install -g pm2   # One-time setup
 
-start.bat            # 빌드 → pm2로 시작 (이미 실행 중이면 재시작)
-stop.bat             # 중지
+start.bat            # Build → start via pm2 (restarts if already running)
+stop.bat             # Stop
 ```
 
-### pm2 명령어
+### pm2 Commands
 
 ```bash
-pm2 logs claude-slack-bot          # 실시간 로그 보기
-pm2 logs claude-slack-bot --lines 50  # 최근 50줄
-pm2 status                         # 프로세스 상태
-pm2 restart claude-slack-bot       # 재시작
-pm2 stop claude-slack-bot          # 중지
-pm2 delete claude-slack-bot        # 제거
+pm2 logs claude-slack-bot             # Live logs
+pm2 logs claude-slack-bot --lines 50  # Last 50 lines
+pm2 status                            # Process status
+pm2 restart claude-slack-bot          # Restart
+pm2 stop claude-slack-bot             # Stop
+pm2 delete claude-slack-bot           # Remove
 ```
 
-### Windows 재부팅 시 자동 시작
+### Auto-Start on Windows Reboot
 
 ```bash
-# 최초 1회 (관리자 권한 불필요)
+# One-time setup (no admin required)
 autostart-setup.bat
 ```
 
-이 스크립트는 Windows 시작 프로그램 폴더에 `pm2-resurrect.vbs`를 등록합니다.
-로그인 시 `pm2 resurrect`가 백그라운드로 자동 실행되어 봇이 복원됩니다 (CMD 창 없음).
+This script registers `pm2-resurrect.vbs` in the Windows Startup folder.
+On login, `pm2 resurrect` runs silently in the background to restore the bot (no CMD window).
 
-**동작 원리:**
-1. `pm2 save` — 현재 실행 중인 pm2 프로세스 목록을 저장
-2. `pm2-resurrect.vbs` → 시작 프로그램 폴더에 복사
-3. Windows 로그인 시 VBS가 `pm2 resurrect`를 숨김 실행
+**How it works:**
+1. `pm2 save` — saves current pm2 process list
+2. `pm2-resurrect.vbs` → copied to Startup folder
+3. On Windows login, VBS runs `pm2 resurrect` silently
 
-**주의:** `start.bat`으로 봇을 실행한 상태에서 `autostart-setup.bat`을 실행해야 합니다.
-봇 설정을 변경한 후에는 `start.bat` → `autostart-setup.bat` 순서로 다시 실행하세요.
+**Note:** Run `autostart-setup.bat` while the bot is running via `start.bat`.
+After changing bot settings, re-run `start.bat` → `autostart-setup.bat` in order.
 
-제거: 시작 프로그램 폴더에서 `pm2-resurrect.vbs` 삭제
+To remove: delete `pm2-resurrect.vbs` from the Startup folder
 ```bash
 del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\pm2-resurrect.vbs"
 ```
 
-### 수동 실행 (pm2 없이)
+### Manual Run (without pm2)
 
 ```bash
 npm run build
-node dist/index.js            # 포그라운드 실행 (Ctrl+C로 종료)
+node dist/index.js            # Foreground (Ctrl+C to stop)
 ```
 
-## Slack 명령어
+## Slack Commands
 
-모든 명령어는 `-` 접두사로 시작합니다. `-help`로 전체 목록을 볼 수 있습니다.
+All commands start with `-` prefix. Use `-help` to see the full list.
+Some commands also work without `-` for mobile convenience (e.g., `resume`, `계속`, `help`).
 
-### 작업 디렉터리
+### Working Directory
 
-| 명령어 | 설명 |
-|--------|------|
-| `-cwd <경로>` | 작업 디렉터리 설정 (상대/절대 경로) |
-| `-cwd` | 현재 설정 확인 |
-
-```
--cwd ct-maven/ct-maven          # BASE_DIRECTORY 기준 상대 경로
--cwd P:\bitbucket\ct-cert        # 절대 경로
--cwd                             # 현재 설정 확인
-```
-
-**적용 범위:**
-- **DM**: 해당 DM 대화 전체에 적용
-- **채널**: 해당 채널 전체에 적용 (봇 추가 시 설정 안내)
-- **쓰레드**: 해당 쓰레드에만 적용 (DM 폴백도 자동 생성)
-
-설정은 디스크에 저장되어 봇 재시작 후에도 유지됩니다.
-
-### 세션 관리
-
-| 명령어 | 설명 |
-|--------|------|
-| `-sessions` | 현재 cwd의 최근 세션 목록 (ID + 요약) |
-| `-continue [메시지]` | 마지막 CLI 세션 이어가기 |
-| `-resume <session-id> [메시지]` | 특정 세션 이어가기 |
-| `-stop` | 진행 중인 쿼리 중단 (graceful interrupt) |
-| `-reset` | 현재 세션 초기화 (다음 메시지는 새 세션) |
+| Command | Description |
+|---------|-------------|
+| `-cwd <path>` | Set working directory (relative or absolute) |
+| `-cwd` | Show current setting |
 
 ```
--sessions                        # 세션 목록 확인
--resume 6449c0ab-4aa1-4de4-89ca-88ffcfc7c334   # 특정 세션 이어가기
--continue 현재 상태를 요약해줘    # 마지막 세션에 메시지 추가
--stop                            # 진행 중인 작업 중단
--reset                           # 세션 초기화
+-cwd my-project/subdir          # Relative to BASE_DIRECTORY
+-cwd P:\projects\my-app          # Absolute path
+-cwd                             # Show current setting
 ```
 
-같은 쓰레드에서의 대화는 자동으로 세션이 이어집니다 (별도 명령 불필요).
+**Scope:**
+- **DM**: Applies to the entire DM conversation
+- **Channel**: Applies to the entire channel (setup prompt on bot join)
+- **Thread**: Applies to that thread only (also creates DM-level fallback)
+
+Settings are persisted to disk and survive bot restarts.
+
+### Session Management
+
+| Command | Description |
+|---------|-------------|
+| `-r` / `resume` / `계속` | Recent sessions picker (mobile-friendly) |
+| `-sessions` | List sessions for current cwd (ID + summary) |
+| `-sessions all` | List sessions across all projects |
+| `-continue [message]` | Resume last CLI session |
+| `-resume <session-id> [message]` | Resume a specific session |
+| `-stop` | Cancel running query (graceful interrupt) |
+| `-reset` | End current session (next message starts fresh) |
+
+```
+-r                               # Session picker with buttons
+resume                           # Same (no prefix needed)
+-sessions                        # Session list
+-resume 6449c0ab-...             # Resume specific session
+-continue summarize current state # Resume last session with message
+-stop                            # Cancel running task
+-reset                           # Reset session
+```
+
+Conversations in the same thread automatically continue the session (no command needed).
 
 ### Plan & Permissions
 
-| 명령어 | 설명 |
-|--------|------|
-| `-plan <프롬프트>` | 읽기 전용으로 계획만 생성 (실행 안함) |
-| `-safe` | Safe 모드: Bash 명령 실행 시 Slack 버튼으로 승인 요청 |
-| `-trust` | Trust 모드: 모든 도구 자동 승인 (기본값) |
+| Command | Description |
+|---------|-------------|
+| `-plan <prompt>` | Read-only plan generation (no execution) |
+| `-default` | Default mode: edits, bash, MCP require approval (default) |
+| `-safe` | Safe mode: edits auto-approved, bash/MCP require approval |
+| `-trust` | Trust mode: all tools auto-approved |
 
 ```
--plan pom.xml 의존성 정리 방법 알려줘   # 계획만 보기 → Execute 버튼
--safe                                    # Bash 승인 모드 전환
--trust                                   # 자동 승인 모드 복귀
+-plan analyze dependencies in pom.xml   # Plan only → Execute button
+-safe                                    # Switch to safe mode
+-trust                                   # Switch to trust mode
+-default                                 # Back to default mode
 ```
 
-**Plan 모드 흐름:**
-1. `-plan <프롬프트>` → Claude가 계획만 작성 (파일 수정 없음)
-2. 계획 확인 후 **Execute** 버튼 → 세션 이어서 실제 실행
-3. 또는 **Cancel** 버튼으로 취소
+**Plan mode flow:**
+1. `-plan <prompt>` → Claude generates a plan (no file modifications)
+2. Review the plan → click **Execute** to proceed
+3. Or click **Cancel** to discard
 
-**Safe 모드:**
-- 파일 읽기/편집: 자동 승인
-- Bash 명령: Slack 버튼으로 승인/거부 요청
-- 2분 내 응답 없으면 자동 승인
+**Permission modes:**
+- **Default**: Edit, Write, Bash, MCP tools require Slack button approval (2-min auto-approve timeout)
+- **Safe**: Edit/Write auto-approved, Bash/MCP require approval
+- **Trust**: All tools auto-approved (no prompts)
 
-### 설정
+### Settings
 
-| 명령어 | 설명 |
-|--------|------|
-| `-model [name]` | 모델 조회/설정 (`sonnet`, `opus`, `haiku`, 또는 전체 이름) |
-| `-budget [amount\|off]` | 쿼리당 비용 상한 조회/설정/해제 (USD) |
-| `-cost` | 마지막 쿼리 비용, 세션 ID 확인 |
+| Command | Description |
+|---------|-------------|
+| `-model [name]` | Get/set model (`sonnet`, `opus`, `haiku`, or full name) |
+| `-budget [amount\|off]` | Get/set/remove per-query cost limit (USD) |
+| `-cost` | Show last query cost and session ID |
 
 ```
--model                # 현재 모델 확인
--model sonnet         # sonnet으로 변경 (빠름/저렴)
--model opus           # opus로 변경 (고성능)
--budget 1.00          # 쿼리당 $1.00 상한
--budget off           # 상한 해제
--cost                 # 마지막 비용 확인
+-model                # Show current model
+-model sonnet         # Switch to sonnet (fast/cheap)
+-model opus           # Switch to opus (high performance)
+-budget 1.00          # Set $1.00 per-query limit
+-budget off           # Remove limit
+-cost                 # Show last cost
 ```
 
-### MCP 서버
+### MCP Servers
 
-| 명령어 | 설명 |
-|--------|------|
-| `-mcp` | MCP 서버 상태 확인 |
-| `-mcp reload` | MCP 설정 다시 로드 |
+| Command | Description |
+|---------|-------------|
+| `-mcp` | Show MCP server status |
+| `-mcp reload` | Reload MCP configuration |
 
-`mcp-servers.json` 파일로 설정:
+Configure via `mcp-servers.json`:
 ```bash
 cp mcp-servers.example.json mcp-servers.json
 ```
 
-### 기타
+### Other
 
-| 명령어 | 설명 |
-|--------|------|
-| `help` 또는 `-help` | 전체 명령어 목록 |
+| Command | Description |
+|---------|-------------|
+| `help` or `-help` | Show full command list |
 
-### 대화
+### Conversations
 
 ```
-# DM으로 직접 메시지
-이 프로젝트의 구조를 설명해줘
+# Direct message
+Explain the structure of this project
 
-# 채널에서 멘션
-@ClaudeBot pom.xml 분석해줘
+# Channel mention
+@ClaudeBot analyze pom.xml
 
-# 쓰레드에서 이어서 (세션 자동 유지)
-의존성 충돌이 있는지 확인해줘
+# Continue in thread (automatic session continuity)
+Check for dependency conflicts
 ```
 
-### 파일 업로드
+### File Uploads
 
-드래그 앤 드롭 또는 첨부 버튼으로 파일 업로드 후 분석 요청:
+Drag & drop or attach files for analysis:
 
-- **이미지**: JPG, PNG, GIF, WebP, SVG
-- **텍스트**: TXT, MD, JSON, JS, TS, PY, Java 등
-- **문서**: PDF, DOCX (제한적)
-- **코드**: 대부분의 프로그래밍 언어
+- **Images**: JPG, PNG, GIF, WebP, SVG
+- **Text**: TXT, MD, JSON, JS, TS, PY, Java, etc.
+- **Documents**: PDF, DOCX (limited)
+- **Code**: Most programming languages
 
-### Rate Limit 재시도
+### Rate Limit Retry
 
-Claude 사용량 한도에 도달하면 봇이 자동으로 감지하고 Slack 예약 메시지를 통한 재시도를 제안합니다:
+When Claude usage limits are reached, the bot automatically detects and offers retry via Slack scheduled messages:
 
-1. Rate limit 에러 발생 → 예상 대기 시간 표시
-2. 리셋 시간에 `@멘션` 알림 자동 예약 (사용 가능 시점 알림)
-3. "예약" 버튼 클릭 → Slack이 지정 시간에 메시지 전달 (멘션 알림은 자동 취소)
-4. 봇이 예약된 메시지를 수신하여 자동 실행
+1. Rate limit error → shows estimated wait time
+2. Automatic `@mention` notification scheduled at reset time
+3. Click "Schedule" → Slack delivers message at the specified time (mention notification auto-cancelled)
+4. Bot receives the scheduled message and auto-executes
 
-## 멀티유저 설정
+## Multi-User Setup
 
-같은 Slack 워크스페이스의 여러 사용자가 각각 봇을 실행하려면:
+For multiple users in the same Slack workspace:
 
-1. **각 사용자가 자신의 Slack App을 생성** (Socket Mode는 앱당 단일 연결)
-2. 각자의 머신에서 봇을 실행 (`claude login` → `.env` 설정 → `start.bat`)
-3. 각자의 Claude 구독에서 사용량 차감
+1. **Each user creates their own Slack App** (Socket Mode = one connection per app)
+2. Each user runs the bot on their machine (`claude login` → `.env` setup → `start.bat`)
+3. Usage billed to each user's Claude subscription
 
-> 팀 공유 서버에서 하나의 봇을 운영하는 것도 가능합니다. 이 경우 모든 팀원이 하나의 Claude 구독을 공유하게 됩니다.
+> You can also run a single bot on a shared server. In this case, all team members share one Claude subscription.
 
-## 고급 설정
+## Advanced Configuration
 
 ### AWS Bedrock
 ```env
 CLAUDE_CODE_USE_BEDROCK=1
-# AWS CLI 또는 IAM 역할로 인증 설정 필요
+# Requires AWS CLI or IAM role authentication
 ```
 
 ### Google Vertex AI
 ```env
 CLAUDE_CODE_USE_VERTEX=1
-# Google Cloud 인증 설정 필요
+# Requires Google Cloud authentication
 ```
 
-## 프로젝트 구조
+## Project Structure
 
 ```
 src/
-├── index.ts                     # 진입점
-├── config.ts                    # 환경변수 및 설정
-├── types.ts                     # TypeScript 타입 정의
-├── claude-handler.ts            # Claude Code SDK 연동
-├── slack-handler.ts             # Slack 이벤트 처리
-├── working-directory-manager.ts # 작업 디렉터리 관리 (영속화)
-├── file-handler.ts              # 파일 업로드 처리
-├── todo-manager.ts              # 작업 목록 관리
-├── mcp-manager.ts               # MCP 서버 관리
-└── logger.ts                    # 로깅 유틸리티
+├── index.ts                     # Entry point
+├── config.ts                    # Environment variables and config
+├── types.ts                     # TypeScript type definitions
+├── claude-handler.ts            # Claude Code SDK integration
+├── slack-handler.ts             # Slack event handling
+├── working-directory-manager.ts # Working directory management (persistence)
+├── file-handler.ts              # File upload handling
+├── session-scanner.ts           # Cross-project session scanning
+├── todo-manager.ts              # Task list management
+├── mcp-manager.ts               # MCP server management
+└── logger.ts                    # Logging utility
 ```
 
-## 트러블슈팅
+## Troubleshooting
 
-### 봇이 응답하지 않음
-1. `stop.bat` → `start.bat`으로 재시작
-2. `pm2 logs claude-slack-bot`으로 로그 확인
-3. `.env` 토큰 유효성 확인
-4. 채널에 봇이 추가되었는지 확인
+### Bot not responding
+1. Restart with `stop.bat` → `start.bat`
+2. Check logs: `pm2 logs claude-slack-bot`
+3. Verify `.env` token validity
+4. Ensure bot is added to the channel
 
-### "No working directory set" 오류
-`-cwd <경로>` 명령으로 작업 디렉터리를 먼저 설정하세요.
+### "No working directory set" error
+Set a working directory first with `-cwd <path>`.
 
-### Windows에서 `npm install` 실패
+### `npm install` fails on Windows
 ```bash
 npm install --ignore-scripts
 ```
 
-## 업스트림 업데이트
+## Upstream Updates
 
 ```bash
 git fetch upstream
@@ -334,6 +344,6 @@ npm install --ignore-scripts
 npm run build
 ```
 
-## 라이선스
+## License
 
 MIT
