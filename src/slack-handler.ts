@@ -59,7 +59,7 @@ export class SlackHandler {
   }> = new Map();
 
   // Rate limit retry
-  private pendingRetries: Map<string, { prompt: string; channel: string; threadTs: string; user: string }> = new Map();
+  private pendingRetries: Map<string, { prompt: string; channel: string; threadTs: string; user: string; notifyScheduledId?: string }> = new Map();
 
   // Plan mode: store session info for "Execute" button
   private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string; user: string }> = new Map();
@@ -587,6 +587,22 @@ export class SlackHandler {
 
           this.pendingRetries.set(retryId, { prompt: finalPrompt, channel, threadTs: thread_ts || ts, user });
           setTimeout(() => this.pendingRetries.delete(retryId), 10 * 60 * 1000);
+
+          // Auto-schedule a mention notification at reset time
+          try {
+            const notifyResult = await this.app.client.chat.scheduleMessage({
+              channel,
+              text: `<@${user}> Rate limit이 해제되었습니다. Claude에게 새 메시지를 보낼 수 있습니다.`,
+              post_at: postAt,
+              thread_ts: thread_ts || ts,
+            });
+            const retryInfo = this.pendingRetries.get(retryId);
+            if (retryInfo && notifyResult.scheduled_message_id) {
+              retryInfo.notifyScheduledId = notifyResult.scheduled_message_id;
+            }
+          } catch (notifyError) {
+            this.logger.warn('Failed to schedule rate limit notification', notifyError);
+          }
 
           const promptPreview = finalPrompt.length > 200
             ? finalPrompt.substring(0, 200) + '...'
@@ -1497,6 +1513,14 @@ export class SlackHandler {
         });
 
         const retryTimeStr = new Date(postAt * 1000).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' });
+
+        // Cancel auto-notification (retry will auto-execute instead)
+        if (retryInfo.notifyScheduledId) {
+          await this.app.client.chat.deleteScheduledMessage({
+            channel: retryInfo.channel,
+            scheduled_message_id: retryInfo.notifyScheduledId,
+          }).catch(() => {});
+        }
         this.pendingRetries.delete(metadata.retryId);
 
         await this.app.client.chat.postMessage({
@@ -1512,6 +1536,14 @@ export class SlackHandler {
     this.app.action('cancel_retry', async ({ ack, body, respond }) => {
       await ack();
       const retryId = (body as any).actions[0].value;
+      const retryInfo = this.pendingRetries.get(retryId);
+      // Cancel auto-notification
+      if (retryInfo?.notifyScheduledId) {
+        await this.app.client.chat.deleteScheduledMessage({
+          channel: retryInfo.channel,
+          scheduled_message_id: retryInfo.notifyScheduledId,
+        }).catch(() => {});
+      }
       this.pendingRetries.delete(retryId);
       await respond({ response_type: 'ephemeral', text: '취소되었습니다.' });
     });
