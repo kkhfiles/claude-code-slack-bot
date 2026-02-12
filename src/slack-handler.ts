@@ -328,6 +328,7 @@ export class SlackHandler {
 
     let currentMessages: string[] = [];
     let statusMessageTs: string | undefined;
+    let rateLimitMessageText: string | undefined;
     const channelModel = this.channelModels.get(channel);
 
     try {
@@ -393,6 +394,13 @@ export class SlackHandler {
         }
 
         if (message.type === 'assistant') {
+          // Detect rate limit / billing error from SDK assistant message
+          const assistantError = (message as any).error;
+          if (assistantError === 'rate_limit' || assistantError === 'billing_error') {
+            const content = this.extractTextContent(message);
+            if (content) rateLimitMessageText = content;
+          }
+
           const hasToolUse = message.message.content?.some((part: any) => part.type === 'tool_use');
 
           if (hasToolUse) {
@@ -415,6 +423,10 @@ export class SlackHandler {
           } else {
             const content = this.extractTextContent(message);
             if (content) {
+              // Detect rate limit text from message content
+              if (this.isRateLimitText(content)) {
+                rateLimitMessageText = content;
+              }
               currentMessages.push(content);
               await say({ text: this.formatMessage(content, false), thread_ts: thread_ts || ts });
             }
@@ -505,9 +517,13 @@ export class SlackHandler {
         }
         await this.updateMessageReaction(sessionKey, '❌');
 
-        // Rate limit detection
-        if (this.isRateLimitError(error)) {
-          const retryAfter = this.parseRetryAfterSeconds(error);
+        // Rate limit detection: check error.message AND pre-captured assistant message
+        const rateLimitSource = rateLimitMessageText
+          ? { message: rateLimitMessageText }
+          : this.isRateLimitError(error) ? error : null;
+
+        if (rateLimitSource) {
+          const retryAfter = this.parseRetryAfterSeconds(rateLimitSource);
           const retryTime = new Date(Date.now() + retryAfter * 1000);
           const retryTimeStr = retryTime.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' });
           const retryId = `retry-${Date.now()}`;
@@ -746,21 +762,34 @@ export class SlackHandler {
 
   // --- Reactions ---
 
+  // Unicode emoji → Slack reaction shortcode mapping
+  private readonly emojiToReaction: Record<string, string> = {
+    '📝': 'memo',
+    '🤔': 'thinking_face',
+    '⚙️': 'gear',
+    '📋': 'clipboard',
+    '✅': 'white_check_mark',
+    '❌': 'x',
+    '⏹️': 'stop_button',
+    '🔄': 'arrows_counterclockwise',
+  };
+
   private async updateMessageReaction(sessionKey: string, emoji: string): Promise<void> {
     const originalMessage = this.originalMessages.get(sessionKey);
     if (!originalMessage) return;
 
-    const currentEmoji = this.currentReactions.get(sessionKey);
-    if (currentEmoji === emoji) return;
+    const reactionName = this.emojiToReaction[emoji] || emoji;
+    const currentReaction = this.currentReactions.get(sessionKey);
+    if (currentReaction === reactionName) return;
 
     try {
-      if (currentEmoji) {
+      if (currentReaction) {
         try {
-          await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: currentEmoji });
+          await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: currentReaction });
         } catch { /* might not exist */ }
       }
-      await this.app.client.reactions.add({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: emoji });
-      this.currentReactions.set(sessionKey, emoji);
+      await this.app.client.reactions.add({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: reactionName });
+      this.currentReactions.set(sessionKey, reactionName);
     } catch (error) {
       this.logger.warn('Failed to update message reaction', error);
     }
@@ -844,7 +873,11 @@ export class SlackHandler {
 
   private isRateLimitError(error: any): boolean {
     const msg = error?.message || '';
-    return /rate.?limit|overloaded|429|too many requests|capacity|usage limit|spending.?cap/i.test(msg);
+    return this.isRateLimitText(msg);
+  }
+
+  private isRateLimitText(text: string): boolean {
+    return /rate.?limit|overloaded|429|too many requests|capacity|usage limit|spending.?cap|hit your limit|resets\s+\d{1,2}\s*(am|pm)/i.test(text);
   }
 
   private parseRetryAfterSeconds(error: any): number {
