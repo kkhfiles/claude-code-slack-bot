@@ -27,7 +27,7 @@ stop.bat                      # pm2 중지
 
 ### Command Pattern
 - 모든 사용자 명령어는 `-` 접두사 필수 (`-cwd`, `-stop`, `-sessions` 등)
-- 예외: `help`는 `-` 없이도 동작 (메타 명령어)
+- 예외: `help`, `resume`, `계속`은 `-` 없이도 동작 (모바일 편의)
 - 명령어 파싱은 정규식 기반, `slack-handler.ts`의 `is*Command()` / `parse*Command()` 패턴
 - `-stop`: `Query.interrupt()`로 정상 중단 (세션 상태 보존), fallback으로 `AbortController.abort()`
 - `-plan <prompt>`: `permissionMode: 'plan'`으로 읽기 전용 실행 → Execute 버튼으로 세션 resume
@@ -44,6 +44,8 @@ stop.bat                      # pm2 중지
 - Claude SDK 에러는 `try/catch`로 감싸고, Slack 메시지로 사용자에게 전달
 - Rate limit 감지: `isRateLimitError()`로 패턴 매칭 → 예약 메시지 제안 + 리셋 시간에 멘션 알림 자동 예약
 - Rate limit 멘션 알림: 재시도/취소 시 자동 취소 (`notifyScheduledId`로 추적)
+- 읽기 전용 도구 (Grep, Read, Glob 등)는 상태 메시지에서만 표시 (`STATUS_ONLY_TOOLS`)
+- 완료 시 도구 사용 요약 표시 (`toolUsageCounts` → `✅ Task completed (Grep ×5, Read ×2)`)
 - 로깅은 `Logger` 클래스 사용 (`this.logger.info/debug/warn/error`)
 
 ### SDK Integration
