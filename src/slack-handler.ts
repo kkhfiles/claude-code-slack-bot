@@ -8,6 +8,7 @@ import { WorkingDirectoryManager } from './working-directory-manager';
 import { FileHandler, ProcessedFile } from './file-handler';
 import { TodoManager, Todo } from './todo-manager';
 import { McpManager } from './mcp-manager';
+import { SessionScanner, SessionInfo, formatRelativeTime } from './session-scanner';
 import { config } from './config';
 
 interface MessageEvent {
@@ -62,6 +63,17 @@ export class SlackHandler {
 
   // Plan mode: store session info for "Execute" button
   private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string; user: string }> = new Map();
+
+  // Session picker
+  private sessionScanner: SessionScanner = new SessionScanner();
+  private pendingPickers: Map<string, {
+    sessions: SessionInfo[];
+    channel: string;
+    threadTs: string;
+    user: string;
+    messageTs: string;
+    timeout: ReturnType<typeof setTimeout>;
+  }> = new Map();
 
   private botUserId: string | null = null;
 
@@ -235,6 +247,12 @@ export class SlackHandler {
 
     // Sessions command
     if (text && this.isSessionsCommand(text)) {
+      // -sessions all → cross-project picker
+      if (/^-sessions?\s+(all|전체)$/i.test(text.trim())) {
+        await this.showSessionPicker(channel, thread_ts || ts, user, say);
+        return;
+      }
+      // -sessions → current cwd sessions
       const isDMForSessions = channel.startsWith('D');
       const cwdForSessions = this.workingDirManager.getWorkingDirectory(channel, thread_ts, isDMForSessions ? user : undefined);
       if (cwdForSessions) {
@@ -264,6 +282,12 @@ export class SlackHandler {
 
     // Resume/continue command
     const resumeParsed = text ? this.parseResumeCommand(text) : null;
+
+    // Session picker: -r or -resume (no args) — works without cwd
+    if (resumeParsed?.mode === 'picker') {
+      await this.showSessionPicker(channel, thread_ts || ts, user, say);
+      return;
+    }
 
     // Plan command: -plan <prompt>
     const planParsed = text ? this.parsePlanCommand(text) : null;
@@ -311,10 +335,11 @@ export class SlackHandler {
     }
 
     // Determine prompt
+    const resumeData = (resumeParsed && 'resumeOptions' in resumeParsed) ? resumeParsed : null;
     const basePrompt = planParsed
       ? planParsed.prompt
-      : resumeParsed
-        ? (resumeParsed.prompt || 'Continue where you left off.')
+      : resumeData
+        ? (resumeData.prompt || 'Continue where you left off.')
         : (text || '');
     const finalPrompt = processedFiles.length > 0
       ? await this.fileHandler.formatFilePrompt(processedFiles, basePrompt)
@@ -363,7 +388,7 @@ export class SlackHandler {
         session,
         abortController,
         workingDirectory,
-        resumeOptions: resumeParsed?.resumeOptions,
+        resumeOptions: resumeData?.resumeOptions,
         model: channelModel,
         maxBudgetUsd: this.channelBudgets.get(channel),
         permissionMode,
@@ -965,7 +990,7 @@ export class SlackHandler {
   }
 
   private isSessionsCommand(text: string): boolean {
-    return /^-sessions?(\s+list)?$/i.test(text.trim());
+    return /^-sessions?(\s+(list|all|전체))?$/i.test(text.trim());
   }
 
   private parsePlanCommand(text: string): { prompt: string } | null {
@@ -974,19 +999,26 @@ export class SlackHandler {
     return null;
   }
 
-  private parseResumeCommand(text: string): { resumeOptions: { continueLastSession?: boolean; resumeSessionId?: string }; prompt?: string } | null {
+  private parseResumeCommand(text: string): { mode: 'picker' } | { mode: 'uuid'; resumeOptions: { resumeSessionId: string }; prompt?: string } | { mode: 'continue'; resumeOptions: { continueLastSession: true }; prompt?: string } | null {
     const trimmed = text.trim();
+
+    // -continue [message]
     const continueMatch = trimmed.match(/^-continue(?:\s+(.+))?$/is);
     if (continueMatch) {
-      return { resumeOptions: { continueLastSession: true }, prompt: continueMatch[1]?.trim() || undefined };
+      return { mode: 'continue', resumeOptions: { continueLastSession: true }, prompt: continueMatch[1]?.trim() || undefined };
     }
-    const resumeMatch = trimmed.match(/^-resume(?:\s+`?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`?)?(?:\s+(.+))?$/is);
-    if (resumeMatch) {
-      const sessionId = resumeMatch[1];
-      const prompt = resumeMatch[2]?.trim() || undefined;
-      if (sessionId) return { resumeOptions: { resumeSessionId: sessionId }, prompt };
-      return { resumeOptions: { continueLastSession: true }, prompt };
+
+    // -resume <UUID> [message]
+    const resumeUuidMatch = trimmed.match(/^-resume\s+`?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`?(?:\s+(.+))?$/is);
+    if (resumeUuidMatch) {
+      return { mode: 'uuid', resumeOptions: { resumeSessionId: resumeUuidMatch[1] }, prompt: resumeUuidMatch[2]?.trim() || undefined };
     }
+
+    // -r or -resume (no args) → session picker
+    if (/^-(r|resume)$/i.test(trimmed)) {
+      return { mode: 'picker' };
+    }
+
     return null;
   }
 
@@ -1029,6 +1061,119 @@ export class SlackHandler {
 
   private isMcpReloadCommand(text: string): boolean {
     return /^-mcp\s+(reload|refresh)$/i.test(text.trim());
+  }
+
+  // --- Session picker ---
+
+  private async showSessionPicker(channel: string, threadTs: string, user: string, say: any): Promise<void> {
+    const knownPaths = this.workingDirManager.getKnownPathsMap();
+    const sessions = this.sessionScanner.listRecentSessions(10, knownPaths);
+
+    if (sessions.length === 0) {
+      await say({ text: 'ℹ️ No sessions found. Start a new conversation or use `-continue` to resume the last CLI session.', thread_ts: threadTs });
+      return;
+    }
+
+    const pickerId = `picker-${Date.now()}`;
+
+    // Group sessions by project
+    const grouped = new Map<string, SessionInfo[]>();
+    for (const s of sessions) {
+      const key = s.projectPath;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key)!.push(s);
+    }
+
+    // Build BlockKit blocks
+    const blocks: any[] = [
+      { type: 'section', text: { type: 'mrkdwn', text: '📂 *Recent Sessions*' } },
+    ];
+
+    let index = 0;
+    for (const [projectPath, projectSessions] of grouped) {
+      const label = projectSessions[0].projectLabel;
+      const branch = projectSessions[0].gitBranch;
+      const headerText = branch ? `*${label}* · \`${branch}\`` : `*${label}*`;
+      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: headerText }] });
+
+      let sessionLines = '';
+      for (const s of projectSessions) {
+        const num = index + 1;
+        const title = s.summary || s.firstPrompt || '(no title)';
+        const truncTitle = title.length > 50 ? title.substring(0, 50) + '...' : title;
+        const relTime = formatRelativeTime(s.modified);
+        sessionLines += `\`${num}\` ${truncTitle} — _${relTime}_\n`;
+        index++;
+      }
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: sessionLines.trim() } });
+    }
+
+    // Action buttons (max 5 per actions block)
+    const totalSessions = sessions.length;
+    const firstRowCount = Math.min(totalSessions, 5);
+    const firstRowButtons: any[] = [];
+    for (let i = 0; i < firstRowCount; i++) {
+      firstRowButtons.push({
+        type: 'button',
+        text: { type: 'plain_text', text: `${i + 1}` },
+        action_id: `pick_${i + 1}`,
+        value: JSON.stringify({ pickerId, index: i }),
+      });
+    }
+    blocks.push({ type: 'actions', elements: firstRowButtons });
+
+    if (totalSessions > 5) {
+      const secondRowButtons: any[] = [];
+      for (let i = 5; i < totalSessions; i++) {
+        secondRowButtons.push({
+          type: 'button',
+          text: { type: 'plain_text', text: `${i + 1}` },
+          action_id: `pick_${i + 1}`,
+          value: JSON.stringify({ pickerId, index: i }),
+        });
+      }
+      secondRowButtons.push({
+        type: 'button',
+        text: { type: 'plain_text', text: 'Cancel' },
+        action_id: 'pick_cancel',
+        value: pickerId,
+      });
+      blocks.push({ type: 'actions', elements: secondRowButtons });
+    } else {
+      // Add cancel to first row's block as a separate actions block
+      blocks.push({
+        type: 'actions',
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'Cancel' },
+          action_id: 'pick_cancel',
+          value: pickerId,
+        }],
+      });
+    }
+
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_`-continue`: 마지막 세션 재개_' }] });
+
+    const result = await say({ text: '📂 Recent Sessions', blocks, thread_ts: threadTs });
+
+    // Store picker state
+    const timeout = setTimeout(() => {
+      this.pendingPickers.delete(pickerId);
+      this.app.client.chat.update({
+        channel, ts: result.ts,
+        text: '📂 _Session picker expired._',
+        blocks: [],
+      }).catch(() => {});
+    }, 300_000); // 5 minutes
+
+    this.pendingPickers.set(pickerId, {
+      sessions,
+      channel,
+      threadTs,
+      user,
+      messageTs: result.ts,
+      timeout,
+    });
   }
 
   // --- Session listing ---
@@ -1102,9 +1247,11 @@ export class SlackHandler {
     help += `\`-cwd <path>\` — Set working directory (relative or absolute)\n`;
     help += `\`-cwd\` — Show current working directory\n\n`;
     help += `*Session*\n`;
+    help += `\`-r\` / \`-resume\` — Recent sessions picker (mobile-friendly)\n`;
     help += `\`-continue [message]\` — Resume last CLI session\n`;
-    help += `\`-resume <session-id> [message]\` — Resume a specific session\n`;
-    help += `\`-sessions\` — List recent sessions for current cwd\n`;
+    help += `\`-resume <session-id>\` — Resume a specific session\n`;
+    help += `\`-sessions\` — List sessions for current cwd\n`;
+    help += `\`-sessions all\` — List sessions across all projects\n`;
     help += `\`-stop\` — Cancel the running query (graceful interrupt)\n`;
     help += `\`-reset\` — End current session (next message starts fresh)\n\n`;
     help += `*Plan & Permissions*\n`;
@@ -1272,6 +1419,79 @@ export class SlackHandler {
       const planId = (body as any).actions[0].value;
       this.pendingPlans.delete(planId);
       await respond({ response_type: 'ephemeral', text: '취소되었습니다.' });
+    });
+
+    // Session picker buttons
+    this.app.action(/^pick_\d+$/, async ({ ack, body }) => {
+      await ack();
+      try {
+        const actionValue = JSON.parse((body as any).actions[0].value);
+        const picker = this.pendingPickers.get(actionValue.pickerId);
+        if (!picker) {
+          await this.app.client.chat.postEphemeral({
+            channel: (body as any).channel?.id,
+            user: (body as any).user?.id,
+            text: '⚠️ Session picker expired. Use `-r` again.',
+          });
+          return;
+        }
+
+        const session = picker.sessions[actionValue.index];
+        if (!session) return;
+
+        clearTimeout(picker.timeout);
+        this.pendingPickers.delete(actionValue.pickerId);
+
+        // 1. Auto-switch cwd to the session's project path
+        if (session.projectPath && session.projectPath.includes('\\')) {
+          this.workingDirManager.setWorkingDirectory(
+            picker.channel, session.projectPath, picker.threadTs, picker.user
+          );
+        }
+
+        // 2. Update picker message to show selection
+        const title = session.summary || session.firstPrompt || '(no title)';
+        const cwdNote = session.projectPath.includes('\\') ? `\n_cwd → ${session.projectPath}_` : '';
+        await this.app.client.chat.update({
+          channel: picker.channel,
+          ts: picker.messageTs,
+          text: `📂 *Resuming:* ${title}${cwdNote}`,
+          blocks: [],
+        }).catch(() => {});
+
+        // 3. Resume session in the same thread
+        const event: MessageEvent = {
+          user: picker.user,
+          channel: picker.channel,
+          thread_ts: picker.threadTs,
+          ts: picker.threadTs,
+          text: `-resume ${session.sessionId}`,
+        };
+        const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel: picker.channel, ...msg });
+        await this.handleMessage(event, sayCb);
+      } catch (error) {
+        this.logger.error('Error handling session picker selection', error);
+      }
+    });
+
+    this.app.action('pick_cancel', async ({ ack, body }) => {
+      await ack();
+      try {
+        const pickerId = (body as any).actions[0].value;
+        const picker = this.pendingPickers.get(pickerId);
+        if (picker) {
+          clearTimeout(picker.timeout);
+          this.pendingPickers.delete(pickerId);
+          await this.app.client.chat.update({
+            channel: picker.channel,
+            ts: picker.messageTs,
+            text: '📂 _Cancelled._',
+            blocks: [],
+          }).catch(() => {});
+        }
+      } catch (error) {
+        this.logger.error('Error handling picker cancel', error);
+      }
     });
 
     // Rate limit retry — open modal with editable prompt
