@@ -43,7 +43,7 @@ export class SlackHandler {
   // UI state
   private todoMessages: Map<string, string> = new Map();
   private originalMessages: Map<string, { channel: string; ts: string }> = new Map();
-  private currentReactions: Map<string, string> = new Map();
+  private currentReactions: Map<string, Set<string>> = new Map();
 
   // Per-channel settings
   private channelModels: Map<string, string> = new Map();
@@ -329,6 +329,8 @@ export class SlackHandler {
     let currentMessages: string[] = [];
     let statusMessageTs: string | undefined;
     let rateLimitMessageText: string | undefined;
+    let lastStatusText = '';
+    let statusRepeatCount = 0;
     const channelModel = this.channelModels.get(channel);
 
     try {
@@ -381,14 +383,27 @@ export class SlackHandler {
           const event = (message as any).event;
           if (event?.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
             const toolName = event.content_block.name;
+            const toolEmoji = this.getToolReactionEmoji(toolName);
             if (statusMessageTs) {
-              await this.app.client.chat.update({
-                channel,
-                ts: statusMessageTs,
-                text: `⚙️ *Using ${toolName}...*`,
-              }).catch(() => {});
+              const newStatusText = `${toolEmoji} *Using ${toolName}...*`;
+              if (newStatusText === lastStatusText) {
+                statusRepeatCount++;
+                await this.app.client.chat.update({
+                  channel,
+                  ts: statusMessageTs,
+                  text: `${toolEmoji} *Using ${toolName}... (${statusRepeatCount})*`,
+                }).catch(() => {});
+              } else {
+                lastStatusText = newStatusText;
+                statusRepeatCount = 1;
+                await this.app.client.chat.update({
+                  channel,
+                  ts: statusMessageTs,
+                  text: newStatusText,
+                }).catch(() => {});
+              }
             }
-            await this.updateMessageReaction(sessionKey, '⚙️');
+            await this.updateMessageReaction(sessionKey, toolEmoji);
           }
           continue;
         }
@@ -404,10 +419,7 @@ export class SlackHandler {
           const hasToolUse = message.message.content?.some((part: any) => part.type === 'tool_use');
 
           if (hasToolUse) {
-            if (statusMessageTs) {
-              await this.app.client.chat.update({ channel, ts: statusMessageTs, text: '⚙️ *Working...*' }).catch(() => {});
-            }
-            await this.updateMessageReaction(sessionKey, '⚙️');
+            // Status message & reaction are already handled by stream_event above
 
             const todoTool = message.message.content?.find((part: any) =>
               part.type === 'tool_use' && part.name === 'TodoWrite'
@@ -428,6 +440,15 @@ export class SlackHandler {
                 rateLimitMessageText = content;
               }
               currentMessages.push(content);
+              if (statusMessageTs) {
+                const newStatusText = '✍️ *Writing...*';
+                if (newStatusText !== lastStatusText) {
+                  lastStatusText = newStatusText;
+                  statusRepeatCount = 1;
+                  await this.app.client.chat.update({ channel, ts: statusMessageTs, text: newStatusText }).catch(() => {});
+                }
+              }
+              await this.updateMessageReaction(sessionKey, '✍️');
               await say({ text: this.formatMessage(content, false), thread_ts: thread_ts || ts });
             }
           }
@@ -777,24 +798,86 @@ export class SlackHandler {
     '❌': 'x',
     '⏹️': 'stop_button',
     '🔄': 'arrows_counterclockwise',
+    '🔍': 'mag',
+    '✏️': 'pencil2',
+    '💻': 'computer',
+    '🌐': 'globe_with_meridians',
+    '🤖': 'robot_face',
+    '🔌': 'electric_plug',
+    '✍️': 'writing_hand',
   };
+
+  private getToolReactionEmoji(toolName: string): string {
+    if (['Read', 'Glob', 'Grep', 'LS'].includes(toolName)) return '🔍';
+    if (['Edit', 'MultiEdit', 'Write', 'NotebookEdit'].includes(toolName)) return '✏️';
+    if (toolName === 'Bash') return '💻';
+    if (['WebFetch', 'WebSearch'].includes(toolName)) return '🌐';
+    if (toolName === 'Task') return '🤖';
+    if (toolName.startsWith('mcp__')) return '🔌';
+    return '⚙️';
+  }
+
+  // Conflicting reaction groups: within each group, only one should be shown at a time
+  private readonly conflictingReactionGroups: string[][] = [
+    // Terminal states conflict with each other and with in-progress states
+    ['white_check_mark', 'x', 'stop_button', 'clipboard'],
+    // In-progress states conflict with each other and with terminal states
+    ['thinking_face', 'memo', 'mag', 'pencil2', 'computer', 'globe_with_meridians', 'robot_face', 'electric_plug', 'gear', 'writing_hand', 'arrows_counterclockwise'],
+  ];
+
+  // Get all reactions that conflict with the given reaction (from all groups it belongs to, plus the other group)
+  private getConflictingReactions(reactionName: string): Set<string> {
+    const conflicts = new Set<string>();
+    // All status reactions are mutually conflicting — collect from all groups
+    for (const group of this.conflictingReactionGroups) {
+      for (const r of group) {
+        if (r !== reactionName) conflicts.add(r);
+      }
+    }
+    return conflicts;
+  }
 
   private async updateMessageReaction(sessionKey: string, emoji: string): Promise<void> {
     const originalMessage = this.originalMessages.get(sessionKey);
     if (!originalMessage) return;
 
     const reactionName = this.emojiToReaction[emoji] || emoji;
-    const currentReaction = this.currentReactions.get(sessionKey);
-    if (currentReaction === reactionName) return;
+    let activeReactions = this.currentReactions.get(sessionKey);
+    if (!activeReactions) {
+      activeReactions = new Set();
+      this.currentReactions.set(sessionKey, activeReactions);
+    }
+
+    // Already showing this exact reaction — nothing to do
+    if (activeReactions.has(reactionName)) {
+      // Still remove any conflicting ones that shouldn't be there
+      const conflicts = this.getConflictingReactions(reactionName);
+      for (const conflict of conflicts) {
+        if (activeReactions.has(conflict)) {
+          try {
+            await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: conflict });
+          } catch { /* might not exist */ }
+          activeReactions.delete(conflict);
+        }
+      }
+      return;
+    }
 
     try {
-      if (currentReaction) {
-        try {
-          await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: currentReaction });
-        } catch { /* might not exist */ }
+      // Remove all conflicting reactions first
+      const conflicts = this.getConflictingReactions(reactionName);
+      for (const conflict of conflicts) {
+        if (activeReactions.has(conflict)) {
+          try {
+            await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: conflict });
+          } catch { /* might not exist */ }
+          activeReactions.delete(conflict);
+        }
       }
+
+      // Add the new reaction
       await this.app.client.reactions.add({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: reactionName });
-      this.currentReactions.set(sessionKey, reactionName);
+      activeReactions.add(reactionName);
     } catch (error) {
       this.logger.warn('Failed to update message reaction', error);
     }
