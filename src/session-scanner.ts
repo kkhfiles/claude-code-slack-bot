@@ -46,6 +46,9 @@ export class SessionScanner {
       const projectPath = this.decodeProjectPath(dir.name, knownPaths);
       const projectLabel = this.getProjectLabel(projectPath);
 
+      // Collect indexed session IDs
+      const indexedSessionIds = new Set<string>();
+
       // Try sessions-index.json first
       const indexPath = path.join(dirPath, 'sessions-index.json');
       if (fs.existsSync(indexPath)) {
@@ -55,6 +58,7 @@ export class SessionScanner {
 
           for (const entry of entries) {
             if (entry.isSidechain) continue;
+            indexedSessionIds.add(entry.sessionId);
             const modified = entry.modified
               ? new Date(entry.modified)
               : entry.fileMtime
@@ -71,15 +75,16 @@ export class SessionScanner {
               modified,
             });
           }
-          continue; // Skip file scanning if index exists
         } catch { /* fall through to file scanning */ }
       }
 
-      // Fallback: scan .jsonl files by mtime
+      // Scan .jsonl files not in index (catches newly created sessions)
       try {
         const jsonlFiles = fs.readdirSync(dirPath)
           .filter(f => f.endsWith('.jsonl'))
           .map(f => {
+            const sessionId = f.replace('.jsonl', '');
+            if (indexedSessionIds.has(sessionId)) return null;
             const fullPath = path.join(dirPath, f);
             try {
               return { name: f, path: fullPath, mtime: fs.statSync(fullPath).mtime };
@@ -89,7 +94,7 @@ export class SessionScanner {
           })
           .filter((f): f is NonNullable<typeof f> => f !== null)
           .sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
-          .slice(0, 5); // Only top 5 per project without index
+          .slice(0, 5);
 
         for (const file of jsonlFiles) {
           const sessionId = file.name.replace('.jsonl', '');
