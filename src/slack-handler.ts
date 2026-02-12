@@ -1076,45 +1076,33 @@ export class SlackHandler {
 
     const pickerId = `picker-${Date.now()}`;
 
-    // Group sessions by project
-    const grouped = new Map<string, SessionInfo[]>();
-    for (const s of sessions) {
-      const key = s.projectPath;
-      if (!grouped.has(key)) grouped.set(key, []);
-      grouped.get(key)!.push(s);
-    }
-
-    // Build BlockKit blocks — button (left) + details below for each session
+    // Build BlockKit blocks — sorted by modified (newest first), no grouping
     const blocks: any[] = [
       { type: 'section', text: { type: 'mrkdwn', text: '📂 *Recent Sessions*' } },
     ];
 
-    let index = 0;
-    for (const [projectPath, projectSessions] of grouped) {
-      for (const s of projectSessions) {
-        const title = s.summary || s.firstPrompt || '(no title)';
-        const label = s.projectLabel;
-        const branch = s.gitBranch;
-        const relTime = formatRelativeTime(s.modified);
-        const projectInfo = branch ? `*${label}* · \`${branch}\`` : `*${label}*`;
+    sessions.forEach((s, index) => {
+      const title = s.summary || s.firstPrompt || '(no title)';
+      const label = s.projectLabel;
+      const branch = s.gitBranch;
+      const relTime = formatRelativeTime(s.modified);
+      const projectInfo = branch ? `*${label}* · \`${branch}\`` : `*${label}*`;
 
-        blocks.push({ type: 'divider' });
-        blocks.push({
-          type: 'context',
-          elements: [{ type: 'mrkdwn', text: `${projectInfo} · _${relTime}_\n${title}\n\`${s.projectPath}\`` }],
-        });
-        blocks.push({
-          type: 'actions',
-          elements: [{
-            type: 'button',
-            text: { type: 'plain_text', text: `▶ Resume` },
-            action_id: `pick_${index + 1}`,
-            value: JSON.stringify({ pickerId, index }),
-          }],
-        });
-        index++;
-      }
-    }
+      blocks.push({ type: 'divider' });
+      blocks.push({
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: `${projectInfo} · _${relTime}_\n${title}\n\`${s.projectPath}\`` }],
+      });
+      blocks.push({
+        type: 'actions',
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: `▶ Resume` },
+          action_id: `pick_${index + 1}`,
+          value: JSON.stringify({ pickerId, index }),
+        }],
+      });
+    });
 
     blocks.push({ type: 'divider' });
     blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_`-continue`: 마지막 세션 재개 · 5분 후 자동 만료_' }] });
