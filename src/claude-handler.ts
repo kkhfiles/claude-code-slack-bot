@@ -57,7 +57,7 @@ export class ClaudeHandler {
       canUseTool?: CanUseTool;
     } = {}
   ): Query {
-    const permissionMode = opts.permissionMode || 'bypassPermissions';
+    const permissionMode = opts.permissionMode || 'default';
     const options: any = {
       permissionMode,
       includePartialMessages: true,

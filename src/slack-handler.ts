@@ -48,7 +48,7 @@ export class SlackHandler {
   // Per-channel settings
   private channelModels: Map<string, string> = new Map();
   private channelBudgets: Map<string, number> = new Map();
-  private channelPermissionModes: Map<string, PermissionMode> = new Map();
+  private channelPermissionModes: Map<string, 'default' | 'safe' | 'trust'> = new Map();
   private lastQueryCosts: Map<string, { cost: number; duration: number; model: string; sessionId: string }> = new Map();
 
   // Interactive approval for canUseTool
@@ -216,15 +216,20 @@ export class SlackHandler {
       }
     }
 
-    // Permission mode commands: -safe / -trust
+    // Permission mode commands: -default / -safe / -trust
+    if (text && this.isDefaultModeCommand(text)) {
+      this.channelPermissionModes.delete(channel);
+      await say({ text: `🔒 Default mode — Bash, file edits, and MCP tools require approval.\nUse \`-safe\` to auto-approve edits, or \`-trust\` to auto-approve all.`, thread_ts: thread_ts || ts });
+      return;
+    }
     if (text && this.isSafeCommand(text)) {
-      this.channelPermissionModes.set(channel, 'acceptEdits');
-      await say({ text: `🛡️ Safe mode ON — Bash commands will require approval.\nUse \`-trust\` to switch back.`, thread_ts: thread_ts || ts });
+      this.channelPermissionModes.set(channel, 'safe');
+      await say({ text: `🛡️ Safe mode — File edits auto-approved, Bash and MCP tools require approval.\nUse \`-default\` for full approval, or \`-trust\` to auto-approve all.`, thread_ts: thread_ts || ts });
       return;
     }
     if (text && this.isTrustCommand(text)) {
-      this.channelPermissionModes.set(channel, 'bypassPermissions');
-      await say({ text: `⚡ Trust mode ON — All tools auto-approved.\nUse \`-safe\` to require approvals.`, thread_ts: thread_ts || ts });
+      this.channelPermissionModes.set(channel, 'trust');
+      await say({ text: `⚡ Trust mode — All tools auto-approved.\nUse \`-default\` or \`-safe\` to require approvals.`, thread_ts: thread_ts || ts });
       return;
     }
 
@@ -317,13 +322,19 @@ export class SlackHandler {
 
     // Determine permission mode
     const isPlanMode = !!planParsed;
+    const botPermLevel = this.channelPermissionModes.get(channel) || 'default';
+
     const permissionMode: PermissionMode = isPlanMode
       ? 'plan'
-      : (this.channelPermissionModes.get(channel) || 'bypassPermissions');
+      : botPermLevel === 'trust'
+        ? 'bypassPermissions'
+        : botPermLevel === 'safe'
+          ? 'acceptEdits'
+          : 'default';
 
-    // Create canUseTool callback for interactive permission
-    const canUseTool = (permissionMode === 'acceptEdits')
-      ? this.createCanUseTool(channel, thread_ts || ts)
+    // Create canUseTool callback for interactive permission (default and safe modes)
+    const canUseTool = (botPermLevel !== 'trust' && !isPlanMode)
+      ? this.createCanUseTool(channel, thread_ts || ts, botPermLevel === 'safe')
       : undefined;
 
     let currentMessages: string[] = [];
@@ -602,12 +613,20 @@ export class SlackHandler {
 
   // --- canUseTool callback factory ---
 
-  private createCanUseTool(channel: string, threadTs: string): CanUseTool {
+  private createCanUseTool(channel: string, threadTs: string, autoApproveEdits: boolean = false): CanUseTool {
     return async (toolName: string, input: Record<string, unknown>, options: { signal: AbortSignal; suggestions?: any[] }): Promise<PermissionResult> => {
-      // Auto-approve safe/read-only tools
-      const safeTools = ['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'Task', 'TodoRead', 'TodoWrite', 'NotebookRead'];
-      if (safeTools.includes(toolName) || toolName.startsWith('mcp__')) {
+      // Always auto-approve read-only/safe tools
+      const readOnlyTools = ['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'Task', 'TodoRead', 'TodoWrite', 'NotebookRead'];
+      if (readOnlyTools.includes(toolName)) {
         return { behavior: 'allow', updatedInput: input };
+      }
+
+      // In -safe mode, auto-approve file edit tools
+      if (autoApproveEdits) {
+        const editTools = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
+        if (editTools.includes(toolName)) {
+          return { behavior: 'allow', updatedInput: input };
+        }
       }
 
       // For Bash and other potentially destructive tools, ask user
@@ -657,7 +676,15 @@ export class SlackHandler {
         return `🔐 *Approve edit to* \`${input.file_path || '?'}\`?`;
       case 'Write':
         return `🔐 *Approve creating* \`${input.file_path || '?'}\`?`;
+      case 'NotebookEdit':
+        return `🔐 *Approve notebook edit to* \`${input.notebook_path || '?'}\`?`;
       default:
+        if (toolName.startsWith('mcp__')) {
+          const parts = toolName.split('__');
+          const serverName = parts[1] || '?';
+          const mcpToolName = parts.slice(2).join('__') || '?';
+          return `🔐 *Approve MCP tool* \`${mcpToolName}\` _(${serverName})_?\n\`\`\`json\n${JSON.stringify(input, null, 2).substring(0, 500)}\n\`\`\``;
+        }
         return `🔐 *Approve ${toolName}?*\n\`\`\`json\n${JSON.stringify(input, null, 2).substring(0, 500)}\n\`\`\``;
     }
   }
@@ -906,6 +933,10 @@ export class SlackHandler {
     return /^-(reset|새로시작)$/i.test(text.trim());
   }
 
+  private isDefaultModeCommand(text: string): boolean {
+    return /^-default$/i.test(text.trim());
+  }
+
   private isSafeCommand(text: string): boolean {
     return /^-safe$/i.test(text.trim());
   }
@@ -1078,8 +1109,9 @@ export class SlackHandler {
     help += `\`-reset\` — End current session (next message starts fresh)\n\n`;
     help += `*Plan & Permissions*\n`;
     help += `\`-plan <prompt>\` — Plan only (read-only, no execution)\n`;
-    help += `\`-safe\` — Safe mode: Bash commands require approval\n`;
-    help += `\`-trust\` — Trust mode: all tools auto-approved (default)\n\n`;
+    help += `\`-default\` — Default: edits, bash, MCP require approval (default)\n`;
+    help += `\`-safe\` — Safe: edits auto-approved, bash/MCP require approval\n`;
+    help += `\`-trust\` — Trust: all tools auto-approved\n\n`;
     help += `*Settings*\n`;
     help += `\`-model [name]\` — Get/set model (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
     help += `\`-budget [amount|off]\` — Get/set/remove max budget per query (USD)\n`;
@@ -1231,13 +1263,8 @@ export class SlackHandler {
       const say = async (msg: any) => {
         return this.app.client.chat.postMessage({ channel, ...msg });
       };
-      // Temporarily set permission mode to acceptEdits for execution
-      const prevMode = this.channelPermissionModes.get(channel);
-      this.channelPermissionModes.set(channel, this.channelPermissionModes.get(channel) || 'bypassPermissions');
+      // Execute with the channel's current permission mode (defaults to 'default' with interactive approval)
       await this.handleMessage(event, say);
-      if (prevMode) {
-        this.channelPermissionModes.set(channel, prevMode);
-      }
     });
 
     this.app.action('cancel_plan', async ({ ack, body, respond }) => {
