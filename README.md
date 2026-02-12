@@ -50,7 +50,7 @@ git checkout custom
 npm install --ignore-scripts
 ```
 
-> `--ignore-scripts`: `@anthropic-ai/claude-code` 패키지의 Windows 플랫폼 체크를 우회.
+> `--ignore-scripts`: `@anthropic-ai/claude-agent-sdk` 패키지의 플랫폼별 스크립트를 우회 (Windows 호환).
 
 ### 2. Slack App 생성
 
@@ -107,14 +107,25 @@ pm2 delete claude-slack-bot        # 제거
 ### Windows 재부팅 시 자동 시작
 
 ```bash
-# 관리자 권한으로 실행 (최초 1회)
+# 최초 1회 (관리자 권한 불필요)
 autostart-setup.bat
 ```
 
-이 스크립트는 Windows Task Scheduler에 `pm2-resurrect` 작업을 등록합니다.
-로그인 시 `pm2 resurrect`가 자동 실행되어 봇이 복원됩니다.
+이 스크립트는 Windows 시작 프로그램 폴더에 `pm2-resurrect.vbs`를 등록합니다.
+로그인 시 `pm2 resurrect`가 백그라운드로 자동 실행되어 봇이 복원됩니다 (CMD 창 없음).
 
-제거: `schtasks /delete /tn "pm2-resurrect" /f`
+**동작 원리:**
+1. `pm2 save` — 현재 실행 중인 pm2 프로세스 목록을 저장
+2. `pm2-resurrect.vbs` → 시작 프로그램 폴더에 복사
+3. Windows 로그인 시 VBS가 `pm2 resurrect`를 숨김 실행
+
+**주의:** `start.bat`으로 봇을 실행한 상태에서 `autostart-setup.bat`을 실행해야 합니다.
+봇 설정을 변경한 후에는 `start.bat` → `autostart-setup.bat` 순서로 다시 실행하세요.
+
+제거: 시작 프로그램 폴더에서 `pm2-resurrect.vbs` 삭제
+```bash
+del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\pm2-resurrect.vbs"
+```
 
 ### 수동 실행 (pm2 없이)
 

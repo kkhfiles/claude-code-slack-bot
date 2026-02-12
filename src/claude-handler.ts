@@ -1,4 +1,4 @@
-import { query, type SDKMessage, type Query, type CanUseTool, type PermissionMode, type PermissionResult } from '@anthropic-ai/claude-code';
+import { query, type SDKMessage, type Query, type CanUseTool, type PermissionMode, type PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { ConversationSession } from './types';
 import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
@@ -57,11 +57,17 @@ export class ClaudeHandler {
       canUseTool?: CanUseTool;
     } = {}
   ): Query {
+    const permissionMode = opts.permissionMode || 'bypassPermissions';
     const options: any = {
-      outputFormat: 'stream-json',
-      permissionMode: opts.permissionMode || 'bypassPermissions',
+      permissionMode,
       includePartialMessages: true,
+      systemPrompt: { type: 'preset', preset: 'claude_code' },
     };
+
+    // Required for bypassPermissions mode in new SDK
+    if (permissionMode === 'bypassPermissions') {
+      options.allowDangerouslySkipPermissions = true;
+    }
 
     if (opts.model) options.model = opts.model;
     if (opts.maxBudgetUsd && opts.maxBudgetUsd > 0) {

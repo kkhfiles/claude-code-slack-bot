@@ -844,7 +844,7 @@ export class SlackHandler {
 
   private isRateLimitError(error: any): boolean {
     const msg = error?.message || '';
-    return /rate.?limit|overloaded|429|too many requests|capacity|usage limit/i.test(msg);
+    return /rate.?limit|overloaded|429|too many requests|capacity|usage limit|spending.?cap/i.test(msg);
   }
 
   private parseRetryAfterSeconds(error: any): number {
@@ -853,6 +853,18 @@ export class SlackHandler {
     if (match) return parseInt(match[1], 10);
     const minMatch = msg.match(/(\d+)\s*minutes?/i);
     if (minMatch) return parseInt(minMatch[1], 10) * 60;
+    // "Spending cap reached resets 1pm" / "resets 2am" format
+    const resetsMatch = msg.match(/resets\s+(\d{1,2})\s*(am|pm)/i);
+    if (resetsMatch) {
+      let hour = parseInt(resetsMatch[1], 10);
+      if (resetsMatch[2].toLowerCase() === 'pm' && hour < 12) hour += 12;
+      if (resetsMatch[2].toLowerCase() === 'am' && hour === 12) hour = 0;
+      const now = new Date();
+      const resetTime = new Date(now);
+      resetTime.setHours(hour, 0, 0, 0);
+      if (resetTime <= now) resetTime.setDate(resetTime.getDate() + 1);
+      return Math.max(60, Math.floor((resetTime.getTime() - now.getTime()) / 1000));
+    }
     return 5 * 60 * 60;
   }
 

@@ -2,7 +2,7 @@
 
 ## Overview
 - Fork of [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot)
-- Windows-compatible, `@anthropic-ai/claude-code` SDK 기반
+- Windows-compatible, `@anthropic-ai/claude-agent-sdk` 기반
 - Slack Socket Mode (공개 URL 불필요)
 - `custom` 브랜치에서 작업, `main`은 upstream 동기화용
 
