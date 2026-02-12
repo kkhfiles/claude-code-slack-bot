@@ -367,6 +367,7 @@ export class SlackHandler {
     let rateLimitMessageText: string | undefined;
     let lastStatusText = '';
     let statusRepeatCount = 0;
+    const toolUsageCounts = new Map<string, number>();
     const channelModel = this.channelModels.get(channel);
 
     try {
@@ -419,6 +420,7 @@ export class SlackHandler {
           const event = (message as any).event;
           if (event?.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
             const toolName = event.content_block.name;
+            toolUsageCounts.set(toolName, (toolUsageCounts.get(toolName) || 0) + 1);
             const toolEmoji = this.getToolReactionEmoji(toolName);
             if (statusMessageTs) {
               const newStatusText = `${toolEmoji} *Using ${toolName}...*`;
@@ -452,7 +454,14 @@ export class SlackHandler {
             if (content) rateLimitMessageText = content;
           }
 
-          const hasToolUse = message.message.content?.some((part: any) => part.type === 'tool_use');
+          const contentParts = message.message.content || [];
+          const hasToolUse = contentParts.some((part: any) => part.type === 'tool_use');
+
+          this.logger.debug('Assistant message received', {
+            hasToolUse,
+            partTypes: contentParts.map((p: any) => p.type),
+            textPreview: contentParts.filter((p: any) => p.type === 'text').map((p: any) => p.text?.substring(0, 80)),
+          });
 
           if (hasToolUse) {
             // Status message & reaction are already handled by stream_event above
@@ -516,9 +525,12 @@ export class SlackHandler {
 
       // Completed
       const doneEmoji = isPlanMode ? '📋' : '✅';
-      const doneText = isPlanMode ? '*Plan ready*' : '*Task completed*';
+      const doneLabel = isPlanMode ? '*Plan ready*' : '*Task completed*';
+      const toolSummary = toolUsageCounts.size > 0
+        ? ' (' + Array.from(toolUsageCounts.entries()).map(([name, count]) => count > 1 ? `${name} ×${count}` : name).join(', ') + ')'
+        : '';
       if (statusMessageTs) {
-        await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `${doneEmoji} ${doneText}` }).catch(() => {});
+        await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `${doneEmoji} ${doneLabel}${toolSummary}` }).catch(() => {});
       }
       await this.updateMessageReaction(sessionKey, doneEmoji);
 
@@ -742,6 +754,13 @@ export class SlackHandler {
     return null;
   }
 
+  // Tools that only show in the status message (no separate say() needed)
+  private static readonly STATUS_ONLY_TOOLS = new Set([
+    'Read', 'Grep', 'Glob', 'LS', 'WebSearch', 'WebFetch',
+    'ListMcpResourcesTool', 'ReadMcpResourceTool',
+    'TodoRead', 'TodoWrite', 'NotebookRead',
+  ]);
+
   private formatToolUse(content: any[]): string {
     const parts: string[] = [];
     for (const part of content) {
@@ -750,6 +769,10 @@ export class SlackHandler {
       } else if (part.type === 'tool_use') {
         const toolName = part.name;
         const input = part.input;
+
+        // Skip tools already shown in status message
+        if (SlackHandler.STATUS_ONLY_TOOLS.has(toolName)) continue;
+
         switch (toolName) {
           case 'Edit':
           case 'MultiEdit':
@@ -758,14 +781,9 @@ export class SlackHandler {
           case 'Write':
             parts.push(this.formatWriteTool(input));
             break;
-          case 'Read':
-            parts.push(this.formatReadTool(input));
-            break;
           case 'Bash':
             parts.push(this.formatBashTool(input));
             break;
-          case 'TodoWrite':
-            return '';
           default:
             parts.push(this.formatGenericTool(toolName, input));
         }
@@ -789,10 +807,6 @@ export class SlackHandler {
 
   private formatWriteTool(input: any): string {
     return `📄 *Creating \`${input.file_path}\`*\n\`\`\`\n${this.truncateString(input.content, 300)}\n\`\`\``;
-  }
-
-  private formatReadTool(input: any): string {
-    return `👁️ *Reading \`${input.file_path}\`*`;
   }
 
   private formatBashTool(input: any): string {
