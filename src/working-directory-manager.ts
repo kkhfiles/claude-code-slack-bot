@@ -227,6 +227,19 @@ export class WorkingDirectoryManager {
     return config?.directory;
   }
 
+  /**
+   * Build a mapping of encoded directory names to actual paths.
+   * Used by SessionScanner to decode project directory names.
+   */
+  getKnownPathsMap(): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const config of this.configs.values()) {
+      const encoded = config.directory.replace(/[^a-zA-Z0-9]/g, '-');
+      map.set(encoded, config.directory);
+    }
+    return map;
+  }
+
   hasChannelWorkingDirectory(channelId: string): boolean {
     return !!this.getChannelWorkingDirectory(channelId);
   }

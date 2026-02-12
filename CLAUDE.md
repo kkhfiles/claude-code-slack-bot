@@ -32,6 +32,8 @@ stop.bat                      # pm2 중지
 - `-stop`: `Query.interrupt()`로 정상 중단 (세션 상태 보존), fallback으로 `AbortController.abort()`
 - `-plan <prompt>`: `permissionMode: 'plan'`으로 읽기 전용 실행 → Execute 버튼으로 세션 resume
 - `-default`/`-safe`/`-trust`: 권한 모드 전환 (default → safe → trust 순으로 자유도 증가)
+- `-r`/`-resume`: 전체 프로젝트 세션 피커 (버튼 선택 → cwd 자동 전환 + 세션 재개)
+- `-sessions all`: 전체 프로젝트 세션 목록 (세션 피커와 동일)
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
   2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)
@@ -84,6 +86,7 @@ git checkout custom
 | `src/claude-handler.ts` | Claude SDK `query()` 호출, 세션 관리 |
 | `src/working-directory-manager.ts` | 작업 디렉터리 설정/조회/영속화 |
 | `src/file-handler.ts` | 파일 업로드 다운로드/임베딩 |
+| `src/session-scanner.ts` | 전체 프로젝트 세션 스캔/피커 데이터 |
 | `src/mcp-manager.ts` | MCP 서버 설정 로드/관리 |
 | `src/config.ts` | 환경변수 로드 |
 | `src/types.ts` | TypeScript 타입 정의 |
