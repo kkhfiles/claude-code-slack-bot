@@ -531,19 +531,43 @@ export class SlackHandler {
           this.pendingRetries.set(retryId, { prompt: finalPrompt, channel, threadTs: thread_ts || ts, user });
           setTimeout(() => this.pendingRetries.delete(retryId), 10 * 60 * 1000);
 
+          // Build blocks: editable prompt (if ≤3000 chars) + action buttons
+          const blocks: any[] = [
+            { type: 'section', text: { type: 'mrkdwn', text: `⏳ *Rate limit reached.*\nEstimated retry: *${retryTimeStr}* (${Math.round(retryAfter / 60)}분 후)` } },
+          ];
+
+          const canEditInline = finalPrompt.length <= 3000;
+          if (canEditInline) {
+            blocks.push({
+              type: 'actions',
+              block_id: 'retry_prompt_block',
+              elements: [{
+                type: 'plain_text_input',
+                action_id: 'retry_prompt_input',
+                multiline: true,
+                initial_value: finalPrompt,
+                placeholder: { type: 'plain_text', text: '재시도할 프롬프트를 편집하세요' },
+              }],
+            });
+          } else {
+            blocks.push({
+              type: 'context',
+              elements: [{ type: 'mrkdwn', text: `_프롬프트가 ${finalPrompt.length}자로 인라인 편집 불가 (3000자 초과). 원본 그대로 재전송됩니다._` }],
+            });
+          }
+
+          blocks.push({
+            type: 'actions',
+            elements: [
+              { type: 'button', text: { type: 'plain_text', text: `예약 (${retryTimeStr})` }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, retryAfter }), style: 'primary' },
+              { type: 'button', text: { type: 'plain_text', text: '취소' }, action_id: 'cancel_retry', value: retryId },
+            ],
+          });
+
           await say({
             thread_ts: thread_ts || ts,
             text: `⏳ *Rate limit reached.* Estimated retry: ${retryTimeStr}`,
-            blocks: [
-              { type: 'section', text: { type: 'mrkdwn', text: `⏳ *Rate limit reached.*\nEstimated retry: *${retryTimeStr}* (${Math.round(retryAfter / 60)}분 후)\n\n다음 세션에 예약 메시지로 재실행할까요?` } },
-              {
-                type: 'actions',
-                elements: [
-                  { type: 'button', text: { type: 'plain_text', text: `예약 (${retryTimeStr})` }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, retryAfter }), style: 'primary' },
-                  { type: 'button', text: { type: 'plain_text', text: '취소' }, action_id: 'cancel_retry', value: retryId },
-                ],
-              },
-            ],
+            blocks,
           });
         } else {
           await say({ text: `Error: ${error.message || 'Something went wrong'}`, thread_ts: thread_ts || ts });
@@ -1166,10 +1190,16 @@ export class SlackHandler {
           await respond({ response_type: 'ephemeral', text: '⚠️ Retry info expired. Please resend your message manually.' });
           return;
         }
+
+        // Read edited prompt from inline text input (if available)
+        const stateValues = (body as any).state?.values;
+        const editedPrompt = stateValues?.retry_prompt_block?.retry_prompt_input?.value;
+        const finalPrompt = editedPrompt || retryInfo.prompt;
+
         const postAt = Math.floor(Date.now() / 1000) + actionValue.retryAfter;
         await this.app.client.chat.scheduleMessage({
           channel: retryInfo.channel,
-          text: retryInfo.prompt,
+          text: finalPrompt,
           post_at: postAt,
           thread_ts: retryInfo.threadTs,
         });
@@ -1180,6 +1210,11 @@ export class SlackHandler {
         this.logger.error('Failed to schedule retry', error);
         await respond({ response_type: 'ephemeral', text: `❌ Failed to schedule: ${(error as any).message}` });
       }
+    });
+
+    // Handle text input interaction (Slack requires action handler for dispatch)
+    this.app.action('retry_prompt_input', async ({ ack }) => {
+      await ack();
     });
 
     this.app.action('cancel_retry', async ({ ack, body, respond }) => {
