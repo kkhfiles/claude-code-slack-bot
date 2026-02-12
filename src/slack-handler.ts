@@ -885,12 +885,15 @@ export class SlackHandler {
     return /rate.?limit|overloaded|429|too many requests|capacity|usage limit|spending.?cap|hit your limit|resets\s+\d{1,2}\s*(am|pm)/i.test(text);
   }
 
+  // Extra buffer after reset time to avoid hitting limit again immediately
+  private readonly RETRY_BUFFER_SECONDS = 3 * 60; // 3 minutes
+
   private parseRetryAfterSeconds(error: any): number {
     const msg = error?.message || '';
     const match = msg.match(/retry.?after[:\s]+(\d+)/i);
-    if (match) return parseInt(match[1], 10);
+    if (match) return parseInt(match[1], 10) + this.RETRY_BUFFER_SECONDS;
     const minMatch = msg.match(/(\d+)\s*minutes?/i);
-    if (minMatch) return parseInt(minMatch[1], 10) * 60;
+    if (minMatch) return parseInt(minMatch[1], 10) * 60 + this.RETRY_BUFFER_SECONDS;
     // "Spending cap reached resets 1pm" / "resets 2am" format
     const resetsMatch = msg.match(/resets\s+(\d{1,2})\s*(am|pm)/i);
     if (resetsMatch) {
@@ -901,7 +904,7 @@ export class SlackHandler {
       const resetTime = new Date(now);
       resetTime.setHours(hour, 0, 0, 0);
       if (resetTime <= now) resetTime.setDate(resetTime.getDate() + 1);
-      return Math.max(60, Math.floor((resetTime.getTime() - now.getTime()) / 1000));
+      return Math.max(60, Math.floor((resetTime.getTime() - now.getTime()) / 1000) + this.RETRY_BUFFER_SECONDS);
     }
     return 5 * 60 * 60;
   }
