@@ -147,7 +147,7 @@ export class McpManager {
     }
 
     info += 'Available tools follow the pattern: `mcp__serverName__toolName`\n';
-    info += 'All MCP tools are allowed by default.';
+    info += 'MCP tools require approval by default. Use `-trust` to auto-approve.';
 
     return info;
   }

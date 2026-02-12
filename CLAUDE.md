@@ -31,8 +31,7 @@ stop.bat                      # pm2 중지
 - 명령어 파싱은 정규식 기반, `slack-handler.ts`의 `is*Command()` / `parse*Command()` 패턴
 - `-stop`: `Query.interrupt()`로 정상 중단 (세션 상태 보존), fallback으로 `AbortController.abort()`
 - `-plan <prompt>`: `permissionMode: 'plan'`으로 읽기 전용 실행 → Execute 버튼으로 세션 resume
-- `-safe`/`-trust`: `acceptEdits` / `bypassPermissions` 전환
-- Safe 모드 시 `canUseTool` 콜백으로 Bash 승인 요청 (2분 타임아웃 후 자동 승인)
+- `-default`/`-safe`/`-trust`: 권한 모드 전환 (default → safe → trust 순으로 자유도 증가)
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
   2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)
@@ -45,7 +44,12 @@ stop.bat                      # pm2 중지
 - 로깅은 `Logger` 클래스 사용 (`this.logger.info/debug/warn/error`)
 
 ### SDK Integration
-- `permissionMode: 'bypassPermissions'` (Windows에서 permission MCP 서버 미지원)
+- 권한 모드 계층 (제한적 → 자유):
+  - Default (기본): `permissionMode: 'default'` + `canUseTool` → Bash, Edit, Write, MCP 승인 요청
+  - `-safe`: `permissionMode: 'acceptEdits'` + `canUseTool` → Edit/Write 자동, Bash/MCP 승인 요청
+  - `-trust`: `permissionMode: 'bypassPermissions'` → 모든 도구 자동 승인
+  - `-default`: 기본 모드로 복귀
+- `canUseTool` 콜백으로 Slack 버튼 승인 (2분 타임아웃 후 자동 승인)
 - Resume 우선순위: 명시적 resumeOptions > Slack 세션 > 새 대화
 - 빈 프롬프트 금지: SDK API는 빈/공백 텍스트 블록을 거부함 → 기본 메시지 사용
 - Slack은 backtick(`)으로 텍스트를 감쌀 수 있음 → 정규식에서 선택적 backtick 처리
