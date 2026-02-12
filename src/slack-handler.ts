@@ -524,8 +524,8 @@ export class SlackHandler {
 
         if (rateLimitSource) {
           const retryAfter = this.parseRetryAfterSeconds(rateLimitSource);
-          const retryTime = new Date(Date.now() + retryAfter * 1000);
-          const retryTimeStr = retryTime.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' });
+          const postAt = Math.floor(Date.now() / 1000) + retryAfter;
+          const retryTimeStr = new Date(postAt * 1000).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' });
           const retryId = `retry-${Date.now()}`;
 
           this.pendingRetries.set(retryId, { prompt: finalPrompt, channel, threadTs: thread_ts || ts, user });
@@ -544,7 +544,7 @@ export class SlackHandler {
               {
                 type: 'actions',
                 elements: [
-                  { type: 'button', text: { type: 'plain_text', text: `예약 (${retryTimeStr})` }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, retryAfter }), style: 'primary' },
+                  { type: 'button', text: { type: 'plain_text', text: `예약 (${retryTimeStr})` }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, postAt, retryTimeStr }), style: 'primary' },
                   { type: 'button', text: { type: 'plain_text', text: '취소' }, action_id: 'cancel_retry', value: retryId },
                 ],
               },
@@ -1179,15 +1179,14 @@ export class SlackHandler {
           return;
         }
 
-        const retryTime = new Date(Date.now() + actionValue.retryAfter * 1000);
-        const retryTimeStr = retryTime.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' });
+        const { postAt, retryTimeStr } = actionValue;
 
         await this.app.client.views.open({
           trigger_id: (body as any).trigger_id,
           view: {
             type: 'modal',
             callback_id: 'schedule_retry_modal',
-            private_metadata: JSON.stringify({ retryId: actionValue.retryId, retryAfter: actionValue.retryAfter }),
+            private_metadata: JSON.stringify({ retryId: actionValue.retryId, postAt }),
             title: { type: 'plain_text', text: '예약 재시도' },
             submit: { type: 'plain_text', text: `예약 (${retryTimeStr})` },
             close: { type: 'plain_text', text: '취소' },
@@ -1224,7 +1223,7 @@ export class SlackHandler {
         if (!retryInfo) return;
 
         const editedPrompt = view.state.values.retry_prompt_block.retry_prompt_input.value || retryInfo.prompt;
-        const postAt = Math.floor(Date.now() / 1000) + metadata.retryAfter;
+        const postAt = metadata.postAt;
 
         await this.app.client.chat.scheduleMessage({
           channel: retryInfo.channel,
