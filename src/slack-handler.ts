@@ -56,7 +56,6 @@ export class SlackHandler {
   // Interactive approval for canUseTool
   private pendingApprovals: Map<string, {
     resolve: (result: PermissionResult) => void;
-    timeout: ReturnType<typeof setTimeout>;
   }> = new Map();
 
   // Rate limit retry
@@ -705,13 +704,7 @@ export class SlackHandler {
       const toolDesc = this.formatToolApprovalMessage(toolName, input, locale);
 
       return new Promise<PermissionResult>((resolve) => {
-        const timeout = setTimeout(() => {
-          this.pendingApprovals.delete(approvalId);
-          this.logger.info('Tool approval auto-approved (timeout)', { approvalId, toolName });
-          resolve({ behavior: 'allow', updatedInput: input });
-        }, 120_000);
-
-        this.pendingApprovals.set(approvalId, { resolve, timeout });
+        this.pendingApprovals.set(approvalId, { resolve });
 
         this.app.client.chat.postMessage({
           channel,
@@ -726,11 +719,9 @@ export class SlackHandler {
                 { type: 'button', text: { type: 'plain_text', text: t('approval.deny', locale) }, action_id: 'deny_tool_use', value: approvalId, style: 'danger' },
               ],
             },
-            { type: 'context', elements: [{ type: 'mrkdwn', text: t('approval.autoApprove', locale) }] },
           ],
         }).catch((err) => {
           this.logger.error('Failed to post approval message', err);
-          clearTimeout(timeout);
           this.pendingApprovals.delete(approvalId);
           resolve({ behavior: 'allow', updatedInput: input });
         });
@@ -1329,7 +1320,6 @@ export class SlackHandler {
         const actionValue = JSON.parse((body as any).actions[0].value);
         const approval = this.pendingApprovals.get(actionValue.approvalId);
         if (approval) {
-          clearTimeout(approval.timeout);
           this.pendingApprovals.delete(actionValue.approvalId);
           approval.resolve({
             behavior: 'allow',
@@ -1351,7 +1341,6 @@ export class SlackHandler {
       const approvalId = (body as any).actions[0].value;
       const approval = this.pendingApprovals.get(approvalId);
       if (approval) {
-        clearTimeout(approval.timeout);
         this.pendingApprovals.delete(approvalId);
         approval.resolve({ behavior: 'deny', message: 'User denied this tool use.' });
         await respond({ response_type: 'ephemeral', text: `❌ ${t('approval.denied', actionLocale)}` });

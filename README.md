@@ -209,7 +209,7 @@ Conversations in the same thread automatically continue the session (no command 
 3. Or click **Cancel** to discard
 
 **Permission modes:**
-- **Default**: Edit, Write, Bash, MCP tools require Slack button approval (2-min auto-approve timeout)
+- **Default**: Edit, Write, Bash, MCP tools require Slack button approval (waits until user responds)
 - **Safe**: Edit/Write auto-approved, Bash/MCP require approval
 - **Trust**: All tools auto-approved (no prompts)
 

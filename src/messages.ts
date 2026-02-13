@@ -96,7 +96,6 @@ const messages: Record<string, Record<Locale, string>> = {
   // --- Tool approval ---
   'approval.approve': { en: 'Approve', ko: '승인' },
   'approval.deny': { en: 'Deny', ko: '거부' },
-  'approval.autoApprove': { en: '_Auto-approves in 2 minutes_', ko: '_2분 후 자동 승인_' },
   'approval.bash': { en: '*Approve Bash command?*', ko: '*Bash 명령어를 실행할까요?*' },
   'approval.edit': { en: '*Approve edit to* `{{path}}`?', ko: '`{{path}}` *편집을 승인할까요?*' },
   'approval.write': { en: '*Approve creating* `{{path}}`?', ko: '`{{path}}` *파일 생성을 승인할까요?*' },

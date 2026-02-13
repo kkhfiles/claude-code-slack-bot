@@ -54,7 +54,7 @@ stop.bat                      # pm2 중지
   - `-safe`: `permissionMode: 'acceptEdits'` + `canUseTool` → Edit/Write 자동, Bash/MCP 승인 요청
   - `-trust`: `permissionMode: 'bypassPermissions'` → 모든 도구 자동 승인
   - `-default`: 기본 모드로 복귀
-- `canUseTool` 콜백으로 Slack 버튼 승인 (2분 타임아웃 후 자동 승인)
+- `canUseTool` 콜백으로 Slack 버튼 승인 (사용자가 승인/거부할 때까지 대기, 자동 승인 없음)
 - Resume 우선순위: 명시적 resumeOptions > Slack 세션 > 새 대화
 - 빈 프롬프트 금지: SDK API는 빈/공백 텍스트 블록을 거부함 → 기본 메시지 사용
 - Slack은 backtick(`)으로 텍스트를 감쌀 수 있음 → 정규식에서 선택적 backtick 처리
