@@ -62,11 +62,19 @@ export class SessionScanner {
           for (const entry of entries) {
             if (entry.isSidechain) continue;
             indexedSessionIds.add(entry.sessionId);
-            const modified = entry.modified
-              ? new Date(entry.modified)
-              : entry.fileMtime
-                ? new Date(entry.fileMtime)
-                : new Date(0);
+
+            // Use actual file mtime if available (more accurate than index timestamps)
+            let modified: Date;
+            const jsonlFullPath = path.join(dirPath, `${entry.sessionId}.jsonl`);
+            try {
+              modified = fs.statSync(jsonlFullPath).mtime;
+            } catch {
+              modified = entry.modified
+                ? new Date(entry.modified)
+                : entry.fileMtime
+                  ? new Date(entry.fileMtime)
+                  : new Date(0);
+            }
 
             allSessions.push({
               sessionId: entry.sessionId,

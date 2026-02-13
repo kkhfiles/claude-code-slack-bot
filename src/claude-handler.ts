@@ -104,7 +104,12 @@ export class ClaudeHandler {
       this.logger.info('Continuing last CLI session');
     } else if (session?.sessionId) {
       options.resume = session.sessionId;
-      this.logger.debug('Resuming Slack session', { sessionId: session.sessionId });
+      if (session.lastAssistantUuid) {
+        options.resumeSessionAt = session.lastAssistantUuid;
+        this.logger.debug('Resuming Slack session at message', { sessionId: session.sessionId, resumeAt: session.lastAssistantUuid });
+      } else {
+        this.logger.debug('Resuming Slack session', { sessionId: session.sessionId });
+      }
     } else {
       this.logger.debug('Starting new Claude conversation');
     }
