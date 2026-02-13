@@ -2,15 +2,21 @@
 
 ## Overview
 - Fork of [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot)
-- Windows-compatible, `@anthropic-ai/claude-agent-sdk` 기반
+- Cross-platform (Windows/macOS/Linux), `@anthropic-ai/claude-agent-sdk` 기반
 - Slack Socket Mode (공개 URL 불필요)
 - `custom` 브랜치에서 작업, `main`은 upstream 동기화용
 
 ## Build & Run
 
 ```bash
-npm install --ignore-scripts   # Windows에서 플랫폼 체크 우회
+npm install                    # macOS / Linux
+npm install --ignore-scripts   # Windows (플랫폼 체크 우회)
 npm run build                  # TypeScript → dist/
+
+# macOS / Linux
+npm run build && pm2 start ecosystem.config.js
+
+# Windows
 start.bat                     # pm2로 빌드+실행 (권장)
 stop.bat                      # pm2 중지
 ```
@@ -27,7 +33,7 @@ stop.bat                      # pm2 중지
 
 ### Command Pattern
 - 모든 사용자 명령어는 `-` 접두사 필수 (`-cwd`, `-stop`, `-sessions` 등)
-- 예외: `help`, `resume`, `계속`은 `-` 없이도 동작 (모바일 편의)
+- 예외: `help`, `resume`, `continue`, `keep going`, `계속`, `계속하자`는 `-` 없이도 동작 (모바일 편의)
 - 명령어 파싱은 정규식 기반, `slack-handler.ts`의 `is*Command()` / `parse*Command()` 패턴
 - `-stop`: `Query.interrupt()`로 정상 중단 (세션 상태 보존), fallback으로 `AbortController.abort()`
 - `-plan <prompt>`: `permissionMode: 'plan'`으로 읽기 전용 실행 → Execute 버튼으로 세션 resume
@@ -37,7 +43,7 @@ stop.bat                      # pm2 중지
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
   2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)
-  3. `getHelpText()`에 도움말 추가
+  3. `messages.ts`의 `getHelpText()`에 도움말 추가
   4. `README.md`에도 반영
 
 ### Error Handling
