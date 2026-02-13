@@ -9,7 +9,7 @@ Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-co
 - Streaming responses (real-time message updates)
 - File uploads (images, text, PDF, code files)
 - CLI session resume/continue (`-sessions`, `-resume`, `-continue`)
-- Mobile-friendly session picker (`resume`, `계속`) — browse and resume recent sessions with buttons
+- Mobile-friendly session picker (`resume`, `continue`, `계속`) — browse and resume recent sessions with buttons
 - Working directory management (persisted to disk, survives restarts)
 - Model selection / cost control (`-model`, `-budget`, `-cost`)
 - Plan mode (`-plan`) — review plans before execution
@@ -133,7 +133,7 @@ node dist/index.js            # Foreground (Ctrl+C to stop)
 ## Slack Commands
 
 All commands start with `-` prefix. Use `-help` to see the full list.
-Some commands also work without `-` for mobile convenience (e.g., `resume`, `계속`, `help`).
+Some commands also work without `-` for mobile convenience (e.g., `resume`, `continue`, `계속`, `help`).
 
 ### Working Directory
 
@@ -159,7 +159,7 @@ Settings are persisted to disk and survive bot restarts.
 
 | Command | Description |
 |---------|-------------|
-| `-r` / `resume` / `계속` | Recent sessions picker (mobile-friendly) |
+| `-r` / `resume` / `continue` / `계속` | Recent sessions picker (mobile-friendly) |
 | `-sessions` | List sessions for current cwd (ID + summary) |
 | `-sessions all` | List sessions across all projects |
 | `-continue [message]` | Resume last CLI session |

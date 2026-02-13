@@ -240,7 +240,7 @@ export function getHelpText(locale: Locale): string {
     help += `\`-cwd <경로>\` — 작업 디렉터리 설정 (상대/절대 경로)\n`;
     help += `\`-cwd\` — 현재 작업 디렉터리 표시\n\n`;
     help += `*세션*\n`;
-    help += `\`-r\` / \`resume\` / \`계속\` — 최근 세션 피커 (모바일 친화)\n`;
+    help += `\`-r\` / \`resume\` / \`continue\` / \`계속\` — 최근 세션 피커 (모바일 친화)\n`;
     help += `\`-continue [메시지]\` — 마지막 CLI 세션 재개\n`;
     help += `\`-resume <세션ID>\` — 특정 세션 재개\n`;
     help += `\`-sessions\` — 현재 cwd의 세션 목록\n`;
@@ -273,7 +273,7 @@ export function getHelpText(locale: Locale): string {
   help += `\`-cwd <path>\` — Set working directory (relative or absolute)\n`;
   help += `\`-cwd\` — Show current working directory\n\n`;
   help += `*Session*\n`;
-  help += `\`-r\` / \`resume\` / \`계속\` — Recent sessions picker (mobile-friendly)\n`;
+  help += `\`-r\` / \`resume\` / \`continue\` / \`계속\` — Recent sessions picker (mobile-friendly)\n`;
   help += `\`-continue [message]\` — Resume last CLI session\n`;
   help += `\`-resume <session-id>\` — Resume a specific session\n`;
   help += `\`-sessions\` — List sessions for current cwd\n`;
