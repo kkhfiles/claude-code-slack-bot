@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { Locale, t, formatShortDate } from './messages';
+import { Logger } from './logger';
 
 export interface SessionInfo {
   sessionId: string;
@@ -26,6 +27,7 @@ interface IndexEntry {
 
 export class SessionScanner {
   private readonly projectsBaseDir: string;
+  private logger = new Logger('SessionScanner');
 
   constructor() {
     this.projectsBaseDir = path.join(os.homedir(), '.claude', 'projects');
@@ -114,8 +116,9 @@ export class SessionScanner {
       } catch { /* skip unreadable directories */ }
     }
 
-    // Sort by modified date (newest first) and take top N
+    // Filter out empty sessions (no conversation content) and sort by modified date
     return allSessions
+      .filter(s => s.summary || s.firstPrompt)
       .sort((a, b) => b.modified.getTime() - a.modified.getTime())
       .slice(0, limit);
   }
@@ -193,6 +196,76 @@ export class SessionScanner {
     // extract the last meaningful segment
     const parts = projectPath.split('--');
     return parts[parts.length - 1] || projectPath;
+  }
+
+  /**
+   * Encode a project path to the directory name format used by Claude CLI.
+   * Non-alphanumeric characters are replaced with '-'.
+   */
+  private encodeProjectPath(projectPath: string): string {
+    return projectPath.replace(/[^a-zA-Z0-9]/g, '-');
+  }
+
+  /**
+   * Register a session in sessions-index.json so that `claude -c` can find it.
+   */
+  registerSession(opts: {
+    sessionId: string;
+    projectPath: string;
+    firstPrompt: string;
+    messageCount?: number;
+  }): void {
+    try {
+      const encodedDir = this.encodeProjectPath(opts.projectPath);
+      const dirPath = path.join(this.projectsBaseDir, encodedDir);
+      const indexPath = path.join(dirPath, 'sessions-index.json');
+      const jsonlPath = path.join(dirPath, `${opts.sessionId}.jsonl`);
+
+      // Verify the session file exists
+      if (!fs.existsSync(jsonlPath)) {
+        this.logger.warn('Session file not found, skipping index registration', { sessionId: opts.sessionId, jsonlPath });
+        return;
+      }
+
+      const fileStat = fs.statSync(jsonlPath);
+      const meta = this.extractSessionMetadata(jsonlPath);
+      const now = new Date().toISOString();
+
+      const newEntry = {
+        sessionId: opts.sessionId,
+        fullPath: jsonlPath,
+        fileMtime: fileStat.mtime.getTime(),
+        firstPrompt: meta.firstPrompt || opts.firstPrompt.substring(0, 100) || 'No prompt',
+        summary: meta.summary || '',
+        messageCount: opts.messageCount || 0,
+        created: now,
+        modified: now,
+        gitBranch: meta.gitBranch || '',
+        projectPath: opts.projectPath,
+        isSidechain: false,
+      };
+
+      // Read existing index or create new one
+      let indexData: { version: number; entries: any[] } = { version: 1, entries: [] };
+      if (fs.existsSync(indexPath)) {
+        try {
+          indexData = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+        } catch { /* start fresh if corrupt */ }
+      }
+
+      // Update existing entry or append
+      const existingIdx = indexData.entries.findIndex((e: any) => e.sessionId === opts.sessionId);
+      if (existingIdx >= 0) {
+        indexData.entries[existingIdx] = { ...indexData.entries[existingIdx], ...newEntry, created: indexData.entries[existingIdx].created };
+      } else {
+        indexData.entries.push(newEntry);
+      }
+
+      fs.writeFileSync(indexPath, JSON.stringify(indexData, null, 2), 'utf-8');
+      this.logger.info('Registered session in index', { sessionId: opts.sessionId, indexPath });
+    } catch (error) {
+      this.logger.error('Failed to register session in index', error);
+    }
   }
 }
 

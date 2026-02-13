@@ -568,6 +568,15 @@ export class SlackHandler {
       }
       await this.updateMessageReaction(sessionKey, doneEmoji);
 
+      // Register session in sessions-index.json for CLI compatibility
+      if (session?.sessionId && workingDirectory) {
+        this.sessionScanner.registerSession({
+          sessionId: session.sessionId,
+          projectPath: workingDirectory,
+          firstPrompt: basePrompt.substring(0, 100),
+        });
+      }
+
       // If plan mode, offer Execute button
       if (isPlanMode && session?.sessionId) {
         const planId = `plan-${Date.now()}`;
