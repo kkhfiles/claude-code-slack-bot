@@ -16,6 +16,7 @@ Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-co
 - Permission modes (Default / Safe / Trust) — interactive tool approval via Slack buttons
 - Real-time progress display (current tool name + usage summary on completion)
 - Rate limit detection with scheduled retry and automatic reset-time mention notification
+- Automatic Korean/English UI based on Slack locale
 - MCP server integration
 - AWS Bedrock / Google Vertex AI support (optional)
 
@@ -31,6 +32,7 @@ Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-co
 - `-stop`: graceful interrupt via SDK `Query.interrupt()` (preserves session state)
 - Real-time progress (`stream_event` for current tool name, usage summary on completion)
 - Rate limit → Slack scheduled message retry + automatic mention notification at reset time
+- i18n: Auto-detect Korean/English from Slack user locale (`users.info` API)
 - Working directory persistence (`.working-dirs.json`)
 - DM thread `-cwd` creates DM-level fallback automatically
 - pm2-based process management (`start.bat`, `stop.bat`)
@@ -313,6 +315,7 @@ src/
 ├── working-directory-manager.ts # Working directory management (persistence)
 ├── file-handler.ts              # File upload handling
 ├── session-scanner.ts           # Cross-project session scanning
+├── messages.ts                  # i18n translation catalog (ko/en)
 ├── todo-manager.ts              # Task list management
 ├── mcp-manager.ts               # MCP server management
 └── logger.ts                    # Logging utility

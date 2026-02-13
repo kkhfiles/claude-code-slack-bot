@@ -1,4 +1,5 @@
 import { Logger } from './logger';
+import { Locale, t } from './messages';
 
 export interface Todo {
   id: string;
@@ -26,21 +27,21 @@ export class TodoManager {
     return this.todos.get(sessionId) || [];
   }
 
-  formatTodoList(todos: Todo[]): string {
+  formatTodoList(todos: Todo[], locale: Locale = 'en'): string {
     if (todos.length === 0) {
-      return '📋 *Task List*\n\nNo tasks defined yet.';
+      return `📋 ${t('todo.title', locale)}\n\n${t('todo.empty', locale)}`;
     }
 
-    let message = '📋 *Task List*\n\n';
-    
+    let message = `📋 ${t('todo.title', locale)}\n\n`;
+
     // Group by status
-    const pending = todos.filter(t => t.status === 'pending');
-    const inProgress = todos.filter(t => t.status === 'in_progress');
-    const completed = todos.filter(t => t.status === 'completed');
+    const pending = todos.filter(td => td.status === 'pending');
+    const inProgress = todos.filter(td => td.status === 'in_progress');
+    const completed = todos.filter(td => td.status === 'completed');
 
     // Show in-progress tasks first
     if (inProgress.length > 0) {
-      message += '*🔄 In Progress:*\n';
+      message += `${t('todo.inProgress', locale)}\n`;
       for (const todo of inProgress) {
         const priority = this.getPriorityIcon(todo.priority);
         message += `${priority} ${todo.content}\n`;
@@ -50,7 +51,7 @@ export class TodoManager {
 
     // Then pending tasks
     if (pending.length > 0) {
-      message += '*⏳ Pending:*\n';
+      message += `${t('todo.pending', locale)}\n`;
       for (const todo of pending) {
         const priority = this.getPriorityIcon(todo.priority);
         message += `${priority} ${todo.content}\n`;
@@ -60,7 +61,7 @@ export class TodoManager {
 
     // Finally completed tasks
     if (completed.length > 0) {
-      message += '*✅ Completed:*\n';
+      message += `${t('todo.completed', locale)}\n`;
       for (const todo of completed) {
         const priority = this.getPriorityIcon(todo.priority);
         message += `${priority} ~${todo.content}~\n`;
@@ -71,8 +72,8 @@ export class TodoManager {
     const total = todos.length;
     const completedCount = completed.length;
     const progress = total > 0 ? Math.round((completedCount / total) * 100) : 0;
-    
-    message += `\n*Progress:* ${completedCount}/${total} tasks completed (${progress}%)`;
+
+    message += `\n${t('todo.progress', locale, { completed: completedCount, total, percent: progress })}`;
 
     return message;
   }
@@ -107,16 +108,16 @@ export class TodoManager {
     return false;
   }
 
-  getStatusChange(oldTodos: Todo[], newTodos: Todo[]): string | null {
+  getStatusChange(oldTodos: Todo[], newTodos: Todo[], locale: Locale = 'en'): string | null {
     // Find status changes
     const changes: string[] = [];
 
     for (const newTodo of newTodos) {
-      const oldTodo = oldTodos.find(t => t.id === newTodo.id);
-      
+      const oldTodo = oldTodos.find(td => td.id === newTodo.id);
+
       if (!oldTodo) {
         // New task added
-        changes.push(`➕ Added: ${newTodo.content}`);
+        changes.push(t('todo.added', locale, { content: newTodo.content }));
       } else if (oldTodo.status !== newTodo.status) {
         // Status changed
         const statusEmoji = {
@@ -124,15 +125,15 @@ export class TodoManager {
           'in_progress': '🔄',
           'completed': '✅'
         };
-        
+
         changes.push(`${statusEmoji[newTodo.status]} ${newTodo.content}`);
       }
     }
 
     // Check for removed tasks
     for (const oldTodo of oldTodos) {
-      if (!newTodos.find(t => t.id === oldTodo.id)) {
-        changes.push(`➖ Removed: ${oldTodo.content}`);
+      if (!newTodos.find(td => td.id === oldTodo.id)) {
+        changes.push(t('todo.removed', locale, { content: oldTodo.content }));
       }
     }
 

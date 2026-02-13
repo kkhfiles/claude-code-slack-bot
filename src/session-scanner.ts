@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { Locale, t, formatShortDate } from './messages';
 
 export interface SessionInfo {
   sessionId: string;
@@ -196,18 +197,18 @@ export class SessionScanner {
 }
 
 /**
- * Format a date as a relative time string in Korean.
+ * Format a date as a relative time string.
  */
-export function formatRelativeTime(date: Date): string {
+export function formatRelativeTime(date: Date, locale: Locale = 'en'): string {
   const diffMs = Date.now() - date.getTime();
   const diffMin = Math.floor(diffMs / 60000);
   const diffHour = Math.floor(diffMs / 3600000);
   const diffDay = Math.floor(diffMs / 86400000);
 
-  if (diffMin < 1) return '방금 전';
-  if (diffMin < 60) return `${diffMin}분 전`;
-  if (diffHour < 24) return `${diffHour}시간 전`;
-  if (diffDay < 7) return `${diffDay}일 전`;
+  if (diffMin < 1) return t('time.justNow', locale);
+  if (diffMin < 60) return t('time.minutesAgo', locale, { n: diffMin });
+  if (diffHour < 24) return t('time.hoursAgo', locale, { n: diffHour });
+  if (diffDay < 7) return t('time.daysAgo', locale, { n: diffDay });
 
-  return date.toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' });
+  return formatShortDate(date, locale);
 }

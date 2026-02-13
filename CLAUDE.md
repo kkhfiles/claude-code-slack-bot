@@ -69,6 +69,14 @@ stop.bat                      # pm2 중지
 - 우선순위: Thread > Channel/DM
 - DM 쓰레드에서 설정 시 DM 레벨 폴백 자동 생성
 
+### i18n (Korean / English)
+- `src/messages.ts`: 번역 카탈로그 (`Record<string, Record<Locale, string>>`) + `t(key, locale, params?)` 함수
+- Slack `users.info` API의 `locale` 필드로 자동 감지 (캐시됨): `ko-*` → Korean, 그 외 → English
+- `{{variable}}` 보간 지원
+- 번역 대상: 사용자에게 보이는 모든 문자열 (상태, 명령 응답, 버튼, 모달, 도움말 등)
+- 번역 제외: Claude에게 보내는 프롬프트, 로그 메시지, 명령어 입력 파싱
+- 새 문자열 추가 시: `messages.ts`에 키 추가 → `t('key', locale)` 호출
+
 ## Git Workflow
 
 ```bash
@@ -90,6 +98,7 @@ git checkout custom
 | `src/working-directory-manager.ts` | 작업 디렉터리 설정/조회/영속화 |
 | `src/file-handler.ts` | 파일 업로드 다운로드/임베딩 |
 | `src/session-scanner.ts` | 전체 프로젝트 세션 스캔/피커 데이터 |
+| `src/messages.ts` | i18n 번역 카탈로그 (`t()` 함수, `Locale` 타입) |
 | `src/mcp-manager.ts` | MCP 서버 설정 로드/관리 |
 | `src/config.ts` | 환경변수 로드 |
 | `src/types.ts` | TypeScript 타입 정의 |

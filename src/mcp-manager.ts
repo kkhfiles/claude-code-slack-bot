@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Logger } from './logger';
+import { Locale, t } from './messages';
 
 export type McpStdioServerConfig = {
   type?: 'stdio'; // Optional for backwards compatibility
@@ -121,18 +122,18 @@ export class McpManager {
     return Object.keys(config.mcpServers).map(serverName => `mcp__${serverName}`);
   }
 
-  formatMcpInfo(): string {
+  formatMcpInfo(locale: Locale = 'en'): string {
     const config = this.loadConfiguration();
     if (!config || Object.keys(config.mcpServers).length === 0) {
-      return 'No MCP servers configured.';
+      return t('mcp.noServers', locale);
     }
 
-    let info = '🔧 **MCP Servers Configured:**\n\n';
-    
+    let info = `🔧 ${t('mcp.title', locale)}\n\n`;
+
     for (const [serverName, serverConfig] of Object.entries(config.mcpServers)) {
       const type = serverConfig.type || 'stdio';
       info += `• **${serverName}** (${type})\n`;
-      
+
       if (type === 'stdio') {
         const stdioConfig = serverConfig as McpStdioServerConfig;
         info += `  Command: \`${stdioConfig.command}\`\n`;
@@ -146,8 +147,8 @@ export class McpManager {
       info += '\n';
     }
 
-    info += 'Available tools follow the pattern: `mcp__serverName__toolName`\n';
-    info += 'MCP tools require approval by default. Use `-trust` to auto-approve.';
+    info += `${t('mcp.toolsPattern', locale)}\n`;
+    info += t('mcp.approvalHint', locale);
 
     return info;
   }

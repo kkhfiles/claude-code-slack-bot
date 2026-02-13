@@ -1,6 +1,7 @@
 import { WorkingDirectoryConfig } from './types';
 import { Logger } from './logger';
 import { config } from './config';
+import { Locale, t } from './messages';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -200,23 +201,23 @@ export class WorkingDirectoryManager {
     return /^-cwd(\?)?$/i.test(text.trim());
   }
 
-  formatDirectoryMessage(directory: string | undefined, context: string): string {
+  formatDirectoryMessage(directory: string | undefined, context: string, locale: Locale = 'en'): string {
     if (directory) {
-      let message = `Current working directory for ${context}: \`${directory}\``;
+      let message = t('cwd.current', locale, { context, directory });
       if (config.baseDirectory) {
-        message += `\n\nBase directory: \`${config.baseDirectory}\``;
-        message += `\nYou can use relative paths like \`-cwd project-name\` or absolute paths.`;
+        message += `\n\n${t('cwd.baseDir', locale, { baseDir: config.baseDirectory })}`;
+        message += `\n${t('cwd.relativeHint', locale)}`;
       }
       return message;
     }
 
-    let message = `No working directory set for ${context}. Please set one using:`;
+    let message = t('cwd.notSet', locale, { context });
     if (config.baseDirectory) {
-      message += `\n\`-cwd project-name\` (relative to base directory)`;
-      message += `\n\`-cwd /absolute/path/to/directory\` (absolute path)`;
-      message += `\n\nBase directory: \`${config.baseDirectory}\``;
+      message += `\n${t('cwd.notSet.relativeOption', locale)}`;
+      message += `\n${t('cwd.notSet.absoluteOption', locale)}`;
+      message += `\n\n${t('cwd.baseDir', locale, { baseDir: config.baseDirectory })}`;
     } else {
-      message += `\n\`-cwd /path/to/directory\``;
+      message += `\n${t('cwd.notSet.absoluteOnly', locale)}`;
     }
     return message;
   }
@@ -244,24 +245,24 @@ export class WorkingDirectoryManager {
     return !!this.getChannelWorkingDirectory(channelId);
   }
 
-  formatChannelSetupMessage(channelId: string, channelName: string): string {
+  formatChannelSetupMessage(channelId: string, channelName: string, locale: Locale = 'en'): string {
     const hasBaseDir = !!config.baseDirectory;
-    
-    let message = `🏠 **Channel Working Directory Setup**\n\n`;
-    message += `Please set the default working directory for #${channelName}:\n\n`;
-    
+
+    let message = `🏠 ${t('cwd.channelSetup.title', locale)}\n\n`;
+    message += `${t('cwd.channelSetup.prompt', locale, { channel: channelName })}\n\n`;
+
     if (hasBaseDir) {
-      message += `**Options:**\n`;
-      message += `• \`-cwd project-name\` (relative to: \`${config.baseDirectory}\`)\n`;
-      message += `• \`-cwd /absolute/path/to/project\` (absolute path)\n\n`;
+      message += `${t('cwd.channelSetup.options', locale)}\n`;
+      message += `${t('cwd.channelSetup.relativeOption', locale, { baseDir: config.baseDirectory! })}\n`;
+      message += `${t('cwd.channelSetup.absoluteOption', locale)}\n\n`;
     } else {
-      message += `**Usage:**\n`;
-      message += `• \`-cwd /path/to/project\`\n\n`;
+      message += `${t('cwd.channelSetup.usage', locale)}\n`;
+      message += `${t('cwd.channelSetup.absoluteOnly', locale)}\n\n`;
     }
 
-    message += `This becomes the default for all conversations in this channel.\n`;
-    message += `Individual threads can override this by mentioning me with a different \`-cwd\` command.`;
-    
+    message += `${t('cwd.channelSetup.defaultNote', locale)}\n`;
+    message += t('cwd.channelSetup.overrideNote', locale);
+
     return message;
   }
 }
