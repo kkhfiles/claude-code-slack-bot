@@ -193,6 +193,10 @@ const messages: Record<string, Record<Locale, string>> = {
   // --- Misc ---
   'misc.continuePrompt': { en: 'Continue where you left off.', ko: '이전에 하던 작업을 이어서 진행하세요.' },
   'misc.cancelled': { en: 'Cancelled.', ko: '취소되었습니다.' },
+  'hint.threadStart': {
+    en: '`-stop` cancel · `-reset` new session · `-plan` plan first · `-help` all commands',
+    ko: '`-stop` 중단 · `-reset` 새 세션 · `-plan` 계획 먼저 · `-help` 전체 명령어',
+  },
 };
 
 /**
