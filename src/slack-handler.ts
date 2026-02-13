@@ -10,6 +10,7 @@ import { TodoManager, Todo } from './todo-manager';
 import { McpManager } from './mcp-manager';
 import { SessionScanner, SessionInfo, formatRelativeTime } from './session-scanner';
 import { config } from './config';
+import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 
 interface MessageEvent {
   user: string;
@@ -76,6 +77,7 @@ export class SlackHandler {
   }> = new Map();
 
   private botUserId: string | null = null;
+  private userLocales: Map<string, Locale> = new Map();
 
   constructor(app: App, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
     this.app = app;
@@ -86,8 +88,23 @@ export class SlackHandler {
     this.todoManager = new TodoManager();
   }
 
+  private async getUserLocale(userId: string): Promise<Locale> {
+    const cached = this.userLocales.get(userId);
+    if (cached) return cached;
+    try {
+      const response = await this.app.client.users.info({ user: userId, include_locale: true });
+      const slackLocale = (response.user as any)?.locale || 'en-US';
+      const locale: Locale = slackLocale.startsWith('ko') ? 'ko' : 'en';
+      this.userLocales.set(userId, locale);
+      return locale;
+    } catch {
+      return 'en';
+    }
+  }
+
   async handleMessage(event: MessageEvent, say: any) {
     const { user, channel, thread_ts, ts, text, files } = event;
+    const locale = await this.getUserLocale(user);
 
     // Process any attached files
     let processedFiles: ProcessedFile[] = [];
@@ -97,7 +114,7 @@ export class SlackHandler {
 
       if (processedFiles.length > 0) {
         await say({
-          text: `📎 Processing ${processedFiles.length} file(s): ${processedFiles.map(f => f.name).join(', ')}`,
+          text: `📎 ${t('file.processing', locale, { count: processedFiles.length, names: processedFiles.map(f => f.name).join(', ') })}`,
           thread_ts: thread_ts || ts,
         });
       }
@@ -123,8 +140,8 @@ export class SlackHandler {
       const isDM = channel.startsWith('D');
       const result = this.workingDirManager.setWorkingDirectory(channel, setDirPath, thread_ts, isDM ? user : undefined);
       if (result.success) {
-        const context = thread_ts ? 'this thread' : (isDM ? 'this conversation' : 'this channel');
-        await say({ text: `✅ Working directory set for ${context}: \`${result.resolvedPath}\``, thread_ts: thread_ts || ts });
+        const context = thread_ts ? t('cwd.context.thread', locale) : (isDM ? t('cwd.context.dm', locale) : t('cwd.context.channel', locale));
+        await say({ text: `✅ ${t('cwd.set', locale, { context, path: result.resolvedPath! })}`, thread_ts: thread_ts || ts });
       } else {
         await say({ text: `❌ ${result.error}`, thread_ts: thread_ts || ts });
       }
@@ -134,22 +151,22 @@ export class SlackHandler {
     if (text && this.workingDirManager.isGetCommand(text)) {
       const isDM = channel.startsWith('D');
       const directory = this.workingDirManager.getWorkingDirectory(channel, thread_ts, isDM ? user : undefined);
-      const context = thread_ts ? 'this thread' : (isDM ? 'this conversation' : 'this channel');
-      await say({ text: this.workingDirManager.formatDirectoryMessage(directory, context), thread_ts: thread_ts || ts });
+      const context = thread_ts ? t('cwd.context.thread', locale) : (isDM ? t('cwd.context.dm', locale) : t('cwd.context.channel', locale));
+      await say({ text: this.workingDirManager.formatDirectoryMessage(directory, context, locale), thread_ts: thread_ts || ts });
       return;
     }
 
     // MCP commands
     if (text && this.isMcpInfoCommand(text)) {
-      await say({ text: this.mcpManager.formatMcpInfo(), thread_ts: thread_ts || ts });
+      await say({ text: this.mcpManager.formatMcpInfo(locale), thread_ts: thread_ts || ts });
       return;
     }
     if (text && this.isMcpReloadCommand(text)) {
       const reloaded = this.mcpManager.reloadConfiguration();
       await say({
         text: reloaded
-          ? `✅ MCP configuration reloaded successfully.\n\n${this.mcpManager.formatMcpInfo()}`
-          : `❌ Failed to reload MCP configuration. Check the mcp-servers.json file.`,
+          ? `✅ ${t('cmd.mcp.reloadSuccess', locale)}\n\n${this.mcpManager.formatMcpInfo(locale)}`
+          : `❌ ${t('cmd.mcp.reloadFailed', locale)}`,
         thread_ts: thread_ts || ts,
       });
       return;
@@ -168,16 +185,16 @@ export class SlackHandler {
         }
         this.activeQueries.delete(sessionKey);
         this.activeControllers.delete(sessionKey);
-        await say({ text: `⏹️ Stopped.`, thread_ts: thread_ts || ts });
+        await say({ text: `⏹️ ${t('cmd.stop.stopped', locale)}`, thread_ts: thread_ts || ts });
       } else {
-        await say({ text: `ℹ️ No active query to stop.`, thread_ts: thread_ts || ts });
+        await say({ text: `ℹ️ ${t('cmd.stop.noActive', locale)}`, thread_ts: thread_ts || ts });
       }
       return;
     }
 
     // Help command
     if (text && this.isHelpCommand(text)) {
-      await say({ text: this.getHelpText(), thread_ts: thread_ts || ts });
+      await say({ text: getHelpTextI18n(locale), thread_ts: thread_ts || ts });
       return;
     }
 
@@ -186,7 +203,7 @@ export class SlackHandler {
       this.claudeHandler.removeSession(user, channel, thread_ts || ts);
       this.lastQueryCosts.delete(channel);
       await say({
-        text: `🔄 Session reset. Next message will start a new conversation.`,
+        text: `🔄 ${t('cmd.reset.done', locale)}`,
         thread_ts: thread_ts || ts,
       });
       return;
@@ -197,11 +214,11 @@ export class SlackHandler {
       const modelArg = this.parseModelCommand(text);
       if (modelArg !== null) {
         if (modelArg === '') {
-          const current = this.channelModels.get(channel) || 'default (determined by Claude Code)';
-          await say({ text: `🤖 Current model: \`${current}\``, thread_ts: thread_ts || ts });
+          const current = this.channelModels.get(channel) || t('cmd.model.default', locale);
+          await say({ text: `🤖 ${t('cmd.model.current', locale, { model: current })}`, thread_ts: thread_ts || ts });
         } else {
           this.channelModels.set(channel, modelArg);
-          await say({ text: `🤖 Model set to \`${modelArg}\``, thread_ts: thread_ts || ts });
+          await say({ text: `🤖 ${t('cmd.model.set', locale, { model: modelArg })}`, thread_ts: thread_ts || ts });
         }
         return;
       }
@@ -214,15 +231,15 @@ export class SlackHandler {
         if (budgetArg === -1) {
           const current = this.channelBudgets.get(channel);
           await say({
-            text: current ? `💰 Max budget: $${current.toFixed(2)} per query` : `💰 No budget limit set`,
+            text: current ? `💰 ${t('cmd.budget.current', locale, { amount: current.toFixed(2) })}` : `💰 ${t('cmd.budget.none', locale)}`,
             thread_ts: thread_ts || ts,
           });
         } else if (budgetArg === 0) {
           this.channelBudgets.delete(channel);
-          await say({ text: `💰 Budget limit removed`, thread_ts: thread_ts || ts });
+          await say({ text: `💰 ${t('cmd.budget.removed', locale)}`, thread_ts: thread_ts || ts });
         } else {
           this.channelBudgets.set(channel, budgetArg);
-          await say({ text: `💰 Max budget set to $${budgetArg.toFixed(2)} per query`, thread_ts: thread_ts || ts });
+          await say({ text: `💰 ${t('cmd.budget.set', locale, { amount: budgetArg.toFixed(2) })}`, thread_ts: thread_ts || ts });
         }
         return;
       }
@@ -231,17 +248,17 @@ export class SlackHandler {
     // Permission mode commands: -default / -safe / -trust
     if (text && this.isDefaultModeCommand(text)) {
       this.channelPermissionModes.delete(channel);
-      await say({ text: `🔒 Default mode — Bash, file edits, and MCP tools require approval.\nUse \`-safe\` to auto-approve edits, or \`-trust\` to auto-approve all.`, thread_ts: thread_ts || ts });
+      await say({ text: `🔒 ${t('cmd.defaultMode', locale)}`, thread_ts: thread_ts || ts });
       return;
     }
     if (text && this.isSafeCommand(text)) {
       this.channelPermissionModes.set(channel, 'safe');
-      await say({ text: `🛡️ Safe mode — File edits auto-approved, Bash and MCP tools require approval.\nUse \`-default\` for full approval, or \`-trust\` to auto-approve all.`, thread_ts: thread_ts || ts });
+      await say({ text: `🛡️ ${t('cmd.safeMode', locale)}`, thread_ts: thread_ts || ts });
       return;
     }
     if (text && this.isTrustCommand(text)) {
       this.channelPermissionModes.set(channel, 'trust');
-      await say({ text: `⚡ Trust mode — All tools auto-approved.\nUse \`-default\` or \`-safe\` to require approvals.`, thread_ts: thread_ts || ts });
+      await say({ text: `⚡ ${t('cmd.trustMode', locale)}`, thread_ts: thread_ts || ts });
       return;
     }
 
@@ -249,7 +266,7 @@ export class SlackHandler {
     if (text && this.isSessionsCommand(text)) {
       // -sessions all → cross-project picker
       if (/^-sessions?\s+(all|전체)$/i.test(text.trim())) {
-        await this.showSessionPicker(channel, thread_ts || ts, user, say);
+        await this.showSessionPicker(channel, thread_ts || ts, user, say, locale);
         return;
       }
       // -sessions → current cwd sessions
@@ -257,9 +274,9 @@ export class SlackHandler {
       const cwdForSessions = this.workingDirManager.getWorkingDirectory(channel, thread_ts, isDMForSessions ? user : undefined);
       if (cwdForSessions) {
         const sessions = this.listSessions(cwdForSessions);
-        await say({ text: this.formatSessionsList(sessions), thread_ts: thread_ts || ts });
+        await say({ text: this.formatSessionsList(sessions, locale), thread_ts: thread_ts || ts });
       } else {
-        await say({ text: `⚠️ Set a working directory first (\`-cwd <path>\`) to list sessions.`, thread_ts: thread_ts || ts });
+        await say({ text: `⚠️ ${t('cmd.sessions.noCwd', locale)}`, thread_ts: thread_ts || ts });
       }
       return;
     }
@@ -268,14 +285,14 @@ export class SlackHandler {
     if (text && this.isCostCommand(text)) {
       const costInfo = this.lastQueryCosts.get(channel);
       if (costInfo) {
-        let msg = `💵 *Last query*\n`;
-        msg += `• Cost: $${costInfo.cost.toFixed(4)}\n`;
-        msg += `• Duration: ${(costInfo.duration / 1000).toFixed(1)}s\n`;
-        msg += `• Model: \`${costInfo.model}\`\n`;
-        msg += `• Session ID: \`${costInfo.sessionId}\``;
+        let msg = `💵 ${t('cmd.cost.header', locale)}\n`;
+        msg += `• ${t('cmd.cost.costLine', locale, { cost: costInfo.cost.toFixed(4) })}\n`;
+        msg += `• ${t('cmd.cost.durationLine', locale, { duration: (costInfo.duration / 1000).toFixed(1) })}\n`;
+        msg += `• ${t('cmd.cost.modelLine', locale, { model: costInfo.model })}\n`;
+        msg += `• ${t('cmd.cost.sessionLine', locale, { sessionId: costInfo.sessionId })}`;
         await say({ text: msg, thread_ts: thread_ts || ts });
       } else {
-        await say({ text: `ℹ️ No query cost data yet.`, thread_ts: thread_ts || ts });
+        await say({ text: `ℹ️ ${t('cmd.cost.noData', locale)}`, thread_ts: thread_ts || ts });
       }
       return;
     }
@@ -285,7 +302,7 @@ export class SlackHandler {
 
     // Session picker: -r or -resume (no args) — works without cwd
     if (resumeParsed?.mode === 'picker') {
-      await this.showSessionPicker(channel, thread_ts || ts, user, say);
+      await this.showSessionPicker(channel, thread_ts || ts, user, say, locale);
       return;
     }
 
@@ -297,18 +314,18 @@ export class SlackHandler {
     const workingDirectory = this.workingDirManager.getWorkingDirectory(channel, thread_ts, isDM ? user : undefined);
 
     if (!workingDirectory) {
-      let errorMessage = `⚠️ No working directory set. `;
+      let errorMessage = `⚠️ ${t('cwd.noCwd', locale)}`;
       if (!isDM && !this.workingDirManager.hasChannelWorkingDirectory(channel)) {
-        errorMessage += `Please set a default working directory for this channel first using:\n`;
+        errorMessage += `${t('cwd.noCwd.channel', locale)}\n`;
         if (config.baseDirectory) {
-          errorMessage += `\`-cwd project-name\` or \`-cwd /absolute/path\`\n\nBase directory: \`${config.baseDirectory}\``;
+          errorMessage += t('cwd.noCwd.relativeHint', locale, { baseDir: config.baseDirectory });
         } else {
-          errorMessage += `\`-cwd /path/to/directory\``;
+          errorMessage += t('cwd.noCwd.absoluteHint', locale);
         }
       } else if (thread_ts) {
-        errorMessage += `You can set a thread-specific working directory using:\n\`-cwd /path/to/directory\``;
+        errorMessage += t('cwd.noCwd.thread', locale);
       } else {
-        errorMessage += `Please set one first using:\n\`-cwd /path/to/directory\``;
+        errorMessage += t('cwd.noCwd.generic', locale);
       }
       await say({ text: errorMessage, thread_ts: thread_ts || ts });
       return;
@@ -339,7 +356,7 @@ export class SlackHandler {
     const basePrompt = planParsed
       ? planParsed.prompt
       : resumeData
-        ? (resumeData.prompt || 'Continue where you left off.')
+        ? (resumeData.prompt || t('misc.continuePrompt', locale))
         : (text || '');
     const finalPrompt = processedFiles.length > 0
       ? await this.fileHandler.formatFilePrompt(processedFiles, basePrompt)
@@ -359,7 +376,7 @@ export class SlackHandler {
 
     // Create canUseTool callback for interactive permission (default and safe modes)
     const canUseTool = (botPermLevel !== 'trust' && !isPlanMode)
-      ? this.createCanUseTool(channel, thread_ts || ts, botPermLevel === 'safe')
+      ? this.createCanUseTool(channel, thread_ts || ts, botPermLevel === 'safe', locale)
       : undefined;
 
     let currentMessages: string[] = [];
@@ -380,7 +397,7 @@ export class SlackHandler {
       });
 
       const statusEmoji = isPlanMode ? '📝' : '🤔';
-      const statusText = isPlanMode ? '*Planning...*' : '*Thinking...*';
+      const statusText = isPlanMode ? t('status.planning', locale) : t('status.thinking', locale);
       const statusResult = await say({ text: `${statusEmoji} ${statusText}`, thread_ts: thread_ts || ts });
       statusMessageTs = statusResult.ts;
       await this.updateMessageReaction(sessionKey, statusEmoji);
@@ -423,13 +440,13 @@ export class SlackHandler {
             toolUsageCounts.set(toolName, (toolUsageCounts.get(toolName) || 0) + 1);
             const toolEmoji = this.getToolReactionEmoji(toolName);
             if (statusMessageTs) {
-              const newStatusText = `${toolEmoji} *Using ${toolName}...*`;
+              const newStatusText = `${toolEmoji} ${t('status.usingTool', locale, { toolName })}`;
               if (newStatusText === lastStatusText) {
                 statusRepeatCount++;
                 await this.app.client.chat.update({
                   channel,
                   ts: statusMessageTs,
-                  text: `${toolEmoji} *Using ${toolName}... (${statusRepeatCount})*`,
+                  text: `${toolEmoji} ${t('status.usingToolCount', locale, { toolName, count: statusRepeatCount })}`,
                 }).catch(() => {});
               } else {
                 lastStatusText = newStatusText;
@@ -470,10 +487,10 @@ export class SlackHandler {
               part.type === 'tool_use' && part.name === 'TodoWrite'
             );
             if (todoTool) {
-              await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, thread_ts || ts, say);
+              await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, thread_ts || ts, say, locale);
             }
 
-            const toolContent = this.formatToolUse(message.message.content);
+            const toolContent = this.formatToolUse(message.message.content, locale);
             if (toolContent) {
               await say({ text: toolContent, thread_ts: thread_ts || ts });
             }
@@ -486,7 +503,7 @@ export class SlackHandler {
               }
               currentMessages.push(content);
               if (statusMessageTs) {
-                const newStatusText = '✍️ *Writing...*';
+                const newStatusText = `✍️ ${t('status.writing', locale)}`;
                 if (newStatusText !== lastStatusText) {
                   lastStatusText = newStatusText;
                   statusRepeatCount = 1;
@@ -525,7 +542,7 @@ export class SlackHandler {
 
       // Completed
       const doneEmoji = isPlanMode ? '📋' : '✅';
-      const doneLabel = isPlanMode ? '*Plan ready*' : '*Task completed*';
+      const doneLabel = isPlanMode ? t('status.planReady', locale) : t('status.taskCompleted', locale);
       const toolSummary = toolUsageCounts.size > 0
         ? ' (' + Array.from(toolUsageCounts.entries()).map(([name, count]) => count > 1 ? `${name} ×${count}` : name).join(', ') + ')'
         : '';
@@ -548,22 +565,22 @@ export class SlackHandler {
 
         await say({
           thread_ts: thread_ts || ts,
-          text: `📋 Plan complete. Execute?`,
+          text: `📋 ${t('plan.complete', locale)}`,
           blocks: [
-            { type: 'section', text: { type: 'mrkdwn', text: `📋 *Plan ready.* Execute this plan?` } },
+            { type: 'section', text: { type: 'mrkdwn', text: `📋 ${t('plan.readyExecute', locale)}` } },
             {
               type: 'actions',
               elements: [
                 {
                   type: 'button',
-                  text: { type: 'plain_text', text: 'Execute' },
+                  text: { type: 'plain_text', text: t('plan.execute', locale) },
                   action_id: 'execute_plan',
                   value: planId,
                   style: 'primary',
                 },
                 {
                   type: 'button',
-                  text: { type: 'plain_text', text: 'Cancel' },
+                  text: { type: 'plain_text', text: t('plan.cancel', locale) },
                   action_id: 'cancel_plan',
                   value: planId,
                 },
@@ -582,7 +599,7 @@ export class SlackHandler {
         this.logger.error('Error handling message', error);
 
         if (statusMessageTs) {
-          await this.app.client.chat.update({ channel, ts: statusMessageTs, text: '❌ *Error occurred*' }).catch(() => {});
+          await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `❌ ${t('status.errorOccurred', locale)}` }).catch(() => {});
         }
         await this.updateMessageReaction(sessionKey, '❌');
 
@@ -594,7 +611,7 @@ export class SlackHandler {
         if (rateLimitSource) {
           const retryAfter = this.parseRetryAfterSeconds(rateLimitSource);
           const postAt = Math.floor(Date.now() / 1000) + retryAfter;
-          const retryTimeStr = new Date(postAt * 1000).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' });
+          const retryTimeStr = formatTime(new Date(postAt * 1000), locale);
           const retryId = `retry-${Date.now()}`;
 
           this.pendingRetries.set(retryId, { prompt: finalPrompt, channel, threadTs: thread_ts || ts, user });
@@ -604,7 +621,7 @@ export class SlackHandler {
           try {
             const notifyResult = await this.app.client.chat.scheduleMessage({
               channel,
-              text: `<@${user}> Rate limit이 해제되었습니다. Claude에게 새 메시지를 보낼 수 있습니다.`,
+              text: t('rateLimit.notify', locale, { user }),
               post_at: postAt,
               thread_ts: thread_ts || ts,
             });
@@ -622,26 +639,27 @@ export class SlackHandler {
 
           await say({
             thread_ts: thread_ts || ts,
-            text: `⏳ *Rate limit reached.* Estimated retry: ${retryTimeStr}`,
+            text: `⏳ ${t('rateLimit.reached', locale)} ${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfter / 60) })}`,
             blocks: [
-              { type: 'section', text: { type: 'mrkdwn', text: `⏳ *Rate limit reached.*\nEstimated retry: *${retryTimeStr}* (${Math.round(retryAfter / 60)}분 후)` } },
-              { type: 'context', elements: [{ type: 'mrkdwn', text: `_Prompt: ${promptPreview}_` }] },
+              { type: 'section', text: { type: 'mrkdwn', text: `⏳ ${t('rateLimit.reached', locale)}\n${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfter / 60) })}` } },
+              { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.prompt', locale, { prompt: promptPreview }) }] },
               {
                 type: 'actions',
                 elements: [
-                  { type: 'button', text: { type: 'plain_text', text: `예약 (${retryTimeStr})` }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, postAt, retryTimeStr }), style: 'primary' },
-                  { type: 'button', text: { type: 'plain_text', text: '취소' }, action_id: 'cancel_retry', value: retryId },
+                  { type: 'button', text: { type: 'plain_text', text: t('rateLimit.schedule', locale, { time: retryTimeStr }) }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, postAt, retryTimeStr }), style: 'primary' },
+                  { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: retryId },
                 ],
               },
+              { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.autoNotify', locale) }] },
             ],
           });
         } else {
-          await say({ text: `Error: ${error.message || 'Something went wrong'}`, thread_ts: thread_ts || ts });
+          await say({ text: t('error.generic', locale, { message: error.message || t('error.somethingWrong', locale) }), thread_ts: thread_ts || ts });
         }
       } else {
         this.logger.debug('Request was aborted', { sessionKey });
         if (statusMessageTs) {
-          await this.app.client.chat.update({ channel, ts: statusMessageTs, text: '⏹️ *Cancelled*' }).catch(() => {});
+          await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `⏹️ ${t('status.cancelled', locale)}` }).catch(() => {});
         }
         await this.updateMessageReaction(sessionKey, '⏹️');
       }
@@ -666,7 +684,7 @@ export class SlackHandler {
 
   // --- canUseTool callback factory ---
 
-  private createCanUseTool(channel: string, threadTs: string, autoApproveEdits: boolean = false): CanUseTool {
+  private createCanUseTool(channel: string, threadTs: string, autoApproveEdits: boolean = false, locale: Locale = 'en'): CanUseTool {
     return async (toolName: string, input: Record<string, unknown>, options: { signal: AbortSignal; suggestions?: any[] }): Promise<PermissionResult> => {
       // Always auto-approve read-only/safe tools
       const readOnlyTools = ['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'Task', 'TodoRead', 'TodoWrite', 'NotebookRead'];
@@ -684,7 +702,7 @@ export class SlackHandler {
 
       // For Bash and other potentially destructive tools, ask user
       const approvalId = `approval-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-      const toolDesc = this.formatToolApprovalMessage(toolName, input);
+      const toolDesc = this.formatToolApprovalMessage(toolName, input, locale);
 
       return new Promise<PermissionResult>((resolve) => {
         const timeout = setTimeout(() => {
@@ -704,11 +722,11 @@ export class SlackHandler {
             {
               type: 'actions',
               elements: [
-                { type: 'button', text: { type: 'plain_text', text: 'Approve' }, action_id: 'approve_tool_use', value: JSON.stringify({ approvalId, input, suggestions: options.suggestions }), style: 'primary' },
-                { type: 'button', text: { type: 'plain_text', text: 'Deny' }, action_id: 'deny_tool_use', value: approvalId, style: 'danger' },
+                { type: 'button', text: { type: 'plain_text', text: t('approval.approve', locale) }, action_id: 'approve_tool_use', value: JSON.stringify({ approvalId, input, suggestions: options.suggestions }), style: 'primary' },
+                { type: 'button', text: { type: 'plain_text', text: t('approval.deny', locale) }, action_id: 'deny_tool_use', value: approvalId, style: 'danger' },
               ],
             },
-            { type: 'context', elements: [{ type: 'mrkdwn', text: '_Auto-approves in 2 minutes_' }] },
+            { type: 'context', elements: [{ type: 'mrkdwn', text: t('approval.autoApprove', locale) }] },
           ],
         }).catch((err) => {
           this.logger.error('Failed to post approval message', err);
@@ -720,25 +738,25 @@ export class SlackHandler {
     };
   }
 
-  private formatToolApprovalMessage(toolName: string, input: Record<string, unknown>): string {
+  private formatToolApprovalMessage(toolName: string, input: Record<string, unknown>, locale: Locale): string {
     switch (toolName) {
       case 'Bash':
-        return `🔐 *Approve Bash command?*\n\`\`\`\n${input.command || '(no command)'}\n\`\`\``;
+        return `🔐 ${t('approval.bash', locale)}\n\`\`\`\n${input.command || '(no command)'}\n\`\`\``;
       case 'Edit':
       case 'MultiEdit':
-        return `🔐 *Approve edit to* \`${input.file_path || '?'}\`?`;
+        return `🔐 ${t('approval.edit', locale, { path: String(input.file_path || '?') })}`;
       case 'Write':
-        return `🔐 *Approve creating* \`${input.file_path || '?'}\`?`;
+        return `🔐 ${t('approval.write', locale, { path: String(input.file_path || '?') })}`;
       case 'NotebookEdit':
-        return `🔐 *Approve notebook edit to* \`${input.notebook_path || '?'}\`?`;
+        return `🔐 ${t('approval.notebook', locale, { path: String(input.notebook_path || '?') })}`;
       default:
         if (toolName.startsWith('mcp__')) {
           const parts = toolName.split('__');
           const serverName = parts[1] || '?';
           const mcpToolName = parts.slice(2).join('__') || '?';
-          return `🔐 *Approve MCP tool* \`${mcpToolName}\` _(${serverName})_?\n\`\`\`json\n${JSON.stringify(input, null, 2).substring(0, 500)}\n\`\`\``;
+          return `🔐 ${t('approval.mcp', locale, { tool: mcpToolName, server: serverName })}\n\`\`\`json\n${JSON.stringify(input, null, 2).substring(0, 500)}\n\`\`\``;
         }
-        return `🔐 *Approve ${toolName}?*\n\`\`\`json\n${JSON.stringify(input, null, 2).substring(0, 500)}\n\`\`\``;
+        return `🔐 ${t('approval.generic', locale, { toolName })}\n\`\`\`json\n${JSON.stringify(input, null, 2).substring(0, 500)}\n\`\`\``;
     }
   }
 
@@ -761,7 +779,7 @@ export class SlackHandler {
     'TodoRead', 'TodoWrite', 'NotebookRead',
   ]);
 
-  private formatToolUse(content: any[]): string {
+  private formatToolUse(content: any[], locale: Locale): string {
     const parts: string[] = [];
     for (const part of content) {
       if (part.type === 'text') {
@@ -776,26 +794,26 @@ export class SlackHandler {
         switch (toolName) {
           case 'Edit':
           case 'MultiEdit':
-            parts.push(this.formatEditTool(toolName, input));
+            parts.push(this.formatEditTool(toolName, input, locale));
             break;
           case 'Write':
-            parts.push(this.formatWriteTool(input));
+            parts.push(this.formatWriteTool(input, locale));
             break;
           case 'Bash':
-            parts.push(this.formatBashTool(input));
+            parts.push(this.formatBashTool(input, locale));
             break;
           default:
-            parts.push(this.formatGenericTool(toolName, input));
+            parts.push(this.formatGenericTool(toolName, input, locale));
         }
       }
     }
     return parts.join('\n\n');
   }
 
-  private formatEditTool(toolName: string, input: any): string {
+  private formatEditTool(toolName: string, input: any, locale: Locale): string {
     const filePath = input.file_path;
     const edits = toolName === 'MultiEdit' ? input.edits : [{ old_string: input.old_string, new_string: input.new_string }];
-    let result = `📝 *Editing \`${filePath}\`*\n`;
+    let result = `📝 ${t('tool.editing', locale, { path: filePath })}\n`;
     for (const edit of edits) {
       result += '\n```diff\n';
       result += `- ${this.truncateString(edit.old_string, 200)}\n`;
@@ -805,16 +823,16 @@ export class SlackHandler {
     return result;
   }
 
-  private formatWriteTool(input: any): string {
-    return `📄 *Creating \`${input.file_path}\`*\n\`\`\`\n${this.truncateString(input.content, 300)}\n\`\`\``;
+  private formatWriteTool(input: any, locale: Locale): string {
+    return `📄 ${t('tool.creating', locale, { path: input.file_path })}\n\`\`\`\n${this.truncateString(input.content, 300)}\n\`\`\``;
   }
 
-  private formatBashTool(input: any): string {
-    return `🖥️ *Running command:*\n\`\`\`bash\n${input.command}\n\`\`\``;
+  private formatBashTool(input: any, locale: Locale): string {
+    return `🖥️ ${t('tool.running', locale)}\n\`\`\`bash\n${input.command}\n\`\`\``;
   }
 
-  private formatGenericTool(toolName: string, _input: any): string {
-    return `🔧 *Using ${toolName}*`;
+  private formatGenericTool(toolName: string, _input: any, locale: Locale): string {
+    return `🔧 ${t('tool.using', locale, { toolName })}`;
   }
 
   private truncateString(str: string, maxLength: number): string {
@@ -833,14 +851,14 @@ export class SlackHandler {
 
   // --- Todo handling ---
 
-  private async handleTodoUpdate(input: any, sessionKey: string, sessionId: string | undefined, channel: string, threadTs: string, say: any): Promise<void> {
+  private async handleTodoUpdate(input: any, sessionKey: string, sessionId: string | undefined, channel: string, threadTs: string, say: any, locale: Locale = 'en'): Promise<void> {
     if (!sessionId || !input.todos) return;
     const newTodos: Todo[] = input.todos;
     const oldTodos = this.todoManager.getTodos(sessionId);
 
     if (this.todoManager.hasSignificantChange(oldTodos, newTodos)) {
       this.todoManager.updateTodos(sessionId, newTodos);
-      const todoList = this.todoManager.formatTodoList(newTodos);
+      const todoList = this.todoManager.formatTodoList(newTodos, locale);
       const existingTodoMessageTs = this.todoMessages.get(sessionKey);
 
       if (existingTodoMessageTs) {
@@ -853,9 +871,9 @@ export class SlackHandler {
         await this.createNewTodoMessage(todoList, channel, threadTs, sessionKey, say);
       }
 
-      const statusChange = this.todoManager.getStatusChange(oldTodos, newTodos);
+      const statusChange = this.todoManager.getStatusChange(oldTodos, newTodos, locale);
       if (statusChange) {
-        await say({ text: `🔄 *Task Update:*\n${statusChange}`, thread_ts: threadTs });
+        await say({ text: `🔄 ${t('tool.taskUpdate', locale)}\n${statusChange}`, thread_ts: threadTs });
       }
       await this.updateTaskProgressReaction(sessionKey, newTodos);
     }
@@ -1095,12 +1113,12 @@ export class SlackHandler {
 
   // --- Session picker ---
 
-  private async showSessionPicker(channel: string, threadTs: string, user: string, say: any): Promise<void> {
+  private async showSessionPicker(channel: string, threadTs: string, user: string, say: any, locale: Locale = 'en'): Promise<void> {
     const knownPaths = this.workingDirManager.getKnownPathsMap();
     const sessions = this.sessionScanner.listRecentSessions(10, knownPaths);
 
     if (sessions.length === 0) {
-      await say({ text: 'ℹ️ No sessions found. Start a new conversation or use `-continue` to resume the last CLI session.', thread_ts: threadTs });
+      await say({ text: `ℹ️ ${t('picker.noSessions', locale)}`, thread_ts: threadTs });
       return;
     }
 
@@ -1108,14 +1126,14 @@ export class SlackHandler {
 
     // Build BlockKit blocks — sorted by modified (newest first), no grouping
     const blocks: any[] = [
-      { type: 'section', text: { type: 'mrkdwn', text: '📂 *Recent Sessions*' } },
+      { type: 'section', text: { type: 'mrkdwn', text: `📂 ${t('picker.title', locale)}` } },
     ];
 
     sessions.forEach((s, index) => {
-      const title = s.summary || s.firstPrompt || '(no title)';
+      const title = s.summary || s.firstPrompt || t('picker.noTitle', locale);
       const label = s.projectLabel;
       const branch = s.gitBranch;
-      const relTime = formatRelativeTime(s.modified);
+      const relTime = formatRelativeTime(s.modified, locale);
       const projectInfo = branch ? `*${label}* · \`${branch}\`` : `*${label}*`;
 
       blocks.push({ type: 'divider' });
@@ -1127,7 +1145,7 @@ export class SlackHandler {
         type: 'actions',
         elements: [{
           type: 'button',
-          text: { type: 'plain_text', text: `▶ Resume` },
+          text: { type: 'plain_text', text: t('picker.resume', locale) },
           action_id: `pick_${index + 1}`,
           value: JSON.stringify({ pickerId, index }),
         }],
@@ -1135,16 +1153,16 @@ export class SlackHandler {
     });
 
     blocks.push({ type: 'divider' });
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_`-continue`: 마지막 세션 재개 · 5분 후 자동 만료_' }] });
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: t('picker.footer', locale) }] });
 
-    const result = await say({ text: '📂 Recent Sessions', blocks, thread_ts: threadTs });
+    const result = await say({ text: `📂 ${t('picker.title', locale)}`, blocks, thread_ts: threadTs });
 
     // Store picker state
     const timeout = setTimeout(() => {
       this.pendingPickers.delete(pickerId);
       this.app.client.chat.update({
         channel, ts: result.ts,
-        text: '📂 _Session picker expired._',
+        text: `📂 ${t('picker.expired', locale)}`,
         blocks: [],
       }).catch(() => {});
     }, 300_000); // 5 minutes
@@ -1210,52 +1228,19 @@ export class SlackHandler {
     return sessions;
   }
 
-  private formatSessionsList(sessions: Array<{ id: string; date: Date; summary: string; preview: string }>): string {
-    if (sessions.length === 0) return `ℹ️ No sessions found for this working directory.`;
-    let msg = `*Recent Sessions*\n\n`;
+  private formatSessionsList(sessions: Array<{ id: string; date: Date; summary: string; preview: string }>, locale: Locale = 'en'): string {
+    if (sessions.length === 0) return `ℹ️ ${t('sessions.noSessions', locale)}`;
+    let msg = `${t('sessions.title', locale)}\n\n`;
     for (const s of sessions) {
-      const dateStr = s.date.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-      const title = s.summary || s.preview || '(no preview)';
+      const dateStr = formatDateTime(s.date, locale);
+      const title = s.summary || s.preview || t('sessions.noPreview', locale);
       msg += `• \`${s.id}\`\n  ${dateStr} — ${title}\n\n`;
     }
-    msg += `_Use \`-resume <session-id>\` to resume a session._`;
+    msg += t('sessions.resumeHint', locale);
     return msg;
   }
 
-  // --- Help text ---
-
-  private getHelpText(): string {
-    let help = `*Claude Code Bot — Commands*\n\n`;
-    help += `*Working Directory*\n`;
-    help += `\`-cwd <path>\` — Set working directory (relative or absolute)\n`;
-    help += `\`-cwd\` — Show current working directory\n\n`;
-    help += `*Session*\n`;
-    help += `\`-r\` / \`resume\` / \`계속\` — Recent sessions picker (mobile-friendly)\n`;
-    help += `\`-continue [message]\` — Resume last CLI session\n`;
-    help += `\`-resume <session-id>\` — Resume a specific session\n`;
-    help += `\`-sessions\` — List sessions for current cwd\n`;
-    help += `\`-sessions all\` — List sessions across all projects\n`;
-    help += `\`-stop\` — Cancel the running query (graceful interrupt)\n`;
-    help += `\`-reset\` — End current session (next message starts fresh)\n\n`;
-    help += `*Plan & Permissions*\n`;
-    help += `\`-plan <prompt>\` — Plan only (read-only, no execution)\n`;
-    help += `\`-default\` — Default: edits, bash, MCP require approval (default)\n`;
-    help += `\`-safe\` — Safe: edits auto-approved, bash/MCP require approval\n`;
-    help += `\`-trust\` — Trust: all tools auto-approved\n\n`;
-    help += `*Settings*\n`;
-    help += `\`-model [name]\` — Get/set model (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
-    help += `\`-budget [amount|off]\` — Get/set/remove max budget per query (USD)\n`;
-    help += `\`-cost\` — Show last query cost and session ID\n\n`;
-    help += `*MCP*\n`;
-    help += `\`-mcp\` — Show MCP server status\n`;
-    help += `\`-mcp reload\` — Reload MCP configuration\n\n`;
-    help += `*Tips*\n`;
-    help += `• Same thread = session auto-continues (no command needed)\n`;
-    help += `• Drag & drop files to upload and analyze\n`;
-    help += `• Rate limit → bot offers scheduled retry\n`;
-    help += `• \`help\` or \`-help\` — Show this message\n`;
-    return help;
-  }
+  // getHelpText is now provided by messages.ts (getHelpTextI18n)
 
   // --- Bot user ID ---
 
@@ -1274,23 +1259,20 @@ export class SlackHandler {
 
   // --- Channel join ---
 
-  private async handleChannelJoin(channelId: string, say: any): Promise<void> {
+  private async handleChannelJoin(channelId: string, say: any, locale: Locale = 'en'): Promise<void> {
     try {
       const channelInfo = await this.app.client.conversations.info({ channel: channelId });
       const channelName = (channelInfo.channel as any)?.name || 'this channel';
 
-      let welcomeMessage = `👋 Hi! I'm Claude Code, your AI coding assistant.\n\n`;
-      welcomeMessage += `To get started, I need to know the default working directory for #${channelName}.\n\n`;
+      let welcomeMessage = `👋 ${t('welcome.greeting', locale)}\n\n`;
+      welcomeMessage += `${t('welcome.needCwd', locale, { channel: channelName })}\n\n`;
       if (config.baseDirectory) {
-        welcomeMessage += `You can use:\n`;
-        welcomeMessage += `• \`-cwd project-name\` (relative to base directory: \`${config.baseDirectory}\`)\n`;
-        welcomeMessage += `• \`-cwd /absolute/path/to/project\` (absolute path)\n\n`;
+        welcomeMessage += `${t('welcome.useRelative', locale, { baseDir: config.baseDirectory })}\n\n`;
       } else {
-        welcomeMessage += `Please set it using:\n• \`-cwd /path/to/project\`\n\n`;
+        welcomeMessage += `${t('welcome.useAbsolute', locale)}\n\n`;
       }
-      welcomeMessage += `This will be the default working directory for this channel. `;
-      welcomeMessage += `You can always override it for specific threads with \`-cwd\`.\n\n`;
-      welcomeMessage += `Type \`-help\` to see all available commands.`;
+      welcomeMessage += `${t('welcome.channelDefault', locale)}\n\n`;
+      welcomeMessage += t('welcome.helpHint', locale);
 
       await say({ text: welcomeMessage });
       this.logger.info('Sent welcome message to channel', { channelId, channelName });
@@ -1343,6 +1325,7 @@ export class SlackHandler {
     this.app.action('approve_tool_use', async ({ ack, body, respond }) => {
       await ack();
       try {
+        const actionLocale = await this.getUserLocale((body as any).user.id);
         const actionValue = JSON.parse((body as any).actions[0].value);
         const approval = this.pendingApprovals.get(actionValue.approvalId);
         if (approval) {
@@ -1353,9 +1336,9 @@ export class SlackHandler {
             updatedInput: actionValue.input,
             updatedPermissions: actionValue.suggestions,
           });
-          await respond({ response_type: 'ephemeral', text: '✅ Approved' });
+          await respond({ response_type: 'ephemeral', text: `✅ ${t('approval.approved', actionLocale)}` });
         } else {
-          await respond({ response_type: 'ephemeral', text: '⚠️ Approval expired (already auto-approved)' });
+          await respond({ response_type: 'ephemeral', text: `⚠️ ${t('approval.expired', actionLocale)}` });
         }
       } catch (error) {
         this.logger.error('Error handling tool approval', error);
@@ -1364,28 +1347,30 @@ export class SlackHandler {
 
     this.app.action('deny_tool_use', async ({ ack, body, respond }) => {
       await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
       const approvalId = (body as any).actions[0].value;
       const approval = this.pendingApprovals.get(approvalId);
       if (approval) {
         clearTimeout(approval.timeout);
         this.pendingApprovals.delete(approvalId);
         approval.resolve({ behavior: 'deny', message: 'User denied this tool use.' });
-        await respond({ response_type: 'ephemeral', text: '❌ Denied' });
+        await respond({ response_type: 'ephemeral', text: `❌ ${t('approval.denied', actionLocale)}` });
       }
     });
 
     // Plan execution
     this.app.action('execute_plan', async ({ ack, body, respond }) => {
       await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
       const planId = (body as any).actions[0].value;
       const planInfo = this.pendingPlans.get(planId);
       if (!planInfo) {
-        await respond({ response_type: 'ephemeral', text: '⚠️ Plan expired. Please re-run.' });
+        await respond({ response_type: 'ephemeral', text: `⚠️ ${t('plan.expired', actionLocale)}` });
         return;
       }
       this.pendingPlans.delete(planId);
 
-      await respond({ response_type: 'in_channel', text: '🚀 *Executing plan...*' });
+      await respond({ response_type: 'in_channel', text: `🚀 ${t('plan.executing', actionLocale)}` });
 
       // Execute by resuming the plan session with acceptEdits mode
       const { channel, threadTs, user, sessionId, prompt } = planInfo;
@@ -1399,22 +1384,24 @@ export class SlackHandler {
 
     this.app.action('cancel_plan', async ({ ack, body, respond }) => {
       await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
       const planId = (body as any).actions[0].value;
       this.pendingPlans.delete(planId);
-      await respond({ response_type: 'ephemeral', text: '취소되었습니다.' });
+      await respond({ response_type: 'ephemeral', text: t('plan.cancelled', actionLocale) });
     });
 
     // Session picker buttons
     this.app.action(/^pick_\d+$/, async ({ ack, body }) => {
       await ack();
       try {
+        const actionLocale = await this.getUserLocale((body as any).user?.id);
         const actionValue = JSON.parse((body as any).actions[0].value);
         const picker = this.pendingPickers.get(actionValue.pickerId);
         if (!picker) {
           await this.app.client.chat.postEphemeral({
             channel: (body as any).channel?.id,
             user: (body as any).user?.id,
-            text: '⚠️ Session picker expired. Use `-r` again.',
+            text: `⚠️ ${t('picker.expiredAction', actionLocale)}`,
           });
           return;
         }
@@ -1433,12 +1420,12 @@ export class SlackHandler {
         }
 
         // 2. Update picker message to show selection
-        const title = session.summary || session.firstPrompt || '(no title)';
+        const title = session.summary || session.firstPrompt || t('picker.noTitle', actionLocale);
         const cwdNote = session.projectPath.includes('\\') ? `\n_cwd → ${session.projectPath}_` : '';
         await this.app.client.chat.update({
           channel: picker.channel,
           ts: picker.messageTs,
-          text: `📂 *Resuming:* ${title}${cwdNote}`,
+          text: `📂 ${t('picker.resuming', actionLocale, { title })}${cwdNote}`,
           blocks: [],
         }).catch(() => {});
 
@@ -1462,13 +1449,14 @@ export class SlackHandler {
     this.app.action('schedule_retry', async ({ ack, body }) => {
       await ack();
       try {
+        const actionLocale = await this.getUserLocale((body as any).user.id);
         const actionValue = JSON.parse((body as any).actions[0].value);
         const retryInfo = this.pendingRetries.get(actionValue.retryId);
         if (!retryInfo) {
           await this.app.client.chat.postEphemeral({
             channel: (body as any).channel?.id || '',
             user: (body as any).user.id,
-            text: '⚠️ Retry info expired. Please resend your message manually.',
+            text: `⚠️ ${t('rateLimit.retryExpired', actionLocale)}`,
           }).catch(() => {});
           return;
         }
@@ -1481,18 +1469,18 @@ export class SlackHandler {
             type: 'modal',
             callback_id: 'schedule_retry_modal',
             private_metadata: JSON.stringify({ retryId: actionValue.retryId, postAt }),
-            title: { type: 'plain_text', text: '예약 재시도' },
-            submit: { type: 'plain_text', text: `예약 (${retryTimeStr})` },
-            close: { type: 'plain_text', text: '취소' },
+            title: { type: 'plain_text', text: t('rateLimit.modalTitle', actionLocale) },
+            submit: { type: 'plain_text', text: t('rateLimit.modalSubmit', actionLocale, { time: retryTimeStr }) },
+            close: { type: 'plain_text', text: t('rateLimit.modalClose', actionLocale) },
             blocks: [
               {
                 type: 'section',
-                text: { type: 'mrkdwn', text: `*${retryTimeStr}*에 아래 프롬프트를 재전송합니다.\n필요하면 편집하세요.` },
+                text: { type: 'mrkdwn', text: t('rateLimit.modalBody', actionLocale, { time: retryTimeStr }) },
               },
               {
                 type: 'input',
                 block_id: 'retry_prompt_block',
-                label: { type: 'plain_text', text: 'Prompt' },
+                label: { type: 'plain_text', text: t('rateLimit.modalLabel', actionLocale) },
                 element: {
                   type: 'plain_text_input',
                   action_id: 'retry_prompt_input',
@@ -1516,6 +1504,7 @@ export class SlackHandler {
         const retryInfo = this.pendingRetries.get(metadata.retryId);
         if (!retryInfo) return;
 
+        const viewLocale = await this.getUserLocale(retryInfo.user);
         const editedPrompt = view.state.values.retry_prompt_block.retry_prompt_input.value || retryInfo.prompt;
         const postAt = metadata.postAt;
 
@@ -1526,7 +1515,7 @@ export class SlackHandler {
           thread_ts: retryInfo.threadTs,
         });
 
-        const retryTimeStr = new Date(postAt * 1000).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' });
+        const retryTimeStr = formatTime(new Date(postAt * 1000), viewLocale);
 
         // Cancel auto-notification (retry will auto-execute instead)
         if (retryInfo.notifyScheduledId) {
@@ -1540,7 +1529,7 @@ export class SlackHandler {
         await this.app.client.chat.postMessage({
           channel: retryInfo.channel,
           thread_ts: retryInfo.threadTs,
-          text: `✅ ${retryTimeStr}에 재실행이 예약되었습니다.`,
+          text: `✅ ${t('rateLimit.scheduled', viewLocale, { time: retryTimeStr })}`,
         });
       } catch (error) {
         this.logger.error('Failed to schedule retry from modal', error);
@@ -1549,6 +1538,7 @@ export class SlackHandler {
 
     this.app.action('cancel_retry', async ({ ack, body, respond }) => {
       await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
       const retryId = (body as any).actions[0].value;
       const retryInfo = this.pendingRetries.get(retryId);
       // Cancel auto-notification
@@ -1559,7 +1549,7 @@ export class SlackHandler {
         }).catch(() => {});
       }
       this.pendingRetries.delete(retryId);
-      await respond({ response_type: 'ephemeral', text: '취소되었습니다.' });
+      await respond({ response_type: 'ephemeral', text: t('misc.cancelled', actionLocale) });
     });
 
     // Cleanup inactive sessions periodically
