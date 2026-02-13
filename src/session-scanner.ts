@@ -186,7 +186,7 @@ export class SessionScanner {
    */
   private getProjectLabel(projectPath: string): string {
     // If it's a decoded real path, use basename
-    if (projectPath.includes('\\') || projectPath.includes('/')) {
+    if (path.isAbsolute(projectPath)) {
       return path.basename(projectPath);
     }
     // For encoded dir names like "P--github-claude-code-slack-bot",
