@@ -1053,8 +1053,8 @@ export class SlackHandler {
       return { mode: 'uuid', resumeOptions: { resumeSessionId: resumeUuidMatch[1] }, prompt: resumeUuidMatch[2]?.trim() || undefined };
     }
 
-    // -r, -resume, resume, 계속 (no args) → session picker
-    if (/^-(r|resume)$/i.test(trimmed) || /^(resume|계속)$/i.test(trimmed)) {
+    // -r, -resume, resume, continue, keep going, 계속, 계속하자 (no args) → session picker
+    if (/^-(r|resume)$/i.test(trimmed) || /^(resume|continue|keep\s*going|계속(하자)?)$/i.test(trimmed)) {
       return { mode: 'picker' };
     }
 
