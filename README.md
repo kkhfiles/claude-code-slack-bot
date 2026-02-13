@@ -1,7 +1,7 @@
 # Claude Code Slack Bot
 
 Run Claude Code on your local machine remotely from Slack and receive results in real time.
-Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot) with Windows compatibility and additional features.
+Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot) with additional features.
 
 ## Features
 
@@ -22,7 +22,6 @@ Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-co
 
 ### Fork Changes
 
-- Windows compatibility (`--ignore-scripts`, pm2-based process management)
 - All commands use `-` prefix (`-cwd`, `-help`, `-sessions`, etc.)
 - CLI session resume/continue (resume sessions started outside Slack)
 - Mobile-friendly session picker across all projects (button selection, auto cwd switch)
@@ -35,7 +34,7 @@ Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-co
 - i18n: Auto-detect Korean/English from Slack user locale (`users.info` API)
 - Working directory persistence (`.working-dirs.json`)
 - DM thread `-cwd` creates DM-level fallback automatically
-- pm2-based process management (`start.bat`, `stop.bat`)
+- pm2-based process management
 
 ## Prerequisites
 
@@ -51,10 +50,9 @@ Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-co
 git clone https://github.com/kkhfiles/claude-code-slack-bot.git
 cd claude-code-slack-bot
 git checkout custom
-npm install --ignore-scripts
+npm install              # macOS / Linux
+npm install --ignore-scripts  # Windows (bypasses SDK platform check)
 ```
-
-> `--ignore-scripts`: Bypasses platform-specific scripts in `@anthropic-ai/claude-agent-sdk` (Windows compatibility).
 
 ### 2. Create a Slack App
 
@@ -93,6 +91,10 @@ Uses [pm2](https://pm2.keymetrics.io/) for background execution. No separate ter
 ```bash
 npm install -g pm2   # One-time setup
 
+# macOS / Linux
+npm run build && pm2 start ecosystem.config.js
+
+# Windows
 start.bat            # Build → start via pm2 (restarts if already running)
 stop.bat             # Stop
 ```
@@ -108,27 +110,17 @@ pm2 stop claude-slack-bot             # Stop
 pm2 delete claude-slack-bot           # Remove
 ```
 
-### Auto-Start on Windows Reboot
+### Auto-Start on Boot
 
+**macOS / Linux:**
 ```bash
-# One-time setup (no admin required)
-autostart-setup.bat
+pm2 startup          # Generate OS-specific startup script
+pm2 save             # Save current process list
 ```
 
-This script registers `pm2-resurrect.vbs` in the Windows Startup folder.
-On login, `pm2 resurrect` runs silently in the background to restore the bot (no CMD window).
-
-**How it works:**
-1. `pm2 save` — saves current pm2 process list
-2. `pm2-resurrect.vbs` → copied to Startup folder
-3. On Windows login, VBS runs `pm2 resurrect` silently
-
-**Note:** Run `autostart-setup.bat` while the bot is running via `start.bat`.
-After changing bot settings, re-run `start.bat` → `autostart-setup.bat` in order.
-
-To remove: delete `pm2-resurrect.vbs` from the Startup folder
+**Windows:**
 ```bash
-del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\pm2-resurrect.vbs"
+autostart-setup.bat  # Registers pm2-resurrect.vbs in Windows Startup folder
 ```
 
 ### Manual Run (without pm2)
@@ -324,7 +316,7 @@ src/
 ## Troubleshooting
 
 ### Bot not responding
-1. Restart with `stop.bat` → `start.bat`
+1. Restart: `pm2 restart claude-slack-bot` (or `stop.bat` → `start.bat` on Windows)
 2. Check logs: `pm2 logs claude-slack-bot`
 3. Verify `.env` token validity
 4. Ensure bot is added to the channel
