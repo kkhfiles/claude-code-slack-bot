@@ -403,6 +403,9 @@ export class SlackHandler {
       const statusText = isPlanMode ? t('status.planning', locale) : t('status.thinking', locale);
       const statusResult = await say({ text: `${statusEmoji} ${statusText}`, thread_ts: thread_ts || ts });
       statusMessageTs = statusResult.ts;
+
+      // Add anchor reaction first to prevent line jumping when progress reactions change
+      await this.addAnchorReaction(sessionKey);
       await this.updateMessageReaction(sessionKey, statusEmoji);
 
       // Show command hint on first message in a new thread
@@ -481,6 +484,12 @@ export class SlackHandler {
         }
 
         if (message.type === 'assistant') {
+          // Track last assistant message UUID for session continuity
+          const assistantUuid = (message as any).uuid;
+          if (assistantUuid && session) {
+            session.lastAssistantUuid = assistantUuid;
+          }
+
           // Detect rate limit / billing error from SDK assistant message
           const assistantError = (message as any).error;
           if (assistantError === 'rate_limit' || assistantError === 'billing_error') {
@@ -557,6 +566,9 @@ export class SlackHandler {
         }
       }
 
+      // Update session activity timestamp
+      if (session) session.lastActivity = new Date();
+
       // Completed
       const doneEmoji = isPlanMode ? '📋' : '✅';
       const doneLabel = isPlanMode ? t('status.planReady', locale) : t('status.taskCompleted', locale);
@@ -567,6 +579,7 @@ export class SlackHandler {
         await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `${doneEmoji} ${doneLabel}${toolSummary}` }).catch(() => {});
       }
       await this.updateMessageReaction(sessionKey, doneEmoji);
+      await this.removeAnchorReaction(sessionKey);
 
       // Register session in sessions-index.json for CLI compatibility
       if (session?.sessionId && workingDirectory) {
@@ -628,6 +641,7 @@ export class SlackHandler {
           await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `❌ ${t('status.errorOccurred', locale)}` }).catch(() => {});
         }
         await this.updateMessageReaction(sessionKey, '❌');
+        await this.removeAnchorReaction(sessionKey);
 
         // Rate limit detection: check error.message AND pre-captured assistant message
         const rateLimitSource = rateLimitMessageText
@@ -688,6 +702,7 @@ export class SlackHandler {
           await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `⏹️ ${t('status.cancelled', locale)}` }).catch(() => {});
         }
         await this.updateMessageReaction(sessionKey, '⏹️');
+        await this.removeAnchorReaction(sessionKey);
       }
 
       if (processedFiles.length > 0) {
@@ -955,6 +970,24 @@ export class SlackHandler {
     return conflicts;
   }
 
+  private readonly ANCHOR_REACTION = 'hourglass_flowing_sand'; // ⏳
+
+  private async addAnchorReaction(sessionKey: string): Promise<void> {
+    const originalMessage = this.originalMessages.get(sessionKey);
+    if (!originalMessage) return;
+    try {
+      await this.app.client.reactions.add({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: this.ANCHOR_REACTION });
+    } catch { /* ignore */ }
+  }
+
+  private async removeAnchorReaction(sessionKey: string): Promise<void> {
+    const originalMessage = this.originalMessages.get(sessionKey);
+    if (!originalMessage) return;
+    try {
+      await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: this.ANCHOR_REACTION });
+    } catch { /* ignore */ }
+  }
+
   private async updateMessageReaction(sessionKey: string, emoji: string): Promise<void> {
     const originalMessage = this.originalMessages.get(sessionKey);
     if (!originalMessage) return;
@@ -1155,9 +1188,10 @@ export class SlackHandler {
       const projectInfo = branch ? `*${label}* · \`${branch}\`` : `*${label}*`;
 
       blocks.push({ type: 'divider' });
+      const shortId = s.sessionId.substring(0, 8);
       blocks.push({
         type: 'context',
-        elements: [{ type: 'mrkdwn', text: `${projectInfo} · _${relTime}_\n${title}\n\`${s.projectPath}\`` }],
+        elements: [{ type: 'mrkdwn', text: `${projectInfo} · _${relTime}_ · \`${shortId}\`\n${title}\n\`${s.projectPath}\`` }],
       });
       blocks.push({
         type: 'actions',
@@ -1571,7 +1605,7 @@ export class SlackHandler {
     // Cleanup inactive sessions periodically
     setInterval(() => {
       this.logger.debug('Running session cleanup');
-      this.claudeHandler.cleanupInactiveSessions();
+      this.claudeHandler.cleanupInactiveSessions(24 * 60 * 60 * 1000); // 24 hours
     }, 5 * 60 * 1000);
   }
 }

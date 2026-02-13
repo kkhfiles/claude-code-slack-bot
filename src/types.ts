@@ -3,6 +3,7 @@ export interface ConversationSession {
   channelId: string;
   threadTs?: string;
   sessionId?: string;
+  lastAssistantUuid?: string;
   isActive: boolean;
   lastActivity: Date;
   workingDirectory?: string;

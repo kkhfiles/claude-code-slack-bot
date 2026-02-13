@@ -65,10 +65,19 @@ stop.bat                      # pm2 중지
 - 빈 프롬프트 금지: SDK API는 빈/공백 텍스트 블록을 거부함 → 기본 메시지 사용
 - Slack은 backtick(`)으로 텍스트를 감쌀 수 있음 → 정규식에서 선택적 backtick 처리
 
+### UX
+- 쓰레드 힌트: 새 세션 첫 응답 시 기본 명령어 안내 (`-stop`, `-reset`, `-plan`, `-help`) 표시
+- 앵커 리액션: 쿼리 실행 중 ⏳ 리액션 유지 → 리액션 수 0↔1 변동으로 인한 Slack 줄 점프 방지
+- 도구 사용 요약: 완료 시 사용된 도구 카운트 표시 (`✅ Task completed (Grep ×5, Read ×2)`)
+
 ### Sessions
 - Claude 세션 파일: `~/.claude/projects/<encoded-path>/*.jsonl`
 - 경로 인코딩: 영숫자 외 문자 → `-` (예: `P:\bitbucket` → `P--bitbucket`)
 - JSONL 형식: `type: "summary"` (제목), `type: "user"` (메시지), `type: "assistant"` (응답)
+- CLI 호환: 쿼리 완료 시 `sessions-index.json`에 세션 등록 → `claude -c`/`-r`에서 Slack 세션 표시
+- 세션 연속성: `lastAssistantUuid` 추적 → `resumeSessionAt`로 정확한 분기점에서 resume (포크 방지)
+- 빈 세션 필터링: 대화 내용 없는 세션 (file-history-snapshot만)은 피커에서 제외
+- 메모리 정리: 24시간 비활성 세션 자동 정리 (5분마다 체크), 디스크 `.jsonl`은 유지
 
 ### Working Directory
 - 디스크 영속화: `.working-dirs.json`
