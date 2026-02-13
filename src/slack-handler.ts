@@ -47,6 +47,9 @@ export class SlackHandler {
   private originalMessages: Map<string, { channel: string; ts: string }> = new Map();
   private currentReactions: Map<string, Set<string>> = new Map();
 
+  // Thread hint tracking (show command hint once per thread)
+  private hintShownThreads: Set<string> = new Set();
+
   // Per-channel settings
   private channelModels: Map<string, string> = new Map();
   private channelBudgets: Map<string, number> = new Map();
@@ -346,6 +349,7 @@ export class SlackHandler {
     this.activeControllers.set(sessionKey, abortController);
 
     let session = this.claudeHandler.getSession(user, channel, thread_ts || ts);
+    const isNewSession = !session;
     if (!session) {
       session = this.claudeHandler.createSession(user, channel, thread_ts || ts);
     }
@@ -400,6 +404,20 @@ export class SlackHandler {
       const statusResult = await say({ text: `${statusEmoji} ${statusText}`, thread_ts: thread_ts || ts });
       statusMessageTs = statusResult.ts;
       await this.updateMessageReaction(sessionKey, statusEmoji);
+
+      // Show command hint on first message in a new thread
+      const threadKey = `${channel}:${thread_ts || ts}`;
+      if (isNewSession && !this.hintShownThreads.has(threadKey)) {
+        this.hintShownThreads.add(threadKey);
+        await this.app.client.chat.postMessage({
+          channel,
+          thread_ts: thread_ts || ts,
+          text: t('hint.threadStart', locale),
+          blocks: [
+            { type: 'context', elements: [{ type: 'mrkdwn', text: t('hint.threadStart', locale) }] },
+          ],
+        }).catch(() => {});
+      }
 
       const activeQuery = this.claudeHandler.buildQuery(finalPrompt, {
         session,
