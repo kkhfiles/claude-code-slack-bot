@@ -9,6 +9,7 @@ node_modules/
 
 # Working directory configs (per-user local state)
 .working-dirs.json
+.session-state.json
 
 # Bot runtime files
 bot.pid

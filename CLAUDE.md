@@ -75,9 +75,11 @@ stop.bat                      # pm2 중지
 - 경로 인코딩: 영숫자 외 문자 → `-` (예: `P:\bitbucket` → `P--bitbucket`)
 - JSONL 형식: `type: "summary"` (제목), `type: "user"` (메시지), `type: "assistant"` (응답)
 - CLI 호환: 쿼리 완료 시 `sessions-index.json`에 세션 등록 → `claude -c`/`-r`에서 Slack 세션 표시
-- 세션 연속성: `lastAssistantUuid` 추적 → `resumeSessionAt`로 정확한 분기점에서 resume (포크 방지)
+- 세션 연속성: `lastAssistantUuid` 추적 → `resumeSessionAt`로 정확한 분기점에서 resume
+- 세션 상태 영속화: `.session-state.json`에 sessionId/lastAssistantUuid 저장 → pm2 재시작 후 복원 (7일 보관)
 - 빈 세션 필터링: 대화 내용 없는 세션 (file-history-snapshot만)은 피커에서 제외
 - 메모리 정리: 24시간 비활성 세션 자동 정리 (5분마다 체크), 디스크 `.jsonl`은 유지
+- CLI 공존 주의: 터미널 CLI `/exit`는 JSONL을 덮어써서 Slack 작업 유실 → 세션 피커 resume 시 안내 표시
 
 ### Working Directory
 - 디스크 영속화: `.working-dirs.json`

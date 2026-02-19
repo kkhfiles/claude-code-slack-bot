@@ -197,6 +197,10 @@ const messages: Record<string, Record<Locale, string>> = {
     en: '`-stop` cancel · `-reset` new session · `-plan` plan first · `-help` all commands',
     ko: '`-stop` 중단 · `-reset` 새 세션 · `-plan` 계획 먼저 · `-help` 전체 명령어',
   },
+  'hint.resumeTerminal': {
+    en: '💡 If this session is open in a terminal, close the terminal window instead of `/exit` to preserve Slack work.',
+    ko: '💡 이 세션이 터미널에서 열려있다면 `/exit` 대신 터미널 창을 닫아주세요. `/exit`는 Slack 작업 내역을 덮어씁니다.',
+  },
 };
 
 /**

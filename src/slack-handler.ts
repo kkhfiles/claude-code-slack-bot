@@ -81,6 +81,9 @@ export class SlackHandler {
   private botUserId: string | null = null;
   private userLocales: Map<string, Locale> = new Map();
 
+  // Track in-flight say() promises per session for canUseTool flush
+  private pendingMessagePromises: Map<string, Promise<any>> = new Map();
+
   constructor(app: App, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
     this.app = app;
     this.claudeHandler = claudeHandler;
@@ -443,6 +446,7 @@ export class SlackHandler {
           const initMsg = message as any;
           if (session) {
             session.sessionId = initMsg.session_id;
+            this.claudeHandler.scheduleSave();
             this.logger.info('Session initialized', {
               sessionId: initMsg.session_id,
               model: initMsg.model,
@@ -488,6 +492,7 @@ export class SlackHandler {
           const assistantUuid = (message as any).uuid;
           if (assistantUuid && session) {
             session.lastAssistantUuid = assistantUuid;
+            this.claudeHandler.scheduleSave();
           }
 
           // Detect rate limit / billing error from SDK assistant message
@@ -518,7 +523,10 @@ export class SlackHandler {
 
             const toolContent = this.formatToolUse(message.message.content, locale);
             if (toolContent) {
-              await say({ text: toolContent, thread_ts: thread_ts || ts });
+              const p = say({ text: toolContent, thread_ts: thread_ts || ts });
+              this.pendingMessagePromises.set(sessionKey, p);
+              await p;
+              this.pendingMessagePromises.delete(sessionKey);
             }
           } else {
             const content = this.extractTextContent(message);
@@ -537,7 +545,10 @@ export class SlackHandler {
                 }
               }
               await this.updateMessageReaction(sessionKey, '✍️');
-              await say({ text: this.formatMessage(content, false), thread_ts: thread_ts || ts });
+              const p = say({ text: this.formatMessage(content, false), thread_ts: thread_ts || ts });
+              this.pendingMessagePromises.set(sessionKey, p);
+              await p;
+              this.pendingMessagePromises.delete(sessionKey);
             }
           }
         } else if (message.type === 'result') {
@@ -566,8 +577,11 @@ export class SlackHandler {
         }
       }
 
-      // Update session activity timestamp
-      if (session) session.lastActivity = new Date();
+      // Update session activity timestamp and flush to disk
+      if (session) {
+        session.lastActivity = new Date();
+        this.claudeHandler.saveNow();
+      }
 
       // Completed
       const doneEmoji = isPlanMode ? '📋' : '✅';
@@ -739,6 +753,11 @@ export class SlackHandler {
         if (editTools.includes(toolName)) {
           return { behavior: 'allow', updatedInput: input };
         }
+      }
+
+      // Flush any in-flight say() calls so code output appears before the approval button
+      for (const [, pending] of this.pendingMessagePromises) {
+        try { await pending; } catch { /* ignore */ }
       }
 
       // For Bash and other potentially destructive tools, ask user
@@ -1118,6 +1137,14 @@ export class SlackHandler {
       return { mode: 'picker' };
     }
 
+    // Natural language resume: short messages (≤30 chars) with resume-intent keywords
+    if (trimmed.length <= 30) {
+      const resumePatterns = /^(let'?s?\s*go|go\s*ahead|carry\s*on|pick\s*up|let'?s?\s*work|go|gg|start|일하자|하자|이어서|다시|시작|진행|작업|고고|ㄱㄱ)!?\.?$/i;
+      if (resumePatterns.test(trimmed)) {
+        return { mode: 'picker' };
+      }
+    }
+
     return null;
   }
 
@@ -1477,6 +1504,16 @@ export class SlackHandler {
           ts: picker.messageTs,
           text: `📂 ${t('picker.resuming', actionLocale, { title })}${cwdNote}`,
           blocks: [],
+        }).catch(() => {});
+
+        // Show terminal coexistence tip
+        await this.app.client.chat.postMessage({
+          channel: picker.channel,
+          thread_ts: picker.threadTs,
+          text: t('hint.resumeTerminal', actionLocale),
+          blocks: [
+            { type: 'context', elements: [{ type: 'mrkdwn', text: t('hint.resumeTerminal', actionLocale) }] },
+          ],
         }).catch(() => {});
 
         // 3. Resume session in the same thread
