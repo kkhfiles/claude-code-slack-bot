@@ -54,6 +54,7 @@ export class SlackHandler {
   private channelModels: Map<string, string> = new Map();
   private channelBudgets: Map<string, number> = new Map();
   private channelPermissionModes: Map<string, 'default' | 'safe' | 'trust'> = new Map();
+  private channelAlwaysApproveTools: Map<string, Set<string>> = new Map();
   private lastQueryCosts: Map<string, { cost: number; duration: number; model: string; sessionId: string }> = new Map();
 
   // Interactive approval for canUseTool
@@ -84,6 +85,11 @@ export class SlackHandler {
   // Track in-flight say() promises per session for canUseTool flush
   private pendingMessagePromises: Map<string, Promise<any>> = new Map();
 
+  // API key management
+  private userApiKeys: Map<string, string> = new Map();
+  private apiKeyActive: Map<string, { userId: string; resetTimerId: ReturnType<typeof setTimeout> }> = new Map();
+  private readonly API_KEYS_FILE = path.join(__dirname, '..', '.api-keys.json');
+
   constructor(app: App, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
     this.app = app;
     this.claudeHandler = claudeHandler;
@@ -91,6 +97,7 @@ export class SlackHandler {
     this.workingDirManager = new WorkingDirectoryManager();
     this.fileHandler = new FileHandler();
     this.todoManager = new TodoManager();
+    this.loadApiKeys();
   }
 
   private async getUserLocale(userId: string): Promise<Locale> {
@@ -177,6 +184,24 @@ export class SlackHandler {
       return;
     }
 
+    // API key command — show button to open modal
+    if (text && this.isApiKeyCommand(text)) {
+      await say({
+        thread_ts: thread_ts || ts,
+        text: t('apiKey.modalBody', locale),
+        blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: `🔑 ${t('apiKey.modalBody', locale)}` } },
+          {
+            type: 'actions',
+            elements: [
+              { type: 'button', text: { type: 'plain_text', text: t('apiKey.modalSubmit', locale) }, action_id: 'open_apikey_modal', value: JSON.stringify({}), style: 'primary' },
+            ],
+          },
+        ],
+      });
+      return;
+    }
+
     // Stop command (interrupt running query)
     if (text && this.isStopCommand(text)) {
       const sessionKey = this.claudeHandler.getSessionKey(user, channel, thread_ts || ts);
@@ -207,6 +232,7 @@ export class SlackHandler {
     if (text && this.isResetCommand(text)) {
       this.claudeHandler.removeSession(user, channel, thread_ts || ts);
       this.lastQueryCosts.delete(channel);
+      this.channelAlwaysApproveTools.delete(channel);
       await say({
         text: `🔄 ${t('cmd.reset.done', locale)}`,
         thread_ts: thread_ts || ts,
@@ -253,6 +279,7 @@ export class SlackHandler {
     // Permission mode commands: -default / -safe / -trust
     if (text && this.isDefaultModeCommand(text)) {
       this.channelPermissionModes.delete(channel);
+      this.channelAlwaysApproveTools.delete(channel);
       await say({ text: `🔒 ${t('cmd.defaultMode', locale)}`, thread_ts: thread_ts || ts });
       return;
     }
@@ -425,6 +452,16 @@ export class SlackHandler {
         }).catch(() => {});
       }
 
+      // Check if API key mode is active for this channel
+      const apiKeyState = this.apiKeyActive.get(channel);
+      let queryEnv: Record<string, string> | undefined;
+      if (apiKeyState) {
+        const apiKey = this.userApiKeys.get(apiKeyState.userId);
+        if (apiKey) {
+          queryEnv = { ANTHROPIC_API_KEY: apiKey };
+        }
+      }
+
       const activeQuery = this.claudeHandler.buildQuery(finalPrompt, {
         session,
         abortController,
@@ -434,6 +471,7 @@ export class SlackHandler {
         maxBudgetUsd: this.channelBudgets.get(channel),
         permissionMode,
         canUseTool,
+        env: queryEnv,
       });
 
       this.activeQueries.set(sessionKey, activeQuery);
@@ -669,7 +707,16 @@ export class SlackHandler {
           const retryId = `retry-${Date.now()}`;
 
           this.pendingRetries.set(retryId, { prompt: finalPrompt, channel, threadTs: thread_ts || ts, user });
-          setTimeout(() => this.pendingRetries.delete(retryId), 10 * 60 * 1000);
+          setTimeout(async () => {
+            const expiredRetry = this.pendingRetries.get(retryId);
+            if (expiredRetry?.notifyScheduledId) {
+              await this.app.client.chat.deleteScheduledMessage({
+                channel: expiredRetry.channel,
+                scheduled_message_id: expiredRetry.notifyScheduledId,
+              }).catch(() => {});
+            }
+            this.pendingRetries.delete(retryId);
+          }, 10 * 60 * 1000);
 
           // Auto-schedule a mention notification at reset time
           try {
@@ -700,7 +747,8 @@ export class SlackHandler {
               {
                 type: 'actions',
                 elements: [
-                  { type: 'button', text: { type: 'plain_text', text: t('rateLimit.schedule', locale, { time: retryTimeStr }) }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, postAt, retryTimeStr }), style: 'primary' },
+                  { type: 'button', text: { type: 'plain_text', text: t('rateLimit.continueWithApiKey', locale) }, action_id: 'continue_with_apikey', value: JSON.stringify({ retryId, retryAfter }), style: 'primary' },
+                  { type: 'button', text: { type: 'plain_text', text: t('rateLimit.schedule', locale, { time: retryTimeStr }) }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, postAt, retryTimeStr }) },
                   { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: retryId },
                 ],
               },
@@ -755,6 +803,12 @@ export class SlackHandler {
         }
       }
 
+      // Check always-approved tools for this channel
+      const alwaysApproved = this.channelAlwaysApproveTools.get(channel);
+      if (alwaysApproved?.has(toolName)) {
+        return { behavior: 'allow', updatedInput: input };
+      }
+
       // Flush any in-flight say() calls so code output appears before the approval button
       for (const [, pending] of this.pendingMessagePromises) {
         try { await pending; } catch { /* ignore */ }
@@ -777,6 +831,7 @@ export class SlackHandler {
               type: 'actions',
               elements: [
                 { type: 'button', text: { type: 'plain_text', text: t('approval.approve', locale) }, action_id: 'approve_tool_use', value: JSON.stringify({ approvalId, input, suggestions: options.suggestions }), style: 'primary' },
+                { type: 'button', text: { type: 'plain_text', text: t('approval.alwaysAllow', locale, { toolName }) }, action_id: 'always_approve_tool_use', value: JSON.stringify({ approvalId, input, suggestions: options.suggestions, toolName, channel }) },
                 { type: 'button', text: { type: 'plain_text', text: t('approval.deny', locale) }, action_id: 'deny_tool_use', value: approvalId, style: 'danger' },
               ],
             },
@@ -1181,6 +1236,59 @@ export class SlackHandler {
     return 5 * 60 * 60;
   }
 
+  // --- API key management ---
+
+  private loadApiKeys(): void {
+    try {
+      if (!fs.existsSync(this.API_KEYS_FILE)) return;
+      const raw = fs.readFileSync(this.API_KEYS_FILE, 'utf-8');
+      const data: Record<string, { apiKey: string; savedAt: string }> = JSON.parse(raw);
+      for (const [userId, entry] of Object.entries(data)) {
+        this.userApiKeys.set(userId, entry.apiKey);
+      }
+      this.logger.info(`Loaded ${this.userApiKeys.size} API key(s) from disk`);
+    } catch (error) {
+      this.logger.error('Failed to load API keys from disk', error);
+    }
+  }
+
+  private saveApiKeys(): void {
+    try {
+      const data: Record<string, { apiKey: string; savedAt: string }> = {};
+      for (const [userId, apiKey] of this.userApiKeys.entries()) {
+        data[userId] = { apiKey, savedAt: new Date().toISOString() };
+      }
+      fs.writeFileSync(this.API_KEYS_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (error) {
+      this.logger.error('Failed to save API keys to disk', error);
+    }
+  }
+
+  private isApiKeyCommand(text: string): boolean {
+    return /^`?-apikey`?$/i.test(text.trim());
+  }
+
+  private activateApiKey(channel: string, threadTs: string, userId: string, retryAfterSec: number, locale: Locale): void {
+    // Clear any existing timer for this channel
+    const existing = this.apiKeyActive.get(channel);
+    if (existing?.resetTimerId) clearTimeout(existing.resetTimerId);
+
+    const resetTimerId = setTimeout(async () => {
+      this.apiKeyActive.delete(channel);
+      try {
+        await this.app.client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text: `🔄 ${t('apiKey.switchingToSubscription', locale)}`,
+        });
+      } catch (err) {
+        this.logger.error('Failed to post subscription switch message', err);
+      }
+    }, retryAfterSec * 1000);
+
+    this.apiKeyActive.set(channel, { userId, resetTimerId });
+  }
+
   private isMcpInfoCommand(text: string): boolean {
     return /^-mcp(\s+(info|list|status))?(\?)?$/i.test(text.trim());
   }
@@ -1435,6 +1543,39 @@ export class SlackHandler {
       }
     });
 
+    // Always approve tool for this channel
+    this.app.action('always_approve_tool_use', async ({ ack, body, respond }) => {
+      await ack();
+      try {
+        const actionLocale = await this.getUserLocale((body as any).user.id);
+        const actionValue = JSON.parse((body as any).actions[0].value);
+        const { approvalId, input, suggestions, toolName, channel: ch } = actionValue;
+
+        // Register tool as always-approved for this channel
+        let toolSet = this.channelAlwaysApproveTools.get(ch);
+        if (!toolSet) {
+          toolSet = new Set();
+          this.channelAlwaysApproveTools.set(ch, toolSet);
+        }
+        toolSet.add(toolName);
+
+        // Resolve the pending approval immediately
+        const approval = this.pendingApprovals.get(approvalId);
+        if (approval) {
+          this.pendingApprovals.delete(approvalId);
+          approval.resolve({
+            behavior: 'allow',
+            updatedInput: input,
+            updatedPermissions: suggestions,
+          });
+        }
+
+        await respond({ response_type: 'ephemeral', text: `✅ ${t('approval.alwaysAllowed', actionLocale, { toolName })}` });
+      } catch (error) {
+        this.logger.error('Error handling always-approve tool', error);
+      }
+    });
+
     // Plan execution
     this.app.action('execute_plan', async ({ ack, body, respond }) => {
       await ack();
@@ -1637,6 +1778,182 @@ export class SlackHandler {
       }
       this.pendingRetries.delete(retryId);
       await respond({ response_type: 'ephemeral', text: t('misc.cancelled', actionLocale) });
+    });
+
+    // Continue with API key on rate limit
+    this.app.action('continue_with_apikey', async ({ ack, body }) => {
+      await ack();
+      try {
+        const userId = (body as any).user.id;
+        const actionLocale = await this.getUserLocale(userId);
+        const actionValue = JSON.parse((body as any).actions[0].value);
+        const { retryId, retryAfter } = actionValue;
+        const retryInfo = this.pendingRetries.get(retryId);
+        if (!retryInfo) {
+          await this.app.client.chat.postEphemeral({
+            channel: (body as any).channel?.id || '',
+            user: userId,
+            text: `⚠️ ${t('rateLimit.retryExpired', actionLocale)}`,
+          }).catch(() => {});
+          return;
+        }
+
+        const apiKey = this.userApiKeys.get(userId);
+        if (apiKey) {
+          // Cancel auto-notification
+          if (retryInfo.notifyScheduledId) {
+            await this.app.client.chat.deleteScheduledMessage({
+              channel: retryInfo.channel,
+              scheduled_message_id: retryInfo.notifyScheduledId,
+            }).catch(() => {});
+          }
+
+          // Activate API key mode for this channel
+          this.activateApiKey(retryInfo.channel, retryInfo.threadTs, userId, retryAfter, actionLocale);
+
+          await this.app.client.chat.postMessage({
+            channel: retryInfo.channel,
+            thread_ts: retryInfo.threadTs,
+            text: `🔑 ${t('apiKey.switchingToApiKey', actionLocale)}`,
+          });
+
+          // Retry with API key
+          const { channel, threadTs, user, prompt } = retryInfo;
+          this.pendingRetries.delete(retryId);
+          const event: MessageEvent = { user, channel, thread_ts: threadTs, ts: threadTs, text: prompt };
+          const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel, ...msg });
+          await this.handleMessage(event, sayCb);
+        } else {
+          // No key registered — open modal to enter one
+          await this.app.client.views.open({
+            trigger_id: (body as any).trigger_id,
+            view: {
+              type: 'modal',
+              callback_id: 'apikey_modal',
+              private_metadata: JSON.stringify({ retryId, retryAfter }),
+              title: { type: 'plain_text', text: t('apiKey.modalTitle', actionLocale) },
+              submit: { type: 'plain_text', text: t('apiKey.modalSubmit', actionLocale) },
+              close: { type: 'plain_text', text: t('apiKey.modalClose', actionLocale) },
+              blocks: [
+                { type: 'section', text: { type: 'mrkdwn', text: t('apiKey.modalBody', actionLocale) } },
+                {
+                  type: 'input',
+                  block_id: 'apikey_block',
+                  label: { type: 'plain_text', text: t('apiKey.modalLabel', actionLocale) },
+                  element: {
+                    type: 'plain_text_input',
+                    action_id: 'apikey_input',
+                    placeholder: { type: 'plain_text', text: 'sk-ant-...' },
+                  },
+                },
+              ],
+            },
+          });
+        }
+      } catch (error) {
+        this.logger.error('Error handling continue_with_apikey', error);
+      }
+    });
+
+    // Open API key modal (from -apikey command button)
+    this.app.action('open_apikey_modal', async ({ ack, body }) => {
+      await ack();
+      try {
+        const userId = (body as any).user.id;
+        const actionLocale = await this.getUserLocale(userId);
+        const existingKey = this.userApiKeys.get(userId);
+
+        await this.app.client.views.open({
+          trigger_id: (body as any).trigger_id,
+          view: {
+            type: 'modal',
+            callback_id: 'apikey_modal',
+            private_metadata: JSON.stringify({}),
+            title: { type: 'plain_text', text: t('apiKey.modalTitle', actionLocale) },
+            submit: { type: 'plain_text', text: t('apiKey.modalSubmit', actionLocale) },
+            close: { type: 'plain_text', text: t('apiKey.modalClose', actionLocale) },
+            blocks: [
+              { type: 'section', text: { type: 'mrkdwn', text: t('apiKey.modalBody', actionLocale) } },
+              {
+                type: 'input',
+                block_id: 'apikey_block',
+                label: { type: 'plain_text', text: t('apiKey.modalLabel', actionLocale) },
+                element: {
+                  type: 'plain_text_input',
+                  action_id: 'apikey_input',
+                  placeholder: { type: 'plain_text', text: existingKey ? `Already set (...${existingKey.slice(-4)})` : 'sk-ant-...' },
+                },
+              },
+            ],
+          },
+        });
+      } catch (error) {
+        this.logger.error('Failed to open API key modal', error);
+      }
+    });
+
+    // API key modal submission
+    this.app.view('apikey_modal', async ({ ack, view, body }) => {
+      await ack();
+      try {
+        const userId = body.user.id;
+        if (!userId) return;
+        const viewLocale = await this.getUserLocale(userId);
+        const apiKey = view.state.values.apikey_block.apikey_input.value?.trim();
+        if (!apiKey) return;
+
+        // Save key
+        this.userApiKeys.set(userId, apiKey);
+        this.saveApiKeys();
+
+        const metadata = JSON.parse(view.private_metadata || '{}');
+
+        if (metadata.retryId) {
+          // Called from rate limit flow — activate API key and retry
+          const retryInfo = this.pendingRetries.get(metadata.retryId);
+          if (retryInfo) {
+            // Cancel auto-notification
+            if (retryInfo.notifyScheduledId) {
+              await this.app.client.chat.deleteScheduledMessage({
+                channel: retryInfo.channel,
+                scheduled_message_id: retryInfo.notifyScheduledId,
+              }).catch(() => {});
+            }
+
+            this.activateApiKey(retryInfo.channel, retryInfo.threadTs, userId, metadata.retryAfter, viewLocale);
+
+            await this.app.client.chat.postMessage({
+              channel: retryInfo.channel,
+              thread_ts: retryInfo.threadTs,
+              text: `🔑 ${t('apiKey.savedAndRetrying', viewLocale)}`,
+            });
+
+            // Retry
+            const { channel, threadTs, user, prompt } = retryInfo;
+            this.pendingRetries.delete(metadata.retryId);
+            const event: MessageEvent = { user, channel, thread_ts: threadTs, ts: threadTs, text: prompt };
+            const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel, ...msg });
+            await this.handleMessage(event, sayCb);
+          }
+        } else {
+          // Called from -apikey command — just confirm save
+          // Post DM to the user
+          try {
+            const dm = await this.app.client.conversations.open({ users: userId });
+            if (dm.channel?.id) {
+              await this.app.client.chat.postMessage({
+                channel: dm.channel.id,
+                text: `✅ ${t('apiKey.saved', viewLocale)}`,
+              });
+            }
+          } catch {
+            // Can't DM, just log
+            this.logger.debug('Could not DM user after API key save');
+          }
+        }
+      } catch (error) {
+        this.logger.error('Error handling API key modal submission', error);
+      }
     });
 
     // Cleanup inactive sessions periodically

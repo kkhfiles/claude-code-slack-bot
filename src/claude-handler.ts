@@ -103,6 +103,7 @@ export class ClaudeHandler {
       maxBudgetUsd?: number;
       permissionMode?: PermissionMode;
       canUseTool?: CanUseTool;
+      env?: Record<string, string>;
     } = {}
   ): Query {
     const permissionMode = opts.permissionMode || 'default';
@@ -124,6 +125,7 @@ export class ClaudeHandler {
     if (opts.workingDirectory) options.cwd = opts.workingDirectory;
     if (opts.canUseTool) options.canUseTool = opts.canUseTool;
     if (opts.abortController) options.abortController = opts.abortController;
+    if (opts.env) options.env = opts.env;
 
     // Add MCP server configuration if available
     const mcpServers = this.mcpManager.getServerConfiguration();

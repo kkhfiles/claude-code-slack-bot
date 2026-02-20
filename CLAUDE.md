@@ -40,6 +40,7 @@ stop.bat                      # pm2 중지
 - `-default`/`-safe`/`-trust`: 권한 모드 전환 (default → safe → trust 순으로 자유도 증가)
 - `-r`/`-resume`: 전체 프로젝트 세션 피커 (버튼 선택 → cwd 자동 전환 + 세션 재개)
 - `-sessions all`: 전체 프로젝트 세션 목록 (세션 피커와 동일)
+- `-apikey`: API 키 등록/수정 모달 (rate limit 시 자동 전환용, `.api-keys.json` 영속화)
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
   2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)
@@ -48,8 +49,9 @@ stop.bat                      # pm2 중지
 
 ### Error Handling
 - Claude SDK 에러는 `try/catch`로 감싸고, Slack 메시지로 사용자에게 전달
-- Rate limit 감지: `isRateLimitError()`로 패턴 매칭 → 예약 메시지 제안 + 리셋 시간에 멘션 알림 자동 예약
+- Rate limit 감지: `isRateLimitError()`로 패턴 매칭 → API 키 전환 또는 예약 메시지 제안 + 리셋 시간에 멘션 알림 자동 예약
 - Rate limit 멘션 알림: 재시도/취소 시 자동 취소 (`notifyScheduledId`로 추적)
+- API 키 fallback: rate limit 시 등록된 API 키로 전환 → 리셋 시간 후 구독 방식으로 자동 복귀
 - 읽기 전용 도구 (Grep, Read, Glob 등)는 상태 메시지에서만 표시 (`STATUS_ONLY_TOOLS`)
 - 완료 시 도구 사용 요약 표시 (`toolUsageCounts` → `✅ Task completed (Grep ×5, Read ×2)`)
 - 로깅은 `Logger` 클래스 사용 (`this.logger.info/debug/warn/error`)
@@ -60,7 +62,9 @@ stop.bat                      # pm2 중지
   - `-safe`: `permissionMode: 'acceptEdits'` + `canUseTool` → Edit/Write 자동, Bash/MCP 승인 요청
   - `-trust`: `permissionMode: 'bypassPermissions'` → 모든 도구 자동 승인
   - `-default`: 기본 모드로 복귀
-- `canUseTool` 콜백으로 Slack 버튼 승인 (사용자가 승인/거부할 때까지 대기, 자동 승인 없음)
+- `canUseTool` 콜백으로 Slack 버튼 승인 (Approve / Always Allow / Deny)
+  - "Always Allow [tool]": 채널별 자동 승인 Set 등록 → 이후 같은 도구 자동 승인
+  - `-default` 또는 `-reset` 시 초기화
 - Resume 우선순위: 명시적 resumeOptions > Slack 세션 > 새 대화
 - 빈 프롬프트 금지: SDK API는 빈/공백 텍스트 블록을 거부함 → 기본 메시지 사용
 - Slack은 backtick(`)으로 텍스트를 감쌀 수 있음 → 정규식에서 선택적 backtick 처리
