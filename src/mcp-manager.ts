@@ -153,6 +153,11 @@ export class McpManager {
     return info;
   }
 
+  getConfigPath(): string | null {
+    if (fs.existsSync(this.configPath)) return this.configPath;
+    return null;
+  }
+
   reloadConfiguration(): McpConfiguration | null {
     this.config = null;
     return this.loadConfiguration();

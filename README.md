@@ -28,7 +28,7 @@ Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-co
 - Model selection, cost limits, cost inquiry
 - Plan mode: review-only plan → Execute button to proceed
 - Permission modes: Default (interactive approval) / Safe (auto-approve edits) / Trust (auto-approve all)
-- `-stop`: graceful interrupt via SDK `Query.interrupt()` (preserves session state)
+- `-stop`: graceful interrupt via CLI process signal (preserves session state)
 - Real-time progress (`stream_event` for current tool name, usage summary on completion)
 - Rate limit → Slack scheduled message retry + automatic mention notification at reset time
 - i18n: Auto-detect Korean/English from Slack user locale (`users.info` API)
@@ -49,9 +49,9 @@ Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-co
 ```bash
 git clone https://github.com/kkhfiles/claude-code-slack-bot.git
 cd claude-code-slack-bot
-git checkout custom
+git checkout cli-migration
 npm install              # macOS / Linux
-npm install --ignore-scripts  # Windows (bypasses SDK platform check)
+npm install --ignore-scripts  # Windows
 ```
 
 ### 2. Create a Slack App
@@ -82,7 +82,7 @@ BASE_DIRECTORY=P:\your\base\directory
 # DEBUG=true
 ```
 
-> No API key needed: Claude Code SDK uses local `claude login` authentication. Usage is billed to your Claude subscription (Pro/Max).
+> No API key needed: Claude Code CLI uses local `claude login` authentication. Usage is billed to your Claude subscription (Pro/Max).
 
 ## Running
 
@@ -201,9 +201,9 @@ Conversations in the same thread automatically continue the session (no command 
 3. Or click **Cancel** to discard
 
 **Permission modes:**
-- **Default**: Edit, Write, Bash, MCP tools require Slack button approval (waits until user responds)
-- **Safe**: Edit/Write auto-approved, Bash/MCP require approval
-- **Trust**: All tools auto-approved (no prompts)
+- **Default**: Read-only tools auto-allowed. Edit, Write, Bash, MCP tools denied → Slack button approval → resume
+- **Safe**: Read + Edit tools auto-allowed. Bash/MCP denied → Slack button approval → resume
+- **Trust**: All tools auto-approved (`--dangerously-skip-permissions`)
 
 ### Settings
 
