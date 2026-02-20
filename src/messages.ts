@@ -206,6 +206,24 @@ const messages: Record<string, Record<Locale, string>> = {
   'todo.added': { en: '➕ Added: {{content}}', ko: '➕ 추가됨: {{content}}' },
   'todo.removed': { en: '➖ Removed: {{content}}', ko: '➖ 삭제됨: {{content}}' },
 
+  // --- Permission denial (CLI mode) ---
+  'permission.denied': {
+    en: 'Permission denied for: {{tools}}. The task was paused.',
+    ko: '권한 거부됨: {{tools}}. 작업이 일시 중지되었습니다.',
+  },
+  'permission.allowTool': {
+    en: 'Allow {{toolName}}',
+    ko: '{{toolName}} 허용',
+  },
+  'permission.allowAllAndResume': {
+    en: 'Allow All & Resume',
+    ko: '모두 허용 & 계속',
+  },
+  'permission.resuming': {
+    en: 'Resuming with approved tools...',
+    ko: '승인된 도구로 재개 중...',
+  },
+
   // --- Misc ---
   'misc.continuePrompt': { en: 'Continue where you left off.', ko: '이전에 하던 작업을 이어서 진행하세요.' },
   'misc.cancelled': { en: 'Cancelled.', ko: '취소되었습니다.' },

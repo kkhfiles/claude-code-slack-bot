@@ -2,9 +2,9 @@
 
 ## Overview
 - Fork of [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot)
-- Cross-platform (Windows/macOS/Linux), `@anthropic-ai/claude-agent-sdk` 기반
+- Cross-platform (Windows/macOS/Linux), CLI (`claude -p`) 기반 프로세스 스폰
 - Slack Socket Mode (공개 URL 불필요)
-- `custom` 브랜치에서 작업, `main`은 upstream 동기화용
+- `cli-migration` 브랜치에서 작업, `main`은 upstream 동기화용
 
 ## Build & Run
 
@@ -27,15 +27,15 @@ stop.bat                      # pm2 중지
 ## Coding Rules
 
 ### TypeScript
-- 엄격한 타입 사용, `any` 최소화 (SDK 옵션 등 불가피한 경우만)
-- 클래스 기반 구조 유지 (SlackHandler, ClaudeHandler, WorkingDirectoryManager 등)
+- 엄격한 타입 사용, `any` 최소화 (Slack API 등 불가피한 경우만)
+- 클래스 기반 구조 유지 (SlackHandler, CliHandler, WorkingDirectoryManager 등)
 - 새 기능은 기존 클래스에 메서드 추가 또는 별도 Manager 클래스로 분리
 
 ### Command Pattern
 - 모든 사용자 명령어는 `-` 접두사 필수 (`-cwd`, `-stop`, `-sessions` 등)
 - 예외: `help`, `resume`, `continue`, `keep going`, `계속`, `계속하자`는 `-` 없이도 동작 (모바일 편의)
 - 명령어 파싱은 정규식 기반, `slack-handler.ts`의 `is*Command()` / `parse*Command()` 패턴
-- `-stop`: `Query.interrupt()`로 정상 중단 (세션 상태 보존), fallback으로 `AbortController.abort()`
+- `-stop`: `CliProcess.interrupt()`로 CLI 프로세스 중단 (세션 상태 보존)
 - `-plan <prompt>`: `permissionMode: 'plan'`으로 읽기 전용 실행 → Execute 버튼으로 세션 resume
 - `-default`/`-safe`/`-trust`: 권한 모드 전환 (default → safe → trust 순으로 자유도 증가)
 - `-r`/`-resume`: 전체 프로젝트 세션 피커 (버튼 선택 → cwd 자동 전환 + 세션 재개)
@@ -48,25 +48,26 @@ stop.bat                      # pm2 중지
   4. `README.md`에도 반영
 
 ### Error Handling
-- Claude SDK 에러는 `try/catch`로 감싸고, Slack 메시지로 사용자에게 전달
-- Rate limit 감지: `isRateLimitError()`로 패턴 매칭 → API 키 전환 또는 예약 메시지 제안 + 리셋 시간에 멘션 알림 자동 예약
+- CLI 프로세스 에러는 `try/catch`로 감싸고, Slack 메시지로 사용자에게 전달
+- Rate limit 감지: CLI `rate_limit_event` 이벤트 + `isRateLimitError()` 텍스트 패턴 매칭
 - Rate limit 멘션 알림: 재시도/취소 시 자동 취소 (`notifyScheduledId`로 추적)
 - API 키 fallback: rate limit 시 등록된 API 키로 전환 → 리셋 시간 후 구독 방식으로 자동 복귀
 - 읽기 전용 도구 (Grep, Read, Glob 등)는 상태 메시지에서만 표시 (`STATUS_ONLY_TOOLS`)
 - 완료 시 도구 사용 요약 표시 (`toolUsageCounts` → `✅ Task completed (Grep ×5, Read ×2)`)
 - 로깅은 `Logger` 클래스 사용 (`this.logger.info/debug/warn/error`)
 
-### SDK Integration
+### CLI Integration
+- `child_process.spawn('claude', ['-p', '--output-format', 'stream-json', ...])` 방식
+- `CliProcess` 클래스: AsyncIterable<CliEvent> 패턴으로 stdout 스트리밍
 - 권한 모드 계층 (제한적 → 자유):
-  - Default (기본): `permissionMode: 'default'` + `canUseTool` → Bash, Edit, Write, MCP 승인 요청
-  - `-safe`: `permissionMode: 'acceptEdits'` + `canUseTool` → Edit/Write 자동, Bash/MCP 승인 요청
-  - `-trust`: `permissionMode: 'bypassPermissions'` → 모든 도구 자동 승인
+  - Default (기본): `--permission-mode default` + `--allowedTools` (읽기 도구만)
+  - `-safe`: `--permission-mode default` + `--allowedTools` (읽기 + 편집 도구)
+  - `-trust`: `--dangerously-skip-permissions` → 모든 도구 자동 승인
   - `-default`: 기본 모드로 복귀
-- `canUseTool` 콜백으로 Slack 버튼 승인 (Approve / Always Allow / Deny)
-  - "Always Allow [tool]": 채널별 자동 승인 Set 등록 → 이후 같은 도구 자동 승인
+- 권한 거부 처리: `result.permission_denials` 감지 → Slack 버튼 (Allow [tool] / Allow All & Resume)
+  - 승인된 도구는 `channelAlwaysApproveTools`에 등록 → `--allowedTools`에 자동 포함
   - `-default` 또는 `-reset` 시 초기화
-- Resume 우선순위: 명시적 resumeOptions > Slack 세션 > 새 대화
-- 빈 프롬프트 금지: SDK API는 빈/공백 텍스트 블록을 거부함 → 기본 메시지 사용
+- Resume 우선순위: 명시적 resumeSessionId > Slack 세션 > 새 대화
 - Slack은 backtick(`)으로 텍스트를 감쌀 수 있음 → 정규식에서 선택적 backtick 처리
 
 ### UX
@@ -79,7 +80,7 @@ stop.bat                      # pm2 중지
 - 경로 인코딩: 영숫자 외 문자 → `-` (예: `P:\bitbucket` → `P--bitbucket`)
 - JSONL 형식: `type: "summary"` (제목), `type: "user"` (메시지), `type: "assistant"` (응답)
 - CLI 호환: 쿼리 완료 시 `sessions-index.json`에 세션 등록 → `claude -c`/`-r`에서 Slack 세션 표시
-- 세션 연속성: `lastAssistantUuid` 추적 → `resumeSessionAt`로 정확한 분기점에서 resume
+- 세션 연속성: `lastAssistantUuid` 추적 (CLI `--resume`는 자동으로 마지막 상태에서 이어감)
 - 세션 상태 영속화: `.session-state.json`에 sessionId/lastAssistantUuid 저장 → pm2 재시작 후 복원 (7일 보관)
 - 빈 세션 필터링: 대화 내용 없는 세션 (file-history-snapshot만)은 피커에서 제외
 - 메모리 정리: 24시간 비활성 세션 자동 정리 (5분마다 체크), 디스크 `.jsonl`은 유지
@@ -104,10 +105,10 @@ stop.bat                      # pm2 중지
 # upstream 업데이트
 git fetch upstream
 git checkout main && git merge upstream/main
-git checkout custom && git merge main
+git checkout cli-migration && git merge main
 
-# 작업은 항상 custom 브랜치에서
-git checkout custom
+# 작업은 cli-migration 브랜치에서
+git checkout cli-migration
 ```
 
 ## File Overview
@@ -115,7 +116,7 @@ git checkout custom
 | File | Role |
 |------|------|
 | `src/slack-handler.ts` | Slack 이벤트 처리, 명령어 파싱, 메시지 포맷팅 |
-| `src/claude-handler.ts` | Claude SDK `query()` 호출, 세션 관리 |
+| `src/cli-handler.ts` | CLI 프로세스 스폰 (`claude -p`), 세션 관리 |
 | `src/working-directory-manager.ts` | 작업 디렉터리 설정/조회/영속화 |
 | `src/file-handler.ts` | 파일 업로드 다운로드/임베딩 |
 | `src/session-scanner.ts` | 전체 프로젝트 세션 스캔/피커 데이터 |

@@ -2,7 +2,8 @@ import { App } from '@slack/bolt';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { ClaudeHandler, type SDKMessage, type Query, type CanUseTool, type PermissionMode, type PermissionResult } from './claude-handler';
+import { CliHandler, type CliEvent, type CliProcess, type CliAssistantEvent, type CliResultEvent, type CliRateLimitEvent } from './cli-handler';
+import { PendingDenial } from './types';
 import { Logger } from './logger';
 import { WorkingDirectoryManager } from './working-directory-manager';
 import { FileHandler, ProcessedFile } from './file-handler';
@@ -31,16 +32,15 @@ interface MessageEvent {
 
 export class SlackHandler {
   private app: App;
-  private claudeHandler: ClaudeHandler;
+  private cliHandler: CliHandler;
   private logger = new Logger('SlackHandler');
   private workingDirManager: WorkingDirectoryManager;
   private fileHandler: FileHandler;
   private todoManager: TodoManager;
   private mcpManager: McpManager;
 
-  // Active query tracking (for interrupt/stop)
-  private activeQueries: Map<string, Query> = new Map();
-  private activeControllers: Map<string, AbortController> = new Map();
+  // Active CLI process tracking (for interrupt/stop)
+  private activeProcesses: Map<string, CliProcess> = new Map();
 
   // UI state
   private todoMessages: Map<string, string> = new Map();
@@ -57,10 +57,8 @@ export class SlackHandler {
   private channelAlwaysApproveTools: Map<string, Set<string>> = new Map();
   private lastQueryCosts: Map<string, { cost: number; duration: number; model: string; sessionId: string }> = new Map();
 
-  // Interactive approval for canUseTool
-  private pendingApprovals: Map<string, {
-    resolve: (result: PermissionResult) => void;
-  }> = new Map();
+  // Permission denial tracking (CLI mode)
+  private pendingDenials: Map<string, PendingDenial> = new Map();
 
   // Rate limit retry
   private pendingRetries: Map<string, { prompt: string; channel: string; threadTs: string; user: string; notifyScheduledId?: string }> = new Map();
@@ -82,17 +80,14 @@ export class SlackHandler {
   private botUserId: string | null = null;
   private userLocales: Map<string, Locale> = new Map();
 
-  // Track in-flight say() promises per session for canUseTool flush
-  private pendingMessagePromises: Map<string, Promise<any>> = new Map();
-
   // API key management
   private userApiKeys: Map<string, string> = new Map();
   private apiKeyActive: Map<string, { userId: string; resetTimerId: ReturnType<typeof setTimeout> }> = new Map();
   private readonly API_KEYS_FILE = path.join(__dirname, '..', '.api-keys.json');
 
-  constructor(app: App, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
+  constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager) {
     this.app = app;
-    this.claudeHandler = claudeHandler;
+    this.cliHandler = cliHandler;
     this.mcpManager = mcpManager;
     this.workingDirManager = new WorkingDirectoryManager();
     this.fileHandler = new FileHandler();
@@ -202,19 +197,13 @@ export class SlackHandler {
       return;
     }
 
-    // Stop command (interrupt running query)
+    // Stop command (interrupt running CLI process)
     if (text && this.isStopCommand(text)) {
-      const sessionKey = this.claudeHandler.getSessionKey(user, channel, thread_ts || ts);
-      const activeQuery = this.activeQueries.get(sessionKey);
-      const controller = this.activeControllers.get(sessionKey);
-      if (activeQuery) {
-        try {
-          await activeQuery.interrupt();
-        } catch {
-          controller?.abort();
-        }
-        this.activeQueries.delete(sessionKey);
-        this.activeControllers.delete(sessionKey);
+      const sessionKey = this.cliHandler.getSessionKey(user, channel, thread_ts || ts);
+      const activeProcess = this.activeProcesses.get(sessionKey);
+      if (activeProcess) {
+        activeProcess.interrupt();
+        this.activeProcesses.delete(sessionKey);
         await say({ text: `⏹️ ${t('cmd.stop.stopped', locale)}`, thread_ts: thread_ts || ts });
       } else {
         await say({ text: `ℹ️ ${t('cmd.stop.noActive', locale)}`, thread_ts: thread_ts || ts });
@@ -230,7 +219,7 @@ export class SlackHandler {
 
     // Reset command
     if (text && this.isResetCommand(text)) {
-      this.claudeHandler.removeSession(user, channel, thread_ts || ts);
+      this.cliHandler.removeSession(user, channel, thread_ts || ts);
       this.lastQueryCosts.delete(channel);
       this.channelAlwaysApproveTools.delete(channel);
       await say({
@@ -364,24 +353,21 @@ export class SlackHandler {
     }
 
     // --- Main query execution ---
-    const sessionKey = this.claudeHandler.getSessionKey(user, channel, thread_ts || ts);
+    const sessionKey = this.cliHandler.getSessionKey(user, channel, thread_ts || ts);
     const originalMessageTs = thread_ts || ts;
     this.originalMessages.set(sessionKey, { channel, ts: originalMessageTs });
 
-    // Cancel any existing request for this conversation
-    const existingQuery = this.activeQueries.get(sessionKey);
-    if (existingQuery) {
-      this.logger.debug('Cancelling existing request for session', { sessionKey });
-      try { await existingQuery.interrupt(); } catch { /* ignore */ }
+    // Cancel any existing CLI process for this conversation
+    const existingProcess = this.activeProcesses.get(sessionKey);
+    if (existingProcess) {
+      this.logger.debug('Cancelling existing CLI process for session', { sessionKey });
+      existingProcess.interrupt();
     }
 
-    const abortController = new AbortController();
-    this.activeControllers.set(sessionKey, abortController);
-
-    let session = this.claudeHandler.getSession(user, channel, thread_ts || ts);
+    let session = this.cliHandler.getSession(user, channel, thread_ts || ts);
     const isNewSession = !session;
     if (!session) {
-      session = this.claudeHandler.createSession(user, channel, thread_ts || ts);
+      session = this.cliHandler.createSession(user, channel, thread_ts || ts);
     }
 
     // Determine prompt
@@ -399,21 +385,12 @@ export class SlackHandler {
     const isPlanMode = !!planParsed;
     const botPermLevel = this.channelPermissionModes.get(channel) || 'default';
 
-    const permissionMode: PermissionMode = isPlanMode
-      ? 'plan'
-      : botPermLevel === 'trust'
-        ? 'bypassPermissions'
-        : botPermLevel === 'safe'
-          ? 'acceptEdits'
-          : 'default';
-
-    // Create canUseTool callback for interactive permission (default and safe modes)
-    const canUseTool = (botPermLevel !== 'trust' && !isPlanMode)
-      ? this.createCanUseTool(channel, thread_ts || ts, botPermLevel === 'safe', locale)
-      : undefined;
+    // Build allowed tools list for CLI --allowedTools
+    const allowedTools = this.buildAllowedTools(channel, botPermLevel);
 
     let currentMessages: string[] = [];
     let statusMessageTs: string | undefined;
+    let rateLimitInfo: { retryAfterSec: number; resetsAt: number; rateLimitType: string } | null = null;
     let rateLimitMessageText: string | undefined;
     let lastStatusText = '';
     let statusRepeatCount = 0;
@@ -421,11 +398,11 @@ export class SlackHandler {
     const channelModel = this.channelModels.get(channel);
 
     try {
-      this.logger.info('Sending query to Claude Code SDK', {
+      this.logger.info('Spawning Claude CLI process', {
         prompt: finalPrompt.substring(0, 200) + (finalPrompt.length > 200 ? '...' : ''),
         sessionId: session.sessionId,
         workingDirectory,
-        permissionMode,
+        permissionMode: isPlanMode ? 'plan' : botPermLevel,
         fileCount: processedFiles.length,
       });
 
@@ -462,43 +439,44 @@ export class SlackHandler {
         }
       }
 
-      const activeQuery = this.claudeHandler.buildQuery(finalPrompt, {
+      const resumeSessionId = resumeData?.mode === 'uuid' ? resumeData.resumeOptions.resumeSessionId : undefined;
+      const continueLastSession = resumeData?.mode === 'continue' ? true : undefined;
+
+      const cliProcess = this.cliHandler.runQuery(finalPrompt, {
         session,
-        abortController,
         workingDirectory,
-        resumeOptions: resumeData?.resumeOptions,
+        resumeSessionId,
+        continueLastSession,
         model: channelModel,
         maxBudgetUsd: this.channelBudgets.get(channel),
-        permissionMode,
-        canUseTool,
+        permissionMode: isPlanMode ? 'plan' : botPermLevel,
+        allowedTools,
         env: queryEnv,
       });
 
-      this.activeQueries.set(sessionKey, activeQuery);
+      this.activeProcesses.set(sessionKey, cliProcess);
 
-      for await (const message of activeQuery) {
-        if (abortController.signal.aborted) break;
-
+      for await (const event of cliProcess) {
         // Session init tracking
-        if (message.type === 'system' && (message as any).subtype === 'init') {
-          const initMsg = message as any;
+        if (event.type === 'system' && (event as any).subtype === 'init') {
+          const initEvent = event as any;
           if (session) {
-            session.sessionId = initMsg.session_id;
-            this.claudeHandler.scheduleSave();
+            session.sessionId = initEvent.session_id;
+            this.cliHandler.scheduleSave();
             this.logger.info('Session initialized', {
-              sessionId: initMsg.session_id,
-              model: initMsg.model,
-              tools: initMsg.tools?.length || 0,
+              sessionId: initEvent.session_id,
+              model: initEvent.model,
+              tools: initEvent.tools?.length || 0,
             });
           }
           continue;
         }
 
         // Stream events: show current tool in status
-        if (message.type === 'stream_event') {
-          const event = (message as any).event;
-          if (event?.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
-            const toolName = event.content_block.name;
+        if (event.type === 'stream_event') {
+          const streamEvent = (event as CliEvent & { event: any }).event;
+          if (streamEvent?.type === 'content_block_start' && streamEvent.content_block?.type === 'tool_use') {
+            const toolName = streamEvent.content_block.name;
             toolUsageCounts.set(toolName, (toolUsageCounts.get(toolName) || 0) + 1);
             const toolEmoji = this.getToolReactionEmoji(toolName);
             if (statusMessageTs) {
@@ -525,22 +503,27 @@ export class SlackHandler {
           continue;
         }
 
-        if (message.type === 'assistant') {
+        // Rate limit event from CLI
+        if (event.type === 'rate_limit_event') {
+          const rlEvent = event as CliRateLimitEvent;
+          const info = rlEvent.rate_limit_info;
+          if (info.status !== 'allowed') {
+            const retryAfterSec = Math.max(60, info.resetsAt - Math.floor(Date.now() / 1000));
+            rateLimitInfo = { retryAfterSec, resetsAt: info.resetsAt, rateLimitType: info.rateLimitType };
+          }
+          continue;
+        }
+
+        if (event.type === 'assistant') {
+          const assistantEvent = event as CliAssistantEvent;
+
           // Track last assistant message UUID for session continuity
-          const assistantUuid = (message as any).uuid;
-          if (assistantUuid && session) {
-            session.lastAssistantUuid = assistantUuid;
-            this.claudeHandler.scheduleSave();
+          if (assistantEvent.uuid && session) {
+            session.lastAssistantUuid = assistantEvent.uuid;
+            this.cliHandler.scheduleSave();
           }
 
-          // Detect rate limit / billing error from SDK assistant message
-          const assistantError = (message as any).error;
-          if (assistantError === 'rate_limit' || assistantError === 'billing_error') {
-            const content = this.extractTextContent(message);
-            if (content) rateLimitMessageText = content;
-          }
-
-          const contentParts = message.message.content || [];
+          const contentParts = assistantEvent.message.content || [];
           const hasToolUse = contentParts.some((part: any) => part.type === 'tool_use');
 
           this.logger.debug('Assistant message received', {
@@ -550,24 +533,19 @@ export class SlackHandler {
           });
 
           if (hasToolUse) {
-            // Status message & reaction are already handled by stream_event above
-
-            const todoTool = message.message.content?.find((part: any) =>
+            const todoTool = contentParts.find((part: any) =>
               part.type === 'tool_use' && part.name === 'TodoWrite'
             );
             if (todoTool) {
               await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, thread_ts || ts, say, locale);
             }
 
-            const toolContent = this.formatToolUse(message.message.content, locale);
+            const toolContent = this.formatToolUse(contentParts, locale);
             if (toolContent) {
-              const p = say({ text: toolContent, thread_ts: thread_ts || ts });
-              this.pendingMessagePromises.set(sessionKey, p);
-              await p;
-              this.pendingMessagePromises.delete(sessionKey);
+              await say({ text: toolContent, thread_ts: thread_ts || ts });
             }
           } else {
-            const content = this.extractTextContent(message);
+            const content = this.extractTextFromContent(contentParts);
             if (content) {
               // Detect rate limit text from message content
               if (this.isRateLimitText(content)) {
@@ -583,33 +561,50 @@ export class SlackHandler {
                 }
               }
               await this.updateMessageReaction(sessionKey, '✍️');
-              const p = say({ text: this.formatMessage(content, false), thread_ts: thread_ts || ts });
-              this.pendingMessagePromises.set(sessionKey, p);
-              await p;
-              this.pendingMessagePromises.delete(sessionKey);
+              await say({ text: this.formatMessage(content, false), thread_ts: thread_ts || ts });
             }
           }
-        } else if (message.type === 'result') {
-          const resultData = message as any;
-          this.logger.info('Received result from Claude SDK', {
-            subtype: resultData.subtype,
-            totalCost: resultData.total_cost_usd,
-            duration: resultData.duration_ms,
+        } else if (event.type === 'result') {
+          const resultEvent = event as CliResultEvent;
+          this.logger.info('Received result from CLI', {
+            subtype: resultEvent.subtype,
+            totalCost: resultEvent.total_cost_usd,
+            duration: resultEvent.duration_ms,
+            isError: resultEvent.is_error,
+            denials: resultEvent.permission_denials?.length || 0,
           });
 
           // Store cost info
-          if (resultData.total_cost_usd !== undefined && session?.sessionId) {
+          if (resultEvent.total_cost_usd !== undefined && session?.sessionId) {
             this.lastQueryCosts.set(channel, {
-              cost: resultData.total_cost_usd,
-              duration: resultData.duration_ms || 0,
+              cost: resultEvent.total_cost_usd,
+              duration: resultEvent.duration_ms || 0,
               model: channelModel || 'default',
               sessionId: session.sessionId,
             });
           }
 
-          if (resultData.subtype === 'success' && resultData.result) {
-            if (!currentMessages.includes(resultData.result)) {
-              await say({ text: this.formatMessage(resultData.result, true), thread_ts: thread_ts || ts });
+          // Handle permission denials — show approval buttons
+          const denials = resultEvent.permission_denials || [];
+          if (denials.length > 0 && (resultEvent.session_id || session?.sessionId)) {
+            const sid = resultEvent.session_id || session?.sessionId || '';
+            await this.showPermissionDenialButtons(
+              channel, thread_ts || ts, user,
+              denials, sid, say, locale
+            );
+          }
+
+          // Handle rate limit from result
+          if (resultEvent.is_error && !rateLimitInfo) {
+            const resultText = resultEvent.result || '';
+            if (this.isRateLimitText(resultText)) {
+              rateLimitMessageText = resultText;
+            }
+          }
+
+          if (resultEvent.subtype === 'success' && resultEvent.result) {
+            if (!currentMessages.includes(resultEvent.result)) {
+              await say({ text: this.formatMessage(resultEvent.result, true), thread_ts: thread_ts || ts });
             }
           }
         }
@@ -618,7 +613,7 @@ export class SlackHandler {
       // Update session activity timestamp and flush to disk
       if (session) {
         session.lastActivity = new Date();
-        this.claudeHandler.saveNow();
+        this.cliHandler.saveNow();
       }
 
       // Completed
@@ -681,98 +676,46 @@ export class SlackHandler {
         });
       }
 
+      // Handle rate limit (from rate_limit_event or error text)
+      if (rateLimitInfo || rateLimitMessageText) {
+        const retryAfter = rateLimitInfo
+          ? rateLimitInfo.retryAfterSec
+          : this.parseRetryAfterSeconds({ message: rateLimitMessageText });
+        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say);
+      }
+
       // Clean up temp files
       if (processedFiles.length > 0) {
         await this.fileHandler.cleanupTempFiles(processedFiles);
       }
     } catch (error: any) {
-      if (error.name !== 'AbortError') {
-        this.logger.error('Error handling message', error);
+      this.logger.error('Error handling message', error);
 
-        if (statusMessageTs) {
-          await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `❌ ${t('status.errorOccurred', locale)}` }).catch(() => {});
-        }
-        await this.updateMessageReaction(sessionKey, '❌');
-        await this.removeAnchorReaction(sessionKey);
+      if (statusMessageTs) {
+        await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `❌ ${t('status.errorOccurred', locale)}` }).catch(() => {});
+      }
+      await this.updateMessageReaction(sessionKey, '❌');
+      await this.removeAnchorReaction(sessionKey);
 
-        // Rate limit detection: check error.message AND pre-captured assistant message
-        const rateLimitSource = rateLimitMessageText
-          ? { message: rateLimitMessageText }
-          : this.isRateLimitError(error) ? error : null;
+      // Rate limit detection from error
+      const rateLimitSource = rateLimitMessageText
+        ? { message: rateLimitMessageText }
+        : this.isRateLimitError(error) ? error : null;
 
-        if (rateLimitSource) {
-          const retryAfter = this.parseRetryAfterSeconds(rateLimitSource);
-          const postAt = Math.floor(Date.now() / 1000) + retryAfter;
-          const retryTimeStr = formatTime(new Date(postAt * 1000), locale);
-          const retryId = `retry-${Date.now()}`;
-
-          this.pendingRetries.set(retryId, { prompt: finalPrompt, channel, threadTs: thread_ts || ts, user });
-          setTimeout(async () => {
-            const expiredRetry = this.pendingRetries.get(retryId);
-            if (expiredRetry?.notifyScheduledId) {
-              await this.app.client.chat.deleteScheduledMessage({
-                channel: expiredRetry.channel,
-                scheduled_message_id: expiredRetry.notifyScheduledId,
-              }).catch(() => {});
-            }
-            this.pendingRetries.delete(retryId);
-          }, 10 * 60 * 1000);
-
-          // Auto-schedule a mention notification at reset time
-          try {
-            const notifyResult = await this.app.client.chat.scheduleMessage({
-              channel,
-              text: t('rateLimit.notify', locale, { user }),
-              post_at: postAt,
-              thread_ts: thread_ts || ts,
-            });
-            const retryInfo = this.pendingRetries.get(retryId);
-            if (retryInfo && notifyResult.scheduled_message_id) {
-              retryInfo.notifyScheduledId = notifyResult.scheduled_message_id;
-            }
-          } catch (notifyError) {
-            this.logger.warn('Failed to schedule rate limit notification', notifyError);
-          }
-
-          const promptPreview = finalPrompt.length > 200
-            ? finalPrompt.substring(0, 200) + '...'
-            : finalPrompt;
-
-          await say({
-            thread_ts: thread_ts || ts,
-            text: `⏳ ${t('rateLimit.reached', locale)} ${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfter / 60) })}`,
-            blocks: [
-              { type: 'section', text: { type: 'mrkdwn', text: `⏳ ${t('rateLimit.reached', locale)}\n${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfter / 60) })}` } },
-              { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.prompt', locale, { prompt: promptPreview }) }] },
-              {
-                type: 'actions',
-                elements: [
-                  { type: 'button', text: { type: 'plain_text', text: t('rateLimit.continueWithApiKey', locale) }, action_id: 'continue_with_apikey', value: JSON.stringify({ retryId, retryAfter }), style: 'primary' },
-                  { type: 'button', text: { type: 'plain_text', text: t('rateLimit.schedule', locale, { time: retryTimeStr }) }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, postAt, retryTimeStr }) },
-                  { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: retryId },
-                ],
-              },
-              { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.autoNotify', locale) }] },
-            ],
-          });
-        } else {
-          await say({ text: t('error.generic', locale, { message: error.message || t('error.somethingWrong', locale) }), thread_ts: thread_ts || ts });
-        }
+      if (rateLimitSource) {
+        const retryAfter = rateLimitInfo
+          ? rateLimitInfo.retryAfterSec
+          : this.parseRetryAfterSeconds(rateLimitSource);
+        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say);
       } else {
-        this.logger.debug('Request was aborted', { sessionKey });
-        if (statusMessageTs) {
-          await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `⏹️ ${t('status.cancelled', locale)}` }).catch(() => {});
-        }
-        await this.updateMessageReaction(sessionKey, '⏹️');
-        await this.removeAnchorReaction(sessionKey);
+        await say({ text: t('error.generic', locale, { message: error.message || t('error.somethingWrong', locale) }), thread_ts: thread_ts || ts });
       }
 
       if (processedFiles.length > 0) {
         await this.fileHandler.cleanupTempFiles(processedFiles);
       }
     } finally {
-      this.activeQueries.delete(sessionKey);
-      this.activeControllers.delete(sessionKey);
+      this.activeProcesses.delete(sessionKey);
 
       if (session?.sessionId) {
         setTimeout(() => {
@@ -785,98 +728,154 @@ export class SlackHandler {
     }
   }
 
-  // --- canUseTool callback factory ---
+  // --- Build allowed tools list for CLI ---
 
-  private createCanUseTool(channel: string, threadTs: string, autoApproveEdits: boolean = false, locale: Locale = 'en'): CanUseTool {
-    return async (toolName: string, input: Record<string, unknown>, options: { signal: AbortSignal; suggestions?: any[] }): Promise<PermissionResult> => {
-      // Always auto-approve read-only/safe tools
-      const readOnlyTools = ['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'Task', 'TodoRead', 'TodoWrite', 'NotebookRead'];
-      if (readOnlyTools.includes(toolName)) {
-        return { behavior: 'allow', updatedInput: input };
+  private buildAllowedTools(channel: string, permLevel: 'default' | 'safe' | 'trust'): string[] {
+    if (permLevel === 'trust') return []; // --dangerously-skip-permissions used instead
+
+    // Read-only tools (always allowed)
+    const tools = [
+      'Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch',
+      'Task', 'TaskOutput', 'TodoRead', 'TodoWrite', 'NotebookRead',
+      'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode',
+      'Skill', 'TaskStop', 'EnterWorktree',
+    ];
+
+    // Safe mode: add edit tools
+    if (permLevel === 'safe') {
+      tools.push('Edit', 'MultiEdit', 'Write', 'NotebookEdit');
+    }
+
+    // Channel-specific always-approved tools
+    const alwaysApproved = this.channelAlwaysApproveTools.get(channel);
+    if (alwaysApproved) {
+      for (const tool of alwaysApproved) {
+        if (!tools.includes(tool)) tools.push(tool);
       }
+    }
 
-      // In -safe mode, auto-approve file edit tools
-      if (autoApproveEdits) {
-        const editTools = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
-        if (editTools.includes(toolName)) {
-          return { behavior: 'allow', updatedInput: input };
-        }
-      }
+    // MCP tools (mcp__ prefix pattern)
+    const mcpTools = this.mcpManager.getDefaultAllowedTools();
+    tools.push(...mcpTools);
 
-      // Check always-approved tools for this channel
-      const alwaysApproved = this.channelAlwaysApproveTools.get(channel);
-      if (alwaysApproved?.has(toolName)) {
-        return { behavior: 'allow', updatedInput: input };
-      }
-
-      // Flush any in-flight say() calls so code output appears before the approval button
-      for (const [, pending] of this.pendingMessagePromises) {
-        try { await pending; } catch { /* ignore */ }
-      }
-
-      // For Bash and other potentially destructive tools, ask user
-      const approvalId = `approval-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-      const toolDesc = this.formatToolApprovalMessage(toolName, input, locale);
-
-      return new Promise<PermissionResult>((resolve) => {
-        this.pendingApprovals.set(approvalId, { resolve });
-
-        this.app.client.chat.postMessage({
-          channel,
-          thread_ts: threadTs,
-          text: toolDesc,
-          blocks: [
-            { type: 'section', text: { type: 'mrkdwn', text: toolDesc } },
-            {
-              type: 'actions',
-              elements: [
-                { type: 'button', text: { type: 'plain_text', text: t('approval.approve', locale) }, action_id: 'approve_tool_use', value: JSON.stringify({ approvalId, input, suggestions: options.suggestions }), style: 'primary' },
-                { type: 'button', text: { type: 'plain_text', text: t('approval.alwaysAllow', locale, { toolName }) }, action_id: 'always_approve_tool_use', value: JSON.stringify({ approvalId, input, suggestions: options.suggestions, toolName, channel }) },
-                { type: 'button', text: { type: 'plain_text', text: t('approval.deny', locale) }, action_id: 'deny_tool_use', value: approvalId, style: 'danger' },
-              ],
-            },
-          ],
-        }).catch((err) => {
-          this.logger.error('Failed to post approval message', err);
-          this.pendingApprovals.delete(approvalId);
-          resolve({ behavior: 'allow', updatedInput: input });
-        });
-      });
-    };
+    return tools;
   }
 
-  private formatToolApprovalMessage(toolName: string, input: Record<string, unknown>, locale: Locale): string {
-    switch (toolName) {
-      case 'Bash':
-        return `🔐 ${t('approval.bash', locale)}\n\`\`\`\n${input.command || '(no command)'}\n\`\`\``;
-      case 'Edit':
-      case 'MultiEdit':
-        return `🔐 ${t('approval.edit', locale, { path: String(input.file_path || '?') })}`;
-      case 'Write':
-        return `🔐 ${t('approval.write', locale, { path: String(input.file_path || '?') })}`;
-      case 'NotebookEdit':
-        return `🔐 ${t('approval.notebook', locale, { path: String(input.notebook_path || '?') })}`;
-      default:
-        if (toolName.startsWith('mcp__')) {
-          const parts = toolName.split('__');
-          const serverName = parts[1] || '?';
-          const mcpToolName = parts.slice(2).join('__') || '?';
-          return `🔐 ${t('approval.mcp', locale, { tool: mcpToolName, server: serverName })}\n\`\`\`json\n${JSON.stringify(input, null, 2).substring(0, 500)}\n\`\`\``;
-        }
-        return `🔐 ${t('approval.generic', locale, { toolName })}\n\`\`\`json\n${JSON.stringify(input, null, 2).substring(0, 500)}\n\`\`\``;
+  // --- Permission denial UI (CLI mode) ---
+
+  private async showPermissionDenialButtons(
+    channel: string, threadTs: string, user: string,
+    denials: Array<{ tool: string; reason: string }>,
+    sessionId: string, say: any, locale: Locale
+  ): Promise<void> {
+    // Deduplicate tools
+    const uniqueTools = [...new Set(denials.map(d => d.tool))];
+    const denialId = `denial-${Date.now()}`;
+
+    this.pendingDenials.set(denialId, {
+      sessionId, deniedTools: uniqueTools,
+      channel, threadTs, user,
+    });
+    setTimeout(() => this.pendingDenials.delete(denialId), 10 * 60 * 1000);
+
+    const toolList = uniqueTools.map(tl => `\`${tl}\``).join(', ');
+    const elements: any[] = [
+      // Per-tool "Allow" buttons (max 3)
+      ...uniqueTools.slice(0, 3).map(tool => ({
+        type: 'button',
+        text: { type: 'plain_text', text: t('permission.allowTool', locale, { toolName: tool }) },
+        action_id: `allow_denied_tool_${tool}`,
+        value: JSON.stringify({ denialId, tool }),
+      })),
+      // "Allow All & Resume" button
+      {
+        type: 'button',
+        text: { type: 'plain_text', text: t('permission.allowAllAndResume', locale) },
+        action_id: 'allow_all_denied_tools',
+        value: JSON.stringify({ denialId }),
+        style: 'primary',
+      },
+    ];
+
+    await say({
+      thread_ts: threadTs,
+      text: t('permission.denied', locale, { tools: toolList }),
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `🔐 ${t('permission.denied', locale, { tools: toolList })}` } },
+        { type: 'actions', elements },
+      ],
+    });
+  }
+
+  // --- Rate limit UI helper ---
+
+  private async handleRateLimitUI(
+    channel: string, threadTs: string, user: string,
+    prompt: string, retryAfterSec: number, locale: Locale, say: any
+  ): Promise<void> {
+    const postAt = Math.floor(Date.now() / 1000) + retryAfterSec;
+    const retryTimeStr = formatTime(new Date(postAt * 1000), locale);
+    const retryId = `retry-${Date.now()}`;
+
+    this.pendingRetries.set(retryId, { prompt, channel, threadTs, user });
+    setTimeout(async () => {
+      const expiredRetry = this.pendingRetries.get(retryId);
+      if (expiredRetry?.notifyScheduledId) {
+        await this.app.client.chat.deleteScheduledMessage({
+          channel: expiredRetry.channel,
+          scheduled_message_id: expiredRetry.notifyScheduledId,
+        }).catch(() => {});
+      }
+      this.pendingRetries.delete(retryId);
+    }, 10 * 60 * 1000);
+
+    // Auto-schedule a mention notification at reset time
+    try {
+      const notifyResult = await this.app.client.chat.scheduleMessage({
+        channel,
+        text: t('rateLimit.notify', locale, { user }),
+        post_at: postAt,
+        thread_ts: threadTs,
+      });
+      const retryInfo = this.pendingRetries.get(retryId);
+      if (retryInfo && notifyResult.scheduled_message_id) {
+        retryInfo.notifyScheduledId = notifyResult.scheduled_message_id;
+      }
+    } catch (notifyError) {
+      this.logger.warn('Failed to schedule rate limit notification', notifyError);
     }
+
+    const promptPreview = prompt.length > 200
+      ? prompt.substring(0, 200) + '...'
+      : prompt;
+
+    await say({
+      thread_ts: threadTs,
+      text: `⏳ ${t('rateLimit.reached', locale)} ${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfterSec / 60) })}`,
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `⏳ ${t('rateLimit.reached', locale)}\n${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfterSec / 60) })}` } },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.prompt', locale, { prompt: promptPreview }) }] },
+        {
+          type: 'actions',
+          elements: [
+            { type: 'button', text: { type: 'plain_text', text: t('rateLimit.continueWithApiKey', locale) }, action_id: 'continue_with_apikey', value: JSON.stringify({ retryId, retryAfter: retryAfterSec }), style: 'primary' },
+            { type: 'button', text: { type: 'plain_text', text: t('rateLimit.schedule', locale, { time: retryTimeStr }) }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, postAt, retryTimeStr }) },
+            { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: retryId },
+          ],
+        },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.autoNotify', locale) }] },
+      ],
+    });
   }
 
   // --- Message content helpers ---
 
-  private extractTextContent(message: SDKMessage): string | null {
-    if (message.type === 'assistant' && message.message.content) {
-      const textParts = message.message.content
-        .filter((part: any) => part.type === 'text')
-        .map((part: any) => part.text);
-      return textParts.join('');
-    }
-    return null;
+  private extractTextFromContent(content: Array<{ type: string; text?: string; [key: string]: any }>): string | null {
+    const textParts = content
+      .filter((part: any) => part.type === 'text')
+      .map((part: any) => part.text);
+    const result = textParts.join('');
+    return result || null;
   }
 
   // Tools that only show in the status message (no separate say() needed)
@@ -1508,71 +1507,73 @@ export class SlackHandler {
 
     // --- Interactive button handlers ---
 
-    // Tool approval (safe mode)
-    this.app.action('approve_tool_use', async ({ ack, body, respond }) => {
+    // Permission denial: "Allow All & Resume" — approve all denied tools and resume
+    this.app.action('allow_all_denied_tools', async ({ ack, body, respond }) => {
       await ack();
       try {
         const actionLocale = await this.getUserLocale((body as any).user.id);
         const actionValue = JSON.parse((body as any).actions[0].value);
-        const approval = this.pendingApprovals.get(actionValue.approvalId);
-        if (approval) {
-          this.pendingApprovals.delete(actionValue.approvalId);
-          approval.resolve({
-            behavior: 'allow',
-            updatedInput: actionValue.input,
-            updatedPermissions: actionValue.suggestions,
-          });
-          await respond({ response_type: 'ephemeral', text: `✅ ${t('approval.approved', actionLocale)}` });
-        } else {
+        const denial = this.pendingDenials.get(actionValue.denialId);
+        if (!denial) {
           await respond({ response_type: 'ephemeral', text: `⚠️ ${t('approval.expired', actionLocale)}` });
+          return;
         }
+
+        // Register each denied tool as always-approved for this channel
+        let toolSet = this.channelAlwaysApproveTools.get(denial.channel);
+        if (!toolSet) { toolSet = new Set(); this.channelAlwaysApproveTools.set(denial.channel, toolSet); }
+        for (const tool of denial.deniedTools) toolSet.add(tool);
+        this.pendingDenials.delete(actionValue.denialId);
+
+        await respond({ response_type: 'in_channel', text: `🔓 ${t('permission.resuming', actionLocale)}` });
+
+        // Resume the session with new allowedTools
+        const event: MessageEvent = {
+          user: denial.user, channel: denial.channel,
+          thread_ts: denial.threadTs, ts: denial.threadTs,
+          text: `-resume ${denial.sessionId}`,
+        };
+        const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel: denial.channel, ...msg });
+        await this.handleMessage(event, sayCb);
       } catch (error) {
-        this.logger.error('Error handling tool approval', error);
+        this.logger.error('Error handling allow_all_denied_tools', error);
       }
     });
 
-    this.app.action('deny_tool_use', async ({ ack, body, respond }) => {
-      await ack();
-      const actionLocale = await this.getUserLocale((body as any).user.id);
-      const approvalId = (body as any).actions[0].value;
-      const approval = this.pendingApprovals.get(approvalId);
-      if (approval) {
-        this.pendingApprovals.delete(approvalId);
-        approval.resolve({ behavior: 'deny', message: 'User denied this tool use.' });
-        await respond({ response_type: 'ephemeral', text: `❌ ${t('approval.denied', actionLocale)}` });
-      }
-    });
-
-    // Always approve tool for this channel
-    this.app.action('always_approve_tool_use', async ({ ack, body, respond }) => {
+    // Permission denial: "Allow <tool>" — approve a single denied tool and resume
+    this.app.action(/^allow_denied_tool_/, async ({ ack, body, respond }) => {
       await ack();
       try {
         const actionLocale = await this.getUserLocale((body as any).user.id);
         const actionValue = JSON.parse((body as any).actions[0].value);
-        const { approvalId, input, suggestions, toolName, channel: ch } = actionValue;
-
-        // Register tool as always-approved for this channel
-        let toolSet = this.channelAlwaysApproveTools.get(ch);
-        if (!toolSet) {
-          toolSet = new Set();
-          this.channelAlwaysApproveTools.set(ch, toolSet);
-        }
-        toolSet.add(toolName);
-
-        // Resolve the pending approval immediately
-        const approval = this.pendingApprovals.get(approvalId);
-        if (approval) {
-          this.pendingApprovals.delete(approvalId);
-          approval.resolve({
-            behavior: 'allow',
-            updatedInput: input,
-            updatedPermissions: suggestions,
-          });
+        const denial = this.pendingDenials.get(actionValue.denialId);
+        if (!denial) {
+          await respond({ response_type: 'ephemeral', text: `⚠️ ${t('approval.expired', actionLocale)}` });
+          return;
         }
 
-        await respond({ response_type: 'ephemeral', text: `✅ ${t('approval.alwaysAllowed', actionLocale, { toolName })}` });
+        // Register the single tool as always-approved
+        let toolSet = this.channelAlwaysApproveTools.get(denial.channel);
+        if (!toolSet) { toolSet = new Set(); this.channelAlwaysApproveTools.set(denial.channel, toolSet); }
+        toolSet.add(actionValue.tool);
+
+        await respond({ response_type: 'ephemeral', text: `✅ ${t('approval.alwaysAllowed', actionLocale, { toolName: actionValue.tool })}` });
+
+        // Check if all denied tools are now approved
+        const allApproved = denial.deniedTools.every(tl => toolSet!.has(tl));
+        if (allApproved) {
+          this.pendingDenials.delete(actionValue.denialId);
+          // Auto-resume since all tools are now approved
+          const event: MessageEvent = {
+            user: denial.user, channel: denial.channel,
+            thread_ts: denial.threadTs, ts: denial.threadTs,
+            text: `-resume ${denial.sessionId}`,
+          };
+          const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel: denial.channel, ...msg });
+          await this.handleMessage(event, sayCb);
+        }
       } catch (error) {
-        this.logger.error('Error handling always-approve tool', error);
+        this.logger.error('Error handling allow_denied_tool', error);
       }
     });
 
@@ -1959,7 +1960,7 @@ export class SlackHandler {
     // Cleanup inactive sessions periodically
     setInterval(() => {
       this.logger.debug('Running session cleanup');
-      this.claudeHandler.cleanupInactiveSessions(24 * 60 * 60 * 1000); // 24 hours
+      this.cliHandler.cleanupInactiveSessions(24 * 60 * 60 * 1000); // 24 hours
     }, 5 * 60 * 1000);
   }
 }

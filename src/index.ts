@@ -1,6 +1,6 @@
 import { App } from '@slack/bolt';
 import { config, validateConfig } from './config';
-import { ClaudeHandler } from './claude-handler';
+import { CliHandler } from './cli-handler';
 import { SlackHandler } from './slack-handler';
 import { McpManager } from './mcp-manager';
 import { Logger } from './logger';
@@ -31,8 +31,8 @@ async function start() {
     const mcpConfig = mcpManager.loadConfiguration();
     
     // Initialize handlers
-    const claudeHandler = new ClaudeHandler(mcpManager);
-    const slackHandler = new SlackHandler(app, claudeHandler, mcpManager);
+    const cliHandler = new CliHandler(mcpManager);
+    const slackHandler = new SlackHandler(app, cliHandler, mcpManager);
 
     // Setup event handlers
     slackHandler.setupEventHandlers();

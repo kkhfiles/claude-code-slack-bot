@@ -16,3 +16,11 @@ export interface WorkingDirectoryConfig {
   directory: string;
   setAt: Date;
 }
+
+export interface PendingDenial {
+  sessionId: string;
+  deniedTools: string[];
+  channel: string;
+  threadTs: string;
+  user: string;
+}
