@@ -103,6 +103,8 @@ const messages: Record<string, Record<Locale, string>> = {
   'approval.mcp': { en: '*Approve MCP tool* `{{tool}}` _({{server}})_?', ko: '*MCP 도구* `{{tool}}` _({{server}})_ *을(를) 승인할까요?*' },
   'approval.generic': { en: '*Approve {{toolName}}?*', ko: '*{{toolName}}을(를) 승인할까요?*' },
   'approval.approved': { en: 'Approved', ko: '승인됨' },
+  'approval.alwaysAllow': { en: 'Always Allow {{toolName}}', ko: '{{toolName}} 항상 허용' },
+  'approval.alwaysAllowed': { en: '{{toolName}} will be auto-approved in this channel. Use `-default` to reset.', ko: '이 채널에서 {{toolName}}이(가) 자동 승인됩니다. `-default`로 초기화 가능.' },
   'approval.denied': { en: 'Denied', ko: '거부됨' },
   'approval.expired': { en: 'Approval expired (already auto-approved)', ko: '승인 만료 (자동 승인됨)' },
 
@@ -149,12 +151,26 @@ const messages: Record<string, Record<Locale, string>> = {
   'rateLimit.scheduled': { en: 'Retry scheduled at {{time}}.', ko: '{{time}}에 재실행이 예약되었습니다.' },
   'rateLimit.retryExpired': { en: 'Retry info expired. Please resend your message manually.', ko: '재시도 정보가 만료되었습니다. 수동으로 메시지를 재전송해주세요.' },
 
+  'rateLimit.continueWithApiKey': { en: 'Continue with API key', ko: 'API 키로 계속' },
+
   // Rate limit modal
   'rateLimit.modalTitle': { en: 'Schedule Retry', ko: '예약 재시도' },
   'rateLimit.modalSubmit': { en: 'Schedule ({{time}})', ko: '예약 ({{time}})' },
   'rateLimit.modalClose': { en: 'Cancel', ko: '취소' },
   'rateLimit.modalBody': { en: 'Will resend the prompt at *{{time}}*.\nEdit if needed.', ko: '*{{time}}*에 아래 프롬프트를 재전송합니다.\n필요하면 편집하세요.' },
   'rateLimit.modalLabel': { en: 'Prompt', ko: '프롬프트' },
+
+  // API key
+  'apiKey.modalTitle': { en: 'API Key', ko: 'API 키' },
+  'apiKey.modalSubmit': { en: 'Save', ko: '저장' },
+  'apiKey.modalClose': { en: 'Cancel', ko: '취소' },
+  'apiKey.modalBody': { en: 'Enter your Anthropic API key. It will be stored locally and used when the subscription rate limit is reached.', ko: 'Anthropic API 키를 입력하세요. 로컬에 저장되며 구독 rate limit 초과 시 사용됩니다.' },
+  'apiKey.modalLabel': { en: 'API Key', ko: 'API 키' },
+  'apiKey.saved': { en: 'API key saved.', ko: 'API 키가 저장되었습니다.' },
+  'apiKey.savedAndRetrying': { en: 'API key saved. Retrying with API key...', ko: 'API 키 저장됨. API 키로 재시도 중...' },
+  'apiKey.switchingToApiKey': { en: 'Switching to API key. Retrying...', ko: 'API 키로 전환합니다. 재시도 중...' },
+  'apiKey.switchingToSubscription': { en: 'Rate limit reset. Switching back to subscription auth.', ko: 'Rate limit이 해제되었습니다. 구독 인증 방식으로 전환합니다.' },
+  'apiKey.noKey': { en: 'No API key registered. Enter one to continue.', ko: '등록된 API 키가 없습니다. 입력해주세요.' },
 
   // --- Error ---
   'error.generic': { en: 'Error: {{message}}', ko: '오류: {{message}}' },
@@ -266,11 +282,12 @@ export function getHelpText(locale: Locale): string {
     help += `\`-cost\` — 마지막 쿼리 비용 및 세션 ID\n\n`;
     help += `*MCP*\n`;
     help += `\`-mcp\` — MCP 서버 상태 표시\n`;
-    help += `\`-mcp reload\` — MCP 설정 리로드\n\n`;
+    help += `\`-mcp reload\` — MCP 설정 리로드\n`;
+    help += `\`-apikey\` — API 키 등록/수정 (rate limit 시 자동 전환용)\n\n`;
     help += `*팁*\n`;
     help += `• 같은 쓰레드 = 세션 자동 연속 (명령어 불필요)\n`;
     help += `• 파일 드래그 앤 드롭으로 업로드 및 분석\n`;
-    help += `• Rate limit → 봇이 예약 재시도 제안\n`;
+    help += `• Rate limit → API 키 전환 또는 예약 재시도\n`;
     help += `• \`help\` 또는 \`-help\` — 이 메시지 표시\n`;
     return help;
   }
@@ -299,11 +316,12 @@ export function getHelpText(locale: Locale): string {
   help += `\`-cost\` — Show last query cost and session ID\n\n`;
   help += `*MCP*\n`;
   help += `\`-mcp\` — Show MCP server status\n`;
-  help += `\`-mcp reload\` — Reload MCP configuration\n\n`;
+  help += `\`-mcp reload\` — Reload MCP configuration\n`;
+  help += `\`-apikey\` — Register/update API key (auto-switch on rate limit)\n\n`;
   help += `*Tips*\n`;
   help += `• Same thread = session auto-continues (no command needed)\n`;
   help += `• Drag & drop files to upload and analyze\n`;
-  help += `• Rate limit → bot offers scheduled retry\n`;
+  help += `• Rate limit → switch to API key or scheduled retry\n`;
   help += `• \`help\` or \`-help\` — Show this message\n`;
   return help;
 }
