@@ -212,6 +212,7 @@ Conversations in the same thread automatically continue the session (no command 
 | `-model [name]` | Get/set model (`sonnet`, `opus`, `haiku`, or full name) |
 | `-budget [amount\|off]` | Get/set/remove per-query cost limit (USD) |
 | `-cost` | Show last query cost and session ID |
+| `-apikey` | Register API key for rate limit fallback (stored in `.api-keys.json`) |
 
 ```
 -model                # Show current model
@@ -302,7 +303,7 @@ src/
 ├── index.ts                     # Entry point
 ├── config.ts                    # Environment variables and config
 ├── types.ts                     # TypeScript type definitions
-├── claude-handler.ts            # Claude Code SDK integration
+├── cli-handler.ts               # Claude CLI process management (stream-json)
 ├── slack-handler.ts             # Slack event handling
 ├── working-directory-manager.ts # Working directory management (persistence)
 ├── file-handler.ts              # File upload handling
@@ -334,7 +335,7 @@ npm install --ignore-scripts
 ```bash
 git fetch upstream
 git checkout main && git merge upstream/main
-git checkout custom && git merge main
+git checkout cli-migration && git merge main
 npm install --ignore-scripts
 npm run build
 ```

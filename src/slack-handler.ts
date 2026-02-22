@@ -59,6 +59,8 @@ export class SlackHandler {
 
   // Permission denial tracking (CLI mode)
   private pendingDenials: Map<string, PendingDenial> = new Map();
+  // One-time approved tools (consumed on next handleMessage call)
+  private pendingOneTimeTools: Map<string, string[]> = new Map();
 
   // Rate limit retry
   private pendingRetries: Map<string, { prompt: string; channel: string; threadTs: string; user: string; notifyScheduledId?: string }> = new Map();
@@ -75,6 +77,8 @@ export class SlackHandler {
     user: string;
     messageTs: string;
     timeout: ReturnType<typeof setTimeout>;
+    shownCount: number;
+    locale: Locale;
   }> = new Map();
 
   private botUserId: string | null = null;
@@ -386,7 +390,7 @@ export class SlackHandler {
     const botPermLevel = this.channelPermissionModes.get(channel) || 'default';
 
     // Build allowed tools list for CLI --allowedTools
-    const allowedTools = this.buildAllowedTools(channel, botPermLevel);
+    const allowedTools = this.buildAllowedTools(channel, botPermLevel, sessionKey);
 
     let currentMessages: string[] = [];
     let statusMessageTs: string | undefined;
@@ -572,6 +576,7 @@ export class SlackHandler {
             duration: resultEvent.duration_ms,
             isError: resultEvent.is_error,
             denials: resultEvent.permission_denials?.length || 0,
+            denialDetails: JSON.stringify(resultEvent.permission_denials),
           });
 
           // Store cost info
@@ -584,9 +589,9 @@ export class SlackHandler {
             });
           }
 
-          // Handle permission denials — show approval buttons
+          // Handle permission denials — show approval buttons (skip in plan mode)
           const denials = resultEvent.permission_denials || [];
-          if (denials.length > 0 && (resultEvent.session_id || session?.sessionId)) {
+          if (!isPlanMode && denials.length > 0 && (resultEvent.session_id || session?.sessionId)) {
             const sid = resultEvent.session_id || session?.sessionId || '';
             await this.showPermissionDenialButtons(
               channel, thread_ts || ts, user,
@@ -730,7 +735,7 @@ export class SlackHandler {
 
   // --- Build allowed tools list for CLI ---
 
-  private buildAllowedTools(channel: string, permLevel: 'default' | 'safe' | 'trust'): string[] {
+  private buildAllowedTools(channel: string, permLevel: 'default' | 'safe' | 'trust', sessionKey?: string): string[] {
     if (permLevel === 'trust') return []; // --dangerously-skip-permissions used instead
 
     // Read-only tools (always allowed)
@@ -754,6 +759,17 @@ export class SlackHandler {
       }
     }
 
+    // One-time approved tools (consumed after use)
+    if (sessionKey) {
+      const oneTime = this.pendingOneTimeTools.get(sessionKey);
+      if (oneTime) {
+        for (const tool of oneTime) {
+          if (!tools.includes(tool)) tools.push(tool);
+        }
+        this.pendingOneTimeTools.delete(sessionKey);
+      }
+    }
+
     // MCP tools (mcp__ prefix pattern)
     const mcpTools = this.mcpManager.getDefaultAllowedTools();
     tools.push(...mcpTools);
@@ -765,11 +781,11 @@ export class SlackHandler {
 
   private async showPermissionDenialButtons(
     channel: string, threadTs: string, user: string,
-    denials: Array<{ tool: string; reason: string }>,
+    denials: Array<{ tool_name: string; tool_use_id: string; tool_input?: any }>,
     sessionId: string, say: any, locale: Locale
   ): Promise<void> {
     // Deduplicate tools
-    const uniqueTools = [...new Set(denials.map(d => d.tool))];
+    const uniqueTools = [...new Set(denials.map(d => d.tool_name))];
     const denialId = `denial-${Date.now()}`;
 
     this.pendingDenials.set(denialId, {
@@ -1298,31 +1314,23 @@ export class SlackHandler {
 
   // --- Session picker ---
 
-  private async showSessionPicker(channel: string, threadTs: string, user: string, say: any, locale: Locale = 'en'): Promise<void> {
-    const knownPaths = this.workingDirManager.getKnownPathsMap();
-    const sessions = this.sessionScanner.listRecentSessions(10, knownPaths);
+  private readonly PICKER_PAGE_SIZE = 5;
 
-    if (sessions.length === 0) {
-      await say({ text: `ℹ️ ${t('picker.noSessions', locale)}`, thread_ts: threadTs });
-      return;
-    }
-
-    const pickerId = `picker-${Date.now()}`;
-
-    // Build BlockKit blocks — sorted by modified (newest first), no grouping
+  private buildPickerBlocks(sessions: SessionInfo[], pickerId: string, shownCount: number, locale: Locale): any[] {
+    const visible = sessions.slice(0, shownCount);
     const blocks: any[] = [
       { type: 'section', text: { type: 'mrkdwn', text: `📂 ${t('picker.title', locale)}` } },
     ];
 
-    sessions.forEach((s, index) => {
+    visible.forEach((s, index) => {
       const title = s.summary || s.firstPrompt || t('picker.noTitle', locale);
       const label = s.projectLabel;
       const branch = s.gitBranch;
       const relTime = formatRelativeTime(s.modified, locale);
       const projectInfo = branch ? `*${label}* · \`${branch}\`` : `*${label}*`;
+      const shortId = s.sessionId.substring(0, 8);
 
       blocks.push({ type: 'divider' });
-      const shortId = s.sessionId.substring(0, 8);
       blocks.push({
         type: 'context',
         elements: [{ type: 'mrkdwn', text: `${projectInfo} · _${relTime}_ · \`${shortId}\`\n${title}\n\`${s.projectPath}\`` }],
@@ -1338,8 +1346,38 @@ export class SlackHandler {
       });
     });
 
+    // "Show more" button if there are more sessions
+    if (shownCount < sessions.length) {
+      blocks.push({ type: 'divider' });
+      blocks.push({
+        type: 'actions',
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: t('picker.showMore', locale, { count: Math.min(this.PICKER_PAGE_SIZE, sessions.length - shownCount) }) },
+          action_id: 'picker_show_more',
+          value: JSON.stringify({ pickerId }),
+        }],
+      });
+    }
+
     blocks.push({ type: 'divider' });
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: t('picker.footer', locale) }] });
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `${t('picker.footer', locale)} (${shownCount}/${sessions.length})` }] });
+
+    return blocks;
+  }
+
+  private async showSessionPicker(channel: string, threadTs: string, user: string, say: any, locale: Locale = 'en'): Promise<void> {
+    const knownPaths = this.workingDirManager.getKnownPathsMap();
+    const sessions = this.sessionScanner.listRecentSessions(30, knownPaths);
+
+    if (sessions.length === 0) {
+      await say({ text: `ℹ️ ${t('picker.noSessions', locale)}`, thread_ts: threadTs });
+      return;
+    }
+
+    const pickerId = `picker-${Date.now()}`;
+    const shownCount = Math.min(this.PICKER_PAGE_SIZE, sessions.length);
+    const blocks = this.buildPickerBlocks(sessions, pickerId, shownCount, locale);
 
     const result = await say({ text: `📂 ${t('picker.title', locale)}`, blocks, thread_ts: threadTs });
 
@@ -1360,6 +1398,8 @@ export class SlackHandler {
       user,
       messageTs: result.ts,
       timeout,
+      shownCount,
+      locale,
     });
   }
 
@@ -1527,11 +1567,13 @@ export class SlackHandler {
 
         await respond({ response_type: 'in_channel', text: `🔓 ${t('permission.resuming', actionLocale)}` });
 
-        // Resume the session with new allowedTools
+        // Resume the session — tell Claude the tools are now approved so it retries
+        const toolNames = denial.deniedTools.join(', ');
+        const resumePrompt = `The following tools have been approved: ${toolNames}. Please retry the previously denied operation.`;
         const event: MessageEvent = {
           user: denial.user, channel: denial.channel,
           thread_ts: denial.threadTs, ts: denial.threadTs,
-          text: `-resume ${denial.sessionId}`,
+          text: `-resume ${denial.sessionId} ${resumePrompt}`,
         };
         const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel: denial.channel, ...msg });
         await this.handleMessage(event, sayCb);
@@ -1540,7 +1582,7 @@ export class SlackHandler {
       }
     });
 
-    // Permission denial: "Allow <tool>" — approve a single denied tool and resume
+    // Permission denial: "Allow <tool>" — one-time approve and resume
     this.app.action(/^allow_denied_tool_/, async ({ ack, body, respond }) => {
       await ack();
       try {
@@ -1552,24 +1594,36 @@ export class SlackHandler {
           return;
         }
 
-        // Register the single tool as always-approved
-        let toolSet = this.channelAlwaysApproveTools.get(denial.channel);
-        if (!toolSet) { toolSet = new Set(); this.channelAlwaysApproveTools.set(denial.channel, toolSet); }
-        toolSet.add(actionValue.tool);
+        // Track one-time approved tools for this denial (not channel-wide)
+        if (!denial.approvedTools) denial.approvedTools = new Set();
+        denial.approvedTools.add(actionValue.tool);
 
-        await respond({ response_type: 'ephemeral', text: `✅ ${t('approval.alwaysAllowed', actionLocale, { toolName: actionValue.tool })}` });
+        await respond({ response_type: 'ephemeral', text: `✅ ${t('permission.allowTool', actionLocale, { toolName: actionValue.tool })}` });
 
-        // Check if all denied tools are now approved
-        const allApproved = denial.deniedTools.every(tl => toolSet!.has(tl));
+        // Check if all denied tools are now approved (one-time or channel-wide)
+        const channelSet = this.channelAlwaysApproveTools.get(denial.channel) || new Set();
+        const allApproved = denial.deniedTools.every(tl => denial.approvedTools!.has(tl) || channelSet.has(tl));
         if (allApproved) {
           this.pendingDenials.delete(actionValue.denialId);
-          // Auto-resume since all tools are now approved
+
+          await this.app.client.chat.postMessage({
+            channel: denial.channel,
+            thread_ts: denial.threadTs,
+            text: `🔓 ${t('permission.resuming', actionLocale)}`,
+          });
+
+          // Resume with one-time + channel-wide approved tools
+          const oneTimeTools = [...(denial.approvedTools || [])];
+          const toolNames = denial.deniedTools.join(', ');
+          const resumePrompt = `The following tools have been approved: ${toolNames}. Please retry the previously denied operation.`;
           const event: MessageEvent = {
             user: denial.user, channel: denial.channel,
             thread_ts: denial.threadTs, ts: denial.threadTs,
-            text: `-resume ${denial.sessionId}`,
+            text: `-resume ${denial.sessionId} ${resumePrompt}`,
           };
           const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel: denial.channel, ...msg });
+          // Store one-time tools temporarily so handleMessage can pick them up
+          this.pendingOneTimeTools.set(`${denial.user}-${denial.channel}-${denial.threadTs || 'direct'}`, oneTimeTools);
           await this.handleMessage(event, sayCb);
         }
       } catch (error) {
@@ -1607,6 +1661,30 @@ export class SlackHandler {
       const planId = (body as any).actions[0].value;
       this.pendingPlans.delete(planId);
       await respond({ response_type: 'ephemeral', text: t('plan.cancelled', actionLocale) });
+    });
+
+    // Session picker "Show more" button
+    this.app.action('picker_show_more', async ({ ack, body }) => {
+      await ack();
+      try {
+        const actionValue = JSON.parse((body as any).actions[0].value);
+        const picker = this.pendingPickers.get(actionValue.pickerId);
+        if (!picker) return;
+
+        // Expand by PICKER_PAGE_SIZE (cap at 15: 3*15+5=50 blocks, Slack hard limit)
+        const MAX_PICKER_SESSIONS = 15;
+        picker.shownCount = Math.min(picker.shownCount + this.PICKER_PAGE_SIZE, picker.sessions.length, MAX_PICKER_SESSIONS);
+        const blocks = this.buildPickerBlocks(picker.sessions, actionValue.pickerId, picker.shownCount, picker.locale);
+
+        await this.app.client.chat.update({
+          channel: picker.channel,
+          ts: picker.messageTs,
+          text: `📂 ${t('picker.title', picker.locale)}`,
+          blocks,
+        }).catch(() => {});
+      } catch (error) {
+        this.logger.error('Error handling picker show more', error);
+      }
     });
 
     // Session picker buttons

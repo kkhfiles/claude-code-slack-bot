@@ -133,6 +133,7 @@ const messages: Record<string, Record<Locale, string>> = {
   'picker.expiredAction': { en: 'Session picker expired. Use `-r` again.', ko: '세션 피커가 만료되었습니다. `-r`을 다시 사용해주세요.' },
   'picker.resuming': { en: '*Resuming:* {{title}}', ko: '*재개 중:* {{title}}' },
   'picker.noTitle': { en: '(no title)', ko: '(제목 없음)' },
+  'picker.showMore': { en: 'Show more ({{count}})', ko: '더보기 ({{count}})' },
 
   // --- Sessions list ---
   'sessions.title': { en: '*Recent Sessions*', ko: '*최근 세션*' },

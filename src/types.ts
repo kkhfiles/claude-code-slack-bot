@@ -23,4 +23,5 @@ export interface PendingDenial {
   channel: string;
   threadTs: string;
   user: string;
+  approvedTools?: Set<string>;
 }
