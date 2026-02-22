@@ -66,7 +66,7 @@ export interface CliResultEvent {
   session_id: string;
   total_cost_usd: number;
   duration_ms: number;
-  permission_denials: Array<{ tool: string; reason: string }>;
+  permission_denials: Array<{ tool_name: string; tool_use_id: string; tool_input?: any }>;
   is_error: boolean;
   result?: string;
   modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
@@ -122,18 +122,18 @@ export class CliProcess {
   private setupExitHandler(): void {
     this.proc.on('exit', (code, signal) => {
       this.logger.debug('CLI process exited', { code, signal });
+      // Always enqueue error event for non-zero exits (even if iterator isn't waiting)
       if (code !== 0 && code !== null && !this.done) {
         const stderr = this.stderrChunks.join('');
-        this.processError = new Error(stderr || `CLI process exited with code ${code}`);
+        const errorEvent = { type: 'result', subtype: 'error', session_id: '', total_cost_usd: 0, duration_ms: 0, permission_denials: [], is_error: true, result: stderr || `CLI process exited with code ${code}` } as CliResultEvent;
+        this.events.push(errorEvent);
       }
       this.done = true;
-      // Resolve any pending iterator
       if (this.pendingResolve) {
         const resolve = this.pendingResolve;
         this.pendingResolve = null;
-        if (this.processError) {
-          // Push an error result event so the caller can handle it
-          resolve({ value: { type: 'result', subtype: 'error', session_id: '', total_cost_usd: 0, duration_ms: 0, permission_denials: [], is_error: true, result: this.processError.message } as CliResultEvent, done: false });
+        if (this.events.length > 0) {
+          resolve({ value: this.events.shift()!, done: false });
         } else {
           resolve({ value: undefined as any, done: true });
         }
@@ -142,12 +142,13 @@ export class CliProcess {
 
     this.proc.on('error', (err) => {
       this.logger.error('CLI process error', err);
-      this.processError = err;
+      const errorEvent = { type: 'result', subtype: 'error', session_id: '', total_cost_usd: 0, duration_ms: 0, permission_denials: [], is_error: true, result: err.message } as CliResultEvent;
+      this.events.push(errorEvent);
       this.done = true;
       if (this.pendingResolve) {
         const resolve = this.pendingResolve;
         this.pendingResolve = null;
-        resolve({ value: { type: 'result', subtype: 'error', session_id: '', total_cost_usd: 0, duration_ms: 0, permission_denials: [], is_error: true, result: err.message } as CliResultEvent, done: false });
+        resolve({ value: this.events.shift()!, done: false });
       }
     });
   }
@@ -368,8 +369,8 @@ export class CliHandler {
       args.push('--append-system-prompt', opts.appendSystemPrompt);
     }
 
-    // Prompt (must be last positional arg)
-    args.push(prompt);
+    // Prompt is passed via stdin (not positional arg)
+    // because --allowedTools is variadic and consumes all remaining args
 
     // Environment
     const spawnEnv: Record<string, string> = {
@@ -395,6 +396,10 @@ export class CliHandler {
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: process.platform === 'win32', // Use shell on Windows for PATH resolution
     });
+
+    // Write prompt to stdin and close it
+    proc.stdin!.write(prompt);
+    proc.stdin!.end();
 
     return new CliProcess(proc);
   }
