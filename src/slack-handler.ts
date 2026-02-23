@@ -1466,6 +1466,7 @@ export class SlackHandler {
   // --- Session picker ---
 
   private readonly PICKER_PAGE_SIZE = 5;
+  private readonly MAX_PICKER_SESSIONS = 15; // 3*15+5=50 blocks, Slack hard limit
 
   private buildPickerBlocks(sessions: SessionInfo[], pickerId: string, shownCount: number, locale: Locale): any[] {
     const visible = sessions.slice(0, shownCount);
@@ -1497,18 +1498,26 @@ export class SlackHandler {
       });
     });
 
-    // "Show more" button if there are more sessions
+    // "Show more" or cap-reached guidance
     if (shownCount < sessions.length) {
       blocks.push({ type: 'divider' });
-      blocks.push({
-        type: 'actions',
-        elements: [{
-          type: 'button',
-          text: { type: 'plain_text', text: t('picker.showMore', locale, { count: Math.min(this.PICKER_PAGE_SIZE, sessions.length - shownCount) }) },
-          action_id: 'picker_show_more',
-          value: JSON.stringify({ pickerId }),
-        }],
-      });
+      if (shownCount < this.MAX_PICKER_SESSIONS) {
+        blocks.push({
+          type: 'actions',
+          elements: [{
+            type: 'button',
+            text: { type: 'plain_text', text: t('picker.showMore', locale, { count: Math.min(this.PICKER_PAGE_SIZE, sessions.length - shownCount) }) },
+            action_id: 'picker_show_more',
+            value: JSON.stringify({ pickerId }),
+          }],
+        });
+      } else {
+        const remaining = sessions.length - shownCount;
+        blocks.push({
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: t('picker.moreAvailable', locale, { remaining: remaining.toString() }) }],
+        });
+      }
     }
 
     blocks.push({ type: 'divider' });
@@ -1825,9 +1834,8 @@ export class SlackHandler {
         const picker = this.pendingPickers.get(actionValue.pickerId);
         if (!picker) return;
 
-        // Expand by PICKER_PAGE_SIZE (cap at 15: 3*15+5=50 blocks, Slack hard limit)
-        const MAX_PICKER_SESSIONS = 15;
-        picker.shownCount = Math.min(picker.shownCount + this.PICKER_PAGE_SIZE, picker.sessions.length, MAX_PICKER_SESSIONS);
+        // Expand by PICKER_PAGE_SIZE (capped by MAX_PICKER_SESSIONS)
+        picker.shownCount = Math.min(picker.shownCount + this.PICKER_PAGE_SIZE, picker.sessions.length, this.MAX_PICKER_SESSIONS);
         const blocks = this.buildPickerBlocks(picker.sessions, actionValue.pickerId, picker.shownCount, picker.locale);
 
         await this.app.client.chat.update({

@@ -134,6 +134,10 @@ const messages: Record<string, Record<Locale, string>> = {
   'picker.resuming': { en: '*Resuming:* {{title}}', ko: '*재개 중:* {{title}}' },
   'picker.noTitle': { en: '(no title)', ko: '(제목 없음)' },
   'picker.showMore': { en: 'Show more ({{count}})', ko: '더보기 ({{count}})' },
+  'picker.moreAvailable': {
+    en: '_{{remaining}} more session(s) not shown. Use `-cwd <path>` to switch to the project, then `-sessions` to list and `-resume <id>` to resume._',
+    ko: '_{{remaining}}개 세션이 더 있습니다. `-cwd <경로>`로 해당 프로젝트로 이동 후 `-sessions`로 세션 ID 확인, `-resume <id>`로 재개하세요._',
+  },
 
   // --- Sessions list ---
   'sessions.title': { en: '*Recent Sessions*', ko: '*최근 세션*' },
