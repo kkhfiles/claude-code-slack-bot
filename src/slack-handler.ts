@@ -87,7 +87,8 @@ export class SlackHandler {
 
   // API key management
   private userApiKeys: Map<string, string> = new Map();
-  private apiKeyActive: Map<string, { userId: string; resetTimerId: ReturnType<typeof setTimeout> }> = new Map();
+  private userApiBudgets: Map<string, number> = new Map();
+  private apiKeyActive: Map<string, { userId: string; resetTimerId: ReturnType<typeof setTimeout>; previousBudget?: number }> = new Map();
   private readonly API_KEYS_FILE = path.join(__dirname, '..', '.api-keys.json');
 
   // Session schedule
@@ -1431,9 +1432,12 @@ export class SlackHandler {
     try {
       if (!fs.existsSync(this.API_KEYS_FILE)) return;
       const raw = fs.readFileSync(this.API_KEYS_FILE, 'utf-8');
-      const data: Record<string, { apiKey: string; savedAt: string }> = JSON.parse(raw);
+      const data: Record<string, { apiKey: string; budget?: number; savedAt: string }> = JSON.parse(raw);
       for (const [userId, entry] of Object.entries(data)) {
         this.userApiKeys.set(userId, entry.apiKey);
+        if (entry.budget && entry.budget > 0) {
+          this.userApiBudgets.set(userId, entry.budget);
+        }
       }
       this.logger.info(`Loaded ${this.userApiKeys.size} API key(s) from disk`);
     } catch (error) {
@@ -1443,9 +1447,10 @@ export class SlackHandler {
 
   private saveApiKeys(): void {
     try {
-      const data: Record<string, { apiKey: string; savedAt: string }> = {};
+      const data: Record<string, { apiKey: string; budget?: number; savedAt: string }> = {};
       for (const [userId, apiKey] of this.userApiKeys.entries()) {
-        data[userId] = { apiKey, savedAt: new Date().toISOString() };
+        const budget = this.userApiBudgets.get(userId);
+        data[userId] = { apiKey, ...(budget ? { budget } : {}), savedAt: new Date().toISOString() };
       }
       fs.writeFileSync(this.API_KEYS_FILE, JSON.stringify(data, null, 2), 'utf-8');
     } catch (error) {
@@ -1462,8 +1467,20 @@ export class SlackHandler {
     const existing = this.apiKeyActive.get(channel);
     if (existing?.resetTimerId) clearTimeout(existing.resetTimerId);
 
+    // Save current channel budget and apply user's API budget
+    const previousBudget = this.channelBudgets.get(channel);
+    const userBudget = this.userApiBudgets.get(userId) ?? 5.0;
+    this.channelBudgets.set(channel, userBudget);
+
     const resetTimerId = setTimeout(async () => {
+      const state = this.apiKeyActive.get(channel);
       this.apiKeyActive.delete(channel);
+      // Restore previous channel budget
+      if (state?.previousBudget !== undefined) {
+        this.channelBudgets.set(channel, state.previousBudget);
+      } else {
+        this.channelBudgets.delete(channel);
+      }
       try {
         await this.app.client.chat.postMessage({
           channel,
@@ -1475,7 +1492,7 @@ export class SlackHandler {
       }
     }, retryAfterSec * 1000);
 
-    this.apiKeyActive.set(channel, { userId, resetTimerId });
+    this.apiKeyActive.set(channel, { userId, resetTimerId, previousBudget });
   }
 
   private isMcpInfoCommand(text: string): boolean {
@@ -2079,11 +2096,12 @@ export class SlackHandler {
 
           // Activate API key mode for this channel
           this.activateApiKey(retryInfo.channel, retryInfo.threadTs, userId, retryAfter, actionLocale);
+          const userBudget = this.userApiBudgets.get(userId) ?? 5.0;
 
           await this.app.client.chat.postMessage({
             channel: retryInfo.channel,
             thread_ts: retryInfo.threadTs,
-            text: `🔑 ${t('apiKey.switchingToApiKey', actionLocale)}`,
+            text: `🔑 ${t('apiKey.switchingToApiKey', actionLocale)} (budget: $${userBudget.toFixed(2)})`,
           });
 
           // Retry with API key
@@ -2115,6 +2133,17 @@ export class SlackHandler {
                     placeholder: { type: 'plain_text', text: 'sk-ant-...' },
                   },
                 },
+                {
+                  type: 'input',
+                  block_id: 'budget_block',
+                  optional: true,
+                  label: { type: 'plain_text', text: t('apiKey.budgetLabel', actionLocale) },
+                  element: {
+                    type: 'plain_text_input',
+                    action_id: 'budget_input',
+                    placeholder: { type: 'plain_text', text: t('apiKey.budgetPlaceholder', actionLocale) },
+                  },
+                },
               ],
             },
           });
@@ -2131,6 +2160,7 @@ export class SlackHandler {
         const userId = (body as any).user.id;
         const actionLocale = await this.getUserLocale(userId);
         const existingKey = this.userApiKeys.get(userId);
+        const existingBudget = this.userApiBudgets.get(userId);
 
         await this.app.client.views.open({
           trigger_id: (body as any).trigger_id,
@@ -2153,6 +2183,17 @@ export class SlackHandler {
                   placeholder: { type: 'plain_text', text: existingKey ? `Already set (...${existingKey.slice(-4)})` : 'sk-ant-...' },
                 },
               },
+              {
+                type: 'input',
+                block_id: 'budget_block',
+                optional: true,
+                label: { type: 'plain_text', text: t('apiKey.budgetLabel', actionLocale) },
+                element: {
+                  type: 'plain_text_input',
+                  action_id: 'budget_input',
+                  placeholder: { type: 'plain_text', text: existingBudget ? `Current: $${existingBudget.toFixed(2)}` : t('apiKey.budgetPlaceholder', actionLocale) },
+                },
+              },
             ],
           },
         });
@@ -2171,8 +2212,14 @@ export class SlackHandler {
         const apiKey = view.state.values.apikey_block.apikey_input.value?.trim();
         if (!apiKey) return;
 
-        // Save key
+        // Parse budget (default: $5.00)
+        const budgetRaw = view.state.values.budget_block?.budget_input?.value?.trim();
+        const budgetParsed = budgetRaw ? parseFloat(budgetRaw) : 5.0;
+        const budget = (!isNaN(budgetParsed) && budgetParsed > 0) ? budgetParsed : 5.0;
+
+        // Save key and budget
         this.userApiKeys.set(userId, apiKey);
+        this.userApiBudgets.set(userId, budget);
         this.saveApiKeys();
 
         const metadata = JSON.parse(view.private_metadata || '{}');
@@ -2194,7 +2241,7 @@ export class SlackHandler {
             await this.app.client.chat.postMessage({
               channel: retryInfo.channel,
               thread_ts: retryInfo.threadTs,
-              text: `🔑 ${t('apiKey.savedAndRetrying', viewLocale)}`,
+              text: `🔑 ${t('apiKey.savedAndRetrying', viewLocale)} (budget: $${budget.toFixed(2)})`,
             });
 
             // Retry
@@ -2212,7 +2259,7 @@ export class SlackHandler {
             if (dm.channel?.id) {
               await this.app.client.chat.postMessage({
                 channel: dm.channel.id,
-                text: `✅ ${t('apiKey.saved', viewLocale)}`,
+                text: `✅ ${t('apiKey.saved', viewLocale)} (budget: $${budget.toFixed(2)})`,
               });
             }
           } catch {
