@@ -41,6 +41,10 @@ stop.bat                      # pm2 중지
 - `-r`/`-resume`: 전체 프로젝트 세션 피커 (버튼 선택 → cwd 자동 전환 + 세션 재개)
 - `-sessions all`: 전체 프로젝트 세션 목록 (세션 피커와 동일)
 - `-apikey`: API 키 등록/수정 모달 (rate limit 시 자동 전환용, `.api-keys.json` 영속화)
+- `-schedule`: 세션 자동 시작 스케줄 관리 (`ScheduleManager`, `.schedule-config.json` 영속화)
+  - `-schedule add HH:MM`: 시간 추가 + 현재 채널을 대상으로 설정
+  - `-schedule remove HH:MM / clear / channel`: 제거/초기화/채널 변경
+  - 예약 시간 도달 시 haiku 모델로 'hi' 자동 전송 → 새 Claude 세션 시작
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
   2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)
@@ -85,6 +89,8 @@ stop.bat                      # pm2 중지
 - 빈 세션 필터링: 대화 내용 없는 세션 (file-history-snapshot만)은 피커에서 제외
 - 메모리 정리: 24시간 비활성 세션 자동 정리 (5분마다 체크), 디스크 `.jsonl`은 유지
 - CLI 공존 주의: 터미널 CLI `/exit`는 JSONL을 덮어써서 Slack 작업 유실 → 세션 피커 resume 시 안내 표시
+- 세션 피커 한도: `MAX_PICKER_SESSIONS = 15` (Slack 50블록 제한, 세션당 3블록+5오버헤드)
+  - 15개 초과 시 "Show more" 대신 `-cwd` → `-sessions` → `-resume <id>` 안내 표시
 
 ### Working Directory
 - 디스크 영속화: `.working-dirs.json`
@@ -118,6 +124,7 @@ git checkout cli-migration
 | `src/slack-handler.ts` | Slack 이벤트 처리, 명령어 파싱, 메시지 포맷팅 |
 | `src/cli-handler.ts` | CLI 프로세스 스폰 (`claude -p`), 세션 관리 |
 | `src/working-directory-manager.ts` | 작업 디렉터리 설정/조회/영속화 |
+| `src/schedule-manager.ts` | 세션 자동 시작 스케줄 관리 (`.schedule-config.json` 영속화) |
 | `src/file-handler.ts` | 파일 업로드 다운로드/임베딩 |
 | `src/session-scanner.ts` | 전체 프로젝트 세션 스캔/피커 데이터 |
 | `src/messages.ts` | i18n 번역 카탈로그 (`t()` 함수, `Locale` 타입) |
