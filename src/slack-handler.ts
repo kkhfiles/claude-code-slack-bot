@@ -564,10 +564,9 @@ export class SlackHandler {
           } else {
             const content = this.extractTextFromContent(contentParts);
             if (content) {
-              // Detect rate limit text from message content
-              if (this.isRateLimitText(content)) {
-                rateLimitMessageText = content;
-              }
+              // NOTE: Do NOT check isRateLimitText on assistant text content here.
+              // It causes false positives when Claude mentions "rate limit" in normal conversation.
+              // Rate limits are reliably detected via rate_limit_event (line ~524) and result.is_error (line ~616).
               currentMessages.push(content);
               if (statusMessageTs) {
                 const newStatusText = `✍️ ${t('status.writing', locale)}`;
