@@ -1,43 +1,76 @@
 # Claude Code Slack Bot
 
-Run Claude Code on your local machine remotely from Slack and receive results in real time.
-Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot) with additional features.
+Start Claude Code tasks on your local machine from Slack — on your phone, on the go, from anywhere.
+Resume previous sessions, switch between projects, and manage everything through conversation threads.
 
-## Features
+> Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot). Uses Claude Code CLI (`claude -p`) with Socket Mode (no public URL needed). Cross-platform: Windows / macOS / Linux.
 
-- DM / channel mention / threaded conversations (automatic session continuity)
-- Streaming responses (real-time message updates)
-- File uploads (images, text, PDF, code files)
-- CLI session resume/continue (`-sessions`, `-resume`, `-continue`)
-- Mobile-friendly session picker (`resume`, `continue`, `계속`) — browse and resume recent sessions with buttons
-- Working directory management (persisted to disk, survives restarts)
-- Model selection / cost control (`-model`, `-budget`, `-cost`)
-- Plan mode (`-plan`) — review plans before execution
-- Permission modes (Default / Safe / Trust) — interactive tool approval via Slack buttons
-- Real-time progress display (current tool name + usage summary on completion)
-- Rate limit detection with scheduled retry, API key fallback, and automatic reset-time notification
-- Scheduled session auto-start (`-schedule`) — haiku model greeting at configured times
-- Automatic Korean/English UI based on Slack locale
-- MCP server integration
-- AWS Bedrock / Google Vertex AI support (optional)
+## Key Features
 
-### Fork Changes
+### Start Tasks Remotely
 
-- All commands use `-` prefix (`-cwd`, `-help`, `-sessions`, etc.)
-- CLI session resume/continue (resume sessions started outside Slack)
-- Mobile-friendly session picker across all projects (button selection, auto cwd switch)
-- Model selection, cost limits, cost inquiry
-- Plan mode: review-only plan → Execute button to proceed
-- Permission modes: Default (interactive approval) / Safe (auto-approve edits) / Trust (auto-approve all)
-- `-stop`: graceful interrupt via CLI process signal (preserves session state)
-- Real-time progress (`stream_event` for current tool name, usage summary on completion)
-- Rate limit → Slack scheduled message retry + API key fallback + automatic mention notification at reset time
-- `-schedule`: Auto-start sessions at configured times (haiku model greeting for minimal token usage)
-- `-apikey`: Register API key for automatic rate limit fallback (auto-reverts to subscription on reset)
-- i18n: Auto-detect Korean/English from Slack user locale (`users.info` API)
-- Working directory persistence (`.working-dirs.json`)
-- DM thread `-cwd` creates DM-level fallback automatically
-- pm2-based process management
+Point the bot at any directory on your local machine with `-cwd`, then send a message — Claude starts working on your codebase immediately. No SSH, no tunnels, just Slack.
+
+### Resume Any Session from Anywhere
+
+Use `-r` to browse all previous Claude Code sessions across your machine — including ones started from the terminal. Select a session, and the bot automatically switches to the correct directory and resumes where you left off. No need to remember paths or session IDs.
+
+### File Attachment Analysis
+
+Drag & drop files into Slack for Claude to analyze:
+- **Images**: JPG, PNG, GIF, WebP, SVG (multimodal analysis)
+- **Text/Code**: TXT, MD, JSON, JS, TS, PY, Java, and more (content embedded inline, up to 50MB)
+- **Documents**: PDF, DOCX (metadata-level analysis)
+
+### Permission Modes
+
+Three levels of trust, switchable at any time:
+
+| Mode | Behavior |
+|------|----------|
+| **Default** (`-default`) | Read-only tools auto-allowed. Edit/Bash/MCP → Slack button approval → auto-resume |
+| **Safe** (`-safe`) | Read + Edit auto-allowed. Bash/MCP → Slack button approval |
+| **Trust** (`-trust`) | All tools auto-approved (`--dangerously-skip-permissions`) |
+
+When a tool is denied, a Slack button appears to approve it individually or allow all — the session resumes automatically.
+
+### Plan Mode
+
+`-plan <prompt>` generates a read-only plan without modifying any files. Review it, then click **Execute** to proceed or **Cancel** to discard.
+
+### Rate Limit Handling & API Key Fallback
+
+When Claude subscription limits are reached:
+
+1. **Continue with API key** — Switch to your registered API key immediately
+2. **Schedule retry** — Slack delivers your message at the estimated reset time
+3. **Cancel** — Discard the pending message
+
+Pre-register your API key with `-apikey` so it's ready when needed. The bot automatically reverts to subscription auth when the rate limit resets. A `@mention` notification is scheduled at the reset time (auto-cancelled if you retry or cancel).
+
+### Session Auto-Start
+
+Claude Pro/Max subscriptions have daily session limits (e.g., 3 sessions × 5-hour windows). To maximize usage, schedule sessions to auto-start at optimal intervals:
+
+```
+-schedule add 6        # Start a session around 6:00 AM
+-schedule add 11       # Start a session around 11:00 AM
+-schedule add 16       # Start a session around 4:00 PM
+```
+
+**How it works:**
+- At each scheduled hour, the bot sends a minimal greeting to Claude (randomized message, randomized timing within +5~25 min of the set hour)
+- Uses `claude-haiku-4-5-20251001` model for minimal token cost
+- Schedule repeats daily, persisted in `.schedule-config.json`
+
+### Additional Features
+
+- **i18n**: Automatic Korean/English UI based on Slack user locale
+- **MCP**: Integrate MCP servers via `mcp-servers.json` (`-mcp`, `-mcp reload`)
+- **Model selection**: `-model sonnet`, `-model opus`, `-model haiku`
+- **Cost control**: `-budget 1.00` per-query limit, `-cost` to check last cost
+- **Streaming**: Real-time response updates with tool progress display
+- **Tool summary**: Completion message shows tools used (`✅ Task completed (Grep ×5, Read ×2)`)
 
 ## Prerequisites
 
@@ -52,7 +85,6 @@ Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-co
 ```bash
 git clone https://github.com/kkhfiles/claude-code-slack-bot.git
 cd claude-code-slack-bot
-git checkout cli-migration
 npm install              # macOS / Linux
 npm install --ignore-scripts  # Windows
 ```
@@ -187,7 +219,7 @@ Conversations in the same thread automatically continue the session (no command 
 | Command | Description |
 |---------|-------------|
 | `-plan <prompt>` | Read-only plan generation (no execution) |
-| `-default` | Default mode: edits, bash, MCP require approval (default) |
+| `-default` | Default mode: edits, bash, MCP require approval |
 | `-safe` | Safe mode: edits auto-approved, bash/MCP require approval |
 | `-trust` | Trust mode: all tools auto-approved |
 
@@ -198,16 +230,6 @@ Conversations in the same thread automatically continue the session (no command 
 -default                                 # Back to default mode
 ```
 
-**Plan mode flow:**
-1. `-plan <prompt>` → Claude generates a plan (no file modifications)
-2. Review the plan → click **Execute** to proceed
-3. Or click **Cancel** to discard
-
-**Permission modes:**
-- **Default**: Read-only tools auto-allowed. Edit, Write, Bash, MCP tools denied → Slack button approval → resume
-- **Safe**: Read + Edit tools auto-allowed. Bash/MCP denied → Slack button approval → resume
-- **Trust**: All tools auto-approved (`--dangerously-skip-permissions`)
-
 ### Settings
 
 | Command | Description |
@@ -217,43 +239,25 @@ Conversations in the same thread automatically continue the session (no command 
 | `-cost` | Show last query cost and session ID |
 | `-apikey` | Register API key for rate limit fallback (stored in `.api-keys.json`) |
 
-```
--model                # Show current model
--model sonnet         # Switch to sonnet (fast/cheap)
--model opus           # Switch to opus (high performance)
--budget 1.00          # Set $1.00 per-query limit
--budget off           # Remove limit
--cost                 # Show last cost
-```
-
-### Session Schedule
-
-Auto-start Claude sessions at configured times using the haiku model (minimal token usage).
-Useful for maximizing daily session windows (e.g., 3 sessions × 5 hours).
+### Session Auto-Start
 
 | Command | Description |
 |---------|-------------|
-| `-schedule` | Show current schedule (times, target channel, next fire) |
-| `-schedule add HH:MM` | Add a session start time (sets current channel as target) |
-| `-schedule remove HH:MM` | Remove a time |
-| `-schedule clear` | Clear all scheduled times |
+| `-schedule` | Show current settings (times, target channel, next fire) |
+| `-schedule add <hour>` | Add a session start hour (e.g., `-schedule add 6`) |
+| `-schedule remove <hour>` | Remove a time |
+| `-schedule clear` | Clear all session start times |
 | `-schedule channel` | Update target channel to current channel |
 
 ```
--schedule add 06:10     # Add 06:10 — starts a session with "hi" via haiku
--schedule add 11:10     # Add 11:10
--schedule add 16:10     # Add 16:10
--schedule               # Show schedule status
--schedule remove 11:10  # Remove 11:10
+-schedule add 6         # Add 6:00 AM
+-schedule add 11        # Add 11:00 AM
+-schedule add 16        # Add 4:00 PM
+-schedule               # Show status
+-schedule remove 11     # Remove 11:00 AM
 -schedule clear         # Clear all
 -schedule channel       # Change target to this channel
 ```
-
-**How it works:**
-1. At each scheduled time, the bot posts a greeting message in the target channel
-2. Sends "hi" to Claude using the `claude-haiku-4-5-20251001` model
-3. Claude responds, starting a new session in that thread
-4. Schedule repeats daily (persisted in `.schedule-config.json`)
 
 ### MCP Servers
 
@@ -267,13 +271,7 @@ Configure via `mcp-servers.json`:
 cp mcp-servers.example.json mcp-servers.json
 ```
 
-### Other
-
-| Command | Description |
-|---------|-------------|
-| `help` or `-help` | Show full command list |
-
-### Conversations
+### Conversations & File Uploads
 
 ```
 # Direct message
@@ -284,29 +282,9 @@ Explain the structure of this project
 
 # Continue in thread (automatic session continuity)
 Check for dependency conflicts
+
+# Attach files: drag & drop images, code, or text files
 ```
-
-### File Uploads
-
-Drag & drop or attach files for analysis:
-
-- **Images**: JPG, PNG, GIF, WebP, SVG
-- **Text**: TXT, MD, JSON, JS, TS, PY, Java, etc.
-- **Documents**: PDF, DOCX (limited)
-- **Code**: Most programming languages
-
-### Rate Limit Handling
-
-When Claude usage limits are reached, the bot offers three options:
-
-1. **Continue with API key** — Switch to your registered API key immediately (`-apikey` to register)
-2. **Schedule retry** — Slack delivers your message at the estimated reset time
-3. **Cancel** — Discard the pending message
-
-**Automatic behavior:**
-- `@mention` notification is scheduled at the reset time (auto-cancelled if you retry or cancel)
-- When using API key mode, the bot automatically reverts to subscription auth when the rate limit resets
-- Pre-register your API key with `-apikey` so it's ready when needed
 
 ## Multi-User Setup
 
@@ -340,7 +318,7 @@ src/
 ├── config.ts                    # Environment variables and config
 ├── types.ts                     # TypeScript type definitions
 ├── cli-handler.ts               # Claude CLI process management (stream-json)
-├── slack-handler.ts             # Slack event handling
+├── slack-handler.ts             # Slack event handling, command parsing
 ├── working-directory-manager.ts # Working directory management (persistence)
 ├── schedule-manager.ts          # Session auto-start scheduler
 ├── file-handler.ts              # File upload handling
@@ -372,9 +350,6 @@ npm install --ignore-scripts
 ```bash
 git fetch upstream
 git checkout main && git merge upstream/main
-git checkout cli-migration && git merge main
-npm install --ignore-scripts
-npm run build
 ```
 
 ## License

@@ -10,14 +10,34 @@ interface ScheduleConfig {
 
 /**
  * Manages scheduled session start times.
- * At each scheduled time, fires a callback to send a "hi" greeting to Claude
- * using the haiku model, starting a new 5-hour session window.
+ * At each scheduled time (with random jitter), fires a callback to start
+ * a new Claude session using the haiku model with a randomized greeting.
  */
 export class ScheduleManager {
   private config: ScheduleConfig | null = null;
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly configFile: string;
   private logger = new Logger('ScheduleManager');
+
+  // Jitter range: actual fire time = scheduled time + random(5~25 min)
+  private static readonly MIN_JITTER_MS = 5 * 60 * 1000;
+  private static readonly MAX_JITTER_MS = 25 * 60 * 1000;
+
+  private static readonly SAY_WORDS: string[] = [
+    'hi', 'ok', 'hey', 'yo', 'go', 'yes', 'hm', 'ah', 'sup', 'wow',
+  ];
+
+  /** Pick a random greeting: 50% say "word", 50% random addition */
+  static getRandomGreeting(): string {
+    if (Math.random() < 0.5) {
+      const words = ScheduleManager.SAY_WORDS;
+      return `say "${words[Math.floor(Math.random() * words.length)]}"`;
+    } else {
+      const a = Math.floor(Math.random() * 9) + 1;
+      const b = Math.floor(Math.random() * 9) + 1;
+      return `${a}+${b}`;
+    }
+  }
 
   constructor() {
     this.configFile = path.join(__dirname, '..', '.schedule-config.json');
@@ -98,6 +118,13 @@ export class ScheduleManager {
   }
 
   normalizeTime(time: string): string | null {
+    // Accept hour-only ("6", "16") or HH:MM ("6:00", "16:30")
+    const hourOnly = time.match(/^(\d{1,2})$/);
+    if (hourOnly) {
+      const h = parseInt(hourOnly[1], 10);
+      if (h < 0 || h > 23) return null;
+      return `${h.toString().padStart(2, '0')}:00`;
+    }
     const match = time.match(/^(\d{1,2}):(\d{2})$/);
     if (!match) return null;
     const h = parseInt(match[1], 10);
@@ -133,11 +160,21 @@ export class ScheduleManager {
     callback: (channel: string, userId: string, time: string) => void,
   ): void {
     const nextFire = this.getNextFireTime(time);
-    const msUntil = nextFire.getTime() - Date.now();
-    this.logger.info(`Scheduled session start`, { time, nextFire: nextFire.toISOString() });
+    const baseMs = nextFire.getTime() - Date.now();
+    const jitterMs = Math.floor(
+      ScheduleManager.MIN_JITTER_MS + Math.random() * (ScheduleManager.MAX_JITTER_MS - ScheduleManager.MIN_JITTER_MS),
+    );
+    const msUntil = baseMs + jitterMs;
+    const actualFireTime = new Date(Date.now() + msUntil);
+    this.logger.info(`Scheduled session start`, {
+      time,
+      nextFire: nextFire.toISOString(),
+      jitterMin: Math.round(jitterMs / 60000),
+      actualFireTime: actualFireTime.toISOString(),
+    });
 
     const timer = setTimeout(() => {
-      this.logger.info(`Firing scheduled session start: ${time}`);
+      this.logger.info(`Firing scheduled session start: ${time} (actual: ${new Date().toISOString()})`);
       try {
         callback(channel, userId, time);
       } catch (error) {
