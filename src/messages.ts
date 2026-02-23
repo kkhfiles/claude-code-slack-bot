@@ -171,6 +171,8 @@ const messages: Record<string, Record<Locale, string>> = {
   'apiKey.modalClose': { en: 'Cancel', ko: '취소' },
   'apiKey.modalBody': { en: 'Enter your Anthropic API key. It will be stored locally and used when the subscription rate limit is reached.', ko: 'Anthropic API 키를 입력하세요. 로컬에 저장되며 구독 rate limit 초과 시 사용됩니다.' },
   'apiKey.modalLabel': { en: 'API Key', ko: 'API 키' },
+  'apiKey.budgetLabel': { en: 'Max budget per query (USD)', ko: '쿼리당 최대 예산 (USD)' },
+  'apiKey.budgetPlaceholder': { en: 'Default: 5.00', ko: '기본값: 5.00' },
   'apiKey.saved': { en: 'API key saved.', ko: 'API 키가 저장되었습니다.' },
   'apiKey.savedAndRetrying': { en: 'API key saved. Retrying with API key...', ko: 'API 키 저장됨. API 키로 재시도 중...' },
   'apiKey.switchingToApiKey': { en: 'Switching to API key. Retrying...', ko: 'API 키로 전환합니다. 재시도 중...' },
