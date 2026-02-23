@@ -15,7 +15,8 @@ Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-co
 - Plan mode (`-plan`) — review plans before execution
 - Permission modes (Default / Safe / Trust) — interactive tool approval via Slack buttons
 - Real-time progress display (current tool name + usage summary on completion)
-- Rate limit detection with scheduled retry and automatic reset-time mention notification
+- Rate limit detection with scheduled retry, API key fallback, and automatic reset-time notification
+- Scheduled session auto-start (`-schedule`) — haiku model greeting at configured times
 - Automatic Korean/English UI based on Slack locale
 - MCP server integration
 - AWS Bedrock / Google Vertex AI support (optional)
@@ -30,7 +31,9 @@ Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-co
 - Permission modes: Default (interactive approval) / Safe (auto-approve edits) / Trust (auto-approve all)
 - `-stop`: graceful interrupt via CLI process signal (preserves session state)
 - Real-time progress (`stream_event` for current tool name, usage summary on completion)
-- Rate limit → Slack scheduled message retry + automatic mention notification at reset time
+- Rate limit → Slack scheduled message retry + API key fallback + automatic mention notification at reset time
+- `-schedule`: Auto-start sessions at configured times (haiku model greeting for minimal token usage)
+- `-apikey`: Register API key for automatic rate limit fallback (auto-reverts to subscription on reset)
 - i18n: Auto-detect Korean/English from Slack user locale (`users.info` API)
 - Working directory persistence (`.working-dirs.json`)
 - DM thread `-cwd` creates DM-level fallback automatically
@@ -223,6 +226,35 @@ Conversations in the same thread automatically continue the session (no command 
 -cost                 # Show last cost
 ```
 
+### Session Schedule
+
+Auto-start Claude sessions at configured times using the haiku model (minimal token usage).
+Useful for maximizing daily session windows (e.g., 3 sessions × 5 hours).
+
+| Command | Description |
+|---------|-------------|
+| `-schedule` | Show current schedule (times, target channel, next fire) |
+| `-schedule add HH:MM` | Add a session start time (sets current channel as target) |
+| `-schedule remove HH:MM` | Remove a time |
+| `-schedule clear` | Clear all scheduled times |
+| `-schedule channel` | Update target channel to current channel |
+
+```
+-schedule add 06:10     # Add 06:10 — starts a session with "hi" via haiku
+-schedule add 11:10     # Add 11:10
+-schedule add 16:10     # Add 16:10
+-schedule               # Show schedule status
+-schedule remove 11:10  # Remove 11:10
+-schedule clear         # Clear all
+-schedule channel       # Change target to this channel
+```
+
+**How it works:**
+1. At each scheduled time, the bot posts a greeting message in the target channel
+2. Sends "hi" to Claude using the `claude-haiku-4-5-20251001` model
+3. Claude responds, starting a new session in that thread
+4. Schedule repeats daily (persisted in `.schedule-config.json`)
+
 ### MCP Servers
 
 | Command | Description |
@@ -263,14 +295,18 @@ Drag & drop or attach files for analysis:
 - **Documents**: PDF, DOCX (limited)
 - **Code**: Most programming languages
 
-### Rate Limit Retry
+### Rate Limit Handling
 
-When Claude usage limits are reached, the bot automatically detects and offers retry via Slack scheduled messages:
+When Claude usage limits are reached, the bot offers three options:
 
-1. Rate limit error → shows estimated wait time
-2. Automatic `@mention` notification scheduled at reset time
-3. Click "Schedule" → Slack delivers message at the specified time (mention notification auto-cancelled)
-4. Bot receives the scheduled message and auto-executes
+1. **Continue with API key** — Switch to your registered API key immediately (`-apikey` to register)
+2. **Schedule retry** — Slack delivers your message at the estimated reset time
+3. **Cancel** — Discard the pending message
+
+**Automatic behavior:**
+- `@mention` notification is scheduled at the reset time (auto-cancelled if you retry or cancel)
+- When using API key mode, the bot automatically reverts to subscription auth when the rate limit resets
+- Pre-register your API key with `-apikey` so it's ready when needed
 
 ## Multi-User Setup
 
@@ -306,6 +342,7 @@ src/
 ├── cli-handler.ts               # Claude CLI process management (stream-json)
 ├── slack-handler.ts             # Slack event handling
 ├── working-directory-manager.ts # Working directory management (persistence)
+├── schedule-manager.ts          # Session auto-start scheduler
 ├── file-handler.ts              # File upload handling
 ├── session-scanner.ts           # Cross-project session scanning
 ├── messages.ts                  # i18n translation catalog (ko/en)
