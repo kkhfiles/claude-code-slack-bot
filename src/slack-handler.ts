@@ -10,6 +10,7 @@ import { FileHandler, ProcessedFile } from './file-handler';
 import { TodoManager, Todo } from './todo-manager';
 import { McpManager } from './mcp-manager';
 import { SessionScanner, SessionInfo, formatRelativeTime } from './session-scanner';
+import { ScheduleManager } from './schedule-manager';
 import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 
@@ -88,6 +89,9 @@ export class SlackHandler {
   private userApiKeys: Map<string, string> = new Map();
   private apiKeyActive: Map<string, { userId: string; resetTimerId: ReturnType<typeof setTimeout> }> = new Map();
   private readonly API_KEYS_FILE = path.join(__dirname, '..', '.api-keys.json');
+
+  // Session schedule
+  private scheduleManager = new ScheduleManager();
 
   constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager) {
     this.app = app;
@@ -199,6 +203,15 @@ export class SlackHandler {
         ],
       });
       return;
+    }
+
+    // Schedule command
+    if (text) {
+      const scheduleParsed = this.parseScheduleCommand(text);
+      if (scheduleParsed) {
+        await this.handleScheduleCommand(scheduleParsed, channel, thread_ts || ts, user, locale, say);
+        return;
+      }
     }
 
     // Stop command (interrupt running CLI process)
@@ -1218,6 +1231,144 @@ export class SlackHandler {
     return null;
   }
 
+  // --- Schedule command ---
+
+  private parseScheduleCommand(text: string): { action: string; time?: string } | null {
+    const trimmed = text.trim();
+    if (/^`?-schedule`?$/i.test(trimmed)) return { action: 'status' };
+    const addMatch = trimmed.match(/^`?-schedule`?\s+add\s+(\d{1,2}:\d{2})`?$/i);
+    if (addMatch) return { action: 'add', time: addMatch[1] };
+    const rmMatch = trimmed.match(/^`?-schedule`?\s+(?:remove|rm|del|delete)\s+(\d{1,2}:\d{2})`?$/i);
+    if (rmMatch) return { action: 'remove', time: rmMatch[1] };
+    if (/^`?-schedule`?\s+clear`?$/i.test(trimmed)) return { action: 'clear' };
+    if (/^`?-schedule`?\s+channel`?$/i.test(trimmed)) return { action: 'channel' };
+    return null;
+  }
+
+  private async handleScheduleCommand(
+    parsed: { action: string; time?: string },
+    channel: string,
+    threadTs: string,
+    userId: string,
+    locale: Locale,
+    say: any,
+  ): Promise<void> {
+    const { action, time } = parsed;
+
+    if (action === 'status') {
+      const cfg = this.scheduleManager.getConfig();
+      if (!cfg || cfg.times.length === 0) {
+        await say({ text: `📅 ${t('schedule.noConfig', locale)}`, thread_ts: threadTs });
+        return;
+      }
+      const nextFires = this.scheduleManager.getNextFireTimes();
+      const timesStr = cfg.times.join(', ');
+      let msg = `📅 ${t('schedule.status.header', locale)}\n`;
+      msg += `• ${t('schedule.status.channel', locale, { channel: cfg.channel })}\n`;
+      msg += `• ${t('schedule.status.times', locale, { times: timesStr })}\n`;
+      const soonest = nextFires.reduce((a, b) => a.nextFire < b.nextFire ? a : b);
+      const minsUntil = Math.round((soonest.nextFire.getTime() - Date.now()) / 60000);
+      msg += `• ${t('schedule.status.next', locale, { time: soonest.time, minutes: minsUntil.toString() })}`;
+      await say({ text: msg, thread_ts: threadTs });
+      return;
+    }
+
+    if (action === 'add') {
+      const normalized = this.scheduleManager.addTime(time!, channel, userId);
+      if (!normalized) {
+        await say({ text: `❌ ${t('schedule.invalidTime', locale)}`, thread_ts: threadTs });
+        return;
+      }
+      this.restartScheduler();
+      await say({ text: `${t('schedule.added', locale, { time: normalized, channel })}`, thread_ts: threadTs });
+      return;
+    }
+
+    if (action === 'remove') {
+      const validTime = this.scheduleManager.normalizeTime(time!);
+      if (!validTime) {
+        await say({ text: `❌ ${t('schedule.invalidTime', locale)}`, thread_ts: threadTs });
+        return;
+      }
+      const removed = this.scheduleManager.removeTime(validTime);
+      if (!removed) {
+        await say({ text: `⚠️ ${t('schedule.notFound', locale, { time: validTime })}`, thread_ts: threadTs });
+        return;
+      }
+      this.restartScheduler();
+      await say({ text: `${t('schedule.removed', locale, { time: removed })}`, thread_ts: threadTs });
+      return;
+    }
+
+    if (action === 'clear') {
+      this.scheduleManager.clearTimes();
+      await say({ text: `${t('schedule.cleared', locale)}`, thread_ts: threadTs });
+      return;
+    }
+
+    if (action === 'channel') {
+      const updated = this.scheduleManager.updateChannel(channel, userId);
+      if (!updated) {
+        await say({ text: `⚠️ ${t('schedule.noConfigForChannel', locale)}`, thread_ts: threadTs });
+        return;
+      }
+      this.restartScheduler();
+      await say({ text: `${t('schedule.channelUpdated', locale, { channel })}`, thread_ts: threadTs });
+    }
+  }
+
+  private restartScheduler(): void {
+    this.scheduleManager.scheduleAll((ch, uid, time) => {
+      this.runScheduledGreeting(ch, uid, time).catch(err =>
+        this.logger.error('Scheduled greeting failed', err),
+      );
+    });
+  }
+
+  private async runScheduledGreeting(channel: string, userId: string, time: string): Promise<void> {
+    const locale = await this.getUserLocale(userId).catch(() => 'ko' as Locale);
+
+    // Post session start notification as top-level message
+    const postResult = await this.app.client.chat.postMessage({
+      channel,
+      text: `🌅 ${t('schedule.sessionStart', locale)} (${time})`,
+    });
+
+    if (!postResult.ok || !postResult.ts) {
+      this.logger.error('Failed to post scheduled greeting message');
+      return;
+    }
+
+    const ts = postResult.ts as string;
+
+    // Suppress thread hint for automated messages
+    this.hintShownThreads.add(`${channel}:${ts}`);
+
+    // Create say callback for this thread
+    const say = async (args: any) => {
+      if (typeof args === 'string') {
+        return this.app.client.chat.postMessage({ channel, thread_ts: ts, text: args });
+      }
+      return this.app.client.chat.postMessage({ channel, ...args });
+    };
+
+    // Build synthetic event
+    const event: MessageEvent = { user: userId, channel, ts, text: 'hi' };
+
+    // Force haiku model for minimal token usage, restore after
+    const prevModel = this.channelModels.get(channel);
+    this.channelModels.set(channel, 'claude-haiku-4-5-20251001');
+    try {
+      await this.handleMessage(event, say);
+    } finally {
+      if (prevModel !== undefined) {
+        this.channelModels.set(channel, prevModel);
+      } else {
+        this.channelModels.delete(channel);
+      }
+    }
+  }
+
   private isRateLimitError(error: any): boolean {
     const msg = error?.message || '';
     return this.isRateLimitText(msg);
@@ -1544,6 +1695,9 @@ export class SlackHandler {
         await this.handleChannelJoin(event.channel, say);
       }
     });
+
+    // Start session scheduler
+    this.restartScheduler();
 
     // --- Interactive button handlers ---
 
