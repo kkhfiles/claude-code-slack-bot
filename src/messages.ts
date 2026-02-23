@@ -193,8 +193,6 @@ const messages: Record<string, Record<Locale, string>> = {
   'schedule.notFound': { en: '`{{time}}` not found.', ko: '`{{time}}`이 설정에 없습니다.' },
   'schedule.cleared': { en: '✅ All session start times cleared.', ko: '✅ 모든 세션 시작 시간이 초기화되었습니다.' },
   'schedule.invalidTime': { en: 'Invalid time. Use an hour (e.g., `6`, `16`).', ko: '잘못된 시간. 시(hour)를 입력하세요 (예: `6`, `16`).' },
-  'schedule.channelUpdated': { en: '✅ Target channel updated to <#{{channel}}>.', ko: '✅ 대상 채널이 <#{{channel}}>으로 변경되었습니다.' },
-  'schedule.noConfigForChannel': { en: 'No session start configured. Add a time first with `-schedule add <hour>`.', ko: '설정된 세션 시작이 없습니다. `-schedule add <시간>`으로 먼저 추가하세요.' },
 
   // --- Error ---
   'error.generic': { en: 'Error: {{message}}', ko: '오류: {{message}}' },
@@ -330,7 +328,8 @@ export function getHelpText(locale: Locale): string {
     help += `\`-schedule add <시간>\` — 세션 시작 시간 추가 (예: \`-schedule add 6\`)\n`;
     help += `\`-schedule remove <시간>\` — 시간 제거\n`;
     help += `\`-schedule clear\` — 전체 초기화\n`;
-    help += `\`-schedule channel\` — 현재 채널을 대상으로 업데이트\n\n`;
+
+
     help += `*팁*\n`;
     help += `• 같은 쓰레드 = 세션 자동 연속 (명령어 불필요)\n`;
     help += `• 파일 드래그 앤 드롭으로 업로드 및 분석\n`;
@@ -369,7 +368,8 @@ export function getHelpText(locale: Locale): string {
   help += `\`-schedule add <hour>\` — Add session start time (e.g., \`-schedule add 6\`)\n`;
   help += `\`-schedule remove <hour>\` — Remove a time\n`;
   help += `\`-schedule clear\` — Clear all scheduled times\n`;
-  help += `\`-schedule channel\` — Set current channel as target\n\n`;
+
+
   help += `*Tips*\n`;
   help += `• Same thread = session auto-continues (no command needed)\n`;
   help += `• Drag & drop files to upload and analyze\n`;

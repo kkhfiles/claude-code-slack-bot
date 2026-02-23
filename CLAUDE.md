@@ -43,7 +43,7 @@ stop.bat                      # pm2 중지
 - `-apikey`: API 키 등록/수정 모달 (rate limit 시 자동 전환용, `.api-keys.json` 영속화)
 - `-schedule`: 세션 자동 시작 설정 관리 (`ScheduleManager`, `.schedule-config.json` 영속화)
   - `-schedule add <hour>`: 시간 추가 (시 단위, 예: `6`, `11`, `16`) + 현재 채널을 대상으로 설정
-  - `-schedule remove <hour> / clear / channel`: 제거/초기화/채널 변경
+  - `-schedule remove <hour> / clear`: 제거/초기화
   - 예약 시간 +5~25분 랜덤 지터로 자동화 감지 방지
   - 랜덤 인사 메시지 (`say "hi"`, `3+7` 등) + haiku 모델로 새 세션 시작
 - 새 명령어 추가 시:

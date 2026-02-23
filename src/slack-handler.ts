@@ -1240,7 +1240,6 @@ export class SlackHandler {
     const rmMatch = trimmed.match(/^`?-schedule`?\s+(?:remove|rm|del|delete)\s+(\d{1,2}(?::\d{2})?)`?$/i);
     if (rmMatch) return { action: 'remove', time: rmMatch[1] };
     if (/^`?-schedule`?\s+clear`?$/i.test(trimmed)) return { action: 'clear' };
-    if (/^`?-schedule`?\s+channel`?$/i.test(trimmed)) return { action: 'channel' };
     return null;
   }
 
@@ -1315,15 +1314,6 @@ export class SlackHandler {
       return;
     }
 
-    if (action === 'channel') {
-      const updated = this.scheduleManager.updateChannel(channel, userId);
-      if (!updated) {
-        await say({ text: `⚠️ ${t('schedule.noConfigForChannel', locale)}`, thread_ts: threadTs });
-        return;
-      }
-      this.restartScheduler();
-      await say({ text: `${t('schedule.channelUpdated', locale, { channel })}`, thread_ts: threadTs });
-    }
   }
 
   private restartScheduler(): void {
@@ -1376,6 +1366,28 @@ export class SlackHandler {
         this.channelModels.set(channel, prevModel);
       } else {
         this.channelModels.delete(channel);
+      }
+    }
+  }
+
+  /**
+   * Cancel all pending scheduled messages created by this bot.
+   * Prevents orphaned rate limit notifications from firing after pm2 restart.
+   */
+  private async cancelOrphanedScheduledMessages(): Promise<void> {
+    const result = await this.app.client.chat.scheduledMessages.list({});
+    const messages = (result as any).scheduled_messages;
+    if (!messages || messages.length === 0) return;
+    this.logger.info(`Found ${messages.length} orphaned scheduled message(s), cancelling`);
+    for (const msg of messages) {
+      try {
+        await this.app.client.chat.deleteScheduledMessage({
+          channel: msg.channel_id,
+          scheduled_message_id: msg.id,
+        });
+        this.logger.debug('Cancelled orphaned scheduled message', { id: msg.id, channel: msg.channel_id });
+      } catch (err) {
+        this.logger.warn('Failed to cancel scheduled message', { id: msg.id, error: err });
       }
     }
   }
@@ -1715,6 +1727,11 @@ export class SlackHandler {
         await this.handleChannelJoin(event.channel, say);
       }
     });
+
+    // Cancel any orphaned scheduled notifications from previous runs
+    this.cancelOrphanedScheduledMessages().catch(err =>
+      this.logger.warn('Failed to cancel orphaned scheduled messages', err),
+    );
 
     // Start session scheduler
     this.restartScheduler();

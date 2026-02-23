@@ -247,7 +247,6 @@ Conversations in the same thread automatically continue the session (no command 
 | `-schedule add <hour>` | Add a session start hour (e.g., `-schedule add 6`) |
 | `-schedule remove <hour>` | Remove a time |
 | `-schedule clear` | Clear all session start times |
-| `-schedule channel` | Update target channel to current channel |
 
 ```
 -schedule add 6         # Add 6:00 AM
@@ -256,7 +255,6 @@ Conversations in the same thread automatically continue the session (no command 
 -schedule               # Show status
 -schedule remove 11     # Remove 11:00 AM
 -schedule clear         # Clear all
--schedule channel       # Change target to this channel
 ```
 
 ### MCP Servers
