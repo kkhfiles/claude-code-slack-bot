@@ -1267,19 +1267,29 @@ export class SlackHandler {
       msg += `• ${t('schedule.status.times', locale, { times: timesStr })}\n`;
       const soonest = nextFires.reduce((a, b) => a.nextFire < b.nextFire ? a : b);
       const minsUntil = Math.round((soonest.nextFire.getTime() - Date.now()) / 60000);
-      msg += `• ${t('schedule.status.next', locale, { time: soonest.time, minutes: minsUntil.toString() })}`;
+      msg += `• ${t('schedule.status.next', locale, { time: soonest.time, minutes: minsUntil.toString() })}\n`;
+      msg += t('schedule.status.hint', locale);
       await say({ text: msg, thread_ts: threadTs });
       return;
     }
 
     if (action === 'add') {
+      // Check for session window conflict before adding
+      const conflict = this.scheduleManager.findConflictingTime(time!);
+      if (conflict) {
+        const normalized = this.scheduleManager.normalizeTime(time!) || time!;
+        const existingHour = conflict.split(':')[0];
+        await say({ text: `❌ ${t('schedule.conflictWithExisting', locale, { time: normalized, existing: conflict, existingHour })}`, thread_ts: threadTs });
+        return;
+      }
       const normalized = this.scheduleManager.addTime(time!, channel, userId);
       if (!normalized) {
         await say({ text: `❌ ${t('schedule.invalidTime', locale)}`, thread_ts: threadTs });
         return;
       }
       this.restartScheduler();
-      await say({ text: `${t('schedule.added', locale, { time: normalized, channel })}`, thread_ts: threadTs });
+      const hour = normalized.split(':')[0];
+      await say({ text: `${t('schedule.added', locale, { time: normalized, hour, channel })}`, thread_ts: threadTs });
       return;
     }
 
