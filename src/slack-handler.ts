@@ -1235,9 +1235,9 @@ export class SlackHandler {
   private parseScheduleCommand(text: string): { action: string; time?: string } | null {
     const trimmed = text.trim();
     if (/^`?-schedule`?$/i.test(trimmed)) return { action: 'status' };
-    const addMatch = trimmed.match(/^`?-schedule`?\s+add\s+(\d{1,2}:\d{2})`?$/i);
+    const addMatch = trimmed.match(/^`?-schedule`?\s+add\s+(\d{1,2}(?::\d{2})?)`?$/i);
     if (addMatch) return { action: 'add', time: addMatch[1] };
-    const rmMatch = trimmed.match(/^`?-schedule`?\s+(?:remove|rm|del|delete)\s+(\d{1,2}:\d{2})`?$/i);
+    const rmMatch = trimmed.match(/^`?-schedule`?\s+(?:remove|rm|del|delete)\s+(\d{1,2}(?::\d{2})?)`?$/i);
     if (rmMatch) return { action: 'remove', time: rmMatch[1] };
     if (/^`?-schedule`?\s+clear`?$/i.test(trimmed)) return { action: 'clear' };
     if (/^`?-schedule`?\s+channel`?$/i.test(trimmed)) return { action: 'channel' };
@@ -1351,8 +1351,10 @@ export class SlackHandler {
       return this.app.client.chat.postMessage({ channel, ...args });
     };
 
-    // Build synthetic event
-    const event: MessageEvent = { user: userId, channel, ts, text: 'hi' };
+    // Build synthetic event with randomized greeting
+    const greeting = ScheduleManager.getRandomGreeting();
+    this.logger.debug('Scheduled greeting message', { time, greeting });
+    const event: MessageEvent = { user: userId, channel, ts, text: greeting };
 
     // Force haiku model for minimal token usage, restore after
     const prevModel = this.channelModels.get(channel);

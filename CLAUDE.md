@@ -41,10 +41,11 @@ stop.bat                      # pm2 중지
 - `-r`/`-resume`: 전체 프로젝트 세션 피커 (버튼 선택 → cwd 자동 전환 + 세션 재개)
 - `-sessions all`: 전체 프로젝트 세션 목록 (세션 피커와 동일)
 - `-apikey`: API 키 등록/수정 모달 (rate limit 시 자동 전환용, `.api-keys.json` 영속화)
-- `-schedule`: 세션 자동 시작 스케줄 관리 (`ScheduleManager`, `.schedule-config.json` 영속화)
-  - `-schedule add HH:MM`: 시간 추가 + 현재 채널을 대상으로 설정
-  - `-schedule remove HH:MM / clear / channel`: 제거/초기화/채널 변경
-  - 예약 시간 도달 시 haiku 모델로 'hi' 자동 전송 → 새 Claude 세션 시작
+- `-schedule`: 세션 자동 시작 설정 관리 (`ScheduleManager`, `.schedule-config.json` 영속화)
+  - `-schedule add <hour>`: 시간 추가 (시 단위, 예: `6`, `11`, `16`) + 현재 채널을 대상으로 설정
+  - `-schedule remove <hour> / clear / channel`: 제거/초기화/채널 변경
+  - 예약 시간 +5~25분 랜덤 지터로 자동화 감지 방지
+  - 랜덤 인사 메시지 (`say "hi"`, `3+7` 등) + haiku 모델로 새 세션 시작
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
   2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)

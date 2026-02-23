@@ -179,20 +179,20 @@ const messages: Record<string, Record<Locale, string>> = {
 
   // --- Schedule ---
   'schedule.sessionStart': { en: '🌅 Starting new Claude session...', ko: '🌅 새 Claude 세션을 시작합니다...' },
-  'schedule.noConfig': { en: 'No session schedule configured. Use `-schedule add HH:MM` to add a time.', ko: '설정된 세션 스케줄이 없습니다. `-schedule add HH:MM`으로 시간을 추가하세요.' },
-  'schedule.status.header': { en: '*Session Schedule*', ko: '*세션 자동 시작 스케줄*' },
+  'schedule.noConfig': { en: 'No session schedule configured. Use `-schedule add <hour>` to add a time (e.g., `-schedule add 6`).', ko: '설정된 세션 시작 시간이 없습니다. `-schedule add <시간>`으로 추가하세요 (예: `-schedule add 6`).' },
+  'schedule.status.header': { en: '*Session Auto-Start*', ko: '*세션 자동 시작*' },
   'schedule.status.channel': { en: 'Target: <#{{channel}}>', ko: '대상 채널: <#{{channel}}>' },
   'schedule.status.times': { en: 'Times: {{times}}', ko: '예약 시간: {{times}}' },
   'schedule.status.next': { en: 'Next: `{{time}}` ({{minutes}} min)', ko: '다음 실행: `{{time}}` ({{minutes}}분 후)' },
   'schedule.status.noTimes': { en: 'No times set.', ko: '설정된 시간 없음.' },
   'schedule.added': { en: '✅ Added `{{time}}`. Target: <#{{channel}}>', ko: '✅ `{{time}}` 추가됨. 대상: <#{{channel}}>' },
-  'schedule.alreadyExists': { en: '`{{time}}` is already in the schedule.', ko: '`{{time}}`은 이미 스케줄에 있습니다.' },
+  'schedule.alreadyExists': { en: '`{{time}}` is already configured.', ko: '`{{time}}`은 이미 설정되어 있습니다.' },
   'schedule.removed': { en: '✅ Removed `{{time}}`.', ko: '✅ `{{time}}` 제거됨.' },
-  'schedule.notFound': { en: '`{{time}}` not found in schedule.', ko: '`{{time}}`이 스케줄에 없습니다.' },
-  'schedule.cleared': { en: '✅ All scheduled times cleared.', ko: '✅ 모든 스케줄이 초기화되었습니다.' },
-  'schedule.invalidTime': { en: 'Invalid time format. Use `HH:MM` (e.g., `06:10`).', ko: '잘못된 시간 형식. `HH:MM` 형식을 사용하세요 (예: `06:10`).' },
-  'schedule.channelUpdated': { en: '✅ Target channel updated to <#{{channel}}>.', ko: '✅ 대상 채널이 <#{{channel}}>으로 업데이트되었습니다.' },
-  'schedule.noConfigForChannel': { en: 'No schedule configured. Add a time first with `-schedule add HH:MM`.', ko: '스케줄이 없습니다. 먼저 `-schedule add HH:MM`으로 시간을 추가하세요.' },
+  'schedule.notFound': { en: '`{{time}}` not found.', ko: '`{{time}}`이 설정에 없습니다.' },
+  'schedule.cleared': { en: '✅ All session start times cleared.', ko: '✅ 모든 세션 시작 시간이 초기화되었습니다.' },
+  'schedule.invalidTime': { en: 'Invalid time. Use an hour (e.g., `6`, `16`).', ko: '잘못된 시간. 시(hour)를 입력하세요 (예: `6`, `16`).' },
+  'schedule.channelUpdated': { en: '✅ Target channel updated to <#{{channel}}>.', ko: '✅ 대상 채널이 <#{{channel}}>으로 변경되었습니다.' },
+  'schedule.noConfigForChannel': { en: 'No session start configured. Add a time first with `-schedule add <hour>`.', ko: '설정된 세션 시작이 없습니다. `-schedule add <시간>`으로 먼저 추가하세요.' },
 
   // --- Error ---
   'error.generic': { en: 'Error: {{message}}', ko: '오류: {{message}}' },
@@ -324,9 +324,9 @@ export function getHelpText(locale: Locale): string {
     help += `\`-mcp\` — MCP 서버 상태 표시\n`;
     help += `\`-mcp reload\` — MCP 설정 리로드\n`;
     help += `\`-apikey\` — API 키 등록/수정 (rate limit 시 자동 전환용)\n`;
-    help += `\`-schedule\` — 세션 자동 시작 스케줄 조회\n`;
-    help += `\`-schedule add HH:MM\` — 세션 시작 시간 추가 (haiku 모델로 자동 시작)\n`;
-    help += `\`-schedule remove HH:MM\` — 시간 제거\n`;
+    help += `\`-schedule\` — 세션 자동 시작 설정 조회\n`;
+    help += `\`-schedule add <시간>\` — 세션 시작 시간 추가 (예: \`-schedule add 6\`)\n`;
+    help += `\`-schedule remove <시간>\` — 시간 제거\n`;
     help += `\`-schedule clear\` — 전체 초기화\n`;
     help += `\`-schedule channel\` — 현재 채널을 대상으로 업데이트\n\n`;
     help += `*팁*\n`;
@@ -363,9 +363,9 @@ export function getHelpText(locale: Locale): string {
   help += `\`-mcp\` — Show MCP server status\n`;
   help += `\`-mcp reload\` — Reload MCP configuration\n`;
   help += `\`-apikey\` — Register/update API key (auto-switch on rate limit)\n`;
-  help += `\`-schedule\` — View session auto-start schedule\n`;
-  help += `\`-schedule add HH:MM\` — Add session start time (auto-sends "hi" via haiku model)\n`;
-  help += `\`-schedule remove HH:MM\` — Remove a time\n`;
+  help += `\`-schedule\` — View session auto-start settings\n`;
+  help += `\`-schedule add <hour>\` — Add session start time (e.g., \`-schedule add 6\`)\n`;
+  help += `\`-schedule remove <hour>\` — Remove a time\n`;
   help += `\`-schedule clear\` — Clear all scheduled times\n`;
   help += `\`-schedule channel\` — Set current channel as target\n\n`;
   help += `*Tips*\n`;
