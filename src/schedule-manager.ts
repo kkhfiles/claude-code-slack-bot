@@ -70,6 +70,33 @@ export class ScheduleManager {
     return this.config;
   }
 
+  private static readonly SESSION_WINDOW_HOURS = 5;
+
+  /**
+   * Check if a new time falls within an existing session's 5-hour window.
+   * Returns the conflicting time if found, null if no conflict.
+   */
+  findConflictingTime(time: string): string | null {
+    const normalized = this.normalizeTime(time);
+    if (!normalized || !this.config) return null;
+    const [newH, newM] = normalized.split(':').map(Number);
+    const newMinutes = newH * 60 + newM;
+    for (const existing of this.config.times) {
+      if (existing === normalized) continue; // same time = duplicate, not conflict
+      const [exH, exM] = existing.split(':').map(Number);
+      const exMinutes = exH * 60 + exM;
+      const windowEnd = exMinutes + ScheduleManager.SESSION_WINDOW_HOURS * 60;
+      // Check if new time falls within [existing, existing + 5h)
+      if (windowEnd <= 24 * 60) {
+        if (newMinutes > exMinutes && newMinutes < windowEnd) return existing;
+      } else {
+        // Wraps past midnight (e.g., 22:00 → window ends at 03:00)
+        if (newMinutes > exMinutes || newMinutes < windowEnd - 24 * 60) return existing;
+      }
+    }
+    return null;
+  }
+
   /** Add a time. Returns normalized "HH:MM" or null if invalid. */
   addTime(time: string, channel: string, userId: string): string | null {
     const normalized = this.normalizeTime(time);
