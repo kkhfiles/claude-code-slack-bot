@@ -13,6 +13,7 @@ import { SessionScanner, SessionInfo, formatRelativeTime } from './session-scann
 import { ScheduleManager } from './schedule-manager';
 import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
+import { getVersionInfo, checkForUpdates } from './version';
 
 interface MessageEvent {
   user: string;
@@ -333,6 +334,40 @@ export class SlackHandler {
       } else {
         await say({ text: `ℹ️ ${t('cmd.cost.noData', locale)}`, thread_ts: thread_ts || ts });
       }
+      return;
+    }
+
+    // Version command
+    if (text && this.isVersionCommand(text)) {
+      const info = getVersionInfo();
+      let msg = `${t('cmd.version.title', locale)}\n`;
+      msg += `• ${t('cmd.version.version', locale, { version: info.version })}\n`;
+      if (info.gitHash) {
+        msg += `• ${t('cmd.version.commit', locale, { hash: info.gitHash, date: info.gitDate ?? '' })}`;
+      } else {
+        msg += `• ${t('cmd.version.commitUnknown', locale)}`;
+      }
+      const threadTs = thread_ts || ts;
+      await say({ text: msg, thread_ts: threadTs });
+
+      // Async update check — send follow-up message
+      checkForUpdates().then(async (result) => {
+        let updateMsg: string;
+        if (result && result.behindBy === 0) {
+          updateMsg = t('cmd.version.upToDate', locale);
+        } else if (result && result.behindBy > 0) {
+          updateMsg = t('cmd.version.updateAvailable', locale, { count: result.behindBy, hash: result.latestHash });
+        } else {
+          updateMsg = t('cmd.version.checkFailed', locale);
+        }
+        try {
+          await say({ text: updateMsg, thread_ts: threadTs });
+        } catch (err) {
+          this.logger.error('Failed to send update check result', err);
+        }
+      }).catch(() => {
+        // Silently ignore
+      });
       return;
     }
 
@@ -1188,6 +1223,10 @@ export class SlackHandler {
 
   private isCostCommand(text: string): boolean {
     return /^-cost$/i.test(text.trim());
+  }
+
+  private isVersionCommand(text: string): boolean {
+    return /^`?-version`?$/i.test(text.trim());
   }
 
   private isSessionsCommand(text: string): boolean {

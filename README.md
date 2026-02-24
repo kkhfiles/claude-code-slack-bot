@@ -80,6 +80,23 @@ Claude Pro/Max subscriptions have daily session limits (e.g., 3 sessions × 5-ho
 
 ## Installation
 
+### Quick Start
+
+```bash
+git clone https://github.com/kkhfiles/claude-code-slack-bot.git
+cd claude-code-slack-bot
+
+# macOS / Linux
+./setup.sh
+
+# Windows
+setup.bat
+```
+
+The setup script checks prerequisites (Node.js 18+, git, claude CLI), installs dependencies, creates `.env` from template, installs pm2, and builds.
+
+### Manual Install
+
 ### 1. Clone and Install
 
 ```bash
@@ -127,7 +144,8 @@ Uses [pm2](https://pm2.keymetrics.io/) for background execution. No separate ter
 npm install -g pm2   # One-time setup
 
 # macOS / Linux
-npm run build && pm2 start ecosystem.config.js
+./start.sh           # Build → start via pm2 (restarts if already running)
+./stop.sh            # Stop
 
 # Windows
 start.bat            # Build → start via pm2 (restarts if already running)
@@ -164,6 +182,18 @@ autostart-setup.bat  # Registers pm2-resurrect.vbs in Windows Startup folder
 npm run build
 node dist/index.js            # Foreground (Ctrl+C to stop)
 ```
+
+## Updating
+
+```bash
+# macOS / Linux
+./update.sh
+
+# Windows
+update.bat
+```
+
+The update script pulls the latest code, installs dependencies, rebuilds, and restarts pm2. Use `-version` in Slack to check if an update is available.
 
 ## Slack Commands
 
@@ -238,6 +268,7 @@ Conversations in the same thread automatically continue the session (no command 
 | `-budget [amount\|off]` | Get/set/remove per-query cost limit (USD) |
 | `-cost` | Show last query cost and session ID |
 | `-apikey` | Register API key for rate limit fallback (stored in `.api-keys.json`) |
+| `-version` | Show bot version and check for updates |
 
 ### Session Auto-Start
 
@@ -324,6 +355,7 @@ src/
 ├── messages.ts                  # i18n translation catalog (ko/en)
 ├── todo-manager.ts              # Task list management
 ├── mcp-manager.ts               # MCP server management
+├── version.ts                   # Version info and update checker
 └── logger.ts                    # Logging utility
 ```
 

@@ -13,12 +13,18 @@ npm install                    # macOS / Linux
 npm install --ignore-scripts   # Windows (플랫폼 체크 우회)
 npm run build                  # TypeScript → dist/
 
-# macOS / Linux
-npm run build && pm2 start ecosystem.config.js
+# 초기 설정 (전제 조건 체크 + 의존성 + .env + pm2 + 빌드)
+./setup.sh                    # macOS / Linux
+setup.bat                     # Windows
 
-# Windows
-start.bat                     # pm2로 빌드+실행 (권장)
-stop.bat                      # pm2 중지
+# 실행
+./start.sh                    # macOS / Linux
+start.bat                     # Windows (pm2로 빌드+실행)
+./stop.sh / stop.bat          # 중지
+
+# 업데이트 (git pull + npm install + 빌드 + pm2 재시작)
+./update.sh                   # macOS / Linux
+update.bat                    # Windows
 ```
 
 - pm2 프로세스명: `claude-slack-bot`
@@ -40,6 +46,7 @@ stop.bat                      # pm2 중지
 - `-default`/`-safe`/`-trust`: 권한 모드 전환 (default → safe → trust 순으로 자유도 증가)
 - `-r`/`-resume`: 전체 프로젝트 세션 피커 (버튼 선택 → cwd 자동 전환 + 세션 재개)
 - `-sessions all`: 전체 프로젝트 세션 목록 (세션 피커와 동일)
+- `-version`: 봇 버전 + git hash + 업데이트 확인 (`src/version.ts`)
 - `-apikey`: API 키 등록/수정 모달 (rate limit 시 자동 전환용, `.api-keys.json` 영속화)
 - `-schedule`: 세션 자동 시작 설정 관리 (`ScheduleManager`, `.schedule-config.json` 영속화)
   - `-schedule add <hour>`: 시간 추가 (시 단위, 예: `6`, `11`, `16`) + 현재 채널을 대상으로 설정
@@ -130,6 +137,7 @@ git checkout cli-migration
 | `src/session-scanner.ts` | 전체 프로젝트 세션 스캔/피커 데이터 |
 | `src/messages.ts` | i18n 번역 카탈로그 (`t()` 함수, `Locale` 타입) |
 | `src/mcp-manager.ts` | MCP 서버 설정 로드/관리 |
+| `src/version.ts` | 버전 정보 + 업데이트 체크 (`getVersionInfo()`, `checkForUpdates()`) |
 | `src/config.ts` | 환경변수 로드 |
 | `src/types.ts` | TypeScript 타입 정의 |
 | `src/logger.ts` | 구조화된 로깅 |

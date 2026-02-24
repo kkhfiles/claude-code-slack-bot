@@ -196,6 +196,15 @@ const messages: Record<string, Record<Locale, string>> = {
   'schedule.cleared': { en: '✅ All session start times cleared.', ko: '✅ 모든 세션 시작 시간이 초기화되었습니다.' },
   'schedule.invalidTime': { en: 'Invalid time. Use an hour (e.g., `6`, `16`).', ko: '잘못된 시간. 시(hour)를 입력하세요 (예: `6`, `16`).' },
 
+  // --- Version ---
+  'cmd.version.title': { en: '*Bot Version*', ko: '*봇 버전*' },
+  'cmd.version.version': { en: 'Version: `{{version}}`', ko: '버전: `{{version}}`' },
+  'cmd.version.commit': { en: 'Commit: `{{hash}}` ({{date}})', ko: '커밋: `{{hash}}` ({{date}})' },
+  'cmd.version.commitUnknown': { en: 'Commit: unknown (not a git repo)', ko: '커밋: 알 수 없음 (git 저장소 아님)' },
+  'cmd.version.upToDate': { en: '✅ Up to date', ko: '✅ 최신 버전' },
+  'cmd.version.updateAvailable': { en: '⬆️ Update available: {{count}} commit(s) behind (latest: `{{hash}}`)\nRun `update.sh` or `update.bat` to update.', ko: '⬆️ 업데이트 있음: {{count}}개 커밋 뒤처짐 (최신: `{{hash}}`)\n`update.sh` 또는 `update.bat`으로 업데이트하세요.' },
+  'cmd.version.checkFailed': { en: '_Could not check for updates._', ko: '_업데이트 확인에 실패했습니다._' },
+
   // --- Error ---
   'error.generic': { en: 'Error: {{message}}', ko: '오류: {{message}}' },
   'error.somethingWrong': { en: 'Something went wrong', ko: '오류가 발생했습니다' },
@@ -321,7 +330,8 @@ export function getHelpText(locale: Locale): string {
     help += `*설정*\n`;
     help += `\`-model [이름]\` — 모델 조회/설정 (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
     help += `\`-budget [금액|off]\` — 쿼리당 최대 예산 조회/설정/해제 (USD)\n`;
-    help += `\`-cost\` — 마지막 쿼리 비용 및 세션 ID\n\n`;
+    help += `\`-cost\` — 마지막 쿼리 비용 및 세션 ID\n`;
+    help += `\`-version\` — 봇 버전 및 업데이트 확인\n\n`;
     help += `*MCP*\n`;
     help += `\`-mcp\` — MCP 서버 상태 표시\n`;
     help += `\`-mcp reload\` — MCP 설정 리로드\n`;
@@ -361,7 +371,8 @@ export function getHelpText(locale: Locale): string {
   help += `*Settings*\n`;
   help += `\`-model [name]\` — Get/set model (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
   help += `\`-budget [amount|off]\` — Get/set/remove max budget per query (USD)\n`;
-  help += `\`-cost\` — Show last query cost and session ID\n\n`;
+  help += `\`-cost\` — Show last query cost and session ID\n`;
+  help += `\`-version\` — Show bot version and check for updates\n\n`;
   help += `*MCP*\n`;
   help += `\`-mcp\` — Show MCP server status\n`;
   help += `\`-mcp reload\` — Reload MCP configuration\n`;
