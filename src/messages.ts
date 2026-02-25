@@ -22,11 +22,6 @@ const messages: Record<string, Record<Locale, string>> = {
   'cmd.model.set': { en: 'Model set to `{{model}}`', ko: '모델을 `{{model}}`(으)로 설정했습니다' },
   'cmd.model.default': { en: 'default (determined by Claude Code)', ko: '기본 (Claude Code가 자동 결정)' },
 
-  // Budget
-  'cmd.budget.current': { en: 'Max budget: ${{amount}} per query\n_Use `-budget <amount>` to change, `-budget off` to remove_', ko: '쿼리당 최대 예산: ${{amount}}\n_`-budget <금액>` 변경, `-budget off` 해제_' },
-  'cmd.budget.none': { en: 'No budget limit set\n_Use `-budget <amount>` to set (e.g., `-budget 1.00`)_', ko: '예산 제한 없음\n_`-budget <금액>`으로 설정 (예: `-budget 1.00`)_' },
-  'cmd.budget.removed': { en: 'Budget limit removed', ko: '예산 제한이 해제되었습니다' },
-  'cmd.budget.set': { en: 'Max budget set to ${{amount}} per query', ko: '쿼리당 최대 예산을 ${{amount}}(으)로 설정했습니다' },
 
   // Cost
   'cmd.cost.header': { en: '*Last query*', ko: '*마지막 쿼리*' },
@@ -171,8 +166,7 @@ const messages: Record<string, Record<Locale, string>> = {
   'apiKey.modalClose': { en: 'Cancel', ko: '취소' },
   'apiKey.modalBody': { en: 'Enter your Anthropic API key. It will be stored locally and used when the subscription rate limit is reached.', ko: 'Anthropic API 키를 입력하세요. 로컬에 저장되며 구독 rate limit 초과 시 사용됩니다.' },
   'apiKey.modalLabel': { en: 'API Key', ko: 'API 키' },
-  'apiKey.budgetLabel': { en: 'Max budget per query (USD)', ko: '쿼리당 최대 예산 (USD)' },
-  'apiKey.budgetPlaceholder': { en: 'Default: 5.00', ko: '기본값: 5.00' },
+
   'apiKey.saved': { en: 'API key saved.', ko: 'API 키가 저장되었습니다.' },
   'apiKey.savedAndRetrying': { en: 'API key saved. Retrying with API key...', ko: 'API 키 저장됨. API 키로 재시도 중...' },
   'apiKey.switchingToApiKey': { en: 'Switching to API key. Retrying...', ko: 'API 키로 전환합니다. 재시도 중...' },
@@ -184,13 +178,13 @@ const messages: Record<string, Record<Locale, string>> = {
   'schedule.noConfig': { en: 'No session schedule configured. Use `-schedule add <hour>` to add a time (e.g., `-schedule add 6`).', ko: '설정된 세션 시작 시간이 없습니다. `-schedule add <시간>`으로 추가하세요 (예: `-schedule add 6`).' },
   'schedule.status.header': { en: '*Session Auto-Start*', ko: '*세션 자동 시작*' },
   'schedule.status.channel': { en: 'Target: <#{{channel}}>', ko: '대상 채널: <#{{channel}}>' },
-  'schedule.status.times': { en: 'Times: {{times}} (auto-sent between :05~:25)', ko: '예약 시간: {{times}} (실제 전송: 매 정시 +5~25분)' },
+  'schedule.status.times': { en: 'Times: {{times}} (each fires at :05~:25, then again ~5h later)', ko: '예약 시간: {{times}} (매 정시 +5~25분 발송, 이후 ~5시간 뒤 재발송)' },
   'schedule.status.next': { en: 'Next: `{{time}}` (~{{minutes}} min)', ko: '다음 전송: `{{time}}` 전후 (약 {{minutes}}분 후)' },
   'schedule.status.noTimes': { en: 'No times set.', ko: '설정된 시간 없음.' },
   'schedule.status.hint': { en: '_`-schedule add <hour>` to add, `-schedule remove <hour>` to remove, `-schedule clear` to reset_', ko: '_`-schedule add <시간>` 추가, `-schedule remove <시간>` 제거, `-schedule clear` 초기화_' },
-  'schedule.added': { en: '✅ `{{hour}}` added. A greeting will be auto-sent between {{hour}}:05 and {{hour}}:25 to start the session. Target: <#{{channel}}>', ko: '✅ {{hour}}시 추가됨. {{hour}}시 세션 시작을 위해 {{hour}}:05~{{hour}}:25 사이에 첫 메시지가 자동 전송됩니다. 대상: <#{{channel}}>' },
+  'schedule.added': { en: '✅ `{{hour}}` added. A greeting will be auto-sent around `{{hour}}:05~:25`, then again ~5h later (`{{followUpHour}}:05~:25`) to cover the next session window. Target: <#{{channel}}>', ko: '✅ {{hour}}시 추가됨. {{hour}}:05~:25 사이 자동 전송 후, 다음 세션 윈도우를 위해 ~5시간 뒤 `{{followUpHour}}:05~:25`에도 자동 전송됩니다. 대상: <#{{channel}}>' },
   'schedule.alreadyExists': { en: '`{{time}}` is already configured.', ko: '`{{time}}`은 이미 설정되어 있습니다.' },
-  'schedule.conflictWithExisting': { en: '`{{time}}` falls within the 5-hour session window of `{{existing}}`. Remove `{{existing}}` first with `-schedule remove {{existingHour}}`.', ko: '`{{time}}`은 `{{existing}}`의 5시간 세션 범위 안에 있어 의미가 없습니다. 먼저 `-schedule remove {{existingHour}}`로 기존 시간을 제거하세요.' },
+  'schedule.conflictWithExisting': { en: '`{{time}}` is within the 5-hour window of `{{existing}}` — the follow-up at ~`{{existing}}+5h` already covers this slot. Remove `{{existing}}` first with `-schedule remove {{existingHour}}` if you want to change the base time.', ko: '`{{time}}`은 `{{existing}}`의 5시간 세션 범위 안에 있습니다 — `{{existing}}+5h` 자동 팔로우업이 이미 해당 시간대를 커버합니다. 기준 시간을 변경하려면 먼저 `-schedule remove {{existingHour}}`로 제거하세요.' },
   'schedule.removed': { en: '✅ Removed `{{time}}`.', ko: '✅ `{{time}}` 제거됨.' },
   'schedule.notFound': { en: '`{{time}}` not found.', ko: '`{{time}}`이 설정에 없습니다.' },
   'schedule.cleared': { en: '✅ All session start times cleared.', ko: '✅ 모든 세션 시작 시간이 초기화되었습니다.' },
@@ -329,7 +323,6 @@ export function getHelpText(locale: Locale): string {
     help += `\`-trust\` — 신뢰 모드: 모든 도구 자동 승인\n\n`;
     help += `*설정*\n`;
     help += `\`-model [이름]\` — 모델 조회/설정 (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
-    help += `\`-budget [금액|off]\` — 쿼리당 최대 예산 조회/설정/해제 (USD)\n`;
     help += `\`-cost\` — 마지막 쿼리 비용 및 세션 ID\n`;
     help += `\`-version\` — 봇 버전 및 업데이트 확인\n\n`;
     help += `*MCP*\n`;
@@ -370,7 +363,6 @@ export function getHelpText(locale: Locale): string {
   help += `\`-trust\` — Trust: all tools auto-approved\n\n`;
   help += `*Settings*\n`;
   help += `\`-model [name]\` — Get/set model (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
-  help += `\`-budget [amount|off]\` — Get/set/remove max budget per query (USD)\n`;
   help += `\`-cost\` — Show last query cost and session ID\n`;
   help += `\`-version\` — Show bot version and check for updates\n\n`;
   help += `*MCP*\n`;

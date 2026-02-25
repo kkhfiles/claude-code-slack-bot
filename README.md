@@ -60,6 +60,8 @@ Claude Pro/Max subscriptions have daily session limits (e.g., 3 sessions × 5-ho
 
 **How it works:**
 - At each scheduled hour, the bot sends a minimal greeting to Claude (randomized message, randomized timing within +5~25 min of the set hour)
+- **Auto follow-up**: 5 hours after each trigger fires, the bot automatically sends a second greeting to start the next session window — so you don't need to manually schedule every slot
+- For example, `-schedule add 6` will auto-trigger at ~6:10 and again at ~11:10, covering two session windows
 - Uses `claude-haiku-4-5-20251001` model for minimal token cost
 - Schedule repeats daily, persisted in `.schedule-config.json`
 
@@ -265,7 +267,6 @@ Conversations in the same thread automatically continue the session (no command 
 | Command | Description |
 |---------|-------------|
 | `-model [name]` | Get/set model (`sonnet`, `opus`, `haiku`, or full name) |
-| `-budget [amount\|off]` | Get/set/remove per-query cost limit (USD) |
 | `-cost` | Show last query cost and session ID |
 | `-apikey` | Register API key for rate limit fallback (stored in `.api-keys.json`) |
 | `-version` | Show bot version and check for updates |
