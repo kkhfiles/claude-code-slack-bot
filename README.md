@@ -50,18 +50,17 @@ Pre-register your API key with `-apikey` so it's ready when needed. The bot auto
 
 ### Session Auto-Start
 
-Claude Pro/Max subscriptions have daily session limits (e.g., 3 sessions × 5-hour windows). To maximize usage, schedule sessions to auto-start at optimal intervals:
+Claude Pro/Max subscriptions have daily session limits (e.g., 3 sessions × 5-hour windows). Register a single time — about **3 hours before your workday starts** — and the bot covers two session windows automatically:
 
 ```
--schedule add 6        # Start a session around 6:00 AM
--schedule add 11       # Start a session around 11:00 AM
--schedule add 16       # Start a session around 4:00 PM
+-schedule add 4        # For early starters (sessions ~4:10 and ~9:10)
+-schedule add 5        # For typical starters (sessions ~5:10 and ~10:10)
+-schedule add 6        # For late starters   (sessions ~6:10 and ~11:10)
 ```
 
 **How it works:**
-- At each scheduled hour, the bot sends a minimal greeting to Claude (randomized message, randomized timing within +5~25 min of the set hour)
-- **Auto follow-up**: 5 hours after each trigger fires, the bot automatically sends a second greeting to start the next session window — so you don't need to manually schedule every slot
-- For example, `-schedule add 6` will auto-trigger at ~6:10 and again at ~11:10, covering two session windows
+- At the scheduled hour, the bot sends a minimal greeting to Claude (randomized message, randomized timing within +5~25 min of the set hour)
+- **Auto follow-up**: 5 hours after the first trigger fires, the bot automatically sends a second greeting to start the next session window — no need to register multiple times
 - Uses `claude-haiku-4-5-20251001` model for minimal token cost
 - Schedule repeats daily, persisted in `.schedule-config.json`
 
@@ -281,11 +280,9 @@ Conversations in the same thread automatically continue the session (no command 
 | `-schedule clear` | Clear all session start times |
 
 ```
--schedule add 6         # Add 6:00 AM
--schedule add 11        # Add 11:00 AM
--schedule add 16        # Add 4:00 PM
--schedule               # Show status
--schedule remove 11     # Remove 11:00 AM
+-schedule add 5         # ~3h before 9am start → auto-triggers at ~5:10 and ~10:10
+-schedule               # Show status (times + next fire)
+-schedule remove 5      # Remove
 -schedule clear         # Clear all
 ```
 
