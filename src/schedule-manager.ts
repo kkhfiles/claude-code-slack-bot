@@ -186,6 +186,14 @@ export class ScheduleManager {
     userId: string,
     callback: (channel: string, userId: string, time: string) => void,
   ): void {
+    // Cancel any pending follow-up from a previous fire of this time slot
+    const followUpKey = `${time}-followup`;
+    const existingFollowUp = this.timers.get(followUpKey);
+    if (existingFollowUp) {
+      clearTimeout(existingFollowUp);
+      this.timers.delete(followUpKey);
+    }
+
     const nextFire = this.getNextFireTime(time);
     const baseMs = nextFire.getTime() - Date.now();
     const jitterMs = Math.floor(
@@ -207,9 +215,35 @@ export class ScheduleManager {
       } catch (error) {
         this.logger.error(`Error in scheduled callback for ${time}`, error);
       }
-      // Reschedule for the next day
+
       const cfg = this.config;
       if (cfg && cfg.times.includes(time)) {
+        // Schedule a follow-up 5 hours later to cover the next session window.
+        // Even if the user is busy when the first message arrives, the second
+        // trigger ensures the next 5-hour window gets started automatically.
+        const followUpJitterMs = Math.floor(
+          ScheduleManager.MIN_JITTER_MS + Math.random() * (ScheduleManager.MAX_JITTER_MS - ScheduleManager.MIN_JITTER_MS),
+        );
+        const followUpMs = ScheduleManager.SESSION_WINDOW_HOURS * 60 * 60 * 1000 + followUpJitterMs;
+        const followUpFireTime = new Date(Date.now() + followUpMs);
+        this.logger.info(`Scheduling follow-up session start for ${time}`, {
+          followUpFireTime: followUpFireTime.toISOString(),
+        });
+        const followUpTimer = setTimeout(() => {
+          this.logger.info(`Firing follow-up session start for ${time} (actual: ${new Date().toISOString()})`);
+          const currentCfg = this.config;
+          if (currentCfg && currentCfg.times.includes(time)) {
+            try {
+              callback(currentCfg.channel, currentCfg.userId, time);
+            } catch (error) {
+              this.logger.error(`Error in follow-up callback for ${time}`, error);
+            }
+          }
+          this.timers.delete(followUpKey);
+        }, followUpMs);
+        this.timers.set(followUpKey, followUpTimer);
+
+        // Reschedule primary for the next day
         this.scheduleOne(time, cfg.channel, cfg.userId, callback);
       }
     }, msUntil);

@@ -319,7 +319,7 @@ export class CliHandler {
     resumeSessionId?: string;
     continueLastSession?: boolean;
     model?: string;
-    maxBudgetUsd?: number;
+
     permissionMode?: 'default' | 'safe' | 'trust' | 'plan';
     allowedTools?: string[];
     appendSystemPrompt?: string;
@@ -344,10 +344,6 @@ export class CliHandler {
     // Model
     if (opts.model) args.push('--model', opts.model);
 
-    // Budget
-    if (opts.maxBudgetUsd && opts.maxBudgetUsd > 0) {
-      args.push('--max-budget-usd', opts.maxBudgetUsd.toString());
-    }
 
     // Session resume
     if (opts.resumeSessionId) {
