@@ -46,7 +46,9 @@ When Claude subscription limits are reached:
 2. **Schedule retry** — Slack delivers your message at the estimated reset time
 3. **Cancel** — Discard the pending message
 
-Pre-register your API key with `-apikey` so it's ready when needed. The bot automatically reverts to subscription auth when the rate limit resets. A `@mention` notification is scheduled at the reset time (auto-cancelled if you retry or cancel).
+Pre-register your API key with `-apikey` so it's ready when needed. The modal also lets you set an optional **spending limit** — the bot auto-deactivates API key mode when the limit is reached. The bot automatically reverts to subscription auth when the rate limit resets. A `@mention` notification is scheduled at the reset time (auto-cancelled if you retry or cancel).
+
+When API key mode is active, each query's cost is tracked and shown in the completion message (`✅ Task completed (Grep ×3) | 🔑 $0.0023 (total: $0.0145)`). Use `-limit` to view or adjust the spending limit at any time.
 
 ### Session Auto-Start
 
@@ -69,7 +71,8 @@ Claude Pro/Max subscriptions have daily session limits (e.g., 3 sessions × 5-ho
 - **i18n**: Automatic Korean/English UI based on Slack user locale
 - **MCP**: Integrate MCP servers via `mcp-servers.json` (`-mcp`, `-mcp reload`)
 - **Model selection**: `-model sonnet`, `-model opus`, `-model haiku`
-- **Cost control**: `-budget 1.00` per-query limit, `-cost` to check last cost
+- **Cost tracking**: API key mode shows per-query and cumulative cost in completion messages; `-cost` for last query details
+- **Spending limit**: Set via `-apikey` modal or `-limit <amount>`; auto-deactivates API key mode when reached
 - **Streaming**: Real-time response updates with tool progress display
 - **Tool summary**: Completion message shows tools used (`✅ Task completed (Grep ×5, Read ×2)`)
 
@@ -267,7 +270,9 @@ Conversations in the same thread automatically continue the session (no command 
 |---------|-------------|
 | `-model [name]` | Get/set model (`sonnet`, `opus`, `haiku`, or full name) |
 | `-cost` | Show last query cost and session ID |
-| `-apikey` | Register API key for rate limit fallback (stored in `.api-keys.json`) |
+| `-apikey` | Register API key for rate limit fallback; optional spending limit field |
+| `-limit [amount]` | View/set API key spending limit (e.g., `-limit 2.00`) |
+| `-limit clear` | Remove spending limit |
 | `-version` | Show bot version and check for updates |
 
 ### Session Auto-Start
