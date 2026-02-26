@@ -199,6 +199,16 @@ const messages: Record<string, Record<Locale, string>> = {
   'cmd.version.updateAvailable': { en: '⬆️ Update available: {{count}} commit(s) behind (latest: `{{hash}}`)\nRun `update.sh` or `update.bat` to update.', ko: '⬆️ 업데이트 있음: {{count}}개 커밋 뒤처짐 (최신: `{{hash}}`)\n`update.sh` 또는 `update.bat`으로 업데이트하세요.' },
   'cmd.version.checkFailed': { en: '_Could not check for updates._', ko: '_업데이트 확인에 실패했습니다._' },
 
+  // API key cost suffix (appended to completion status when API key mode is active)
+  'apiKey.costSuffix': { en: ' | 🔑 ${{queryCost}} (total: ${{totalCost}})', ko: ' | 🔑 ${{queryCost}} (누계: ${{totalCost}})' },
+
+  // Limit command
+  'cmd.limit.set': { en: '✅ Spending limit set: ${{amount}}', ko: '✅ 사용 한도 설정: ${{amount}}' },
+  'cmd.limit.cleared': { en: '✅ Spending limit cleared.', ko: '✅ 사용 한도가 초기화되었습니다.' },
+  'cmd.limit.exceeded': { en: '⚠️ Spending limit (${{limit}}) reached (spent: ${{cost}}). Switched back to subscription auth.', ko: '⚠️ 사용 한도 ${{limit}}에 도달했습니다 (사용: ${{cost}}). 구독 인증으로 전환됩니다.' },
+  'cmd.limit.invalidAmount': { en: 'Invalid amount. Use a number like `2.00`.', ko: '잘못된 금액. `2.00` 같이 숫자로 입력하세요.' },
+  'cmd.limit.none': { en: 'No spending limit configured. Use `-limit <amount>` to set one (e.g., `-limit 2.00`).', ko: '사용 한도가 설정되지 않았습니다. `-limit <금액>`으로 설정하세요 (예: `-limit 2.00`).' },
+
   // --- Error ---
   'error.generic': { en: 'Error: {{message}}', ko: '오류: {{message}}' },
   'error.somethingWrong': { en: 'Something went wrong', ko: '오류가 발생했습니다' },
@@ -329,6 +339,8 @@ export function getHelpText(locale: Locale): string {
     help += `\`-mcp\` — MCP 서버 상태 표시\n`;
     help += `\`-mcp reload\` — MCP 설정 리로드\n`;
     help += `\`-apikey\` — API 키 등록/수정 (rate limit 시 자동 전환용)\n`;
+    help += `\`-limit [금액]\` — API 키 사용 한도 조회/설정 (예: \`-limit 2.00\`)\n`;
+    help += `\`-limit clear\` — 사용 한도 초기화\n`;
     help += `\`-schedule\` — 세션 자동 시작 설정 조회\n`;
     help += `\`-schedule add <시간>\` — 세션 시작 시간 추가 (예: \`-schedule add 6\`)\n`;
     help += `\`-schedule remove <시간>\` — 시간 제거\n`;
@@ -369,6 +381,8 @@ export function getHelpText(locale: Locale): string {
   help += `\`-mcp\` — Show MCP server status\n`;
   help += `\`-mcp reload\` — Reload MCP configuration\n`;
   help += `\`-apikey\` — Register/update API key (auto-switch on rate limit)\n`;
+  help += `\`-limit [amount]\` — View/set API key spending limit (e.g., \`-limit 2.00\`)\n`;
+  help += `\`-limit clear\` — Remove spending limit\n`;
   help += `\`-schedule\` — View session auto-start settings\n`;
   help += `\`-schedule add <hour>\` — Add session start time (e.g., \`-schedule add 6\`)\n`;
   help += `\`-schedule remove <hour>\` — Remove a time\n`;

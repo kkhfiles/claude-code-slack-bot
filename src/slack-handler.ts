@@ -87,7 +87,8 @@ export class SlackHandler {
 
   // API key management
   private userApiKeys: Map<string, string> = new Map();
-  private apiKeyActive: Map<string, { userId: string; resetTimerId: ReturnType<typeof setTimeout> }> = new Map();
+  private apiKeyActive: Map<string, { userId: string; resetTimerId: ReturnType<typeof setTimeout>; totalCost: number; limit?: number }> = new Map();
+  private channelApiKeyLimits: Map<string, number> = new Map();
   private readonly API_KEYS_FILE = path.join(__dirname, '..', '.api-keys.json');
 
   // Session schedule
@@ -156,9 +157,9 @@ export class SlackHandler {
       const result = this.workingDirManager.setWorkingDirectory(channel, setDirPath, thread_ts, isDM ? user : undefined);
       if (result.success) {
         const context = thread_ts ? t('cwd.context.thread', locale) : (isDM ? t('cwd.context.dm', locale) : t('cwd.context.channel', locale));
-        await say({ text: `✅ ${t('cwd.set', locale, { context, path: result.resolvedPath! })}`, thread_ts: thread_ts || ts });
+        await say({ text: `✅ ${t('cwd.set', locale, { context, path: result.resolvedPath! })}`, thread_ts: thread_ts });
       } else {
-        await say({ text: `❌ ${result.error}`, thread_ts: thread_ts || ts });
+        await say({ text: `❌ ${result.error}`, thread_ts: thread_ts });
       }
       return;
     }
@@ -167,13 +168,13 @@ export class SlackHandler {
       const isDM = channel.startsWith('D');
       const directory = this.workingDirManager.getWorkingDirectory(channel, thread_ts, isDM ? user : undefined);
       const context = thread_ts ? t('cwd.context.thread', locale) : (isDM ? t('cwd.context.dm', locale) : t('cwd.context.channel', locale));
-      await say({ text: this.workingDirManager.formatDirectoryMessage(directory, context, locale), thread_ts: thread_ts || ts });
+      await say({ text: this.workingDirManager.formatDirectoryMessage(directory, context, locale), thread_ts: thread_ts });
       return;
     }
 
     // MCP commands
     if (text && this.isMcpInfoCommand(text)) {
-      await say({ text: this.mcpManager.formatMcpInfo(locale), thread_ts: thread_ts || ts });
+      await say({ text: this.mcpManager.formatMcpInfo(locale), thread_ts: thread_ts });
       return;
     }
     if (text && this.isMcpReloadCommand(text)) {
@@ -182,7 +183,7 @@ export class SlackHandler {
         text: reloaded
           ? `✅ ${t('cmd.mcp.reloadSuccess', locale)}\n\n${this.mcpManager.formatMcpInfo(locale)}`
           : `❌ ${t('cmd.mcp.reloadFailed', locale)}`,
-        thread_ts: thread_ts || ts,
+        thread_ts: thread_ts,
       });
       return;
     }
@@ -190,7 +191,7 @@ export class SlackHandler {
     // API key command — show button to open modal
     if (text && this.isApiKeyCommand(text)) {
       await say({
-        thread_ts: thread_ts || ts,
+        thread_ts: thread_ts,
         text: t('apiKey.modalBody', locale),
         blocks: [
           { type: 'section', text: { type: 'mrkdwn', text: `🔑 ${t('apiKey.modalBody', locale)}` } },
@@ -205,11 +206,20 @@ export class SlackHandler {
       return;
     }
 
+    // Limit command
+    if (text) {
+      const limitParsed = this.parseLimitCommand(text);
+      if (limitParsed) {
+        await this.handleLimitCommand(limitParsed, channel, thread_ts, locale, say);
+        return;
+      }
+    }
+
     // Schedule command
     if (text) {
       const scheduleParsed = this.parseScheduleCommand(text);
       if (scheduleParsed) {
-        await this.handleScheduleCommand(scheduleParsed, channel, thread_ts || ts, user, locale, say);
+        await this.handleScheduleCommand(scheduleParsed, channel, thread_ts, user, locale, say);
         return;
       }
     }
@@ -221,16 +231,16 @@ export class SlackHandler {
       if (activeProcess) {
         activeProcess.interrupt();
         this.activeProcesses.delete(sessionKey);
-        await say({ text: `⏹️ ${t('cmd.stop.stopped', locale)}`, thread_ts: thread_ts || ts });
+        await say({ text: `⏹️ ${t('cmd.stop.stopped', locale)}`, thread_ts: thread_ts });
       } else {
-        await say({ text: `ℹ️ ${t('cmd.stop.noActive', locale)}`, thread_ts: thread_ts || ts });
+        await say({ text: `ℹ️ ${t('cmd.stop.noActive', locale)}`, thread_ts: thread_ts });
       }
       return;
     }
 
     // Help command
     if (text && this.isHelpCommand(text)) {
-      await say({ text: getHelpTextI18n(locale), thread_ts: thread_ts || ts });
+      await say({ text: getHelpTextI18n(locale), thread_ts: thread_ts });
       return;
     }
 
@@ -241,7 +251,7 @@ export class SlackHandler {
       this.channelAlwaysApproveTools.delete(channel);
       await say({
         text: `🔄 ${t('cmd.reset.done', locale)}`,
-        thread_ts: thread_ts || ts,
+        thread_ts: thread_ts,
       });
       return;
     }
@@ -252,10 +262,10 @@ export class SlackHandler {
       if (modelArg !== null) {
         if (modelArg === '') {
           const current = this.channelModels.get(channel) || t('cmd.model.default', locale);
-          await say({ text: `🤖 ${t('cmd.model.current', locale, { model: current })}`, thread_ts: thread_ts || ts });
+          await say({ text: `🤖 ${t('cmd.model.current', locale, { model: current })}`, thread_ts: thread_ts });
         } else {
           this.channelModels.set(channel, modelArg);
-          await say({ text: `🤖 ${t('cmd.model.set', locale, { model: modelArg })}`, thread_ts: thread_ts || ts });
+          await say({ text: `🤖 ${t('cmd.model.set', locale, { model: modelArg })}`, thread_ts: thread_ts });
         }
         return;
       }
@@ -266,17 +276,17 @@ export class SlackHandler {
     if (text && this.isDefaultModeCommand(text)) {
       this.channelPermissionModes.delete(channel);
       this.channelAlwaysApproveTools.delete(channel);
-      await say({ text: `🔒 ${t('cmd.defaultMode', locale)}`, thread_ts: thread_ts || ts });
+      await say({ text: `🔒 ${t('cmd.defaultMode', locale)}`, thread_ts: thread_ts });
       return;
     }
     if (text && this.isSafeCommand(text)) {
       this.channelPermissionModes.set(channel, 'safe');
-      await say({ text: `🛡️ ${t('cmd.safeMode', locale)}`, thread_ts: thread_ts || ts });
+      await say({ text: `🛡️ ${t('cmd.safeMode', locale)}`, thread_ts: thread_ts });
       return;
     }
     if (text && this.isTrustCommand(text)) {
       this.channelPermissionModes.set(channel, 'trust');
-      await say({ text: `⚡ ${t('cmd.trustMode', locale)}`, thread_ts: thread_ts || ts });
+      await say({ text: `⚡ ${t('cmd.trustMode', locale)}`, thread_ts: thread_ts });
       return;
     }
 
@@ -292,9 +302,9 @@ export class SlackHandler {
       const cwdForSessions = this.workingDirManager.getWorkingDirectory(channel, thread_ts, isDMForSessions ? user : undefined);
       if (cwdForSessions) {
         const sessions = this.listSessions(cwdForSessions);
-        await say({ text: this.formatSessionsList(sessions, locale), thread_ts: thread_ts || ts });
+        await say({ text: this.formatSessionsList(sessions, locale), thread_ts: thread_ts });
       } else {
-        await say({ text: `⚠️ ${t('cmd.sessions.noCwd', locale)}`, thread_ts: thread_ts || ts });
+        await say({ text: `⚠️ ${t('cmd.sessions.noCwd', locale)}`, thread_ts: thread_ts });
       }
       return;
     }
@@ -308,9 +318,9 @@ export class SlackHandler {
         msg += `• ${t('cmd.cost.durationLine', locale, { duration: (costInfo.duration / 1000).toFixed(1) })}\n`;
         msg += `• ${t('cmd.cost.modelLine', locale, { model: costInfo.model })}\n`;
         msg += `• ${t('cmd.cost.sessionLine', locale, { sessionId: costInfo.sessionId })}`;
-        await say({ text: msg, thread_ts: thread_ts || ts });
+        await say({ text: msg, thread_ts: thread_ts });
       } else {
-        await say({ text: `ℹ️ ${t('cmd.cost.noData', locale)}`, thread_ts: thread_ts || ts });
+        await say({ text: `ℹ️ ${t('cmd.cost.noData', locale)}`, thread_ts: thread_ts });
       }
       return;
     }
@@ -325,8 +335,7 @@ export class SlackHandler {
       } else {
         msg += `• ${t('cmd.version.commitUnknown', locale)}`;
       }
-      const threadTs = thread_ts || ts;
-      await say({ text: msg, thread_ts: threadTs });
+      await say({ text: msg, thread_ts: thread_ts });
 
       // Async update check — send follow-up message
       checkForUpdates().then(async (result) => {
@@ -339,7 +348,7 @@ export class SlackHandler {
           updateMsg = t('cmd.version.checkFailed', locale);
         }
         try {
-          await say({ text: updateMsg, thread_ts: threadTs });
+          await say({ text: updateMsg, thread_ts: thread_ts });
         } catch (err) {
           this.logger.error('Failed to send update check result', err);
         }
@@ -427,6 +436,7 @@ export class SlackHandler {
     let statusRepeatCount = 0;
     const toolUsageCounts = new Map<string, number>();
     const channelModel = this.channelModels.get(channel);
+    let apiKeyCostInfo: { queryCost: number; totalCost: number } | null = null;
 
     try {
       this.logger.info('Spawning Claude CLI process', {
@@ -614,6 +624,22 @@ export class SlackHandler {
             });
           }
 
+          // API key cost accumulation
+          const apiKeyStateForCost = this.apiKeyActive.get(channel);
+          if (apiKeyStateForCost && resultEvent.total_cost_usd !== undefined) {
+            apiKeyStateForCost.totalCost += resultEvent.total_cost_usd;
+            apiKeyCostInfo = { queryCost: resultEvent.total_cost_usd, totalCost: apiKeyStateForCost.totalCost };
+            // Check spending limit
+            if (apiKeyStateForCost.limit !== undefined && apiKeyStateForCost.totalCost >= apiKeyStateForCost.limit) {
+              clearTimeout(apiKeyStateForCost.resetTimerId);
+              this.apiKeyActive.delete(channel);
+              await say({
+                text: `⚠️ ${t('cmd.limit.exceeded', locale, { limit: apiKeyStateForCost.limit.toFixed(2), cost: apiKeyStateForCost.totalCost.toFixed(4) })}`,
+                thread_ts: thread_ts || ts,
+              });
+            }
+          }
+
           // Handle permission denials — show approval buttons (skip in plan mode)
           const denials = resultEvent.permission_denials || [];
           if (!isPlanMode && denials.length > 0 && (resultEvent.session_id || session?.sessionId)) {
@@ -652,8 +678,11 @@ export class SlackHandler {
       const toolSummary = toolUsageCounts.size > 0
         ? ' (' + Array.from(toolUsageCounts.entries()).map(([name, count]) => count > 1 ? `${name} ×${count}` : name).join(', ') + ')'
         : '';
+      const costSuffix = apiKeyCostInfo
+        ? t('apiKey.costSuffix', locale, { queryCost: apiKeyCostInfo.queryCost.toFixed(4), totalCost: apiKeyCostInfo.totalCost.toFixed(4) })
+        : '';
       if (statusMessageTs) {
-        await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `${doneEmoji} ${doneLabel}${toolSummary}` }).catch(() => {});
+        await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `${doneEmoji} ${doneLabel}${toolSummary}${costSuffix}` }).catch(() => {});
       }
       await this.updateMessageReaction(sessionKey, doneEmoji);
       await this.removeAnchorReaction(sessionKey);
@@ -1255,7 +1284,7 @@ export class SlackHandler {
   private async handleScheduleCommand(
     parsed: { action: string; time?: string },
     channel: string,
-    threadTs: string,
+    threadTs: string | undefined,
     userId: string,
     locale: Locale,
     say: any,
@@ -1467,6 +1496,66 @@ export class SlackHandler {
     return /^`?-apikey`?$/i.test(text.trim());
   }
 
+  private parseLimitCommand(text: string): { action: 'status' } | { action: 'set'; amount: number } | { action: 'clear' } | null {
+    const trimmed = text.trim();
+    if (/^`?-limit`?$/i.test(trimmed)) return { action: 'status' };
+    if (/^`?-limit`?\s+(clear|off|reset)`?$/i.test(trimmed)) return { action: 'clear' };
+    const setMatch = trimmed.match(/^`?-limit`?\s+([\d.]+)`?$/i);
+    if (setMatch) {
+      const amount = parseFloat(setMatch[1]);
+      if (!isNaN(amount) && amount > 0) return { action: 'set', amount };
+    }
+    return null;
+  }
+
+  private async handleLimitCommand(
+    parsed: { action: 'status' } | { action: 'set'; amount: number } | { action: 'clear' },
+    channel: string,
+    threadTs: string | undefined,
+    locale: Locale,
+    say: any,
+  ): Promise<void> {
+    if (parsed.action === 'set') {
+      this.channelApiKeyLimits.set(channel, parsed.amount);
+      // Update active session limit if running
+      const active = this.apiKeyActive.get(channel);
+      if (active) active.limit = parsed.amount;
+      await say({ text: `✅ ${t('cmd.limit.set', locale, { amount: parsed.amount.toFixed(2) })}`, thread_ts: threadTs });
+      return;
+    }
+
+    if (parsed.action === 'clear') {
+      this.channelApiKeyLimits.delete(channel);
+      const active = this.apiKeyActive.get(channel);
+      if (active) active.limit = undefined;
+      await say({ text: `✅ ${t('cmd.limit.cleared', locale)}`, thread_ts: threadTs });
+      return;
+    }
+
+    // Status
+    const active = this.apiKeyActive.get(channel);
+    const configuredLimit = this.channelApiKeyLimits.get(channel);
+    if (active) {
+      const limitStr = active.limit !== undefined ? `$${active.limit.toFixed(2)}` : (locale === 'ko' ? '없음' : 'none');
+      let msg = `💰 *${locale === 'ko' ? 'API 키 모드 활성 중' : 'API key mode active'}*\n`;
+      msg += `• ${locale === 'ko' ? '이번 세션 사용' : 'Spent'}: $${active.totalCost.toFixed(4)}\n`;
+      msg += `• ${locale === 'ko' ? '한도' : 'Limit'}: ${limitStr}\n`;
+      msg += locale === 'ko'
+        ? '_`-limit <금액>`으로 변경, `-limit clear`로 초기화_'
+        : '_Use `-limit <amount>` to change, `-limit clear` to remove_';
+      await say({ text: msg, thread_ts: threadTs });
+    } else if (configuredLimit !== undefined) {
+      let msg = `ℹ️ ${locale === 'ko' ? 'API 키 모드 비활성.' : 'API key mode not active.'}\n`;
+      msg += `• ${locale === 'ko' ? '설정된 한도' : 'Configured limit'}: $${configuredLimit.toFixed(2)}\n`;
+      msg += locale === 'ko'
+        ? '_Rate limit 시 API 키 모드 전환 시 자동 적용됩니다._'
+        : '_Will apply automatically when API key mode is activated._';
+      await say({ text: msg, thread_ts: threadTs });
+    } else {
+      await say({ text: `ℹ️ ${t('cmd.limit.none', locale)}`, thread_ts: threadTs });
+    }
+  }
+
   private activateApiKey(channel: string, threadTs: string, userId: string, retryAfterSec: number, locale: Locale): void {
     // Clear any existing timer for this channel
     const existing = this.apiKeyActive.get(channel);
@@ -1485,7 +1574,12 @@ export class SlackHandler {
       }
     }, retryAfterSec * 1000);
 
-    this.apiKeyActive.set(channel, { userId, resetTimerId });
+    this.apiKeyActive.set(channel, {
+      userId,
+      resetTimerId,
+      totalCost: 0,
+      limit: this.channelApiKeyLimits.get(channel),
+    });
   }
 
   private isMcpInfoCommand(text: string): boolean {
