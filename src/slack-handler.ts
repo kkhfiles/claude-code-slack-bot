@@ -2203,7 +2203,7 @@ export class SlackHandler {
             view: {
               type: 'modal',
               callback_id: 'apikey_modal',
-              private_metadata: JSON.stringify({ retryId, retryAfter }),
+              private_metadata: JSON.stringify({ retryId, retryAfter, channel: retryInfo.channel }),
               title: { type: 'plain_text', text: t('apiKey.modalTitle', actionLocale) },
               submit: { type: 'plain_text', text: t('apiKey.modalSubmit', actionLocale) },
               close: { type: 'plain_text', text: t('apiKey.modalClose', actionLocale) },
@@ -2217,6 +2217,18 @@ export class SlackHandler {
                     type: 'plain_text_input',
                     action_id: 'apikey_input',
                     placeholder: { type: 'plain_text', text: 'sk-ant-...' },
+                  },
+                },
+                {
+                  type: 'input',
+                  block_id: 'limit_block',
+                  optional: true,
+                  label: { type: 'plain_text', text: t('apiKey.limitLabel', actionLocale) },
+                  element: {
+                    type: 'plain_text_input',
+                    action_id: 'limit_input',
+                    placeholder: { type: 'plain_text', text: t('apiKey.limitPlaceholder', actionLocale) },
+                    initial_value: this.channelApiKeyLimits.has(retryInfo.channel) ? String(this.channelApiKeyLimits.get(retryInfo.channel)) : undefined,
                   },
                 },
               ],
@@ -2235,13 +2247,14 @@ export class SlackHandler {
         const userId = (body as any).user.id;
         const actionLocale = await this.getUserLocale(userId);
         const existingKey = this.userApiKeys.get(userId);
+        const modalChannel = (body as any).channel?.id || (body as any).container?.channel_id || '';
 
         await this.app.client.views.open({
           trigger_id: (body as any).trigger_id,
           view: {
             type: 'modal',
             callback_id: 'apikey_modal',
-            private_metadata: JSON.stringify({}),
+            private_metadata: JSON.stringify({ channel: modalChannel }),
             title: { type: 'plain_text', text: t('apiKey.modalTitle', actionLocale) },
             submit: { type: 'plain_text', text: t('apiKey.modalSubmit', actionLocale) },
             close: { type: 'plain_text', text: t('apiKey.modalClose', actionLocale) },
@@ -2255,6 +2268,18 @@ export class SlackHandler {
                   type: 'plain_text_input',
                   action_id: 'apikey_input',
                   placeholder: { type: 'plain_text', text: existingKey ? `Already set (...${existingKey.slice(-4)})` : 'sk-ant-...' },
+                },
+              },
+              {
+                type: 'input',
+                block_id: 'limit_block',
+                optional: true,
+                label: { type: 'plain_text', text: t('apiKey.limitLabel', actionLocale) },
+                element: {
+                  type: 'plain_text_input',
+                  action_id: 'limit_input',
+                  placeholder: { type: 'plain_text', text: t('apiKey.limitPlaceholder', actionLocale) },
+                  initial_value: modalChannel && this.channelApiKeyLimits.has(modalChannel) ? String(this.channelApiKeyLimits.get(modalChannel)) : undefined,
                 },
               },
             ],
@@ -2280,6 +2305,25 @@ export class SlackHandler {
         this.saveApiKeys();
 
         const metadata = JSON.parse(view.private_metadata || '{}');
+
+        // Save spending limit if provided
+        const limitValue = view.state.values.limit_block?.limit_input?.value?.trim();
+        const metaChannel = metadata.channel as string | undefined;
+        if (metaChannel) {
+          if (limitValue) {
+            const limitAmount = parseFloat(limitValue);
+            if (!isNaN(limitAmount) && limitAmount > 0) {
+              this.channelApiKeyLimits.set(metaChannel, limitAmount);
+              const active = this.apiKeyActive.get(metaChannel);
+              if (active) active.limit = limitAmount;
+            }
+          } else {
+            // Blank = clear limit
+            this.channelApiKeyLimits.delete(metaChannel);
+            const active = this.apiKeyActive.get(metaChannel);
+            if (active) active.limit = undefined;
+          }
+        }
 
         if (metadata.retryId) {
           // Called from rate limit flow — activate API key and retry
