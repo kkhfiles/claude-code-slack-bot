@@ -11,6 +11,7 @@ import { TodoManager, Todo } from './todo-manager';
 import { McpManager } from './mcp-manager';
 import { SessionScanner, SessionInfo, formatRelativeTime } from './session-scanner';
 import { ScheduleManager } from './schedule-manager';
+import { AccountManager } from './account-manager';
 import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
@@ -93,6 +94,9 @@ export class SlackHandler {
 
   // Session schedule
   private scheduleManager = new ScheduleManager();
+
+  // Multi-account management
+  private accountManager = new AccountManager();
 
   constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager) {
     this.app = app;
@@ -213,6 +217,12 @@ export class SlackHandler {
         await this.handleLimitCommand(limitParsed, channel, thread_ts, locale, say);
         return;
       }
+    }
+
+    // Account command
+    if (text && this.isAccountCommand(text)) {
+      await this.handleAccountCommand(text, channel, thread_ts, locale, say);
+      return;
     }
 
     // Schedule command
@@ -740,6 +750,16 @@ export class SlackHandler {
         const retryAfter = rateLimitInfo
           ? rateLimitInfo.retryAfterSec
           : this.parseRetryAfterSeconds({ message: rateLimitMessageText });
+
+        // Try auto-switching to next account before showing retry buttons
+        const nextAccount = this.accountManager.switchToNext();
+        if (nextAccount) {
+          if (processedFiles.length > 0) await this.fileHandler.cleanupTempFiles(processedFiles);
+          await say({ text: `🔄 ${t('account.rateLimitSwitch', locale, { account: nextAccount })}`, thread_ts: thread_ts || ts });
+          await this.handleMessage(event, say);
+          return;
+        }
+
         await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say);
       }
 
@@ -765,6 +785,16 @@ export class SlackHandler {
         const retryAfter = rateLimitInfo
           ? rateLimitInfo.retryAfterSec
           : this.parseRetryAfterSeconds(rateLimitSource);
+
+        // Try auto-switching to next account before showing retry buttons
+        const nextAccountOnError = this.accountManager.switchToNext();
+        if (nextAccountOnError) {
+          if (processedFiles.length > 0) await this.fileHandler.cleanupTempFiles(processedFiles);
+          await say({ text: `🔄 ${t('account.rateLimitSwitch', locale, { account: nextAccountOnError })}`, thread_ts: thread_ts || ts });
+          await this.handleMessage(event, say);
+          return;
+        }
+
         await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say);
       } else {
         await say({ text: t('error.generic', locale, { message: error.message || t('error.somethingWrong', locale) }), thread_ts: thread_ts || ts });
@@ -1580,6 +1610,66 @@ export class SlackHandler {
       totalCost: 0,
       limit: this.channelApiKeyLimits.get(channel),
     });
+  }
+
+  // --- Account management commands ---
+
+  private isAccountCommand(text: string): boolean {
+    return /^`?-account(`?\s*.*)?$/i.test(text.trim());
+  }
+
+  private async handleAccountCommand(text: string, channel: string, threadTs: string | undefined, locale: Locale, say: any): Promise<void> {
+    const trimmed = text.trim().replace(/^`|`$/g, '');
+    const switchMatch = trimmed.match(/^-account\s+(.+)$/i);
+
+    if (!switchMatch) {
+      // Status display
+      const current = this.accountManager.getCurrentAccount();
+      const accounts = this.accountManager.getAccountList();
+      let msg = `${t('account.current', locale, { account: current })}\n${t('account.list', locale)}\n`;
+      for (const acc of accounts) {
+        if (acc.id === current) {
+          msg += `${t('account.entryActive', locale, { id: acc.id })}\n`;
+        } else if (acc.exists) {
+          msg += `${t('account.entryAvailable', locale, { id: acc.id })}\n`;
+        } else {
+          msg += `${t('account.entryMissing', locale, { id: acc.id, file: acc.file })}\n`;
+        }
+      }
+      msg += `\n${t('account.hint', locale)}`;
+      await say({ text: msg, thread_ts: threadTs });
+      return;
+    }
+
+    // Parse target account: "primary", "1", "2", "3", "account-1", etc.
+    const raw = switchMatch[1].trim().toLowerCase();
+    let targetId: import('./account-manager').AccountId | null = null;
+    if (raw === 'primary') {
+      targetId = 'primary';
+    } else if (raw === '1' || raw === 'account-1') {
+      targetId = 'account-1';
+    } else if (raw === '2' || raw === 'account-2') {
+      targetId = 'account-2';
+    } else if (raw === '3' || raw === 'account-3') {
+      targetId = 'account-3';
+    }
+
+    if (!targetId) {
+      await say({ text: `❌ Unknown account \`${raw}\`. Use \`primary\`, \`1\`, \`2\`, or \`3\`.`, thread_ts: threadTs });
+      return;
+    }
+
+    if (targetId === this.accountManager.getCurrentAccount()) {
+      await say({ text: t('account.alreadyCurrent', locale, { account: targetId }), thread_ts: threadTs });
+      return;
+    }
+
+    const ok = this.accountManager.switchTo(targetId);
+    if (ok) {
+      await say({ text: t('account.switchedTo', locale, { account: targetId }), thread_ts: threadTs });
+    } else {
+      await say({ text: t('account.notFound', locale, { account: targetId }), thread_ts: threadTs });
+    }
   }
 
   private isMcpInfoCommand(text: string): boolean {
