@@ -211,6 +211,18 @@ const messages: Record<string, Record<Locale, string>> = {
   'cmd.limit.invalidAmount': { en: 'Invalid amount. Use a number like `2.00`.', ko: '잘못된 금액. `2.00` 같이 숫자로 입력하세요.' },
   'cmd.limit.none': { en: 'No spending limit configured. Use `-limit <amount>` to set one (e.g., `-limit 2.00`).', ko: '사용 한도가 설정되지 않았습니다. `-limit <금액>`으로 설정하세요 (예: `-limit 2.00`).' },
 
+  // Account management
+  'account.current': { en: '🔑 Current account: `{{account}}`', ko: '🔑 현재 계정: `{{account}}`' },
+  'account.list': { en: 'Available accounts:', ko: '사용 가능한 계정:' },
+  'account.entryActive': { en: '• ✅ `{{id}}` (active)', ko: '• ✅ `{{id}}` (활성)' },
+  'account.entryAvailable': { en: '• ✅ `{{id}}`', ko: '• ✅ `{{id}}`' },
+  'account.entryMissing': { en: '• ❌ `{{id}}` — file not found: `{{file}}`', ko: '• ❌ `{{id}}` — 파일 없음: `{{file}}`' },
+  'account.switchedTo': { en: '✅ Switched to `{{account}}`', ko: '✅ `{{account}}`(으)로 전환했습니다' },
+  'account.notFound': { en: '❌ Credentials file not found for `{{account}}`', ko: '❌ `{{account}}` 자격증명 파일을 찾을 수 없습니다' },
+  'account.alreadyCurrent': { en: 'Already on `{{account}}`', ko: '이미 `{{account}}`을(를) 사용 중입니다' },
+  'account.rateLimitSwitch': { en: 'Rate limit reached. Switching to `{{account}}` and retrying...', ko: 'Rate limit 도달. `{{account}}`으로 전환하여 재시도합니다...' },
+  'account.hint': { en: '_Use `-account <id>` to switch (e.g., `-account primary`, `-account 1`)_', ko: '_`-account <id>`로 전환 (예: `-account primary`, `-account 1`)_' },
+
   // --- Error ---
   'error.generic': { en: 'Error: {{message}}', ko: '오류: {{message}}' },
   'error.somethingWrong': { en: 'Something went wrong', ko: '오류가 발생했습니다' },
@@ -347,7 +359,8 @@ export function getHelpText(locale: Locale): string {
     help += `\`-schedule add <시간>\` — 세션 시작 시간 추가 (예: \`-schedule add 6\`)\n`;
     help += `\`-schedule remove <시간>\` — 시간 제거\n`;
     help += `\`-schedule clear\` — 전체 초기화\n`;
-
+    help += `\`-account\` — 현재 계정 및 등록된 계정 목록\n`;
+    help += `\`-account <id>\` — 계정 전환 (예: \`-account primary\`, \`-account 1\`)\n`;
 
     help += `*팁*\n`;
     help += `• 같은 쓰레드 = 세션 자동 연속 (명령어 불필요)\n`;
@@ -389,7 +402,8 @@ export function getHelpText(locale: Locale): string {
   help += `\`-schedule add <hour>\` — Add session start time (e.g., \`-schedule add 6\`)\n`;
   help += `\`-schedule remove <hour>\` — Remove a time\n`;
   help += `\`-schedule clear\` — Clear all scheduled times\n`;
-
+  help += `\`-account\` — Show current account and registered accounts\n`;
+  help += `\`-account <id>\` — Switch account (e.g., \`-account primary\`, \`-account 1\`)\n`;
 
   help += `*Tips*\n`;
   help += `• Same thread = session auto-continues (no command needed)\n`;
