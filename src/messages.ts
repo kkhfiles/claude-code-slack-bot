@@ -152,6 +152,7 @@ const messages: Record<string, Record<Locale, string>> = {
   'rateLimit.retryExpired': { en: 'Retry info expired. Please resend your message manually.', ko: '재시도 정보가 만료되었습니다. 수동으로 메시지를 재전송해주세요.' },
 
   'rateLimit.continueWithApiKey': { en: 'Continue with API key', ko: 'API 키로 계속' },
+  'rateLimit.switchAccount': { en: '🔄 Switch to {{account}}', ko: '🔄 {{account}}으로 전환' },
 
   // Rate limit modal
   'rateLimit.modalTitle': { en: 'Schedule Retry', ko: '예약 재시도' },
@@ -214,14 +215,19 @@ const messages: Record<string, Record<Locale, string>> = {
   // Account management
   'account.current': { en: '🔑 Current account: `{{account}}`', ko: '🔑 현재 계정: `{{account}}`' },
   'account.list': { en: 'Available accounts:', ko: '사용 가능한 계정:' },
-  'account.entryActive': { en: '• ✅ `{{id}}` (active)', ko: '• ✅ `{{id}}` (활성)' },
+  'account.entryActive': { en: '• ✅ `{{id}}` _(active)_', ko: '• ✅ `{{id}}` _(활성)_' },
   'account.entryAvailable': { en: '• ✅ `{{id}}`', ko: '• ✅ `{{id}}`' },
-  'account.entryMissing': { en: '• ❌ `{{id}}` — file not found: `{{file}}`', ko: '• ❌ `{{id}}` — 파일 없음: `{{file}}`' },
+  'account.entryMissing': { en: '• ❌ `{{id}}` _(not configured)_', ko: '• ❌ `{{id}}` _(미설정)_' },
+  'account.useBtn': { en: '▶ Use', ko: '▶ 사용' },
+  'account.setBtn': { en: '✎ Set', ko: '✎ 설정' },
+  'account.unsetBtn': { en: '✕ Unset', ko: '✕ 해제' },
+  'account.unset.done': { en: '✅ `{{id}}` unset.', ko: '✅ `{{id}}` 해제됨.' },
   'account.switchedTo': { en: '✅ Switched to `{{account}}`', ko: '✅ `{{account}}`(으)로 전환했습니다' },
   'account.notFound': { en: '❌ Credentials file not found for `{{account}}`', ko: '❌ `{{account}}` 자격증명 파일을 찾을 수 없습니다' },
   'account.alreadyCurrent': { en: 'Already on `{{account}}`', ko: '이미 `{{account}}`을(를) 사용 중입니다' },
   'account.rateLimitSwitch': { en: 'Rate limit reached. Switching to `{{account}}` and retrying...', ko: 'Rate limit 도달. `{{account}}`으로 전환하여 재시도합니다...' },
-  'account.hint': { en: '_Use `-account <id>` to switch (e.g., `-account primary`, `-account 1`)_', ko: '_`-account <id>`로 전환 (예: `-account primary`, `-account 1`)_' },
+  'account.switchedTerminalGuide': { en: '✅ Switched to `{{account}}`.\n_Terminal: type `/exit` then `claude -c` to resume with the new account._', ko: '✅ `{{account}}`(으)로 전환했습니다.\n_터미널에서 `/exit` 후 `claude -c`로 새 계정으로 재개하세요._' },
+  'account.hint': { en: '_Use `-account <id>` to switch (e.g., `-account 1`, `-account 2`)_', ko: '_`-account <id>`로 전환 (예: `-account 1`, `-account 2`)_' },
 
   // Setup wizard
   'account.setup.title': { en: '🔑 *Multi-Account Setup*', ko: '🔑 *다중 계정 설정*' },
@@ -230,23 +236,18 @@ const messages: Record<string, Record<Locale, string>> = {
     ko: '보조 Claude 계정을 추가하면 rate limit 시 자동으로 전환됩니다.\n기본 계정이 rate limit에 걸리면 다음 계정으로 자동 전환 — 별도 조치 불필요.',
   },
   'account.setup.chooseSlot': { en: 'Choose which slot to configure:', ko: '설정할 슬롯을 선택하세요:' },
-  'account.setup.slotAvailable': { en: '{{id}} — ready to configure', ko: '{{id}} — 설정 가능' },
-  'account.setup.slotTaken': { en: '{{id}} — already set up (overwrite?)', ko: '{{id}} — 이미 설정됨 (덮어쓰기?)' },
-  'account.setup.checkBtn': { en: '✅ Check file', ko: '✅ 파일 확인' },
+  'account.setup.slotAvailable': { en: '{{id}}', ko: '{{id}}' },
+  'account.setup.slotTaken': { en: '{{id}} (overwrite)', ko: '{{id}} (덮어쓰기)' },
   'account.setup.cancelBtn': { en: 'Cancel', ko: '취소' },
-  'account.setup.found': { en: '✅ Credentials file found for `{{slot}}`!\nYou\'re all set — this account will be used automatically on rate limit.', ko: '✅ `{{slot}}` 자격증명 파일 확인됨!\n설정 완료 — rate limit 시 이 계정이 자동으로 사용됩니다.' },
-  'account.setup.notFound': { en: '❌ File not found yet at:\n`{{file}}`\nComplete the steps above and click *Check file* again.', ko: '❌ 아직 파일이 없습니다:\n`{{file}}`\n위 단계를 완료하고 *파일 확인*을 다시 클릭하세요.' },
-  'account.setup.expired': { en: '⚠️ Setup session expired. Run `-account setup` again.', ko: '⚠️ 설정 세션이 만료됐습니다. `-account setup`을 다시 실행하세요.' },
   'account.setup.cancelled': { en: 'Setup cancelled.', ko: '설정이 취소됐습니다.' },
-  'account.setup.instructionHeader': { en: '📋 *Setup instructions for `{{slot}}`*\nOpen a new terminal window and run the following commands:', ko: '📋 *`{{slot}}` 설정 안내*\n새 터미널 창을 열고 아래 명령어를 순서대로 실행하세요:' },
-  'account.setup.instructionWarning': {
-    en: '⚠️ *Open a NEW terminal window* — do not use the one where Claude is running.',
-    ko: '⚠️ *새 터미널 창을 여세요* — Claude가 실행 중인 터미널에서 실행하지 마세요.',
-  },
-  'account.setup.instructionStep1': { en: '*Step 1 — Log in with a different account (uses a temp directory):*', ko: '*1단계 — 다른 계정으로 로그인 (임시 디렉터리 사용):*' },
-  'account.setup.instructionStep2': { en: '*Step 2 — Copy the credentials file:*', ko: '*2단계 — 자격증명 파일 복사:*' },
-  'account.setup.instructionStep3': { en: '*Step 3 — Clean up:*', ko: '*3단계 — 정리:*' },
-  'account.setup.instructionAltTitle': { en: '_If `CLAUDE_CONFIG_DIR` does not work (alternative):_', ko: '_`CLAUDE_CONFIG_DIR`이 동작하지 않는 경우 (대안):_' },
+  'account.setup.expired': { en: '⚠️ Setup session expired. Run `-account setup` again.', ko: '⚠️ 설정 세션이 만료됐습니다. `-account setup`을 다시 실행하세요.' },
+  'account.setup.captureNew.title': { en: '🔑 *Setup `{{slot}}`*\nIn your terminal:\n1. Type `/logout` and press Enter\n2. Run `claude` and login with your *`{{slot}}`* account\n\nClick ✅ Done when login is complete:', ko: '🔑 *`{{slot}}` 설정*\n터미널에서:\n1. `/logout` 입력 후 엔터\n2. `claude` 실행 후 *`{{slot}}`* 계정으로 로그인\n\n로그인 완료 후 ✅ 완료를 클릭하세요:' },
+  'account.setup.captureNew.doneBtn': { en: '✅ Done', ko: '✅ 완료' },
+  'account.setup.captureNew.notChanged': { en: '❌ Credentials haven\'t changed yet. Please complete the login first, then click Done again.', ko: '❌ 아직 크리덴셜이 변경되지 않았습니다. 로그인을 완료한 후 다시 클릭하세요.' },
+  'account.setup.restoreAccount1.title': { en: '🔑 *Setup `{{slot}}` — last step*\n✅ `{{slot}}` credentials captured!\n\nNow in your terminal:\n1. Type `/logout` and press Enter\n2. Run `claude` and login with your *`account-1`* account\n\nClick ✅ Done when ready:', ko: '🔑 *`{{slot}}` 설정 — 마지막 단계*\n✅ `{{slot}}` 크리덴셜 저장 완료!\n\n이제 터미널에서:\n1. `/logout` 입력 후 엔터\n2. `claude` 실행 후 *`account-1`* 계정으로 로그인\n\n완료 후 ✅ 를 클릭하세요:' },
+  'account.setup.restoreAccount1.doneBtn': { en: '✅ Done', ko: '✅ 완료' },
+  'account.setup.restoreAccount1.notChanged': { en: '❌ Credentials haven\'t changed yet. Please complete the account-1 login first, then click Done again.', ko: '❌ 아직 크리덴셜이 변경되지 않았습니다. account-1 로그인을 완료한 후 다시 클릭하세요.' },
+  'account.setup.done': { en: '✅ *`{{slot}}` setup complete!*\nThis account will be used automatically on rate limit failover.', ko: '✅ *`{{slot}}` 설정 완료!*\nRate limit 시 자동으로 이 계정으로 전환됩니다.' },
 
   // --- Error ---
   'error.generic': { en: 'Error: {{message}}', ko: '오류: {{message}}' },
@@ -359,34 +360,34 @@ export function getHelpText(locale: Locale): string {
     help += `\`-cwd\` — 현재 작업 디렉터리 표시\n\n`;
     help += `*세션*\n`;
     help += `\`-r\` / \`resume\` / \`continue\` / \`계속\` — 최근 세션 피커 (모바일 친화)\n`;
-    help += `\`-continue [메시지]\` — 마지막 CLI 세션 재개\n`;
+    help += `\`-c\` / \`-continue [메시지]\` — 마지막 CLI 세션 재개\n`;
     help += `\`-resume <세션ID>\` — 특정 세션 재개\n`;
-    help += `\`-sessions\` — 현재 cwd의 세션 목록\n`;
-    help += `\`-sessions all\` — 전체 프로젝트 세션 목록\n`;
+    help += `\`-s\` / \`-sessions\` / \`세션\` — 현재 cwd의 세션 목록\n`;
+    help += `\`-sessions all\` / \`세션 전체\` — 전체 프로젝트 세션 목록\n`;
     help += `\`-stop\` — 실행 중인 쿼리 중단 (graceful interrupt)\n`;
-    help += `\`-reset\` — 세션 종료 (다음 메시지부터 새 대화)\n\n`;
+    help += `\`-reset\` / \`초기화\` — 세션 종료 (다음 메시지부터 새 대화)\n\n`;
     help += `*계획 및 권한*\n`;
-    help += `\`-plan <프롬프트>\` — 계획만 수립 (읽기 전용, 실행 안 함)\n`;
-    help += `\`-default\` — 기본 모드: 편집, Bash, MCP 승인 필요 (기본값)\n`;
-    help += `\`-safe\` — 안전 모드: 편집 자동 승인, Bash/MCP 승인 필요\n`;
-    help += `\`-trust\` — 신뢰 모드: 모든 도구 자동 승인\n\n`;
+    help += `\`-plan <프롬프트>\` / \`계획 <프롬프트>\` — 계획만 수립 (읽기 전용, 실행 안 함)\n`;
+    help += `\`-d\` / \`-default\` / \`기본\` — 기본 모드: 편집, Bash, MCP 승인 필요 (기본값)\n`;
+    help += `\`-safe\` / \`안전\` — 안전 모드: 편집 자동 승인, Bash/MCP 승인 필요\n`;
+    help += `\`-trust\` / \`신뢰\` — 신뢰 모드: 모든 도구 자동 승인\n\n`;
     help += `*설정*\n`;
-    help += `\`-model [이름]\` — 모델 조회/설정 (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
-    help += `\`-cost\` — 마지막 쿼리 비용 및 세션 ID\n`;
-    help += `\`-version\` — 봇 버전 및 업데이트 확인\n\n`;
+    help += `\`-m\` / \`-model [이름]\` / \`모델\` — 모델 조회/설정 (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
+    help += `\`-cost\` / \`비용\` — 마지막 쿼리 비용 및 세션 ID\n`;
+    help += `\`-v\` / \`-version\` / \`버전\` — 봇 버전 및 업데이트 확인\n\n`;
     help += `*MCP*\n`;
     help += `\`-mcp\` — MCP 서버 상태 표시\n`;
     help += `\`-mcp reload\` — MCP 설정 리로드\n`;
-    help += `\`-apikey\` — API 키 등록/수정 (rate limit 시 자동 전환용)\n`;
-    help += `\`-limit [금액]\` — API 키 사용 한도 조회/설정 (예: \`-limit 2.00\`)\n`;
-    help += `\`-limit clear\` — 사용 한도 초기화\n`;
-    help += `\`-schedule\` — 세션 자동 시작 설정 조회\n`;
-    help += `\`-schedule add <시간>\` — 세션 시작 시간 추가 (예: \`-schedule add 6\`)\n`;
-    help += `\`-schedule remove <시간>\` — 시간 제거\n`;
-    help += `\`-schedule clear\` — 전체 초기화\n`;
-    help += `\`-account\` — 현재 계정 및 등록된 계정 목록\n`;
-    help += `\`-account setup\` — 보조 계정 설정 마법사 (대화형 안내)\n`;
-    help += `\`-account <id>\` — 계정 전환 (예: \`-account primary\`, \`-account 1\`)\n`;
+    help += `\`-key\` / \`-apikey\` / \`키\` — API 키 등록/수정 (rate limit 시 자동 전환용)\n`;
+    help += `\`-limit [금액]\` / \`한도\` — API 키 사용 한도 조회/설정 (예: \`-limit 2.00\`)\n`;
+    help += `\`-limit clear\` / \`한도 초기화\` — 사용 한도 초기화\n`;
+    help += `\`-sc\` / \`-schedule\` / \`스케줄\` — 세션 자동 시작 설정 조회\n`;
+    help += `\`-sc add <시간>\` / \`스케줄 추가 <시간>\` — 세션 시작 시간 추가 (예: \`-sc add 6\`)\n`;
+    help += `\`-sc remove <시간>\` / \`스케줄 삭제 <시간>\` — 시간 제거\n`;
+    help += `\`-sc clear\` / \`스케줄 초기화\` — 전체 초기화\n`;
+    help += `\`-ac\` / \`-account\` / \`계정\` — 현재 계정 및 등록된 계정 목록\n`;
+    help += `\`-ac setup\` — 계정 설정 마법사 (대화형 안내)\n`;
+    help += `\`-ac <id>\` — 계정 전환 (예: \`-ac 1\`, \`-ac 2\`)\n`;
 
     help += `*팁*\n`;
     help += `• 같은 쓰레드 = 세션 자동 연속 (명령어 불필요)\n`;
@@ -403,34 +404,34 @@ export function getHelpText(locale: Locale): string {
   help += `\`-cwd\` — Show current working directory\n\n`;
   help += `*Session*\n`;
   help += `\`-r\` / \`resume\` / \`continue\` / \`계속\` — Recent sessions picker (mobile-friendly)\n`;
-  help += `\`-continue [message]\` — Resume last CLI session\n`;
+  help += `\`-c\` / \`-continue [message]\` — Resume last CLI session\n`;
   help += `\`-resume <session-id>\` — Resume a specific session\n`;
-  help += `\`-sessions\` — List sessions for current cwd\n`;
+  help += `\`-s\` / \`-sessions\` — List sessions for current cwd\n`;
   help += `\`-sessions all\` — List sessions across all projects\n`;
   help += `\`-stop\` — Cancel the running query (graceful interrupt)\n`;
   help += `\`-reset\` — End current session (next message starts fresh)\n\n`;
   help += `*Plan & Permissions*\n`;
   help += `\`-plan <prompt>\` — Plan only (read-only, no execution)\n`;
-  help += `\`-default\` — Default: edits, bash, MCP require approval (default)\n`;
+  help += `\`-d\` / \`-default\` — Default: edits, bash, MCP require approval (default)\n`;
   help += `\`-safe\` — Safe: edits auto-approved, bash/MCP require approval\n`;
   help += `\`-trust\` — Trust: all tools auto-approved\n\n`;
   help += `*Settings*\n`;
-  help += `\`-model [name]\` — Get/set model (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
+  help += `\`-m\` / \`-model [name]\` — Get/set model (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
   help += `\`-cost\` — Show last query cost and session ID\n`;
-  help += `\`-version\` — Show bot version and check for updates\n\n`;
+  help += `\`-v\` / \`-version\` — Show bot version and check for updates\n\n`;
   help += `*MCP*\n`;
   help += `\`-mcp\` — Show MCP server status\n`;
   help += `\`-mcp reload\` — Reload MCP configuration\n`;
-  help += `\`-apikey\` — Register/update API key (auto-switch on rate limit)\n`;
+  help += `\`-key\` / \`-apikey\` — Register/update API key (auto-switch on rate limit)\n`;
   help += `\`-limit [amount]\` — View/set API key spending limit (e.g., \`-limit 2.00\`)\n`;
   help += `\`-limit clear\` — Remove spending limit\n`;
-  help += `\`-schedule\` — View session auto-start settings\n`;
-  help += `\`-schedule add <hour>\` — Add session start time (e.g., \`-schedule add 6\`)\n`;
-  help += `\`-schedule remove <hour>\` — Remove a time\n`;
-  help += `\`-schedule clear\` — Clear all scheduled times\n`;
-  help += `\`-account\` — Show current account and registered accounts\n`;
-  help += `\`-account setup\` — Interactive wizard to configure backup accounts\n`;
-  help += `\`-account <id>\` — Switch account (e.g., \`-account primary\`, \`-account 1\`)\n`;
+  help += `\`-sc\` / \`-schedule\` — View session auto-start settings\n`;
+  help += `\`-sc add <hour>\` — Add session start time (e.g., \`-sc add 6\`)\n`;
+  help += `\`-sc remove <hour>\` — Remove a time\n`;
+  help += `\`-sc clear\` — Clear all scheduled times\n`;
+  help += `\`-ac\` / \`-account\` — Show current account and registered accounts\n`;
+  help += `\`-ac setup\` — Interactive wizard to configure accounts\n`;
+  help += `\`-ac <id>\` — Switch account (e.g., \`-ac 1\`, \`-ac 2\`)\n`;
 
   help += `*Tips*\n`;
   help += `• Same thread = session auto-continues (no command needed)\n`;
