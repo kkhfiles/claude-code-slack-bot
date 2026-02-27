@@ -223,6 +223,31 @@ const messages: Record<string, Record<Locale, string>> = {
   'account.rateLimitSwitch': { en: 'Rate limit reached. Switching to `{{account}}` and retrying...', ko: 'Rate limit 도달. `{{account}}`으로 전환하여 재시도합니다...' },
   'account.hint': { en: '_Use `-account <id>` to switch (e.g., `-account primary`, `-account 1`)_', ko: '_`-account <id>`로 전환 (예: `-account primary`, `-account 1`)_' },
 
+  // Setup wizard
+  'account.setup.title': { en: '🔑 *Multi-Account Setup*', ko: '🔑 *다중 계정 설정*' },
+  'account.setup.intro': {
+    en: 'Add backup Claude accounts for automatic rate limit failover.\nWhen your primary account hits a rate limit, the bot switches to the next account automatically — no action needed.',
+    ko: '보조 Claude 계정을 추가하면 rate limit 시 자동으로 전환됩니다.\n기본 계정이 rate limit에 걸리면 다음 계정으로 자동 전환 — 별도 조치 불필요.',
+  },
+  'account.setup.chooseSlot': { en: 'Choose which slot to configure:', ko: '설정할 슬롯을 선택하세요:' },
+  'account.setup.slotAvailable': { en: '{{id}} — ready to configure', ko: '{{id}} — 설정 가능' },
+  'account.setup.slotTaken': { en: '{{id}} — already set up (overwrite?)', ko: '{{id}} — 이미 설정됨 (덮어쓰기?)' },
+  'account.setup.checkBtn': { en: '✅ Check file', ko: '✅ 파일 확인' },
+  'account.setup.cancelBtn': { en: 'Cancel', ko: '취소' },
+  'account.setup.found': { en: '✅ Credentials file found for `{{slot}}`!\nYou\'re all set — this account will be used automatically on rate limit.', ko: '✅ `{{slot}}` 자격증명 파일 확인됨!\n설정 완료 — rate limit 시 이 계정이 자동으로 사용됩니다.' },
+  'account.setup.notFound': { en: '❌ File not found yet at:\n`{{file}}`\nComplete the steps above and click *Check file* again.', ko: '❌ 아직 파일이 없습니다:\n`{{file}}`\n위 단계를 완료하고 *파일 확인*을 다시 클릭하세요.' },
+  'account.setup.expired': { en: '⚠️ Setup session expired. Run `-account setup` again.', ko: '⚠️ 설정 세션이 만료됐습니다. `-account setup`을 다시 실행하세요.' },
+  'account.setup.cancelled': { en: 'Setup cancelled.', ko: '설정이 취소됐습니다.' },
+  'account.setup.instructionHeader': { en: '📋 *Setup instructions for `{{slot}}`*\nOpen a new terminal window and run the following commands:', ko: '📋 *`{{slot}}` 설정 안내*\n새 터미널 창을 열고 아래 명령어를 순서대로 실행하세요:' },
+  'account.setup.instructionWarning': {
+    en: '⚠️ *Open a NEW terminal window* — do not use the one where Claude is running.',
+    ko: '⚠️ *새 터미널 창을 여세요* — Claude가 실행 중인 터미널에서 실행하지 마세요.',
+  },
+  'account.setup.instructionStep1': { en: '*Step 1 — Log in with a different account (uses a temp directory):*', ko: '*1단계 — 다른 계정으로 로그인 (임시 디렉터리 사용):*' },
+  'account.setup.instructionStep2': { en: '*Step 2 — Copy the credentials file:*', ko: '*2단계 — 자격증명 파일 복사:*' },
+  'account.setup.instructionStep3': { en: '*Step 3 — Clean up:*', ko: '*3단계 — 정리:*' },
+  'account.setup.instructionAltTitle': { en: '_If `CLAUDE_CONFIG_DIR` does not work (alternative):_', ko: '_`CLAUDE_CONFIG_DIR`이 동작하지 않는 경우 (대안):_' },
+
   // --- Error ---
   'error.generic': { en: 'Error: {{message}}', ko: '오류: {{message}}' },
   'error.somethingWrong': { en: 'Something went wrong', ko: '오류가 발생했습니다' },
@@ -360,6 +385,7 @@ export function getHelpText(locale: Locale): string {
     help += `\`-schedule remove <시간>\` — 시간 제거\n`;
     help += `\`-schedule clear\` — 전체 초기화\n`;
     help += `\`-account\` — 현재 계정 및 등록된 계정 목록\n`;
+    help += `\`-account setup\` — 보조 계정 설정 마법사 (대화형 안내)\n`;
     help += `\`-account <id>\` — 계정 전환 (예: \`-account primary\`, \`-account 1\`)\n`;
 
     help += `*팁*\n`;
@@ -403,6 +429,7 @@ export function getHelpText(locale: Locale): string {
   help += `\`-schedule remove <hour>\` — Remove a time\n`;
   help += `\`-schedule clear\` — Clear all scheduled times\n`;
   help += `\`-account\` — Show current account and registered accounts\n`;
+  help += `\`-account setup\` — Interactive wizard to configure backup accounts\n`;
   help += `\`-account <id>\` — Switch account (e.g., \`-account primary\`, \`-account 1\`)\n`;
 
   help += `*Tips*\n`;

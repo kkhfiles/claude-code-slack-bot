@@ -97,6 +97,7 @@ export class SlackHandler {
 
   // Multi-account management
   private accountManager = new AccountManager();
+  private pendingAccountSetups: Map<string, { slot: import('./account-manager').AccountId; channel: string; threadTs: string; messageTs: string; locale: Locale }> = new Map();
 
   constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager) {
     this.app = app;
@@ -1620,10 +1621,31 @@ export class SlackHandler {
 
   private async handleAccountCommand(text: string, channel: string, threadTs: string | undefined, locale: Locale, say: any): Promise<void> {
     const trimmed = text.trim().replace(/^`|`$/g, '');
-    const switchMatch = trimmed.match(/^-account\s+(.+)$/i);
+    const argMatch = trimmed.match(/^-account\s+(.+)$/i);
+    const raw = argMatch ? argMatch[1].trim().toLowerCase() : '';
 
-    if (!switchMatch) {
-      // Status display
+    // -account setup [slot] — interactive wizard
+    if (raw === 'setup' || raw.startsWith('setup ')) {
+      const slotArg = raw.replace(/^setup\s*/, '');
+      const slot = this.parseAccountId(slotArg) as import('./account-manager').AccountId | null;
+      if (slotArg && !slot) {
+        await say({ text: `❌ Unknown slot \`${slotArg}\`. Use \`1\`, \`2\`, or \`3\`.`, thread_ts: threadTs });
+        return;
+      }
+      if (slot && slot === 'primary') {
+        await say({ text: `❌ Cannot set up primary account via this wizard. Use \`-account setup 1\` or higher.`, thread_ts: threadTs });
+        return;
+      }
+      if (slot) {
+        await this.showAccountSetupInstructions(slot, channel, threadTs, locale, say);
+      } else {
+        await this.showAccountSetupSlotPicker(channel, threadTs, locale, say);
+      }
+      return;
+    }
+
+    // -account (no args) — status
+    if (!raw) {
       const current = this.accountManager.getCurrentAccount();
       const accounts = this.accountManager.getAccountList();
       let msg = `${t('account.current', locale, { account: current })}\n${t('account.list', locale)}\n`;
@@ -1641,35 +1663,169 @@ export class SlackHandler {
       return;
     }
 
-    // Parse target account: "primary", "1", "2", "3", "account-1", etc.
-    const raw = switchMatch[1].trim().toLowerCase();
-    let targetId: import('./account-manager').AccountId | null = null;
-    if (raw === 'primary') {
-      targetId = 'primary';
-    } else if (raw === '1' || raw === 'account-1') {
-      targetId = 'account-1';
-    } else if (raw === '2' || raw === 'account-2') {
-      targetId = 'account-2';
-    } else if (raw === '3' || raw === 'account-3') {
-      targetId = 'account-3';
-    }
-
+    // -account <id> — switch
+    const targetId = this.parseAccountId(raw);
     if (!targetId) {
-      await say({ text: `❌ Unknown account \`${raw}\`. Use \`primary\`, \`1\`, \`2\`, or \`3\`.`, thread_ts: threadTs });
+      await say({ text: `❌ Unknown account \`${raw}\`. Use \`primary\`, \`1\`, \`2\`, \`3\`, or \`setup\`.`, thread_ts: threadTs });
       return;
     }
-
     if (targetId === this.accountManager.getCurrentAccount()) {
       await say({ text: t('account.alreadyCurrent', locale, { account: targetId }), thread_ts: threadTs });
       return;
     }
-
     const ok = this.accountManager.switchTo(targetId);
-    if (ok) {
-      await say({ text: t('account.switchedTo', locale, { account: targetId }), thread_ts: threadTs });
+    await say({
+      text: ok
+        ? t('account.switchedTo', locale, { account: targetId })
+        : t('account.notFound', locale, { account: targetId }),
+      thread_ts: threadTs,
+    });
+  }
+
+  private parseAccountId(raw: string): import('./account-manager').AccountId | null {
+    if (raw === 'primary') return 'primary';
+    if (raw === '1' || raw === 'account-1') return 'account-1';
+    if (raw === '2' || raw === 'account-2') return 'account-2';
+    if (raw === '3' || raw === 'account-3') return 'account-3';
+    return null;
+  }
+
+  private async showAccountSetupSlotPicker(channel: string, threadTs: string | undefined, locale: Locale, say: any): Promise<void> {
+    const accounts = this.accountManager.getAccountList().filter(a => a.id !== 'primary');
+    const elements = accounts.map(acc => ({
+      type: 'button',
+      text: { type: 'plain_text', text: acc.exists
+        ? t('account.setup.slotTaken', locale, { id: acc.id })
+        : t('account.setup.slotAvailable', locale, { id: acc.id }),
+      },
+      action_id: `account_setup_slot`,
+      value: acc.id,
+      style: acc.exists ? undefined : 'primary' as const,
+    }));
+
+    await say({
+      thread_ts: threadTs,
+      text: t('account.setup.title', locale),
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `${t('account.setup.title', locale)}\n${t('account.setup.intro', locale)}` } },
+        { type: 'divider' },
+        { type: 'section', text: { type: 'mrkdwn', text: t('account.setup.chooseSlot', locale) } },
+        { type: 'actions', elements },
+      ],
+    });
+  }
+
+  private async showAccountSetupInstructions(
+    slot: import('./account-manager').AccountId,
+    channel: string, threadTs: string | undefined, locale: Locale, say: any,
+  ): Promise<void> {
+    // Pause credential sync so the watcher doesn't overwrite primary backup during setup
+    this.accountManager.pauseSync();
+
+    const instructions = this.formatSetupInstructions(slot, locale);
+    const setupId = `setup-${Date.now()}`;
+    const result = await say({
+      thread_ts: threadTs,
+      text: instructions,
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: instructions } },
+        {
+          type: 'actions',
+          elements: [
+            {
+              type: 'button',
+              text: { type: 'plain_text', text: t('account.setup.checkBtn', locale) },
+              action_id: 'account_setup_check',
+              value: JSON.stringify({ setupId, slot }),
+              style: 'primary',
+            },
+            {
+              type: 'button',
+              text: { type: 'plain_text', text: t('account.setup.cancelBtn', locale) },
+              action_id: 'account_setup_cancel',
+              value: setupId,
+            },
+          ],
+        },
+      ],
+    });
+
+    this.pendingAccountSetups.set(setupId, {
+      slot,
+      channel,
+      threadTs: threadTs || '',
+      messageTs: result.ts,
+      locale,
+    });
+    // Auto-expire after 30 minutes
+    setTimeout(() => {
+      const setup = this.pendingAccountSetups.get(setupId);
+      if (setup) {
+        this.pendingAccountSetups.delete(setupId);
+        this.accountManager.resumeSync();
+      }
+    }, 30 * 60 * 1000);
+  }
+
+  private formatSetupInstructions(slot: import('./account-manager').AccountId, locale: Locale): string {
+    const isWin = process.platform === 'win32';
+    const homeDir = require('os').homedir().replace(/\\/g, '\\\\');
+    const targetFile = isWin
+      ? `${homeDir}\\.claude\\.credentials.${slot}.json`
+      : `~/.claude/.credentials.${slot}.json`;
+
+    let text = `${t('account.setup.instructionHeader', locale, { slot })}\n\n`;
+    text += `${t('account.setup.instructionWarning', locale)}\n\n`;
+    text += `${t('account.setup.instructionStep1', locale)}\n`;
+
+    if (isWin) {
+      text += '```powershell\n';
+      text += `$env:CLAUDE_CONFIG_DIR = "$env:USERPROFILE\\.claude-setup-temp"\n`;
+      text += `claude login\n`;
+      text += '```\n\n';
+      text += `${t('account.setup.instructionStep2', locale)}\n`;
+      text += '```powershell\n';
+      text += `Copy-Item "$env:USERPROFILE\\.claude-setup-temp\\.credentials.json" \`\n`;
+      text += `          "$env:USERPROFILE\\.claude\\.credentials.${slot}.json"\n`;
+      text += '```\n\n';
+      text += `${t('account.setup.instructionStep3', locale)}\n`;
+      text += '```powershell\n';
+      text += `Remove-Item -Recurse -Force "$env:USERPROFILE\\.claude-setup-temp"\n`;
+      text += `Remove-Item Env:\\CLAUDE_CONFIG_DIR\n`;
+      text += '```\n\n';
+      text += `${t('account.setup.instructionAltTitle', locale)}\n`;
+      text += '```powershell\n';
+      text += `# (Use only if CLAUDE_CONFIG_DIR does not work)\n`;
+      text += `claude login   # logs in as new account, overwrites .credentials.json\n`;
+      text += `Copy-Item "$env:USERPROFILE\\.claude\\.credentials.json" \`\n`;
+      text += `          "$env:USERPROFILE\\.claude\\.credentials.${slot}.json"\n`;
+      text += `Copy-Item "$env:USERPROFILE\\.claude\\.credentials.primary-backup.json" \`\n`;
+      text += `          "$env:USERPROFILE\\.claude\\.credentials.json"   # restore primary\n`;
+      text += '```\n';
     } else {
-      await say({ text: t('account.notFound', locale, { account: targetId }), thread_ts: threadTs });
+      text += '```bash\n';
+      text += `CLAUDE_CONFIG_DIR=~/.claude-setup-temp claude login\n`;
+      text += '```\n\n';
+      text += `${t('account.setup.instructionStep2', locale)}\n`;
+      text += '```bash\n';
+      text += `cp ~/.claude-setup-temp/.credentials.json \\\n`;
+      text += `   ~/.claude/.credentials.${slot}.json\n`;
+      text += '```\n\n';
+      text += `${t('account.setup.instructionStep3', locale)}\n`;
+      text += '```bash\n';
+      text += `rm -rf ~/.claude-setup-temp\n`;
+      text += '```\n\n';
+      text += `${t('account.setup.instructionAltTitle', locale)}\n`;
+      text += '```bash\n';
+      text += `# (Use only if CLAUDE_CONFIG_DIR does not work)\n`;
+      text += `claude login   # logs in as new account, overwrites .credentials.json\n`;
+      text += `cp ~/.claude/.credentials.json ~/.claude/.credentials.${slot}.json\n`;
+      text += `cp ~/.claude/.credentials.primary-backup.json ~/.claude/.credentials.json\n`;
+      text += '```\n';
     }
+
+    text += `\n_Target file: \`${targetFile}\`_`;
+    return text;
   }
 
   private isMcpInfoCommand(text: string): boolean {
@@ -2046,6 +2202,85 @@ export class SlackHandler {
       const planId = (body as any).actions[0].value;
       this.pendingPlans.delete(planId);
       await respond({ response_type: 'ephemeral', text: t('plan.cancelled', actionLocale) });
+    });
+
+    // Account setup: slot picker button → show instructions
+    this.app.action('account_setup_slot', async ({ ack, body, respond }) => {
+      await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
+      const slot = (body as any).actions[0].value as import('./account-manager').AccountId;
+      const channel = (body as any).channel?.id || (body as any).container?.channel_id || '';
+      const threadTs = (body as any).message?.thread_ts || (body as any).message?.ts;
+      // Replace picker message with instructions
+      await respond({ response_type: 'in_channel', text: `📋 ${t('account.setup.instructionHeader', actionLocale, { slot })}`, delete_original: true });
+      const say = async (msg: any) => this.app.client.chat.postMessage({ channel, ...msg });
+      await this.showAccountSetupInstructions(slot, channel, threadTs, actionLocale, say);
+    });
+
+    // Account setup: "Check file" button
+    this.app.action('account_setup_check', async ({ ack, body, respond }) => {
+      await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
+      try {
+        const { setupId, slot } = JSON.parse((body as any).actions[0].value);
+        const setup = this.pendingAccountSetups.get(setupId);
+
+        if (!setup) {
+          await respond({ response_type: 'ephemeral', text: t('account.setup.expired', actionLocale) });
+          return;
+        }
+
+        const accounts = this.accountManager.getAccountList();
+        const acc = accounts.find(a => a.id === slot);
+
+        if (acc?.exists) {
+          // Success: clean up and resume sync
+          this.pendingAccountSetups.delete(setupId);
+          this.accountManager.resumeSync();
+
+          // Build updated account list
+          const current = this.accountManager.getCurrentAccount();
+          let listMsg = `${t('account.current', actionLocale, { account: current })}\n${t('account.list', actionLocale)}\n`;
+          for (const a of accounts) {
+            const updated = a.id === slot ? { ...a, exists: true } : a;
+            if (updated.id === current) {
+              listMsg += `${t('account.entryActive', actionLocale, { id: updated.id })}\n`;
+            } else if (updated.exists || updated.id === slot) {
+              listMsg += `${t('account.entryAvailable', actionLocale, { id: updated.id })}\n`;
+            } else {
+              listMsg += `${t('account.entryMissing', actionLocale, { id: updated.id, file: updated.file })}\n`;
+            }
+          }
+
+          await respond({
+            response_type: 'in_channel',
+            replace_original: true,
+            text: `${t('account.setup.found', actionLocale, { slot })}\n\n${listMsg}`,
+          });
+        } else {
+          // Not found yet — keep buttons, show ephemeral hint
+          await respond({
+            response_type: 'ephemeral',
+            text: t('account.setup.notFound', actionLocale, { file: acc?.file || '' }),
+          });
+        }
+      } catch (error) {
+        this.logger.error('Error in account_setup_check', error);
+        await respond({ response_type: 'ephemeral', text: '❌ An error occurred. Please try again.' });
+      }
+    });
+
+    // Account setup: "Cancel" button
+    this.app.action('account_setup_cancel', async ({ ack, body, respond }) => {
+      await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
+      const setupId = (body as any).actions[0].value;
+      const setup = this.pendingAccountSetups.get(setupId);
+      if (setup) {
+        this.pendingAccountSetups.delete(setupId);
+        this.accountManager.resumeSync();
+      }
+      await respond({ response_type: 'in_channel', replace_original: true, text: t('account.setup.cancelled', actionLocale) });
     });
 
     // Session picker "Show more" button
