@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { Logger } from './logger';
 
-export type AccountId = 'primary' | 'account-1' | 'account-2' | 'account-3';
+export type AccountId = 'account-1' | 'account-2' | 'account-3';
 
 export interface AccountInfo {
   id: AccountId;
@@ -11,7 +11,7 @@ export interface AccountInfo {
   exists: boolean;
 }
 
-const ACCOUNT_CHAIN: AccountId[] = ['primary', 'account-1', 'account-2', 'account-3'];
+const ACCOUNT_CHAIN: AccountId[] = ['account-1', 'account-2', 'account-3'];
 
 export class AccountManager {
   private logger = new Logger('AccountManager');
@@ -19,7 +19,7 @@ export class AccountManager {
   private readonly credentialsFile: string;
   private readonly stateFile: string;
 
-  private currentAccount: AccountId = 'primary';
+  private currentAccount: AccountId = 'account-1';
   private watcher: fs.FSWatcher | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private isSwitching = false;
@@ -30,8 +30,6 @@ export class AccountManager {
     this.stateFile = path.join(path.resolve(__dirname, '..'), '.account-state.json');
     this.loadState();
     this.startWatcher();
-    // Ensure primary backup exists on startup
-    this.ensurePrimaryBackup();
   }
 
   // --- State persistence ---
@@ -45,7 +43,7 @@ export class AccountManager {
         }
       }
     } catch {
-      this.currentAccount = 'primary';
+      this.currentAccount = 'account-1';
     }
   }
 
@@ -60,22 +58,7 @@ export class AccountManager {
   // --- Backup file paths ---
 
   private getBackupFile(accountId: AccountId): string {
-    if (accountId === 'primary') {
-      return path.join(this.claudeDir, '.credentials.primary-backup.json');
-    }
     return path.join(this.claudeDir, `.credentials.${accountId}.json`);
-  }
-
-  private ensurePrimaryBackup(): void {
-    const backupFile = this.getBackupFile('primary');
-    if (!fs.existsSync(backupFile) && fs.existsSync(this.credentialsFile) && this.currentAccount === 'primary') {
-      try {
-        fs.copyFileSync(this.credentialsFile, backupFile);
-        this.logger.info('Created primary credentials backup');
-      } catch (error) {
-        this.logger.warn('Failed to create primary credentials backup', error);
-      }
-    }
   }
 
   // --- File watcher (sync backup when token is refreshed) ---
@@ -98,7 +81,7 @@ export class AccountManager {
     }
   }
 
-  /** Pause auto-sync during guided setup (prevents watcher from overwriting primary backup). */
+  /** Pause auto-sync during guided setup. */
   pauseSync(): void { this.syncPaused = true; }
 
   /** Resume auto-sync and immediately flush current credentials to active account backup. */
@@ -125,13 +108,17 @@ export class AccountManager {
     return this.currentAccount;
   }
 
+  /** Update the tracked active account without any file operations. */
+  setCurrentAccount(id: AccountId): void {
+    this.currentAccount = id;
+    this.saveState();
+  }
+
   getAccountList(): AccountInfo[] {
     return ACCOUNT_CHAIN.map(id => ({
       id,
       file: this.getBackupFile(id),
-      exists: id === 'primary'
-        ? fs.existsSync(this.getBackupFile('primary'))
-        : fs.existsSync(this.getBackupFile(id)),
+      exists: fs.existsSync(this.getBackupFile(id)),
     }));
   }
 
@@ -177,11 +164,48 @@ export class AccountManager {
     }
   }
 
+  /** Read the accessToken from the current credentials file (for change detection). */
+  readCurrentToken(): string | null {
+    try {
+      const data = JSON.parse(fs.readFileSync(this.credentialsFile, 'utf-8'));
+      return data.claudeAiOauth?.accessToken || null;
+    } catch { return null; }
+  }
+
+  /** Copy current credentials.json to the given slot's backup file. */
+  captureForSlot(slot: AccountId): boolean {
+    try {
+      fs.copyFileSync(this.credentialsFile, this.getBackupFile(slot));
+      this.logger.info('Captured credentials for slot', { slot });
+      return true;
+    } catch (error) {
+      this.logger.error('Failed to capture slot credentials', error);
+      return false;
+    }
+  }
+
   /** Switch to the next available account. Returns the new AccountId, or null if exhausted. */
   switchToNext(): AccountId | null {
     const next = this.getNextAccount();
     if (!next) return null;
     return this.switchTo(next) ? next : null;
+  }
+
+  /** Delete the credentials backup file for a slot. */
+  unsetAccount(id: AccountId): boolean {
+    const file = this.getBackupFile(id);
+    try {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+      if (this.currentAccount === id) {
+        this.currentAccount = 'account-1';
+        this.saveState();
+      }
+      this.logger.info('Account unset', { id });
+      return true;
+    } catch (error) {
+      this.logger.error('Failed to unset account', error);
+      return false;
+    }
   }
 
   destroy(): void {

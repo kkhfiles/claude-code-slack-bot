@@ -11,7 +11,7 @@ import { TodoManager, Todo } from './todo-manager';
 import { McpManager } from './mcp-manager';
 import { SessionScanner, SessionInfo, formatRelativeTime } from './session-scanner';
 import { ScheduleManager } from './schedule-manager';
-import { AccountManager } from './account-manager';
+import { AccountManager, AccountId } from './account-manager';
 import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
@@ -97,7 +97,7 @@ export class SlackHandler {
 
   // Multi-account management
   private accountManager = new AccountManager();
-  private pendingAccountSetups: Map<string, { slot: import('./account-manager').AccountId; channel: string; threadTs: string; messageTs: string; locale: Locale }> = new Map();
+  private pendingAccountSetups: Map<string, { slot: AccountId; stage: 'capture-new' | 'restore-account-1'; originalToken: string | null; locale: Locale }> = new Map();
 
   constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager) {
     this.app = app;
@@ -752,16 +752,8 @@ export class SlackHandler {
           ? rateLimitInfo.retryAfterSec
           : this.parseRetryAfterSeconds({ message: rateLimitMessageText });
 
-        // Try auto-switching to next account before showing retry buttons
-        const nextAccount = this.accountManager.switchToNext();
-        if (nextAccount) {
-          if (processedFiles.length > 0) await this.fileHandler.cleanupTempFiles(processedFiles);
-          await say({ text: `🔄 ${t('account.rateLimitSwitch', locale, { account: nextAccount })}`, thread_ts: thread_ts || ts });
-          await this.handleMessage(event, say);
-          return;
-        }
-
-        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say);
+        const nextAccount = this.accountManager.getNextAccount();
+        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccount ?? undefined);
       }
 
       // Clean up temp files
@@ -787,16 +779,8 @@ export class SlackHandler {
           ? rateLimitInfo.retryAfterSec
           : this.parseRetryAfterSeconds(rateLimitSource);
 
-        // Try auto-switching to next account before showing retry buttons
-        const nextAccountOnError = this.accountManager.switchToNext();
-        if (nextAccountOnError) {
-          if (processedFiles.length > 0) await this.fileHandler.cleanupTempFiles(processedFiles);
-          await say({ text: `🔄 ${t('account.rateLimitSwitch', locale, { account: nextAccountOnError })}`, thread_ts: thread_ts || ts });
-          await this.handleMessage(event, say);
-          return;
-        }
-
-        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say);
+        const nextAccountOnError = this.accountManager.getNextAccount();
+        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccountOnError ?? undefined);
       } else {
         await say({ text: t('error.generic', locale, { message: error.message || t('error.somethingWrong', locale) }), thread_ts: thread_ts || ts });
       }
@@ -912,7 +896,8 @@ export class SlackHandler {
 
   private async handleRateLimitUI(
     channel: string, threadTs: string, user: string,
-    prompt: string, retryAfterSec: number, locale: Locale, say: any
+    prompt: string, retryAfterSec: number, locale: Locale, say: any,
+    nextAccount?: AccountId
   ): Promise<void> {
     const postAt = Math.floor(Date.now() / 1000) + retryAfterSec;
     const retryTimeStr = formatTime(new Date(postAt * 1000), locale);
@@ -950,20 +935,29 @@ export class SlackHandler {
       ? prompt.substring(0, 200) + '...'
       : prompt;
 
+    const buttons: any[] = [];
+    if (nextAccount) {
+      buttons.push({
+        type: 'button',
+        text: { type: 'plain_text', text: t('rateLimit.switchAccount', locale, { account: nextAccount }) },
+        action_id: 'switch_account_retry',
+        value: JSON.stringify({ retryId, account: nextAccount }),
+        style: 'primary',
+      });
+    }
+    buttons.push(
+      { type: 'button', text: { type: 'plain_text', text: t('rateLimit.continueWithApiKey', locale) }, action_id: 'continue_with_apikey', value: JSON.stringify({ retryId, retryAfter: retryAfterSec }), style: nextAccount ? undefined : 'primary' },
+      { type: 'button', text: { type: 'plain_text', text: t('rateLimit.schedule', locale, { time: retryTimeStr }) }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, postAt, retryTimeStr }) },
+      { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: retryId },
+    );
+
     await say({
       thread_ts: threadTs,
       text: `⏳ ${t('rateLimit.reached', locale)} ${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfterSec / 60) })}`,
       blocks: [
         { type: 'section', text: { type: 'mrkdwn', text: `⏳ ${t('rateLimit.reached', locale)}\n${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfterSec / 60) })}` } },
         { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.prompt', locale, { prompt: promptPreview }) }] },
-        {
-          type: 'actions',
-          elements: [
-            { type: 'button', text: { type: 'plain_text', text: t('rateLimit.continueWithApiKey', locale) }, action_id: 'continue_with_apikey', value: JSON.stringify({ retryId, retryAfter: retryAfterSec }), style: 'primary' },
-            { type: 'button', text: { type: 'plain_text', text: t('rateLimit.schedule', locale, { time: retryTimeStr }) }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, postAt, retryTimeStr }) },
-            { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: retryId },
-          ],
-        },
+        { type: 'actions', elements: buttons },
         { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.autoNotify', locale) }] },
       ],
     });
@@ -1228,51 +1222,50 @@ export class SlackHandler {
   }
 
   private isResetCommand(text: string): boolean {
-    return /^-(reset|새로시작)$/i.test(text.trim());
+    return /^-(reset|새로시작)$|^초기화$/i.test(text.trim());
   }
 
   private isDefaultModeCommand(text: string): boolean {
-    return /^-default$/i.test(text.trim());
+    return /^-(?:default|d)$|^기본$/i.test(text.trim());
   }
 
   private isSafeCommand(text: string): boolean {
-    return /^-safe$/i.test(text.trim());
+    return /^-safe$|^안전$/i.test(text.trim());
   }
 
   private isTrustCommand(text: string): boolean {
-    return /^-trust$/i.test(text.trim());
+    return /^-trust$|^신뢰$/i.test(text.trim());
   }
 
   private parseModelCommand(text: string): string | null {
-    const match = text.trim().match(/^-model(?:\s+(\S+))?$/i);
-    if (match) return match[1] || '';
+    const match = text.trim().match(/^-(?:model|m)(?:\s+(\S+))?$|^모델(?:\s+(\S+))?$/i);
+    if (match) return match[1] || match[2] || '';
     return null;
   }
 
-
   private isCostCommand(text: string): boolean {
-    return /^-cost$/i.test(text.trim());
+    return /^-cost$|^비용$/i.test(text.trim());
   }
 
   private isVersionCommand(text: string): boolean {
-    return /^`?-version`?$/i.test(text.trim());
+    return /^`?-(?:version|v)`?$|^버전$/i.test(text.trim());
   }
 
   private isSessionsCommand(text: string): boolean {
-    return /^-sessions?(\s+(list|all|전체))?$/i.test(text.trim());
+    return /^-(?:sessions?|s)(\s+(list|all|전체))?$|^세션(\s+(all|전체))?$/i.test(text.trim());
   }
 
   private parsePlanCommand(text: string): { prompt: string } | null {
-    const match = text.trim().match(/^-plan\s+(.+)$/is);
-    if (match) return { prompt: match[1].trim() };
+    const match = text.trim().match(/^-plan\s+(.+)$|^계획\s+(.+)$/is);
+    if (match) return { prompt: (match[1] || match[2]).trim() };
     return null;
   }
 
   private parseResumeCommand(text: string): { mode: 'picker' } | { mode: 'uuid'; resumeOptions: { resumeSessionId: string }; prompt?: string } | { mode: 'continue'; resumeOptions: { continueLastSession: true }; prompt?: string } | null {
     const trimmed = text.trim();
 
-    // -continue [message]
-    const continueMatch = trimmed.match(/^-continue(?:\s+(.+))?$/is);
+    // -continue / -c [message]
+    const continueMatch = trimmed.match(/^-(?:continue|c)(?:\s+(.+))?$/is);
     if (continueMatch) {
       return { mode: 'continue', resumeOptions: { continueLastSession: true }, prompt: continueMatch[1]?.trim() || undefined };
     }
@@ -1303,12 +1296,12 @@ export class SlackHandler {
 
   private parseScheduleCommand(text: string): { action: string; time?: string } | null {
     const trimmed = text.trim();
-    if (/^`?-schedule`?$/i.test(trimmed)) return { action: 'status' };
-    const addMatch = trimmed.match(/^`?-schedule`?\s+add\s+(\d{1,2}(?::\d{2})?)`?$/i);
-    if (addMatch) return { action: 'add', time: addMatch[1] };
-    const rmMatch = trimmed.match(/^`?-schedule`?\s+(?:remove|rm|del|delete)\s+(\d{1,2}(?::\d{2})?)`?$/i);
-    if (rmMatch) return { action: 'remove', time: rmMatch[1] };
-    if (/^`?-schedule`?\s+clear`?$/i.test(trimmed)) return { action: 'clear' };
+    if (/^`?-(?:schedule|sc)`?$|^스케줄$/i.test(trimmed)) return { action: 'status' };
+    const addMatch = trimmed.match(/^`?-(?:schedule|sc)`?\s+(?:add|추가)\s+(\d{1,2}(?::\d{2})?)`?$|^스케줄\s+(?:add|추가)\s+(\d{1,2}(?::\d{2})?)$/i);
+    if (addMatch) return { action: 'add', time: addMatch[1] || addMatch[2] };
+    const rmMatch = trimmed.match(/^`?-(?:schedule|sc)`?\s+(?:remove|rm|del|delete|삭제|제거)\s+(\d{1,2}(?::\d{2})?)`?$|^스케줄\s+(?:remove|rm|삭제|제거)\s+(\d{1,2}(?::\d{2})?)$/i);
+    if (rmMatch) return { action: 'remove', time: rmMatch[1] || rmMatch[2] };
+    if (/^`?-(?:schedule|sc)`?\s+(?:clear|초기화)`?$|^스케줄\s+(?:clear|초기화)$/i.test(trimmed)) return { action: 'clear' };
     return null;
   }
 
@@ -1524,16 +1517,16 @@ export class SlackHandler {
   }
 
   private isApiKeyCommand(text: string): boolean {
-    return /^`?-apikey`?$/i.test(text.trim());
+    return /^`?-(?:apikey|key)`?$|^키$/i.test(text.trim());
   }
 
   private parseLimitCommand(text: string): { action: 'status' } | { action: 'set'; amount: number } | { action: 'clear' } | null {
     const trimmed = text.trim();
-    if (/^`?-limit`?$/i.test(trimmed)) return { action: 'status' };
-    if (/^`?-limit`?\s+(clear|off|reset)`?$/i.test(trimmed)) return { action: 'clear' };
-    const setMatch = trimmed.match(/^`?-limit`?\s+([\d.]+)`?$/i);
+    if (/^`?-limit`?$|^한도$/i.test(trimmed)) return { action: 'status' };
+    if (/^`?-limit`?\s+(clear|off|reset)`?$|^한도\s+(?:clear|초기화)$/i.test(trimmed)) return { action: 'clear' };
+    const setMatch = trimmed.match(/^`?-limit`?\s+([\d.]+)`?$|^한도\s+([\d.]+)$/i);
     if (setMatch) {
-      const amount = parseFloat(setMatch[1]);
+      const amount = parseFloat(setMatch[1] || setMatch[2]);
       if (!isNaN(amount) && amount > 0) return { action: 'set', amount };
     }
     return null;
@@ -1616,127 +1609,115 @@ export class SlackHandler {
   // --- Account management commands ---
 
   private isAccountCommand(text: string): boolean {
-    return /^`?-account(`?\s*.*)?$/i.test(text.trim());
+    return /^`?-(?:account|ac)(`?\s*.*)?$|^계정(\s.*)?$/i.test(text.trim());
   }
 
-  private async handleAccountCommand(text: string, channel: string, threadTs: string | undefined, locale: Locale, say: any): Promise<void> {
+  private async handleAccountCommand(text: string, _channel: string, threadTs: string | undefined, locale: Locale, say: any): Promise<void> {
     const trimmed = text.trim().replace(/^`|`$/g, '');
-    const argMatch = trimmed.match(/^-account\s+(.+)$/i);
+    const argMatch = trimmed.match(/^-(?:account|ac)\s+(.+)$/i) || trimmed.match(/^계정\s+(.+)$/);
     const raw = argMatch ? argMatch[1].trim().toLowerCase() : '';
 
-    // -account setup [slot] — interactive wizard
-    if (raw === 'setup' || raw.startsWith('setup ')) {
-      const slotArg = raw.replace(/^setup\s*/, '');
-      const slot = this.parseAccountId(slotArg) as import('./account-manager').AccountId | null;
-      if (slotArg && !slot) {
-        await say({ text: `❌ Unknown slot \`${slotArg}\`. Use \`1\`, \`2\`, or \`3\`.`, thread_ts: threadTs });
+    // -account <id> — direct switch shortcut
+    const targetId = raw ? this.parseAccountId(raw) : null;
+    if (targetId) {
+      if (targetId === this.accountManager.getCurrentAccount()) {
+        await say({ text: t('account.alreadyCurrent', locale, { account: targetId }), thread_ts: threadTs });
         return;
       }
-      if (slot && slot === 'primary') {
-        await say({ text: `❌ Cannot set up primary account via this wizard. Use \`-account setup 1\` or higher.`, thread_ts: threadTs });
+      const ok = this.accountManager.switchTo(targetId);
+      if (!ok) {
+        const { text: statusText, blocks } = this.buildAccountStatusBlocks(locale);
+        await say({ text: statusText, blocks, thread_ts: threadTs });
         return;
       }
-      if (slot) {
-        await this.showAccountSetupInstructions(slot, channel, threadTs, locale, say);
-      } else {
-        await this.showAccountSetupSlotPicker(channel, threadTs, locale, say);
-      }
+      const note = t('account.switchedTerminalGuide', locale, { account: targetId });
+      const { text: statusText, blocks } = this.buildAccountStatusBlocks(locale, note);
+      await say({ text: statusText, blocks, thread_ts: threadTs });
       return;
     }
 
-    // -account (no args) — status
-    if (!raw) {
-      const current = this.accountManager.getCurrentAccount();
-      const accounts = this.accountManager.getAccountList();
-      let msg = `${t('account.current', locale, { account: current })}\n${t('account.list', locale)}\n`;
-      for (const acc of accounts) {
-        if (acc.id === current) {
-          msg += `${t('account.entryActive', locale, { id: acc.id })}\n`;
-        } else if (acc.exists) {
-          msg += `${t('account.entryAvailable', locale, { id: acc.id })}\n`;
-        } else {
-          msg += `${t('account.entryMissing', locale, { id: acc.id, file: acc.file })}\n`;
-        }
-      }
-      msg += `\n${t('account.hint', locale)}`;
-      await say({ text: msg, thread_ts: threadTs });
-      return;
-    }
-
-    // -account <id> — switch
-    const targetId = this.parseAccountId(raw);
-    if (!targetId) {
-      await say({ text: `❌ Unknown account \`${raw}\`. Use \`primary\`, \`1\`, \`2\`, \`3\`, or \`setup\`.`, thread_ts: threadTs });
-      return;
-    }
-    if (targetId === this.accountManager.getCurrentAccount()) {
-      await say({ text: t('account.alreadyCurrent', locale, { account: targetId }), thread_ts: threadTs });
-      return;
-    }
-    const ok = this.accountManager.switchTo(targetId);
-    await say({
-      text: ok
-        ? t('account.switchedTo', locale, { account: targetId })
-        : t('account.notFound', locale, { account: targetId }),
-      thread_ts: threadTs,
-    });
+    // No args (or unrecognized) — show unified status + buttons
+    const { text: statusText, blocks } = this.buildAccountStatusBlocks(locale);
+    await say({ text: statusText, blocks, thread_ts: threadTs });
   }
 
-  private parseAccountId(raw: string): import('./account-manager').AccountId | null {
-    if (raw === 'primary') return 'primary';
+  private parseAccountId(raw: string): AccountId | null {
     if (raw === '1' || raw === 'account-1') return 'account-1';
     if (raw === '2' || raw === 'account-2') return 'account-2';
     if (raw === '3' || raw === 'account-3') return 'account-3';
     return null;
   }
 
-  private async showAccountSetupSlotPicker(channel: string, threadTs: string | undefined, locale: Locale, say: any): Promise<void> {
-    const accounts = this.accountManager.getAccountList().filter(a => a.id !== 'primary');
-    const elements = accounts.map(acc => ({
-      type: 'button',
-      text: { type: 'plain_text', text: acc.exists
-        ? t('account.setup.slotTaken', locale, { id: acc.id })
-        : t('account.setup.slotAvailable', locale, { id: acc.id }),
-      },
-      action_id: `account_setup_slot`,
-      value: acc.id,
-      style: acc.exists ? undefined : 'primary' as const,
-    }));
+  private buildAccountStatusBlocks(locale: Locale, note?: string): { text: string; blocks: any[] } {
+    const current = this.accountManager.getCurrentAccount();
+    const accounts = this.accountManager.getAccountList();
+    const blocks: any[] = [];
 
-    await say({
-      thread_ts: threadTs,
-      text: t('account.setup.title', locale),
-      blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: `${t('account.setup.title', locale)}\n${t('account.setup.intro', locale)}` } },
-        { type: 'divider' },
-        { type: 'section', text: { type: 'mrkdwn', text: t('account.setup.chooseSlot', locale) } },
-        { type: 'actions', elements },
-      ],
-    });
+    if (note) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: note } });
+      blocks.push({ type: 'divider' });
+    }
+
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: t('account.current', locale, { account: current }) } });
+
+    for (const acc of accounts) {
+      if (acc.id === current) {
+        // Active account: show status + Set button for reconfiguring
+        blocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: t('account.entryActive', locale, { id: acc.id }) },
+          accessory: {
+            type: 'button',
+            text: { type: 'plain_text', text: t('account.setBtn', locale) },
+            action_id: 'account_set_btn',
+            value: acc.id,
+          },
+        });
+      } else if (acc.exists) {
+        // Configured, not active: Use / Set / Unset
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: t('account.entryAvailable', locale, { id: acc.id }) } });
+        blocks.push({
+          type: 'actions',
+          elements: [
+            { type: 'button', text: { type: 'plain_text', text: t('account.useBtn', locale) }, action_id: 'account_use_btn', value: acc.id, style: 'primary' },
+            { type: 'button', text: { type: 'plain_text', text: t('account.setBtn', locale) }, action_id: 'account_set_btn', value: acc.id },
+            { type: 'button', text: { type: 'plain_text', text: t('account.unsetBtn', locale) }, action_id: 'account_unset_btn', value: acc.id, style: 'danger' },
+          ],
+        });
+      } else {
+        // Not configured: Set only
+        blocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: t('account.entryMissing', locale, { id: acc.id, file: acc.file }) },
+          accessory: {
+            type: 'button',
+            text: { type: 'plain_text', text: t('account.setBtn', locale) },
+            action_id: 'account_set_btn',
+            value: acc.id,
+          },
+        });
+      }
+    }
+
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: t('account.hint', locale) }] });
+
+    return { text: t('account.current', locale, { account: current }), blocks };
   }
 
-  private async showAccountSetupInstructions(
-    slot: import('./account-manager').AccountId,
-    channel: string, threadTs: string | undefined, locale: Locale, say: any,
-  ): Promise<void> {
-    // Pause credential sync so the watcher doesn't overwrite primary backup during setup
-    this.accountManager.pauseSync();
-
-    const instructions = this.formatSetupInstructions(slot, locale);
-    const setupId = `setup-${Date.now()}`;
-    const result = await say({
-      thread_ts: threadTs,
-      text: instructions,
+  private buildCaptureNewBlocks(setupId: string, slot: AccountId, locale: Locale): { text: string; blocks: any[] } {
+    const text = t('account.setup.captureNew.title', locale, { slot });
+    return {
+      text,
       blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: instructions } },
+        { type: 'section', text: { type: 'mrkdwn', text } },
         {
           type: 'actions',
           elements: [
             {
               type: 'button',
-              text: { type: 'plain_text', text: t('account.setup.checkBtn', locale) },
-              action_id: 'account_setup_check',
-              value: JSON.stringify({ setupId, slot }),
+              text: { type: 'plain_text', text: t('account.setup.captureNew.doneBtn', locale) },
+              action_id: 'account_setup_next',
+              value: setupId,
               style: 'primary',
             },
             {
@@ -1748,84 +1729,35 @@ export class SlackHandler {
           ],
         },
       ],
-    });
-
-    this.pendingAccountSetups.set(setupId, {
-      slot,
-      channel,
-      threadTs: threadTs || '',
-      messageTs: result.ts,
-      locale,
-    });
-    // Auto-expire after 30 minutes
-    setTimeout(() => {
-      const setup = this.pendingAccountSetups.get(setupId);
-      if (setup) {
-        this.pendingAccountSetups.delete(setupId);
-        this.accountManager.resumeSync();
-      }
-    }, 30 * 60 * 1000);
+    };
   }
 
-  private formatSetupInstructions(slot: import('./account-manager').AccountId, locale: Locale): string {
-    const isWin = process.platform === 'win32';
-    const homeDir = require('os').homedir().replace(/\\/g, '\\\\');
-    const targetFile = isWin
-      ? `${homeDir}\\.claude\\.credentials.${slot}.json`
-      : `~/.claude/.credentials.${slot}.json`;
-
-    let text = `${t('account.setup.instructionHeader', locale, { slot })}\n\n`;
-    text += `${t('account.setup.instructionWarning', locale)}\n\n`;
-    text += `${t('account.setup.instructionStep1', locale)}\n`;
-
-    if (isWin) {
-      text += '```powershell\n';
-      text += `$env:CLAUDE_CONFIG_DIR = "$env:USERPROFILE\\.claude-setup-temp"\n`;
-      text += `claude login\n`;
-      text += '```\n\n';
-      text += `${t('account.setup.instructionStep2', locale)}\n`;
-      text += '```powershell\n';
-      text += `Copy-Item "$env:USERPROFILE\\.claude-setup-temp\\.credentials.json" \`\n`;
-      text += `          "$env:USERPROFILE\\.claude\\.credentials.${slot}.json"\n`;
-      text += '```\n\n';
-      text += `${t('account.setup.instructionStep3', locale)}\n`;
-      text += '```powershell\n';
-      text += `Remove-Item -Recurse -Force "$env:USERPROFILE\\.claude-setup-temp"\n`;
-      text += `Remove-Item Env:\\CLAUDE_CONFIG_DIR\n`;
-      text += '```\n\n';
-      text += `${t('account.setup.instructionAltTitle', locale)}\n`;
-      text += '```powershell\n';
-      text += `# (Use only if CLAUDE_CONFIG_DIR does not work)\n`;
-      text += `claude login   # logs in as new account, overwrites .credentials.json\n`;
-      text += `Copy-Item "$env:USERPROFILE\\.claude\\.credentials.json" \`\n`;
-      text += `          "$env:USERPROFILE\\.claude\\.credentials.${slot}.json"\n`;
-      text += `Copy-Item "$env:USERPROFILE\\.claude\\.credentials.primary-backup.json" \`\n`;
-      text += `          "$env:USERPROFILE\\.claude\\.credentials.json"   # restore primary\n`;
-      text += '```\n';
-    } else {
-      text += '```bash\n';
-      text += `CLAUDE_CONFIG_DIR=~/.claude-setup-temp claude login\n`;
-      text += '```\n\n';
-      text += `${t('account.setup.instructionStep2', locale)}\n`;
-      text += '```bash\n';
-      text += `cp ~/.claude-setup-temp/.credentials.json \\\n`;
-      text += `   ~/.claude/.credentials.${slot}.json\n`;
-      text += '```\n\n';
-      text += `${t('account.setup.instructionStep3', locale)}\n`;
-      text += '```bash\n';
-      text += `rm -rf ~/.claude-setup-temp\n`;
-      text += '```\n\n';
-      text += `${t('account.setup.instructionAltTitle', locale)}\n`;
-      text += '```bash\n';
-      text += `# (Use only if CLAUDE_CONFIG_DIR does not work)\n`;
-      text += `claude login   # logs in as new account, overwrites .credentials.json\n`;
-      text += `cp ~/.claude/.credentials.json ~/.claude/.credentials.${slot}.json\n`;
-      text += `cp ~/.claude/.credentials.primary-backup.json ~/.claude/.credentials.json\n`;
-      text += '```\n';
-    }
-
-    text += `\n_Target file: \`${targetFile}\`_`;
-    return text;
+  private buildRestoreAccount1Blocks(setupId: string, slot: AccountId, locale: Locale): { text: string; blocks: any[] } {
+    const text = t('account.setup.restoreAccount1.title', locale, { slot });
+    return {
+      text,
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text } },
+        {
+          type: 'actions',
+          elements: [
+            {
+              type: 'button',
+              text: { type: 'plain_text', text: t('account.setup.restoreAccount1.doneBtn', locale) },
+              action_id: 'account_setup_next',
+              value: setupId,
+              style: 'primary',
+            },
+            {
+              type: 'button',
+              text: { type: 'plain_text', text: t('account.setup.cancelBtn', locale) },
+              action_id: 'account_setup_cancel',
+              value: setupId,
+            },
+          ],
+        },
+      ],
+    };
   }
 
   private isMcpInfoCommand(text: string): boolean {
@@ -2204,68 +2136,112 @@ export class SlackHandler {
       await respond({ response_type: 'ephemeral', text: t('plan.cancelled', actionLocale) });
     });
 
-    // Account setup: slot picker button → show instructions
-    this.app.action('account_setup_slot', async ({ ack, body, respond }) => {
+    // Account status view: "Switch" button
+    this.app.action('account_switch_btn', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
-      const slot = (body as any).actions[0].value as import('./account-manager').AccountId;
-      const channel = (body as any).channel?.id || (body as any).container?.channel_id || '';
-      const threadTs = (body as any).message?.thread_ts || (body as any).message?.ts;
-      // Replace picker message with instructions
-      await respond({ response_type: 'in_channel', text: `📋 ${t('account.setup.instructionHeader', actionLocale, { slot })}`, delete_original: true });
-      const say = async (msg: any) => this.app.client.chat.postMessage({ channel, ...msg });
-      await this.showAccountSetupInstructions(slot, channel, threadTs, actionLocale, say);
+      const accountId = (body as any).actions[0].value as AccountId;
+      const ok = this.accountManager.switchTo(accountId);
+      const note = ok
+        ? t('account.switchedTerminalGuide', actionLocale, { account: accountId })
+        : t('account.notFound', actionLocale, { account: accountId });
+      const { text, blocks } = this.buildAccountStatusBlocks(actionLocale, note);
+      await respond({ replace_original: true, text, blocks });
     });
 
-    // Account setup: "Check file" button
-    this.app.action('account_setup_check', async ({ ack, body, respond }) => {
+    // Account status view: "Use" button → switch account
+    this.app.action('account_use_btn', async ({ ack, body, respond }) => {
+      await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
+      const accountId = (body as any).actions[0].value as AccountId;
+      const ok = this.accountManager.switchTo(accountId);
+      const note = ok
+        ? t('account.switchedTerminalGuide', actionLocale, { account: accountId })
+        : t('account.notFound', actionLocale, { account: accountId });
+      const { text, blocks } = this.buildAccountStatusBlocks(actionLocale, note);
+      await respond({ replace_original: true, text, blocks });
+    });
+
+    // Account status view: "Set" button → guide user to login with target account
+    this.app.action('account_set_btn', async ({ ack, body, respond }) => {
+      await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
+      const slot = (body as any).actions[0].value as AccountId;
+
+      this.accountManager.pauseSync();
+      const originalToken = this.accountManager.readCurrentToken();
+      const setupId = `setup-${Date.now()}`;
+      this.pendingAccountSetups.set(setupId, { slot, stage: 'capture-new', originalToken, locale: actionLocale });
+      setTimeout(() => {
+        const s = this.pendingAccountSetups.get(setupId);
+        if (s) { this.pendingAccountSetups.delete(setupId); this.accountManager.resumeSync(); }
+      }, 30 * 60 * 1000);
+
+      const { text, blocks } = this.buildCaptureNewBlocks(setupId, slot, actionLocale);
+      await respond({ replace_original: true, text, blocks });
+    });
+
+    // Account status view: "Unset" button → remove credentials backup
+    this.app.action('account_unset_btn', async ({ ack, body, respond }) => {
+      await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
+      const accountId = (body as any).actions[0].value as AccountId;
+      this.accountManager.unsetAccount(accountId);
+      const { text, blocks } = this.buildAccountStatusBlocks(actionLocale, t('account.unset.done', actionLocale, { id: accountId }));
+      await respond({ replace_original: true, text, blocks });
+    });
+
+    // Account setup: "Done" button — handles 'capture-new' and 'restore-account-1' stages
+    this.app.action('account_setup_next', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       try {
-        const { setupId, slot } = JSON.parse((body as any).actions[0].value);
+        const setupId = (body as any).actions[0].value as string;
         const setup = this.pendingAccountSetups.get(setupId);
-
         if (!setup) {
           await respond({ response_type: 'ephemeral', text: t('account.setup.expired', actionLocale) });
           return;
         }
 
-        const accounts = this.accountManager.getAccountList();
-        const acc = accounts.find(a => a.id === slot);
+        const currentToken = this.accountManager.readCurrentToken();
 
-        if (acc?.exists) {
-          // Success: clean up and resume sync
-          this.pendingAccountSetups.delete(setupId);
-          this.accountManager.resumeSync();
-
-          // Build updated account list
-          const current = this.accountManager.getCurrentAccount();
-          let listMsg = `${t('account.current', actionLocale, { account: current })}\n${t('account.list', actionLocale)}\n`;
-          for (const a of accounts) {
-            const updated = a.id === slot ? { ...a, exists: true } : a;
-            if (updated.id === current) {
-              listMsg += `${t('account.entryActive', actionLocale, { id: updated.id })}\n`;
-            } else if (updated.exists || updated.id === slot) {
-              listMsg += `${t('account.entryAvailable', actionLocale, { id: updated.id })}\n`;
-            } else {
-              listMsg += `${t('account.entryMissing', actionLocale, { id: updated.id, file: updated.file })}\n`;
-            }
+        if (setup.stage === 'capture-new') {
+          // User should now be logged into the new account — verify token changed
+          if (currentToken === setup.originalToken) {
+            await respond({ response_type: 'ephemeral', text: t('account.setup.captureNew.notChanged', actionLocale) });
+            return;
           }
+          this.accountManager.captureForSlot(setup.slot);
 
-          await respond({
-            response_type: 'in_channel',
-            replace_original: true,
-            text: `${t('account.setup.found', actionLocale, { slot })}\n\n${listMsg}`,
-          });
+          if (setup.slot === 'account-1') {
+            // account-1 setup done — no restore step needed
+            this.accountManager.setCurrentAccount('account-1');
+            this.accountManager.resumeSync();
+            this.pendingAccountSetups.delete(setupId);
+            const doneBlocks = this.buildAccountStatusBlocks(actionLocale, t('account.setup.done', actionLocale, { slot: setup.slot }));
+            await respond({ replace_original: true, ...doneBlocks });
+          } else {
+            // account-2/3: now guide user back to account-1
+            setup.originalToken = currentToken;
+            setup.stage = 'restore-account-1';
+            const { text, blocks } = this.buildRestoreAccount1Blocks(setupId, setup.slot, setup.locale);
+            await respond({ replace_original: true, text, blocks });
+          }
         } else {
-          // Not found yet — keep buttons, show ephemeral hint
-          await respond({
-            response_type: 'ephemeral',
-            text: t('account.setup.notFound', actionLocale, { file: acc?.file || '' }),
-          });
+          // stage === 'restore-account-1': user should now be logged back into account-1
+          if (currentToken === setup.originalToken) {
+            await respond({ response_type: 'ephemeral', text: t('account.setup.restoreAccount1.notChanged', actionLocale) });
+            return;
+          }
+          this.accountManager.captureForSlot('account-1');
+          this.accountManager.setCurrentAccount('account-1');
+          this.accountManager.resumeSync();
+          this.pendingAccountSetups.delete(setupId);
+          const doneBlocks = this.buildAccountStatusBlocks(actionLocale, t('account.setup.done', actionLocale, { slot: setup.slot }));
+          await respond({ replace_original: true, ...doneBlocks });
         }
       } catch (error) {
-        this.logger.error('Error in account_setup_check', error);
+        this.logger.error('Error in account_setup_next', error);
         await respond({ response_type: 'ephemeral', text: '❌ An error occurred. Please try again.' });
       }
     });
@@ -2278,9 +2254,13 @@ export class SlackHandler {
       const setup = this.pendingAccountSetups.get(setupId);
       if (setup) {
         this.pendingAccountSetups.delete(setupId);
-        this.accountManager.resumeSync();
+        if (setup.stage === 'capture-new' || setup.stage === 'restore-account-1') {
+          this.accountManager.resumeSync();
+        }
       }
-      await respond({ response_type: 'in_channel', replace_original: true, text: t('account.setup.cancelled', actionLocale) });
+      // Return to status view with cancel note
+      const { text, blocks } = this.buildAccountStatusBlocks(actionLocale, t('account.setup.cancelled', actionLocale));
+      await respond({ replace_original: true, text, blocks });
     });
 
     // Session picker "Show more" button
@@ -2476,6 +2456,50 @@ export class SlackHandler {
       }
       this.pendingRetries.delete(retryId);
       await respond({ response_type: 'ephemeral', text: t('misc.cancelled', actionLocale) });
+    });
+
+    // Switch account on rate limit
+    this.app.action('switch_account_retry', async ({ ack, body, respond }) => {
+      await ack();
+      try {
+        const userId = (body as any).user.id;
+        const actionLocale = await this.getUserLocale(userId);
+        const { retryId, account } = JSON.parse((body as any).actions[0].value) as { retryId: string; account: AccountId };
+        const retryInfo = this.pendingRetries.get(retryId);
+        if (!retryInfo) {
+          await respond({ response_type: 'ephemeral', text: `⚠️ ${t('rateLimit.retryExpired', actionLocale)}` });
+          return;
+        }
+
+        // Cancel auto-notification
+        if (retryInfo.notifyScheduledId) {
+          await this.app.client.chat.deleteScheduledMessage({
+            channel: retryInfo.channel,
+            scheduled_message_id: retryInfo.notifyScheduledId,
+          }).catch(() => {});
+        }
+
+        const ok = this.accountManager.switchTo(account);
+        if (!ok) {
+          await respond({ response_type: 'ephemeral', text: t('account.notFound', actionLocale, { account }) });
+          return;
+        }
+
+        // Replace rate limit message (remove buttons) + show switch confirmation
+        await respond({
+          replace_original: true,
+          text: t('account.switchedTerminalGuide', actionLocale, { account }),
+        });
+
+        // Retry original query with new account
+        const { channel, threadTs, user: retryUser, prompt } = retryInfo;
+        this.pendingRetries.delete(retryId);
+        const event: MessageEvent = { user: retryUser, channel, thread_ts: threadTs, ts: threadTs, text: prompt };
+        const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel, ...msg });
+        await this.handleMessage(event, sayCb);
+      } catch (error) {
+        this.logger.error('Error handling switch_account_retry', error);
+      }
     });
 
     // Continue with API key on rate limit
