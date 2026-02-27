@@ -23,6 +23,7 @@ export class AccountManager {
   private watcher: fs.FSWatcher | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private isSwitching = false;
+  private syncPaused = false;
 
   constructor() {
     this.credentialsFile = path.join(this.claudeDir, '.credentials.json');
@@ -97,8 +98,17 @@ export class AccountManager {
     }
   }
 
+  /** Pause auto-sync during guided setup (prevents watcher from overwriting primary backup). */
+  pauseSync(): void { this.syncPaused = true; }
+
+  /** Resume auto-sync and immediately flush current credentials to active account backup. */
+  resumeSync(): void {
+    this.syncPaused = false;
+    this.syncBackupFile();
+  }
+
   private syncBackupFile(): void {
-    if (this.isSwitching) return; // Don't sync during account switch
+    if (this.isSwitching || this.syncPaused) return;
     try {
       if (!fs.existsSync(this.credentialsFile)) return;
       const backupFile = this.getBackupFile(this.currentAccount);
