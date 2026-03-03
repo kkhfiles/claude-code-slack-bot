@@ -7,98 +7,96 @@ export type AccountId = 'account-1' | 'account-2' | 'account-3';
 
 export interface AccountInfo {
   id: AccountId;
-  file: string;
   exists: boolean;
+  email?: string;
+}
+
+interface OAuthTokenData {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+  scopes?: string[];
+  subscriptionType?: string;
+  rateLimitTier?: string;
+  email?: string;
+}
+
+interface AccountsFileData {
+  currentAccount: AccountId;
+  accounts: Partial<Record<AccountId, OAuthTokenData>>;
 }
 
 const ACCOUNT_CHAIN: AccountId[] = ['account-1', 'account-2', 'account-3'];
+const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
+const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000; // Refresh 5 minutes before expiry
 
 export class AccountManager {
   private logger = new Logger('AccountManager');
   private readonly claudeDir = path.join(os.homedir(), '.claude');
   private readonly credentialsFile: string;
-  private readonly stateFile: string;
+  private readonly accountsFile: string;
 
   private currentAccount: AccountId = 'account-1';
-  private watcher: fs.FSWatcher | null = null;
-  private debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  private isSwitching = false;
-  private syncPaused = false;
 
   constructor() {
     this.credentialsFile = path.join(this.claudeDir, '.credentials.json');
-    this.stateFile = path.join(path.resolve(__dirname, '..'), '.account-state.json');
-    this.loadState();
-    this.startWatcher();
+    this.accountsFile = path.join(path.resolve(__dirname, '..'), '.accounts.json');
+    this.loadAccounts();
   }
 
-  // --- State persistence ---
+  // --- Accounts file persistence ---
 
-  private loadState(): void {
+  private loadAccounts(): AccountsFileData {
     try {
-      if (fs.existsSync(this.stateFile)) {
-        const data = JSON.parse(fs.readFileSync(this.stateFile, 'utf-8'));
+      if (fs.existsSync(this.accountsFile)) {
+        const data: AccountsFileData = JSON.parse(fs.readFileSync(this.accountsFile, 'utf-8'));
         if (ACCOUNT_CHAIN.includes(data.currentAccount)) {
           this.currentAccount = data.currentAccount;
         }
+        return data;
       }
     } catch {
       this.currentAccount = 'account-1';
     }
+    return { currentAccount: this.currentAccount, accounts: {} };
   }
 
-  private saveState(): void {
+  private saveAccounts(data: AccountsFileData): void {
     try {
-      fs.writeFileSync(this.stateFile, JSON.stringify({ currentAccount: this.currentAccount }, null, 2), 'utf-8');
+      fs.writeFileSync(this.accountsFile, JSON.stringify(data, null, 2), 'utf-8');
     } catch (error) {
-      this.logger.error('Failed to save account state', error);
+      this.logger.error('Failed to save accounts file', error);
     }
   }
 
-  // --- Backup file paths ---
+  // --- OAuth token refresh ---
 
-  private getBackupFile(accountId: AccountId): string {
-    return path.join(this.claudeDir, `.credentials.${accountId}.json`);
-  }
-
-  // --- File watcher (sync backup when token is refreshed) ---
-
-  private startWatcher(): void {
-    if (!fs.existsSync(this.claudeDir)) {
-      this.logger.warn('~/.claude directory not found, watcher not started');
-      return;
-    }
+  private async refreshOAuthToken(refreshToken: string): Promise<OAuthTokenData | null> {
     try {
-      // Watch directory rather than file — handles atomic rename-based writes
-      this.watcher = fs.watch(this.claudeDir, (eventType, filename) => {
-        if (filename !== '.credentials.json') return;
-        if (this.debounceTimer) clearTimeout(this.debounceTimer);
-        this.debounceTimer = setTimeout(() => this.syncBackupFile(), 500);
+      const body = new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: CLIENT_ID,
       });
-      this.logger.info('Credentials watcher started', { account: this.currentAccount });
+      const response = await fetch(TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      });
+      if (!response.ok) {
+        this.logger.error('Token refresh failed', { status: response.status, statusText: response.statusText });
+        return null;
+      }
+      const result = await response.json() as Record<string, unknown>;
+      return {
+        accessToken: result.access_token as string,
+        refreshToken: result.refresh_token as string || refreshToken,
+        expiresAt: Date.now() + (result.expires_in as number) * 1000,
+      };
     } catch (error) {
-      this.logger.warn('Failed to start credentials watcher', error);
-    }
-  }
-
-  /** Pause auto-sync during guided setup. */
-  pauseSync(): void { this.syncPaused = true; }
-
-  /** Resume auto-sync and immediately flush current credentials to active account backup. */
-  resumeSync(): void {
-    this.syncPaused = false;
-    this.syncBackupFile();
-  }
-
-  private syncBackupFile(): void {
-    if (this.isSwitching || this.syncPaused) return;
-    try {
-      if (!fs.existsSync(this.credentialsFile)) return;
-      const backupFile = this.getBackupFile(this.currentAccount);
-      fs.copyFileSync(this.credentialsFile, backupFile);
-      this.logger.debug('Synced credentials to backup', { account: this.currentAccount });
-    } catch (error) {
-      this.logger.warn('Failed to sync credentials backup', error);
+      this.logger.error('Token refresh error', error);
+      return null;
     }
   }
 
@@ -110,61 +108,77 @@ export class AccountManager {
 
   /** Update the tracked active account without any file operations. */
   setCurrentAccount(id: AccountId): void {
+    const data = this.loadAccounts();
     this.currentAccount = id;
-    this.saveState();
+    data.currentAccount = id;
+    this.saveAccounts(data);
   }
 
   getAccountList(): AccountInfo[] {
+    const data = this.loadAccounts();
     return ACCOUNT_CHAIN.map(id => ({
       id,
-      file: this.getBackupFile(id),
-      exists: fs.existsSync(this.getBackupFile(id)),
+      exists: !!data.accounts[id]?.accessToken,
+      email: data.accounts[id]?.email,
     }));
   }
 
-  /** Returns the next account in the chain that has a credentials file, or null if exhausted. */
+  /** Returns the next account in the chain that has credentials, or null if exhausted. */
   getNextAccount(): AccountId | null {
+    const data = this.loadAccounts();
     const current = ACCOUNT_CHAIN.indexOf(this.currentAccount);
     for (let i = current + 1; i < ACCOUNT_CHAIN.length; i++) {
       const candidate = ACCOUNT_CHAIN[i];
-      if (fs.existsSync(this.getBackupFile(candidate))) {
+      if (data.accounts[candidate]?.accessToken) {
         return candidate;
       }
     }
     return null;
   }
 
-  /** Switch to a specific account. Returns true on success. */
-  switchTo(accountId: AccountId): boolean {
-    const backupFile = this.getBackupFile(accountId);
-    if (!fs.existsSync(backupFile)) {
-      this.logger.warn('Account credentials file not found', { accountId, file: backupFile });
-      return false;
+  /** Get a valid access token for the given account (or current account). Refreshes if expired. */
+  async getAccessToken(id?: AccountId): Promise<string | null> {
+    const accountId = id || this.currentAccount;
+    const data = this.loadAccounts();
+    const tokenData = data.accounts[accountId];
+    if (!tokenData?.accessToken) return null;
+
+    // Check expiry (with 5-minute buffer)
+    if (tokenData.expiresAt && tokenData.expiresAt - TOKEN_EXPIRY_BUFFER_MS < Date.now()) {
+      if (!tokenData.refreshToken) {
+        this.logger.warn('Token expired but no refresh token available', { accountId });
+        return null;
+      }
+      this.logger.info('Token expired, refreshing', { accountId });
+      const refreshed = await this.refreshOAuthToken(tokenData.refreshToken);
+      if (refreshed) {
+        data.accounts[accountId] = { ...tokenData, ...refreshed };
+        this.saveAccounts(data);
+        this.logger.info('Token refreshed successfully', { accountId });
+        return refreshed.accessToken;
+      }
+      this.logger.warn('Token refresh failed, returning expired token', { accountId });
     }
 
-    this.isSwitching = true;
-    try {
-      // Flush current credentials to current account's backup before switching
-      if (fs.existsSync(this.credentialsFile)) {
-        fs.copyFileSync(this.credentialsFile, this.getBackupFile(this.currentAccount));
-      }
-      // Copy new account credentials
-      fs.copyFileSync(backupFile, this.credentialsFile);
-      const prev = this.currentAccount;
-      this.currentAccount = accountId;
-      this.saveState();
-      this.logger.info('Account switched', { from: prev, to: accountId });
-      return true;
-    } catch (error) {
-      this.logger.error('Failed to switch account', error);
-      return false;
-    } finally {
-      // Delay flag reset to suppress watcher events triggered by the file copy
-      setTimeout(() => { this.isSwitching = false; }, 1000);
-    }
+    return tokenData.accessToken;
   }
 
-  /** Read the accessToken from the current credentials file (for change detection). */
+  /** Switch to a specific account. Returns true on success. */
+  switchTo(accountId: AccountId): boolean {
+    const data = this.loadAccounts();
+    if (!data.accounts[accountId]?.accessToken) {
+      this.logger.warn('Account not configured', { accountId });
+      return false;
+    }
+    const prev = this.currentAccount;
+    this.currentAccount = accountId;
+    data.currentAccount = accountId;
+    this.saveAccounts(data);
+    this.logger.info('Account switched', { from: prev, to: accountId });
+    return true;
+  }
+
+  /** Read the accessToken from the current credentials file (for Set wizard login detection). */
   readCurrentToken(): string | null {
     try {
       const data = JSON.parse(fs.readFileSync(this.credentialsFile, 'utf-8'));
@@ -172,11 +186,35 @@ export class AccountManager {
     } catch { return null; }
   }
 
-  /** Copy current credentials.json to the given slot's backup file. */
+  /** Capture current .credentials.json token data into the given account slot. */
   captureForSlot(slot: AccountId): boolean {
     try {
-      fs.copyFileSync(this.credentialsFile, this.getBackupFile(slot));
-      this.logger.info('Captured credentials for slot', { slot });
+      const credData = JSON.parse(fs.readFileSync(this.credentialsFile, 'utf-8'));
+      const oauth = credData.claudeAiOauth;
+      if (!oauth?.accessToken) {
+        this.logger.error('No OAuth data in credentials file');
+        return false;
+      }
+      // Read email from ~/.claude.json (updated by Claude on login)
+      let email: string | undefined;
+      try {
+        const claudeJsonPath = path.join(os.homedir(), '.claude.json');
+        const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'));
+        email = claudeJson.oauthAccount?.emailAddress;
+      } catch { /* ignore */ }
+
+      const data = this.loadAccounts();
+      data.accounts[slot] = {
+        accessToken: oauth.accessToken,
+        refreshToken: oauth.refreshToken,
+        expiresAt: oauth.expiresAt,
+        scopes: oauth.scopes,
+        subscriptionType: oauth.subscriptionType,
+        rateLimitTier: oauth.rateLimitTier,
+        email,
+      };
+      this.saveAccounts(data);
+      this.logger.info('Captured credentials for slot', { slot, email });
       return true;
     } catch (error) {
       this.logger.error('Failed to capture slot credentials', error);
@@ -191,15 +229,16 @@ export class AccountManager {
     return this.switchTo(next) ? next : null;
   }
 
-  /** Delete the credentials backup file for a slot. */
+  /** Remove credentials for a slot. */
   unsetAccount(id: AccountId): boolean {
-    const file = this.getBackupFile(id);
     try {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
+      const data = this.loadAccounts();
+      delete data.accounts[id];
       if (this.currentAccount === id) {
         this.currentAccount = 'account-1';
-        this.saveState();
+        data.currentAccount = 'account-1';
       }
+      this.saveAccounts(data);
       this.logger.info('Account unset', { id });
       return true;
     } catch (error) {
@@ -209,12 +248,6 @@ export class AccountManager {
   }
 
   destroy(): void {
-    if (this.watcher) {
-      this.watcher.close();
-      this.watcher = null;
-    }
-    if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
-    }
+    // No resources to clean up (watcher removed)
   }
 }

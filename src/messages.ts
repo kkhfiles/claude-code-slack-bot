@@ -178,7 +178,7 @@ const messages: Record<string, Record<Locale, string>> = {
 
   // --- Schedule ---
   'schedule.sessionStart': { en: '🌅 Starting new Claude session...', ko: '🌅 새 Claude 세션을 시작합니다...' },
-  'schedule.noConfig': { en: 'No session schedule configured. Use `-schedule add <hour>` to add a time (e.g., `-schedule add 6`).', ko: '설정된 세션 시작 시간이 없습니다. `-schedule add <시간>`으로 추가하세요 (예: `-schedule add 6`).' },
+  'schedule.noConfig': { en: '_No schedules configured. Use the buttons below to add._', ko: '_설정된 스케줄이 없습니다. 아래 버튼으로 추가하세요._' },
   'schedule.status.header': { en: '*Session Auto-Start*', ko: '*세션 자동 시작*' },
   'schedule.status.channel': { en: 'Target: <#{{channel}}>', ko: '대상 채널: <#{{channel}}>' },
   'schedule.status.times': { en: 'Times: {{times}} (each fires at :05~:25, then again ~5h later)', ko: '예약 시간: {{times}} (매 정시 +5~25분 발송, 이후 ~5시간 뒤 재발송)' },
@@ -192,6 +192,13 @@ const messages: Record<string, Record<Locale, string>> = {
   'schedule.notFound': { en: '`{{time}}` not found.', ko: '`{{time}}`이 설정에 없습니다.' },
   'schedule.cleared': { en: '✅ All session start times cleared.', ko: '✅ 모든 세션 시작 시간이 초기화되었습니다.' },
   'schedule.invalidTime': { en: 'Invalid time. Use an hour (e.g., `6`, `16`).', ko: '잘못된 시간. 시(hour)를 입력하세요 (예: `6`, `16`).' },
+  'schedule.clearBtn': { en: '🗑 Clear all', ko: '🗑 전체 삭제' },
+  'schedule.noAccounts': { en: '_No accounts configured. Use `-account` to set up accounts first._', ko: '_설정된 계정이 없습니다. `-account`로 먼저 계정을 설정하세요._' },
+  'schedule.modal.title': { en: 'Add Schedule', ko: '스케줄 추가' },
+  'schedule.modal.submit': { en: 'Add', ko: '추가' },
+  'schedule.modal.close': { en: 'Cancel', ko: '취소' },
+  'schedule.modal.body': { en: 'Add a scheduled time for *{{account}}*.\nA greeting will be sent at the specified time (+5~25min jitter), then again ~5h later.', ko: '*{{account}}*에 스케줄을 추가합니다.\n지정 시간(+5~25분 지터)에 인사 메시지 전송 후, ~5시간 뒤 재전송됩니다.' },
+  'schedule.modal.label': { en: 'Time (hour or HH:MM)', ko: '시간 (시 또는 HH:MM)' },
 
   // --- Version ---
   'cmd.version.title': { en: '*Bot Version*', ko: '*봇 버전*' },
@@ -226,7 +233,7 @@ const messages: Record<string, Record<Locale, string>> = {
   'account.notFound': { en: '❌ Credentials file not found for `{{account}}`', ko: '❌ `{{account}}` 자격증명 파일을 찾을 수 없습니다' },
   'account.alreadyCurrent': { en: 'Already on `{{account}}`', ko: '이미 `{{account}}`을(를) 사용 중입니다' },
   'account.rateLimitSwitch': { en: 'Rate limit reached. Switching to `{{account}}` and retrying...', ko: 'Rate limit 도달. `{{account}}`으로 전환하여 재시도합니다...' },
-  'account.switchedTerminalGuide': { en: '✅ Switched to `{{account}}`.\n_Terminal: type `/exit` then `claude -c` to resume with the new account._', ko: '✅ `{{account}}`(으)로 전환했습니다.\n_터미널에서 `/exit` 후 `claude -c`로 새 계정으로 재개하세요._' },
+  'account.switchedTerminalGuide': { en: '✅ Switched to `{{account}}`.', ko: '✅ `{{account}}`(으)로 전환했습니다.' },
   'account.hint': { en: '_Use `-account <id>` to switch (e.g., `-account 1`, `-account 2`)_', ko: '_`-account <id>`로 전환 (예: `-account 1`, `-account 2`)_' },
 
   // Setup wizard
@@ -244,9 +251,6 @@ const messages: Record<string, Record<Locale, string>> = {
   'account.setup.captureNew.title': { en: '🔑 *Setup `{{slot}}`*\nIn your terminal:\n1. Type `/logout` and press Enter\n2. Run `claude` and login with your *`{{slot}}`* account\n\nClick ✅ Done when login is complete:', ko: '🔑 *`{{slot}}` 설정*\n터미널에서:\n1. `/logout` 입력 후 엔터\n2. `claude` 실행 후 *`{{slot}}`* 계정으로 로그인\n\n로그인 완료 후 ✅ 완료를 클릭하세요:' },
   'account.setup.captureNew.doneBtn': { en: '✅ Done', ko: '✅ 완료' },
   'account.setup.captureNew.notChanged': { en: '❌ Credentials haven\'t changed yet. Please complete the login first, then click Done again.', ko: '❌ 아직 크리덴셜이 변경되지 않았습니다. 로그인을 완료한 후 다시 클릭하세요.' },
-  'account.setup.restoreAccount1.title': { en: '🔑 *Setup `{{slot}}` — last step*\n✅ `{{slot}}` credentials captured!\n\nNow in your terminal:\n1. Type `/logout` and press Enter\n2. Run `claude` and login with your *`account-1`* account\n\nClick ✅ Done when ready:', ko: '🔑 *`{{slot}}` 설정 — 마지막 단계*\n✅ `{{slot}}` 크리덴셜 저장 완료!\n\n이제 터미널에서:\n1. `/logout` 입력 후 엔터\n2. `claude` 실행 후 *`account-1`* 계정으로 로그인\n\n완료 후 ✅ 를 클릭하세요:' },
-  'account.setup.restoreAccount1.doneBtn': { en: '✅ Done', ko: '✅ 완료' },
-  'account.setup.restoreAccount1.notChanged': { en: '❌ Credentials haven\'t changed yet. Please complete the account-1 login first, then click Done again.', ko: '❌ 아직 크리덴셜이 변경되지 않았습니다. account-1 로그인을 완료한 후 다시 클릭하세요.' },
   'account.setup.done': { en: '✅ *`{{slot}}` setup complete!*\nThis account will be used automatically on rate limit failover.', ko: '✅ *`{{slot}}` 설정 완료!*\nRate limit 시 자동으로 이 계정으로 전환됩니다.' },
 
   // --- Error ---
@@ -381,10 +385,7 @@ export function getHelpText(locale: Locale): string {
     help += `\`-key\` / \`-apikey\` / \`키\` — API 키 등록/수정 (rate limit 시 자동 전환용)\n`;
     help += `\`-limit [금액]\` / \`한도\` — API 키 사용 한도 조회/설정 (예: \`-limit 2.00\`)\n`;
     help += `\`-limit clear\` / \`한도 초기화\` — 사용 한도 초기화\n`;
-    help += `\`-sc\` / \`-schedule\` / \`스케줄\` — 세션 자동 시작 설정 조회\n`;
-    help += `\`-sc add <시간>\` / \`스케줄 추가 <시간>\` — 세션 시작 시간 추가 (예: \`-sc add 6\`)\n`;
-    help += `\`-sc remove <시간>\` / \`스케줄 삭제 <시간>\` — 시간 제거\n`;
-    help += `\`-sc clear\` / \`스케줄 초기화\` — 전체 초기화\n`;
+    help += `\`-sc\` / \`-schedule\` / \`스케줄\` — 세션 자동 시작 스케줄 관리 (계정별 추가/삭제)\n`;
     help += `\`-ac\` / \`-account\` / \`계정\` — 현재 계정 및 등록된 계정 목록\n`;
     help += `\`-ac setup\` — 계정 설정 마법사 (대화형 안내)\n`;
     help += `\`-ac <id>\` — 계정 전환 (예: \`-ac 1\`, \`-ac 2\`)\n`;
@@ -425,10 +426,7 @@ export function getHelpText(locale: Locale): string {
   help += `\`-key\` / \`-apikey\` — Register/update API key (auto-switch on rate limit)\n`;
   help += `\`-limit [amount]\` — View/set API key spending limit (e.g., \`-limit 2.00\`)\n`;
   help += `\`-limit clear\` — Remove spending limit\n`;
-  help += `\`-sc\` / \`-schedule\` — View session auto-start settings\n`;
-  help += `\`-sc add <hour>\` — Add session start time (e.g., \`-sc add 6\`)\n`;
-  help += `\`-sc remove <hour>\` — Remove a time\n`;
-  help += `\`-sc clear\` — Clear all scheduled times\n`;
+  help += `\`-sc\` / \`-schedule\` — Manage session auto-start schedules (per-account add/remove)\n`;
   help += `\`-ac\` / \`-account\` — Show current account and registered accounts\n`;
   help += `\`-ac setup\` — Interactive wizard to configure accounts\n`;
   help += `\`-ac <id>\` — Switch account (e.g., \`-ac 1\`, \`-ac 2\`)\n`;

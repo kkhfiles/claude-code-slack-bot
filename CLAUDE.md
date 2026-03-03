@@ -48,17 +48,20 @@ update.bat                    # Windows
 - `-sessions all`: 전체 프로젝트 세션 목록 (세션 피커와 동일)
 - `-version`: 봇 버전 + git hash + 업데이트 확인 (`src/version.ts`)
 - `-apikey`: API 키 등록/수정 모달 (rate limit 시 자동 전환용, `.api-keys.json` 영속화)
-- `-account`: 다중 계정 상태 조회 및 수동 전환 (`AccountManager`, `.account-state.json` 영속화)
-  - `-account` — 현재 계정 + 등록 계정 목록
-  - `-account primary` / `-account 1` / `-account 2` / `-account 3` — 수동 전환
-  - 자격증명 파일: `~/.claude/.credentials.account-{1,2,3}.json` (사용자가 직접 준비)
-  - rate limit 시 자동 전환 체인: primary → account-1 → account-2 → account-3 → API 키 버튼
-  - 파일 감시: `.credentials.json` 변경 → 현재 계정 백업 파일 자동 동기화 (토큰 갱신 대응)
+- `-account`: 다중 계정 상태 조회 및 수동 전환 (`AccountManager`, `.accounts.json` 영속화)
+  - `-account` — 통합 상태 뷰 (Set/Use/Unset 버튼)
+  - `-account 1` / `-account 2` / `-account 3` — 수동 전환
+  - 토큰 저장: `.accounts.json` 통합 파일 (accessToken, refreshToken, expiresAt, email)
+  - 전환: `CLAUDE_CODE_OAUTH_TOKEN` env var 주입 (파일 교체 아님)
+  - 토큰 만료 시 자동 갱신 (OAuth refresh)
+  - rate limit 시 전환 체인: account-1 → account-2 → account-3 → API 키 버튼
 - `-schedule`: 세션 자동 시작 설정 관리 (`ScheduleManager`, `.schedule-config.json` 영속화)
-  - `-schedule add <hour>`: 시간 추가 (시 단위, 예: `6`, `11`, `16`) + 현재 채널을 대상으로 설정
-  - `-schedule remove <hour> / clear`: 제거/초기화
+  - 블록 UI: 계정별 `[+ email]` 추가 버튼(모달) + 시간별 `[✕]` 삭제 버튼 + `[🗑 Clear all]`
+  - 각 스케줄 엔트리는 특정 계정에 연결 (`ScheduleEntry: { time, account }`)
+  - 같은 계정 내에서만 5시간 윈도우 충돌 검사 (다른 계정끼리는 겹쳐도 OK)
+  - 모달 제출 후 원래 메시지를 `chat.update`로 즉시 갱신
   - 예약 시간 +5~25분 랜덤 지터로 자동화 감지 방지
-  - **자동 팔로우업**: 첫 발송 후 정확히 5시간 뒤 두 번째 메시지 자동 발송 (다음 세션 윈도우 커버)
+  - **자동 팔로우업**: 첫 발송 후 5시간 뒤 두 번째 메시지 자동 발송 (다음 세션 윈도우 커버)
   - 랜덤 인사 메시지 (`say "hi"`, `3+7` 등) + haiku 모델로 새 세션 시작
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
@@ -71,7 +74,7 @@ update.bat                    # Windows
 - Rate limit 감지: CLI `rate_limit_event` 이벤트 + `isRateLimitError()` 텍스트 패턴 매칭
 - Rate limit 멘션 알림: 재시도/취소 시 자동 취소 (`notifyScheduledId`로 추적)
 - API 키 fallback: rate limit 시 등록된 API 키로 전환 → 리셋 시간 후 구독 방식으로 자동 복귀
-- 다중 계정 fallback: rate limit 시 `AccountManager.switchToNext()` → primary → account-1 → account-2 → account-3 → API 키 버튼 순으로 자동 전환
+- 다중 계정 fallback: rate limit 시 `AccountManager.switchToNext()` → account-1 → account-2 → account-3 → API 키 버튼 순으로 전환
 - 읽기 전용 도구 (Grep, Read, Glob 등)는 상태 메시지에서만 표시 (`STATUS_ONLY_TOOLS`)
 - 완료 시 도구 사용 요약 표시 (`toolUsageCounts` → `✅ Task completed (Grep ×5, Read ×2)`)
 - 로깅은 `Logger` 클래스 사용 (`this.logger.info/debug/warn/error`)
@@ -145,7 +148,7 @@ git checkout cli-migration
 | `src/session-scanner.ts` | 전체 프로젝트 세션 스캔/피커 데이터 |
 | `src/messages.ts` | i18n 번역 카탈로그 (`t()` 함수, `Locale` 타입) |
 | `src/mcp-manager.ts` | MCP 서버 설정 로드/관리 |
-| `src/account-manager.ts` | 다중 계정 관리 — 파일 감시, 계정 전환, 백업 동기화 (`.account-state.json`) |
+| `src/account-manager.ts` | 다중 계정 관리 — OAuth 토큰 저장/갱신, env var 주입 방식 전환 (`.accounts.json`) |
 | `src/version.ts` | 버전 정보 + 업데이트 체크 (`getVersionInfo()`, `checkForUpdates()`) |
 | `src/config.ts` | 환경변수 로드 |
 | `src/types.ts` | TypeScript 타입 정의 |

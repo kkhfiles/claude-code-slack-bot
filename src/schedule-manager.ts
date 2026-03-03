@@ -2,8 +2,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Logger } from './logger';
 
+export interface ScheduleEntry {
+  time: string;     // "HH:MM" 24-hour format
+  account: string;  // AccountId (e.g., 'account-1')
+}
+
 interface ScheduleConfig {
-  times: string[];  // "HH:MM" 24-hour format, sorted
+  entries: ScheduleEntry[];
   channel: string;  // Slack channel ID to post to
   userId: string;   // Slack user ID who set it up (for locale)
 }
@@ -12,6 +17,7 @@ interface ScheduleConfig {
  * Manages scheduled session start times.
  * At each scheduled time (with random jitter), fires a callback to start
  * a new Claude session using the haiku model with a randomized greeting.
+ * Each schedule entry is associated with an account for token injection.
  */
 export class ScheduleManager {
   private config: ScheduleConfig | null = null;
@@ -47,9 +53,14 @@ export class ScheduleManager {
   private load(): void {
     try {
       if (fs.existsSync(this.configFile)) {
-        const raw = fs.readFileSync(this.configFile, 'utf-8');
-        this.config = JSON.parse(raw) as ScheduleConfig;
-        this.logger.info('Loaded schedule config', { times: this.config.times, channel: this.config.channel });
+        const raw = JSON.parse(fs.readFileSync(this.configFile, 'utf-8'));
+        // Migrate old format: { times: string[] } → { entries: ScheduleEntry[] }
+        if (raw.times && !raw.entries) {
+          raw.entries = (raw.times as string[]).map((time: string) => ({ time, account: 'account-1' }));
+          delete raw.times;
+        }
+        this.config = raw as ScheduleConfig;
+        this.logger.info('Loaded schedule config', { entries: this.config.entries, channel: this.config.channel });
       }
     } catch (error) {
       this.logger.error('Failed to load schedule config', error);
@@ -70,43 +81,50 @@ export class ScheduleManager {
     return this.config;
   }
 
+  getEntries(): ScheduleEntry[] {
+    return this.config?.entries ?? [];
+  }
+
   private static readonly SESSION_WINDOW_HOURS = 5;
 
   /**
-   * Check if a new time falls within an existing session's 5-hour window.
+   * Check if a new time falls within an existing session's 5-hour window for the SAME account.
+   * Different accounts can have overlapping times.
    * Returns the conflicting time if found, null if no conflict.
    */
-  findConflictingTime(time: string): string | null {
+  findConflictingTime(time: string, account: string): string | null {
     const normalized = this.normalizeTime(time);
     if (!normalized || !this.config) return null;
     const [newH, newM] = normalized.split(':').map(Number);
     const newMinutes = newH * 60 + newM;
-    for (const existing of this.config.times) {
-      if (existing === normalized) continue; // same time = duplicate, not conflict
-      const [exH, exM] = existing.split(':').map(Number);
+    for (const entry of this.config.entries) {
+      if (entry.account !== account) continue; // only check same account
+      if (entry.time === normalized) continue; // same time = duplicate, not conflict
+      const [exH, exM] = entry.time.split(':').map(Number);
       const exMinutes = exH * 60 + exM;
       const windowEnd = exMinutes + ScheduleManager.SESSION_WINDOW_HOURS * 60;
       // Check if new time falls within [existing, existing + 5h)
       if (windowEnd <= 24 * 60) {
-        if (newMinutes > exMinutes && newMinutes < windowEnd) return existing;
+        if (newMinutes > exMinutes && newMinutes < windowEnd) return entry.time;
       } else {
         // Wraps past midnight (e.g., 22:00 → window ends at 03:00)
-        if (newMinutes > exMinutes || newMinutes < windowEnd - 24 * 60) return existing;
+        if (newMinutes > exMinutes || newMinutes < windowEnd - 24 * 60) return entry.time;
       }
     }
     return null;
   }
 
-  /** Add a time. Returns normalized "HH:MM" or null if invalid. */
-  addTime(time: string, channel: string, userId: string): string | null {
+  /** Add a time with associated account. Returns normalized "HH:MM" or null if invalid. */
+  addTime(time: string, channel: string, userId: string, account: string): string | null {
     const normalized = this.normalizeTime(time);
     if (!normalized) return null;
     if (!this.config) {
-      this.config = { times: [normalized], channel, userId };
+      this.config = { entries: [{ time: normalized, account }], channel, userId };
     } else {
-      if (!this.config.times.includes(normalized)) {
-        this.config.times.push(normalized);
-        this.config.times.sort();
+      const existing = this.config.entries.find(e => e.time === normalized && e.account === account);
+      if (!existing) {
+        this.config.entries.push({ time: normalized, account });
+        this.config.entries.sort((a, b) => a.time.localeCompare(b.time) || a.account.localeCompare(b.account));
       }
       this.config.channel = channel;
       this.config.userId = userId;
@@ -115,14 +133,16 @@ export class ScheduleManager {
     return normalized;
   }
 
-  /** Remove a time. Returns normalized "HH:MM" if removed, null if not found or invalid. */
-  removeTime(time: string): string | null {
+  /** Remove a time+account entry. Returns normalized "HH:MM" if removed, null if not found or invalid. */
+  removeTime(time: string, account?: string): string | null {
     if (!this.config) return null;
     const normalized = this.normalizeTime(time);
     if (!normalized) return null;
-    const before = this.config.times.length;
-    this.config.times = this.config.times.filter(t => t !== normalized);
-    if (this.config.times.length === before) return null;
+    const before = this.config.entries.length;
+    this.config.entries = this.config.entries.filter(e =>
+      account ? !(e.time === normalized && e.account === account) : e.time !== normalized,
+    );
+    if (this.config.entries.length === before) return null;
     this.save();
     return normalized;
   }
@@ -130,7 +150,7 @@ export class ScheduleManager {
   clearTimes(): void {
     this.cancelAll();
     if (this.config) {
-      this.config.times = [];
+      this.config.entries = [];
       this.save();
     }
   }
@@ -172,11 +192,11 @@ export class ScheduleManager {
   }
 
   /** Start all timers. Cancels existing timers first. */
-  scheduleAll(callback: (channel: string, userId: string, time: string) => void): void {
+  scheduleAll(callback: (channel: string, userId: string, time: string, account: string) => void): void {
     this.cancelAll();
-    if (!this.config || this.config.times.length === 0) return;
-    for (const time of this.config.times) {
-      this.scheduleOne(time, this.config.channel, this.config.userId, callback);
+    if (!this.config || this.config.entries.length === 0) return;
+    for (const entry of this.config.entries) {
+      this.scheduleOne(entry.time, this.config.channel, this.config.userId, entry.account, callback);
     }
   }
 
@@ -184,7 +204,8 @@ export class ScheduleManager {
     time: string,
     channel: string,
     userId: string,
-    callback: (channel: string, userId: string, time: string) => void,
+    account: string,
+    callback: (channel: string, userId: string, time: string, account: string) => void,
   ): void {
     // Cancel any pending follow-up from a previous fire of this time slot
     const followUpKey = `${time}-followup`;
@@ -203,38 +224,40 @@ export class ScheduleManager {
     const actualFireTime = new Date(Date.now() + msUntil);
     this.logger.info(`Scheduled session start`, {
       time,
+      account,
       nextFire: nextFire.toISOString(),
       jitterMin: Math.round(jitterMs / 60000),
       actualFireTime: actualFireTime.toISOString(),
     });
 
     const timer = setTimeout(() => {
-      this.logger.info(`Firing scheduled session start: ${time} (actual: ${new Date().toISOString()})`);
+      this.logger.info(`Firing scheduled session start: ${time} (account: ${account}, actual: ${new Date().toISOString()})`);
       try {
-        callback(channel, userId, time);
+        callback(channel, userId, time, account);
       } catch (error) {
         this.logger.error(`Error in scheduled callback for ${time}`, error);
       }
 
       const cfg = this.config;
-      if (cfg && cfg.times.includes(time)) {
+      const entry = cfg?.entries.find(e => e.time === time);
+      if (cfg && entry) {
         // Schedule a follow-up 5 hours later to cover the next session window.
-        // Even if the user is busy when the first message arrives, the second
-        // trigger ensures the next 5-hour window gets started automatically.
         const followUpJitterMs = Math.floor(
           ScheduleManager.MIN_JITTER_MS + Math.random() * (ScheduleManager.MAX_JITTER_MS - ScheduleManager.MIN_JITTER_MS),
         );
         const followUpMs = ScheduleManager.SESSION_WINDOW_HOURS * 60 * 60 * 1000 + followUpJitterMs;
         const followUpFireTime = new Date(Date.now() + followUpMs);
         this.logger.info(`Scheduling follow-up session start for ${time}`, {
+          account: entry.account,
           followUpFireTime: followUpFireTime.toISOString(),
         });
         const followUpTimer = setTimeout(() => {
-          this.logger.info(`Firing follow-up session start for ${time} (actual: ${new Date().toISOString()})`);
+          this.logger.info(`Firing follow-up session start for ${time} (account: ${entry.account}, actual: ${new Date().toISOString()})`);
           const currentCfg = this.config;
-          if (currentCfg && currentCfg.times.includes(time)) {
+          const currentEntry = currentCfg?.entries.find(e => e.time === time);
+          if (currentCfg && currentEntry) {
             try {
-              callback(currentCfg.channel, currentCfg.userId, time);
+              callback(currentCfg.channel, currentCfg.userId, time, currentEntry.account);
             } catch (error) {
               this.logger.error(`Error in follow-up callback for ${time}`, error);
             }
@@ -244,7 +267,7 @@ export class ScheduleManager {
         this.timers.set(followUpKey, followUpTimer);
 
         // Reschedule primary for the next day
-        this.scheduleOne(time, cfg.channel, cfg.userId, callback);
+        this.scheduleOne(time, cfg.channel, cfg.userId, entry.account, callback);
       }
     }, msUntil);
 
@@ -258,8 +281,12 @@ export class ScheduleManager {
     this.timers.clear();
   }
 
-  getNextFireTimes(): Array<{ time: string; nextFire: Date }> {
+  getNextFireTimes(): Array<{ time: string; account: string; nextFire: Date }> {
     if (!this.config) return [];
-    return this.config.times.map(time => ({ time, nextFire: this.getNextFireTime(time) }));
+    return this.config.entries.map(entry => ({
+      time: entry.time,
+      account: entry.account,
+      nextFire: this.getNextFireTime(entry.time),
+    }));
   }
 }
