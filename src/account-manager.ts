@@ -41,7 +41,7 @@ export class AccountManager {
 
   constructor() {
     this.credentialsFile = path.join(this.claudeDir, '.credentials.json');
-    this.accountsFile = path.join(path.resolve(__dirname, '..'), '.accounts.json');
+    this.accountsFile = path.join(this.claudeDir, '.bot-accounts.json');
     this.loadAccounts();
   }
 
