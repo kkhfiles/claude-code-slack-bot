@@ -4,7 +4,7 @@
 - Fork of [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot)
 - Cross-platform (Windows/macOS/Linux), CLI (`claude -p`) 기반 프로세스 스폰
 - Slack Socket Mode (공개 URL 불필요)
-- `cli-migration` 브랜치에서 작업, `main`은 upstream 동기화용
+- `main` 브랜치 기반, 기능 개발은 `feature/*` 브랜치
 
 ## Build & Run
 
@@ -47,11 +47,11 @@ update.bat                    # Windows
 - `-r`/`-resume`: 전체 프로젝트 세션 피커 (버튼 선택 → cwd 자동 전환 + 세션 재개)
 - `-sessions all`: 전체 프로젝트 세션 목록 (세션 피커와 동일)
 - `-version`: 봇 버전 + git hash + 업데이트 확인 (`src/version.ts`)
-- `-apikey`: API 키 등록/수정 모달 (rate limit 시 자동 전환용, `.api-keys.json` 영속화)
-- `-account`: 다중 계정 상태 조회 및 수동 전환 (`AccountManager`, `.accounts.json` 영속화)
+- `-apikey`: API 키 등록/수정 모달 (rate limit 시 자동 전환용, `~/.claude/.bot-api-keys.json` 영속화)
+- `-account`: 다중 계정 상태 조회 및 수동 전환 (`AccountManager`, `~/.claude/.bot-accounts.json` 영속화)
   - `-account` — 통합 상태 뷰 (Set/Use/Unset 버튼)
   - `-account 1` / `-account 2` / `-account 3` — 수동 전환
-  - 토큰 저장: `.accounts.json` 통합 파일 (accessToken, refreshToken, expiresAt, email)
+  - 토큰 저장: `~/.claude/.bot-accounts.json` (accessToken, refreshToken, expiresAt, email)
   - 전환: `CLAUDE_CODE_OAUTH_TOKEN` env var 주입 (파일 교체 아님)
   - 토큰 만료 시 자동 갱신 (OAuth refresh)
   - rate limit 시 전환 체인: account-1 → account-2 → account-3 → API 키 버튼
@@ -130,10 +130,10 @@ update.bat                    # Windows
 # upstream 업데이트
 git fetch upstream
 git checkout main && git merge upstream/main
-git checkout cli-migration && git merge main
 
-# 작업은 cli-migration 브랜치에서
-git checkout cli-migration
+# 기능 개발
+git checkout -b feature/<name>
+# ... 작업 후 main으로 머지
 ```
 
 ## File Overview
@@ -148,8 +148,18 @@ git checkout cli-migration
 | `src/session-scanner.ts` | 전체 프로젝트 세션 스캔/피커 데이터 |
 | `src/messages.ts` | i18n 번역 카탈로그 (`t()` 함수, `Locale` 타입) |
 | `src/mcp-manager.ts` | MCP 서버 설정 로드/관리 |
-| `src/account-manager.ts` | 다중 계정 관리 — OAuth 토큰 저장/갱신, env var 주입 방식 전환 (`.accounts.json`) |
+| `src/account-manager.ts` | 다중 계정 관리 — OAuth 토큰 저장/갱신, env var 주입 방식 전환 |
 | `src/version.ts` | 버전 정보 + 업데이트 체크 (`getVersionInfo()`, `checkForUpdates()`) |
 | `src/config.ts` | 환경변수 로드 |
 | `src/types.ts` | TypeScript 타입 정의 |
 | `src/logger.ts` | 구조화된 로깅 |
+
+### Data Files
+
+| File | Location | Contains Secrets |
+|------|----------|-----------------|
+| `.bot-accounts.json` | `~/.claude/` | ✅ OAuth 토큰 |
+| `.bot-api-keys.json` | `~/.claude/` | ✅ API 키 |
+| `.working-dirs.json` | 프로젝트 루트 | ❌ |
+| `.session-state.json` | 프로젝트 루트 | ❌ |
+| `.schedule-config.json` | 프로젝트 루트 | ❌ |
