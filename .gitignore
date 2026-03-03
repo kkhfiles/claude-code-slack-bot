@@ -7,10 +7,9 @@ node_modules/
 .env.local
 .env.*.local
 
-# Working directory configs (per-user local state)
+# Bot local state (per-installation, not sensitive)
 .working-dirs.json
 .session-state.json
-.api-keys.json
 .schedule-config.json
 
 # Bot runtime files

@@ -91,7 +91,7 @@ export class SlackHandler {
   private userApiKeys: Map<string, string> = new Map();
   private apiKeyActive: Map<string, { userId: string; resetTimerId: ReturnType<typeof setTimeout>; totalCost: number; limit?: number }> = new Map();
   private channelApiKeyLimits: Map<string, number> = new Map();
-  private readonly API_KEYS_FILE = path.join(__dirname, '..', '.api-keys.json');
+  private readonly API_KEYS_FILE = path.join(os.homedir(), '.claude', '.bot-api-keys.json');
 
   // Session schedule
   private scheduleManager = new ScheduleManager();
