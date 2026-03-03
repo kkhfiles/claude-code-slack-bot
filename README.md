@@ -55,14 +55,14 @@ When API key mode is active, each query's cost is tracked and shown in the compl
 Claude Pro/Max subscriptions have daily session limits (e.g., 3 sessions × 5-hour windows). Register a single time — about **3 hours before your workday starts** — and the bot covers two session windows automatically:
 
 ```
--schedule add 4        # For early starters (sessions ~4:10 and ~9:10)
--schedule add 5        # For typical starters (sessions ~5:10 and ~10:10)
--schedule add 6        # For late starters   (sessions ~6:10 and ~11:10)
+-schedule    # Opens block-based UI with per-account add/remove buttons
 ```
 
 **How it works:**
-- At the scheduled hour, the bot sends a minimal greeting to Claude (randomized message, randomized timing within +5~25 min of the set hour)
+- Each schedule entry is tied to a specific account — use the `[+ email]` buttons to add times per account
+- At the scheduled hour, the bot sends a minimal greeting to Claude using the assigned account's token (randomized message, randomized timing within +5~25 min of the set hour)
 - **Auto follow-up**: 5 hours after the first trigger fires, the bot automatically sends a second greeting to start the next session window — no need to register multiple times
+- Different accounts can have overlapping times; conflict checking is per-account only (5-hour window)
 - Uses `claude-haiku-4-5-20251001` model for minimal token cost
 - Schedule repeats daily, persisted in `.schedule-config.json`
 
@@ -279,16 +279,10 @@ Conversations in the same thread automatically continue the session (no command 
 
 | Command | Description |
 |---------|-------------|
-| `-schedule` | Show current settings (times, target channel, next fire) |
-| `-schedule add <hour>` | Add a session start hour (e.g., `-schedule add 6`) |
-| `-schedule remove <hour>` | Remove a time |
-| `-schedule clear` | Clear all session start times |
+| `-schedule` | Show schedule status with per-account add/remove buttons |
 
 ```
--schedule add 5         # ~3h before 9am start → auto-triggers at ~5:10 and ~10:10
--schedule               # Show status (times + next fire)
--schedule remove 5      # Remove
--schedule clear         # Clear all
+-schedule               # Block-based UI: add via modal, remove via ✕ button, clear all
 ```
 
 ### MCP Servers

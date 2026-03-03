@@ -22,6 +22,7 @@ interface MessageEvent {
   thread_ts?: string;
   ts: string;
   text?: string;
+  accountId?: string; // Override account for token injection (used by scheduled sessions)
   files?: Array<{
     id: string;
     name: string;
@@ -97,7 +98,7 @@ export class SlackHandler {
 
   // Multi-account management
   private accountManager = new AccountManager();
-  private pendingAccountSetups: Map<string, { slot: AccountId; stage: 'capture-new' | 'restore-account-1'; originalToken: string | null; locale: Locale }> = new Map();
+  private pendingAccountSetups: Map<string, { slot: AccountId; originalToken: string | null; locale: Locale }> = new Map();
 
   constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager) {
     this.app = app;
@@ -227,12 +228,9 @@ export class SlackHandler {
     }
 
     // Schedule command
-    if (text) {
-      const scheduleParsed = this.parseScheduleCommand(text);
-      if (scheduleParsed) {
-        await this.handleScheduleCommand(scheduleParsed, channel, thread_ts, user, locale, say);
-        return;
-      }
+    if (text && this.isScheduleCommand(text)) {
+      await this.handleScheduleCommand(channel, thread_ts, user, locale, say);
+      return;
     }
 
     // Stop command (interrupt running CLI process)
@@ -488,6 +486,16 @@ export class SlackHandler {
         const apiKey = this.userApiKeys.get(apiKeyState.userId);
         if (apiKey) {
           queryEnv = { ANTHROPIC_API_KEY: apiKey };
+        }
+      }
+
+      // Inject OAuth token (when not in API key mode)
+      // Use event.accountId if specified (scheduled sessions), otherwise current account
+      if (!queryEnv) {
+        const targetAccount = event.accountId || undefined;
+        const oauthToken = await this.accountManager.getAccessToken(targetAccount as any);
+        if (oauthToken) {
+          queryEnv = { CLAUDE_CODE_OAUTH_TOKEN: oauthToken };
         }
       }
 
@@ -1294,106 +1302,104 @@ export class SlackHandler {
 
   // --- Schedule command ---
 
-  private parseScheduleCommand(text: string): { action: string; time?: string } | null {
-    const trimmed = text.trim();
-    if (/^`?-(?:schedule|sc)`?$|^스케줄$/i.test(trimmed)) return { action: 'status' };
-    const addMatch = trimmed.match(/^`?-(?:schedule|sc)`?\s+(?:add|추가)\s+(\d{1,2}(?::\d{2})?)`?$|^스케줄\s+(?:add|추가)\s+(\d{1,2}(?::\d{2})?)$/i);
-    if (addMatch) return { action: 'add', time: addMatch[1] || addMatch[2] };
-    const rmMatch = trimmed.match(/^`?-(?:schedule|sc)`?\s+(?:remove|rm|del|delete|삭제|제거)\s+(\d{1,2}(?::\d{2})?)`?$|^스케줄\s+(?:remove|rm|삭제|제거)\s+(\d{1,2}(?::\d{2})?)$/i);
-    if (rmMatch) return { action: 'remove', time: rmMatch[1] || rmMatch[2] };
-    if (/^`?-(?:schedule|sc)`?\s+(?:clear|초기화)`?$|^스케줄\s+(?:clear|초기화)$/i.test(trimmed)) return { action: 'clear' };
-    return null;
+  private isScheduleCommand(text: string): boolean {
+    return /^`?-(?:schedule|sc)`?(?:\s|$)|^스케줄/i.test(text.trim());
   }
 
   private async handleScheduleCommand(
-    parsed: { action: string; time?: string },
     channel: string,
     threadTs: string | undefined,
     userId: string,
     locale: Locale,
     say: any,
   ): Promise<void> {
-    const { action, time } = parsed;
+    const { text, blocks } = this.buildScheduleBlocks(locale, channel, userId);
+    await say({ text, blocks, thread_ts: threadTs });
+  }
 
-    if (action === 'status') {
-      const cfg = this.scheduleManager.getConfig();
-      if (!cfg || cfg.times.length === 0) {
-        await say({ text: `📅 ${t('schedule.noConfig', locale)}`, thread_ts: threadTs });
-        return;
-      }
+  private buildScheduleBlocks(locale: Locale, channel?: string, userId?: string, note?: string): { text: string; blocks: any[] } {
+    const entries = this.scheduleManager.getEntries();
+    const accounts = this.accountManager.getAccountList();
+    const configuredAccounts = accounts.filter(a => a.exists);
+    const blocks: any[] = [];
+
+    if (note) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: note } });
+      blocks.push({ type: 'divider' });
+    }
+
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `📅 ${t('schedule.status.header', locale)}` } });
+
+    if (entries.length === 0) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: t('schedule.noConfig', locale) } });
+    } else {
       const nextFires = this.scheduleManager.getNextFireTimes();
-      const timesStr = cfg.times.join(', ');
-      let msg = `📅 ${t('schedule.status.header', locale)}\n`;
-      msg += `• ${t('schedule.status.channel', locale, { channel: cfg.channel })}\n`;
-      msg += `• ${t('schedule.status.times', locale, { times: timesStr })}\n`;
-      const soonest = nextFires.reduce((a, b) => a.nextFire < b.nextFire ? a : b);
-      const minsUntil = Math.round((soonest.nextFire.getTime() - Date.now()) / 60000);
-      msg += `• ${t('schedule.status.next', locale, { time: soonest.time, minutes: minsUntil.toString() })}\n`;
-      msg += t('schedule.status.hint', locale);
-      await say({ text: msg, thread_ts: threadTs });
-      return;
+      for (const entry of entries) {
+        const email = accounts.find(a => a.id === entry.account)?.email;
+        const label = email ? `${entry.account} (${email})` : entry.account;
+        const nf = nextFires.find(f => f.time === entry.time && f.account === entry.account);
+        const minsUntil = nf ? Math.round((nf.nextFire.getTime() - Date.now()) / 60000) : 0;
+        const timeInfo = nf ? ` _(${minsUntil}m)_` : '';
+        blocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: `• \`${entry.time}\` → ${label}${timeInfo}` },
+          accessory: {
+            type: 'button',
+            text: { type: 'plain_text', text: '✕' },
+            action_id: `schedule_remove_btn_${entry.time.replace(':', '')}_${entry.account}`,
+            value: JSON.stringify({ time: entry.time, account: entry.account }),
+            style: 'danger',
+          },
+        });
+      }
     }
 
-    if (action === 'add') {
-      // Check for session window conflict before adding
-      const conflict = this.scheduleManager.findConflictingTime(time!);
-      if (conflict) {
-        const normalized = this.scheduleManager.normalizeTime(time!) || time!;
-        const existingHour = conflict.split(':')[0];
-        await say({ text: `❌ ${t('schedule.conflictWithExisting', locale, { time: normalized, existing: conflict, existingHour })}`, thread_ts: threadTs });
-        return;
+    // Add buttons: one per configured account
+    if (configuredAccounts.length > 0) {
+      blocks.push({ type: 'divider' });
+      const addButtons = configuredAccounts.map(acc => {
+        const label = acc.email ? `+ ${acc.email}` : `+ ${acc.id}`;
+        return {
+          type: 'button',
+          text: { type: 'plain_text', text: label },
+          action_id: `schedule_add_btn_${acc.id}`,
+          value: JSON.stringify({ account: acc.id, channel, userId }),
+        };
+      });
+      // Clear all button (only when entries exist)
+      if (entries.length > 0) {
+        addButtons.push({
+          type: 'button',
+          text: { type: 'plain_text', text: t('schedule.clearBtn', locale) },
+          action_id: 'schedule_clear_btn',
+          value: 'clear',
+        } as any);
       }
-      const normalized = this.scheduleManager.addTime(time!, channel, userId);
-      if (!normalized) {
-        await say({ text: `❌ ${t('schedule.invalidTime', locale)}`, thread_ts: threadTs });
-        return;
-      }
-      this.restartScheduler();
-      const hour = normalized.split(':')[0];
-      const followUpHour = String((parseInt(hour, 10) + 5) % 24).padStart(2, '0');
-      await say({ text: `${t('schedule.added', locale, { time: normalized, hour, followUpHour, channel })}`, thread_ts: threadTs });
-      return;
+      blocks.push({ type: 'actions', elements: addButtons });
+    } else {
+      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: t('schedule.noAccounts', locale) }] });
     }
 
-    if (action === 'remove') {
-      const validTime = this.scheduleManager.normalizeTime(time!);
-      if (!validTime) {
-        await say({ text: `❌ ${t('schedule.invalidTime', locale)}`, thread_ts: threadTs });
-        return;
-      }
-      const removed = this.scheduleManager.removeTime(validTime);
-      if (!removed) {
-        await say({ text: `⚠️ ${t('schedule.notFound', locale, { time: validTime })}`, thread_ts: threadTs });
-        return;
-      }
-      this.restartScheduler();
-      await say({ text: `${t('schedule.removed', locale, { time: removed })}`, thread_ts: threadTs });
-      return;
-    }
-
-    if (action === 'clear') {
-      this.scheduleManager.clearTimes();
-      await say({ text: `${t('schedule.cleared', locale)}`, thread_ts: threadTs });
-      return;
-    }
-
+    return { text: `📅 ${t('schedule.status.header', locale)}`, blocks };
   }
 
   private restartScheduler(): void {
-    this.scheduleManager.scheduleAll((ch, uid, time) => {
-      this.runScheduledGreeting(ch, uid, time).catch(err =>
+    this.scheduleManager.scheduleAll((ch, uid, time, account) => {
+      this.runScheduledGreeting(ch, uid, time, account).catch(err =>
         this.logger.error('Scheduled greeting failed', err),
       );
     });
   }
 
-  private async runScheduledGreeting(channel: string, userId: string, time: string): Promise<void> {
+  private async runScheduledGreeting(channel: string, userId: string, time: string, account: string): Promise<void> {
     const locale = await this.getUserLocale(userId).catch(() => 'ko' as Locale);
 
     // Post session start notification as top-level message
+    const accountEmail = this.accountManager.getAccountList().find(a => a.id === account)?.email;
+    const accountLabel = accountEmail ? `${account} (${accountEmail})` : account;
     const postResult = await this.app.client.chat.postMessage({
       channel,
-      text: `🌅 ${t('schedule.sessionStart', locale)} (${time})`,
+      text: `🌅 ${t('schedule.sessionStart', locale)} (${time}) — ${accountLabel}`,
     });
 
     if (!postResult.ok || !postResult.ts) {
@@ -1417,7 +1423,7 @@ export class SlackHandler {
     // Build synthetic event with randomized greeting
     const greeting = ScheduleManager.getRandomGreeting();
     this.logger.debug('Scheduled greeting message', { time, greeting });
-    const event: MessageEvent = { user: userId, channel, ts, text: greeting };
+    const event: MessageEvent = { user: userId, channel, ts, text: greeting, accountId: account };
 
     // Force haiku model for minimal token usage, restore after
     const prevModel = this.channelModels.get(channel);
@@ -1658,14 +1664,17 @@ export class SlackHandler {
       blocks.push({ type: 'divider' });
     }
 
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: t('account.current', locale, { account: current }) } });
+    const currentEmail = accounts.find(a => a.id === current)?.email;
+    const currentLabel = currentEmail ? `${current} (${currentEmail})` : current;
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: t('account.current', locale, { account: currentLabel }) } });
 
     for (const acc of accounts) {
+      const emailSuffix = acc.email ? ` — ${acc.email}` : '';
       if (acc.id === current) {
         // Active account: show status + Set button for reconfiguring
         blocks.push({
           type: 'section',
-          text: { type: 'mrkdwn', text: t('account.entryActive', locale, { id: acc.id }) },
+          text: { type: 'mrkdwn', text: t('account.entryActive', locale, { id: acc.id }) + emailSuffix },
           accessory: {
             type: 'button',
             text: { type: 'plain_text', text: t('account.setBtn', locale) },
@@ -1675,7 +1684,7 @@ export class SlackHandler {
         });
       } else if (acc.exists) {
         // Configured, not active: Use / Set / Unset
-        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: t('account.entryAvailable', locale, { id: acc.id }) } });
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: t('account.entryAvailable', locale, { id: acc.id }) + emailSuffix } });
         blocks.push({
           type: 'actions',
           elements: [
@@ -1688,7 +1697,7 @@ export class SlackHandler {
         // Not configured: Set only
         blocks.push({
           type: 'section',
-          text: { type: 'mrkdwn', text: t('account.entryMissing', locale, { id: acc.id, file: acc.file }) },
+          text: { type: 'mrkdwn', text: t('account.entryMissing', locale, { id: acc.id }) },
           accessory: {
             type: 'button',
             text: { type: 'plain_text', text: t('account.setBtn', locale) },
@@ -1716,34 +1725,6 @@ export class SlackHandler {
             {
               type: 'button',
               text: { type: 'plain_text', text: t('account.setup.captureNew.doneBtn', locale) },
-              action_id: 'account_setup_next',
-              value: setupId,
-              style: 'primary',
-            },
-            {
-              type: 'button',
-              text: { type: 'plain_text', text: t('account.setup.cancelBtn', locale) },
-              action_id: 'account_setup_cancel',
-              value: setupId,
-            },
-          ],
-        },
-      ],
-    };
-  }
-
-  private buildRestoreAccount1Blocks(setupId: string, slot: AccountId, locale: Locale): { text: string; blocks: any[] } {
-    const text = t('account.setup.restoreAccount1.title', locale, { slot });
-    return {
-      text,
-      blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text } },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: { type: 'plain_text', text: t('account.setup.restoreAccount1.doneBtn', locale) },
               action_id: 'account_setup_next',
               value: setupId,
               style: 'primary',
@@ -2168,13 +2149,12 @@ export class SlackHandler {
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const slot = (body as any).actions[0].value as AccountId;
 
-      this.accountManager.pauseSync();
       const originalToken = this.accountManager.readCurrentToken();
       const setupId = `setup-${Date.now()}`;
-      this.pendingAccountSetups.set(setupId, { slot, stage: 'capture-new', originalToken, locale: actionLocale });
+      this.pendingAccountSetups.set(setupId, { slot, originalToken, locale: actionLocale });
       setTimeout(() => {
         const s = this.pendingAccountSetups.get(setupId);
-        if (s) { this.pendingAccountSetups.delete(setupId); this.accountManager.resumeSync(); }
+        if (s) { this.pendingAccountSetups.delete(setupId); }
       }, 30 * 60 * 1000);
 
       const { text, blocks } = this.buildCaptureNewBlocks(setupId, slot, actionLocale);
@@ -2191,7 +2171,7 @@ export class SlackHandler {
       await respond({ replace_original: true, text, blocks });
     });
 
-    // Account setup: "Done" button — handles 'capture-new' and 'restore-account-1' stages
+    // Account setup: "Done" button — capture token for the target slot
     this.app.action('account_setup_next', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
@@ -2204,42 +2184,15 @@ export class SlackHandler {
         }
 
         const currentToken = this.accountManager.readCurrentToken();
-
-        if (setup.stage === 'capture-new') {
-          // User should now be logged into the new account — verify token changed
-          if (currentToken === setup.originalToken) {
-            await respond({ response_type: 'ephemeral', text: t('account.setup.captureNew.notChanged', actionLocale) });
-            return;
-          }
-          this.accountManager.captureForSlot(setup.slot);
-
-          if (setup.slot === 'account-1') {
-            // account-1 setup done — no restore step needed
-            this.accountManager.setCurrentAccount('account-1');
-            this.accountManager.resumeSync();
-            this.pendingAccountSetups.delete(setupId);
-            const doneBlocks = this.buildAccountStatusBlocks(actionLocale, t('account.setup.done', actionLocale, { slot: setup.slot }));
-            await respond({ replace_original: true, ...doneBlocks });
-          } else {
-            // account-2/3: now guide user back to account-1
-            setup.originalToken = currentToken;
-            setup.stage = 'restore-account-1';
-            const { text, blocks } = this.buildRestoreAccount1Blocks(setupId, setup.slot, setup.locale);
-            await respond({ replace_original: true, text, blocks });
-          }
-        } else {
-          // stage === 'restore-account-1': user should now be logged back into account-1
-          if (currentToken === setup.originalToken) {
-            await respond({ response_type: 'ephemeral', text: t('account.setup.restoreAccount1.notChanged', actionLocale) });
-            return;
-          }
-          this.accountManager.captureForSlot('account-1');
-          this.accountManager.setCurrentAccount('account-1');
-          this.accountManager.resumeSync();
-          this.pendingAccountSetups.delete(setupId);
-          const doneBlocks = this.buildAccountStatusBlocks(actionLocale, t('account.setup.done', actionLocale, { slot: setup.slot }));
-          await respond({ replace_original: true, ...doneBlocks });
+        if (currentToken === setup.originalToken) {
+          await respond({ response_type: 'ephemeral', text: t('account.setup.captureNew.notChanged', actionLocale) });
+          return;
         }
+
+        this.accountManager.captureForSlot(setup.slot);
+        this.pendingAccountSetups.delete(setupId);
+        const doneBlocks = this.buildAccountStatusBlocks(actionLocale, t('account.setup.done', actionLocale, { slot: setup.slot }));
+        await respond({ replace_original: true, ...doneBlocks });
       } catch (error) {
         this.logger.error('Error in account_setup_next', error);
         await respond({ response_type: 'ephemeral', text: '❌ An error occurred. Please try again.' });
@@ -2254,12 +2207,119 @@ export class SlackHandler {
       const setup = this.pendingAccountSetups.get(setupId);
       if (setup) {
         this.pendingAccountSetups.delete(setupId);
-        if (setup.stage === 'capture-new' || setup.stage === 'restore-account-1') {
-          this.accountManager.resumeSync();
-        }
+        // No cleanup needed — watcher removed
       }
       // Return to status view with cancel note
       const { text, blocks } = this.buildAccountStatusBlocks(actionLocale, t('account.setup.cancelled', actionLocale));
+      await respond({ replace_original: true, text, blocks });
+    });
+
+    // Schedule: "Add" button → open modal for time input
+    this.app.action(/^schedule_add_btn_/, async ({ ack, body }) => {
+      await ack();
+      try {
+        const actionLocale = await this.getUserLocale((body as any).user.id);
+        const value = JSON.parse((body as any).actions[0].value);
+        const { account, channel: ch, userId: uid } = value;
+        const messageTs = (body as any).message?.ts;
+        const accInfo = this.accountManager.getAccountList().find(a => a.id === account);
+        const label = accInfo?.email ? `${account} (${accInfo.email})` : account;
+
+        await this.app.client.views.open({
+          trigger_id: (body as any).trigger_id,
+          view: {
+            type: 'modal',
+            callback_id: 'schedule_add_modal',
+            private_metadata: JSON.stringify({ account, channel: ch, userId: uid, messageTs }),
+            title: { type: 'plain_text', text: t('schedule.modal.title', actionLocale) },
+            submit: { type: 'plain_text', text: t('schedule.modal.submit', actionLocale) },
+            close: { type: 'plain_text', text: t('schedule.modal.close', actionLocale) },
+            blocks: [
+              { type: 'section', text: { type: 'mrkdwn', text: t('schedule.modal.body', actionLocale, { account: label }) } },
+              {
+                type: 'input',
+                block_id: 'schedule_time_block',
+                label: { type: 'plain_text', text: t('schedule.modal.label', actionLocale) },
+                element: {
+                  type: 'plain_text_input',
+                  action_id: 'schedule_time_input',
+                  placeholder: { type: 'plain_text', text: '5, 11, 16:30' },
+                },
+              },
+            ],
+          },
+        });
+      } catch (error) {
+        this.logger.error('Failed to open schedule add modal', error);
+      }
+    });
+
+    // Schedule: modal submission → add time
+    this.app.view('schedule_add_modal', async ({ ack, view, body }) => {
+      const metadata = JSON.parse(view.private_metadata);
+      const timeInput = view.state.values.schedule_time_block.schedule_time_input.value || '';
+      const viewLocale = await this.getUserLocale(body.user.id);
+
+      // Validate
+      const normalized = this.scheduleManager.normalizeTime(timeInput);
+      if (!normalized) {
+        await ack({ response_action: 'errors', errors: { schedule_time_block: t('schedule.invalidTime', viewLocale) } });
+        return;
+      }
+      const conflict = this.scheduleManager.findConflictingTime(normalized, metadata.account);
+      if (conflict) {
+        const existingHour = conflict.split(':')[0];
+        await ack({ response_action: 'errors', errors: { schedule_time_block: t('schedule.conflictWithExisting', viewLocale, { time: normalized, existing: conflict, existingHour }) } });
+        return;
+      }
+
+      await ack();
+      this.scheduleManager.addTime(normalized, metadata.channel, metadata.userId, metadata.account);
+      this.restartScheduler();
+
+      // Update original schedule message in-place
+      try {
+        const { text, blocks } = this.buildScheduleBlocks(viewLocale, metadata.channel, metadata.userId);
+        if (metadata.messageTs) {
+          await this.app.client.chat.update({
+            channel: metadata.channel,
+            ts: metadata.messageTs,
+            text,
+            blocks,
+          });
+        } else {
+          await this.app.client.chat.postMessage({
+            channel: metadata.channel,
+            text,
+            blocks,
+          });
+        }
+      } catch (err) {
+        this.logger.error('Failed to update schedule view after add', err);
+      }
+    });
+
+    // Schedule: "Remove" button
+    this.app.action(/^schedule_remove_btn_/, async ({ ack, body, respond }) => {
+      await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
+      const ch = (body as any).channel?.id;
+      const uid = (body as any).user.id;
+      const { time, account } = JSON.parse((body as any).actions[0].value);
+      this.scheduleManager.removeTime(time, account);
+      this.restartScheduler();
+      const { text, blocks } = this.buildScheduleBlocks(actionLocale, ch, uid);
+      await respond({ replace_original: true, text, blocks });
+    });
+
+    // Schedule: "Clear all" button
+    this.app.action('schedule_clear_btn', async ({ ack, body, respond }) => {
+      await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
+      const ch = (body as any).channel?.id;
+      const uid = (body as any).user.id;
+      this.scheduleManager.clearTimes();
+      const { text, blocks } = this.buildScheduleBlocks(actionLocale, ch, uid);
       await respond({ replace_original: true, text, blocks });
     });
 
