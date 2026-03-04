@@ -207,8 +207,9 @@ export class ScheduleManager {
     account: string,
     callback: (channel: string, userId: string, time: string, account: string) => void,
   ): void {
-    // Cancel any pending follow-up from a previous fire of this time slot
-    const followUpKey = `${time}-followup`;
+    // Cancel any pending follow-up from a previous fire of this time+account slot
+    const timerKey = `${time}_${account}`;
+    const followUpKey = `${timerKey}-followup`;
     const existingFollowUp = this.timers.get(followUpKey);
     if (existingFollowUp) {
       clearTimeout(existingFollowUp);
@@ -239,7 +240,7 @@ export class ScheduleManager {
       }
 
       const cfg = this.config;
-      const entry = cfg?.entries.find(e => e.time === time);
+      const entry = cfg?.entries.find(e => e.time === time && e.account === account);
       if (cfg && entry) {
         // Schedule a follow-up 5 hours later to cover the next session window.
         const followUpJitterMs = Math.floor(
@@ -252,9 +253,9 @@ export class ScheduleManager {
           followUpFireTime: followUpFireTime.toISOString(),
         });
         const followUpTimer = setTimeout(() => {
-          this.logger.info(`Firing follow-up session start for ${time} (account: ${entry.account}, actual: ${new Date().toISOString()})`);
+          this.logger.info(`Firing follow-up session start for ${time} (account: ${account}, actual: ${new Date().toISOString()})`);
           const currentCfg = this.config;
-          const currentEntry = currentCfg?.entries.find(e => e.time === time);
+          const currentEntry = currentCfg?.entries.find(e => e.time === time && e.account === account);
           if (currentCfg && currentEntry) {
             try {
               callback(currentCfg.channel, currentCfg.userId, time, currentEntry.account);
@@ -271,7 +272,7 @@ export class ScheduleManager {
       }
     }, msUntil);
 
-    this.timers.set(time, timer);
+    this.timers.set(timerKey, timer);
   }
 
   cancelAll(): void {
