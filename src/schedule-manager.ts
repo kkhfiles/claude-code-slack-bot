@@ -216,14 +216,7 @@ export class ScheduleManager {
     account: string,
     callback: (channel: string, userId: string, time: string, account: string) => void,
   ): void {
-    // Cancel any pending follow-up from a previous fire of this time+account slot
     const timerKey = `${time}_${account}`;
-    const followUpKey = `${timerKey}-followup`;
-    const existingFollowUp = this.timers.get(followUpKey);
-    if (existingFollowUp) {
-      clearTimeout(existingFollowUp);
-      this.timers.delete(followUpKey);
-    }
 
     const nextFire = this.getNextFireTime(time);
     const baseMs = nextFire.getTime() - Date.now();
@@ -276,6 +269,14 @@ export class ScheduleManager {
   ): void {
     const timerKey = `${time}_${account}`;
     const followUpKey = `${timerKey}-followup`;
+
+    // Cancel existing follow-up if any (e.g., from previous day)
+    const existing = this.timers.get(followUpKey);
+    if (existing) {
+      clearTimeout(existing);
+      this.timers.delete(followUpKey);
+    }
+
     const msUntil = fireAt - Date.now();
     if (msUntil <= 0) return; // Already past
 
