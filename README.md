@@ -38,30 +38,39 @@ When a tool is denied, a Slack button appears to approve it individually or allo
 
 `-plan <prompt>` generates a read-only plan without modifying any files. Review it, then click **Execute** to proceed or **Cancel** to discard.
 
+### Multi-Account Support
+
+Register up to 3 Claude accounts and switch between them. Each query uses `CLAUDE_CODE_OAUTH_TOKEN` env var injection — no credential file swapping.
+
+- `-account` — View all accounts with Set/Use/Unset buttons
+- Tokens are auto-refreshed on expiry (OAuth refresh flow)
+- Rate limit triggers automatic account rotation: account-1 → account-2 → account-3 → API key fallback
+
 ### Rate Limit Handling & API Key Fallback
 
 When Claude subscription limits are reached:
 
-1. **Continue with API key** — Switch to your registered API key immediately
-2. **Schedule retry** — Slack delivers your message at the estimated reset time
-3. **Cancel** — Discard the pending message
+1. **Auto account switch** — If multiple accounts are registered, the bot tries the next account automatically
+2. **Continue with API key** — Switch to your registered API key
+3. **Schedule retry** — Slack delivers your message at the estimated reset time
+4. **Cancel** — Discard the pending message
 
-Pre-register your API key with `-apikey` so it's ready when needed. The modal also lets you set an optional **spending limit** — the bot auto-deactivates API key mode when the limit is reached. The bot automatically reverts to subscription auth when the rate limit resets. A `@mention` notification is scheduled at the reset time (auto-cancelled if you retry or cancel).
+Pre-register your API key with `-apikey` so it's ready when needed. The modal also lets you set an optional **spending limit** — the bot auto-deactivates API key mode when the limit is reached. The bot automatically reverts to subscription auth when the rate limit resets.
 
 When API key mode is active, each query's cost is tracked and shown in the completion message (`✅ Task completed (Grep ×3) | 🔑 $0.0023 (total: $0.0145)`). Use `-limit` to view or adjust the spending limit at any time.
 
 ### Session Auto-Start
 
-Claude Pro/Max subscriptions have daily session limits (e.g., 3 sessions × 5-hour windows). Register a single time — about **3 hours before your workday starts** — and the bot covers two session windows automatically:
+Claude Pro/Max subscriptions have session limits with 5-hour windows. Schedule automatic session starts to keep your sessions running:
 
 ```
--schedule    # Opens block-based UI with per-account add/remove buttons
+-schedule    # Block-based UI with per-account add/remove buttons
 ```
 
 **How it works:**
 - Each schedule entry is tied to a specific account — use the `[+ email]` buttons to add times per account
-- At the scheduled hour, the bot sends a minimal greeting to Claude using the assigned account's token (randomized message, randomized timing within +5~25 min of the set hour)
-- **Auto follow-up**: 5 hours after the first trigger fires, the bot automatically sends a second greeting to start the next session window — no need to register multiple times
+- At the scheduled hour, the bot sends a minimal greeting using the assigned account's token (randomized message, +5~25 min jitter)
+- **Auto follow-up**: 5 hours later, a second greeting fires automatically to cover the next session window (persisted to disk — survives restarts)
 - Different accounts can have overlapping times; conflict checking is per-account only (5-hour window)
 - Uses `claude-haiku-4-5-20251001` model for minimal token cost
 - Schedule repeats daily, persisted in `.schedule-config.json`
@@ -268,6 +277,8 @@ Conversations in the same thread automatically continue the session (no command 
 
 | Command | Description |
 |---------|-------------|
+| `-account` | Multi-account status (Set/Use/Unset buttons) |
+| `-account 1/2/3` | Switch to specific account |
 | `-model [name]` | Get/set model (`sonnet`, `opus`, `haiku`, or full name) |
 | `-cost` | Show last query cost and session ID |
 | `-apikey` | Register API key for rate limit fallback; optional spending limit field |
@@ -346,6 +357,7 @@ src/
 ├── cli-handler.ts               # Claude CLI process management (stream-json)
 ├── slack-handler.ts             # Slack event handling, command parsing
 ├── working-directory-manager.ts # Working directory management (persistence)
+├── account-manager.ts           # Multi-account OAuth token management
 ├── schedule-manager.ts          # Session auto-start scheduler
 ├── file-handler.ts              # File upload handling
 ├── session-scanner.ts           # Cross-project session scanning
