@@ -7,10 +7,17 @@ export interface ScheduleEntry {
   account: string;  // AccountId (e.g., 'account-1')
 }
 
+interface PendingFollowUp {
+  time: string;     // Original schedule time
+  account: string;
+  fireAt: number;   // Unix timestamp ms
+}
+
 interface ScheduleConfig {
   entries: ScheduleEntry[];
   channel: string;  // Slack channel ID to post to
   userId: string;   // Slack user ID who set it up (for locale)
+  pendingFollowUps?: PendingFollowUp[];
 }
 
 /**
@@ -191,13 +198,15 @@ export class ScheduleManager {
     return next;
   }
 
-  /** Start all timers. Cancels existing timers first. */
+  /** Start all timers. Cancels existing timers first. Restores persisted follow-ups. */
   scheduleAll(callback: (channel: string, userId: string, time: string, account: string) => void): void {
     this.cancelAll();
     if (!this.config || this.config.entries.length === 0) return;
     for (const entry of this.config.entries) {
       this.scheduleOne(entry.time, this.config.channel, this.config.userId, entry.account, callback);
     }
+    // Restore persisted follow-ups (survives pm2 restart)
+    this.restoreFollowUps(callback);
   }
 
   private scheduleOne(
@@ -247,25 +256,8 @@ export class ScheduleManager {
           ScheduleManager.MIN_JITTER_MS + Math.random() * (ScheduleManager.MAX_JITTER_MS - ScheduleManager.MIN_JITTER_MS),
         );
         const followUpMs = ScheduleManager.SESSION_WINDOW_HOURS * 60 * 60 * 1000 + followUpJitterMs;
-        const followUpFireTime = new Date(Date.now() + followUpMs);
-        this.logger.info(`Scheduling follow-up session start for ${time}`, {
-          account: entry.account,
-          followUpFireTime: followUpFireTime.toISOString(),
-        });
-        const followUpTimer = setTimeout(() => {
-          this.logger.info(`Firing follow-up session start for ${time} (account: ${account}, actual: ${new Date().toISOString()})`);
-          const currentCfg = this.config;
-          const currentEntry = currentCfg?.entries.find(e => e.time === time && e.account === account);
-          if (currentCfg && currentEntry) {
-            try {
-              callback(currentCfg.channel, currentCfg.userId, time, currentEntry.account);
-            } catch (error) {
-              this.logger.error(`Error in follow-up callback for ${time}`, error);
-            }
-          }
-          this.timers.delete(followUpKey);
-        }, followUpMs);
-        this.timers.set(followUpKey, followUpTimer);
+        const followUpFireAt = Date.now() + followUpMs;
+        this.scheduleFollowUp(time, account, followUpFireAt, callback);
 
         // Reschedule primary for the next day
         this.scheduleOne(time, cfg.channel, cfg.userId, entry.account, callback);
@@ -273,6 +265,89 @@ export class ScheduleManager {
     }, msUntil);
 
     this.timers.set(timerKey, timer);
+  }
+
+  /** Schedule a follow-up and persist it to disk so it survives restarts. */
+  private scheduleFollowUp(
+    time: string,
+    account: string,
+    fireAt: number,
+    callback: (channel: string, userId: string, time: string, account: string) => void,
+  ): void {
+    const timerKey = `${time}_${account}`;
+    const followUpKey = `${timerKey}-followup`;
+    const msUntil = fireAt - Date.now();
+    if (msUntil <= 0) return; // Already past
+
+    this.logger.info(`Scheduling follow-up session start for ${time}`, {
+      account,
+      followUpFireTime: new Date(fireAt).toISOString(),
+    });
+
+    // Persist to disk
+    this.addPendingFollowUp({ time, account, fireAt });
+
+    const followUpTimer = setTimeout(() => {
+      this.logger.info(`Firing follow-up session start for ${time} (account: ${account}, actual: ${new Date().toISOString()})`);
+      const currentCfg = this.config;
+      const currentEntry = currentCfg?.entries.find(e => e.time === time && e.account === account);
+      if (currentCfg && currentEntry) {
+        try {
+          callback(currentCfg.channel, currentCfg.userId, time, currentEntry.account);
+        } catch (error) {
+          this.logger.error(`Error in follow-up callback for ${time}`, error);
+        }
+      }
+      this.timers.delete(followUpKey);
+      this.removePendingFollowUp(time, account);
+    }, msUntil);
+    this.timers.set(followUpKey, followUpTimer);
+  }
+
+  /** Restore persisted follow-ups after restart. */
+  private restoreFollowUps(callback: (channel: string, userId: string, time: string, account: string) => void): void {
+    if (!this.config?.pendingFollowUps || this.config.pendingFollowUps.length === 0) return;
+    const now = Date.now();
+    const valid: PendingFollowUp[] = [];
+    for (const fu of this.config.pendingFollowUps) {
+      if (fu.fireAt > now) {
+        this.scheduleFollowUp(fu.time, fu.account, fu.fireAt, callback);
+        valid.push(fu);
+      } else {
+        // Expired while offline — fire immediately
+        this.logger.info(`Firing missed follow-up for ${fu.time} (account: ${fu.account})`);
+        const entry = this.config.entries.find(e => e.time === fu.time && e.account === fu.account);
+        if (entry) {
+          try {
+            callback(this.config.channel, this.config.userId, fu.time, fu.account);
+          } catch (error) {
+            this.logger.error(`Error in missed follow-up callback for ${fu.time}`, error);
+          }
+        }
+      }
+    }
+    // Clean up expired entries
+    this.config.pendingFollowUps = valid;
+    this.save();
+  }
+
+  private addPendingFollowUp(fu: PendingFollowUp): void {
+    if (!this.config) return;
+    if (!this.config.pendingFollowUps) this.config.pendingFollowUps = [];
+    // Replace existing for same time+account
+    this.config.pendingFollowUps = this.config.pendingFollowUps.filter(
+      f => !(f.time === fu.time && f.account === fu.account),
+    );
+    this.config.pendingFollowUps.push(fu);
+    this.save();
+  }
+
+  private removePendingFollowUp(time: string, account: string): void {
+    if (!this.config?.pendingFollowUps) return;
+    this.config.pendingFollowUps = this.config.pendingFollowUps.filter(
+      f => !(f.time === time && f.account === account),
+    );
+    this.save();
   }
 
   cancelAll(): void {
