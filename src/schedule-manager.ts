@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import Holidays from 'date-holidays';
 import { Logger } from './logger';
 
 export interface ScheduleEntry {
@@ -31,6 +32,7 @@ export class ScheduleManager {
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly configFile: string;
   private logger = new Logger('ScheduleManager');
+  private holidays = new Holidays('KR');
 
   // Jitter range: actual fire time = scheduled time + random(5~25 min)
   private static readonly MIN_JITTER_MS = 5 * 60 * 1000;
@@ -187,6 +189,19 @@ export class ScheduleManager {
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
   }
 
+  /** Check if a date is a non-working day (weekend or Korean public holiday). */
+  private isNonWorkingDay(date: Date = new Date()): { skip: boolean; reason?: string } {
+    const day = date.getDay();
+    if (day === 0) return { skip: true, reason: 'Sunday' };
+    if (day === 6) return { skip: true, reason: 'Saturday' };
+    const result = this.holidays.isHoliday(date);
+    if (Array.isArray(result)) {
+      const publicHoliday = result.find(h => h.type === 'public');
+      if (publicHoliday) return { skip: true, reason: publicHoliday.name };
+    }
+    return { skip: false };
+  }
+
   getNextFireTime(time: string): Date {
     const [h, m] = time.split(':').map(Number);
     const now = new Date();
@@ -234,6 +249,18 @@ export class ScheduleManager {
     });
 
     const timer = setTimeout(() => {
+      // Skip on weekends and Korean public holidays
+      const nonWorking = this.isNonWorkingDay();
+      if (nonWorking.skip) {
+        this.logger.info(`Skipping scheduled session (${nonWorking.reason})`, { time, account });
+        const cfg = this.config;
+        const entry = cfg?.entries.find(e => e.time === time && e.account === account);
+        if (cfg && entry) {
+          this.scheduleOne(time, cfg.channel, cfg.userId, entry.account, callback);
+        }
+        return;
+      }
+
       this.logger.info(`Firing scheduled session start: ${time} (account: ${account}, actual: ${new Date().toISOString()})`);
       try {
         callback(channel, userId, time, account);
@@ -289,6 +316,15 @@ export class ScheduleManager {
     this.addPendingFollowUp({ time, account, fireAt });
 
     const followUpTimer = setTimeout(() => {
+      // Skip on weekends and Korean public holidays
+      const nonWorking = this.isNonWorkingDay();
+      if (nonWorking.skip) {
+        this.logger.info(`Skipping follow-up session (${nonWorking.reason})`, { time, account });
+        this.timers.delete(followUpKey);
+        this.removePendingFollowUp(time, account);
+        return;
+      }
+
       this.logger.info(`Firing follow-up session start for ${time} (account: ${account}, actual: ${new Date().toISOString()})`);
       const currentCfg = this.config;
       const currentEntry = currentCfg?.entries.find(e => e.time === time && e.account === account);
