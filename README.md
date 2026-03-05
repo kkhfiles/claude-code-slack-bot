@@ -73,6 +73,7 @@ Claude Pro/Max subscriptions have session limits with 5-hour windows. Schedule a
 - **Auto follow-up**: 5 hours later, a second greeting fires automatically to cover the next session window (persisted to disk — survives restarts)
 - Different accounts can have overlapping times; conflict checking is per-account only (5-hour window)
 - Uses `claude-haiku-4-5-20251001` model for minimal token cost
+- **Non-working day skip**: Weekends and Korean public holidays (including lunar calendar) are automatically skipped
 - Schedule repeats daily, persisted in `.schedule-config.json`
 
 ### Additional Features
