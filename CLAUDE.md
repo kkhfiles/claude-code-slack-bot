@@ -52,7 +52,7 @@ update.bat                    # Windows
   - `-account` — 통합 상태 뷰 (Set/Use/Unset 버튼)
   - `-account 1` / `-account 2` / `-account 3` — 수동 전환
   - 토큰 저장: `~/.claude/.bot-accounts.json` (accessToken, refreshToken, expiresAt, email)
-  - 전환: `CLAUDE_CODE_OAUTH_TOKEN` env var 주입 (파일 교체 아님)
+  - 전환: `CLAUDE_CODE_OAUTH_TOKEN` env var 주입 + `~/.claude/.credentials.json` 자동 동기화 (터미널 CLI도 전환 반영)
   - 토큰 만료 시 자동 갱신 (OAuth refresh)
   - rate limit 시 전환 체인: account-1 → account-2 → account-3 → API 키 버튼
 - `-schedule`: 세션 자동 시작 설정 관리 (`ScheduleManager`, `.schedule-config.json` 영속화)

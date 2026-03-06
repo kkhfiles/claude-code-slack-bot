@@ -174,8 +174,48 @@ export class AccountManager {
     this.currentAccount = accountId;
     data.currentAccount = accountId;
     this.saveAccounts(data);
+    this.syncToCredentialsFile(accountId, data);
     this.logger.info('Account switched', { from: prev, to: accountId });
     return true;
+  }
+
+  /**
+   * Sync the given account's OAuth token to ~/.claude/.credentials.json
+   * so that terminal CLI also uses the switched account.
+   * Preserves other fields (e.g. mcpOAuth) in the credentials file.
+   */
+  private syncToCredentialsFile(accountId: AccountId, accountsData?: AccountsFileData): void {
+    try {
+      const data = accountsData || this.loadAccounts();
+      const tokenData = data.accounts[accountId];
+      if (!tokenData?.accessToken) return;
+
+      // Read existing credentials file to preserve other fields (e.g. mcpOAuth)
+      let credData: Record<string, unknown> = {};
+      try {
+        credData = JSON.parse(fs.readFileSync(this.credentialsFile, 'utf-8'));
+      } catch {
+        // File doesn't exist or is invalid — start fresh
+      }
+
+      // Replace only claudeAiOauth, preserve everything else
+      credData.claudeAiOauth = {
+        accessToken: tokenData.accessToken,
+        refreshToken: tokenData.refreshToken,
+        expiresAt: tokenData.expiresAt,
+        ...(tokenData.scopes && { scopes: tokenData.scopes }),
+        ...(tokenData.subscriptionType && { subscriptionType: tokenData.subscriptionType }),
+        ...(tokenData.rateLimitTier && { rateLimitTier: tokenData.rateLimitTier }),
+      };
+
+      // Atomic write: temp file + rename to prevent JSON corruption
+      const tmpFile = this.credentialsFile + '.tmp';
+      fs.writeFileSync(tmpFile, JSON.stringify(credData, null, 2), 'utf-8');
+      fs.renameSync(tmpFile, this.credentialsFile);
+      this.logger.info('Synced credentials file', { accountId });
+    } catch (error) {
+      this.logger.error('Failed to sync credentials file (non-fatal)', error);
+    }
   }
 
   /** Read the accessToken from the current credentials file (for Set wizard login detection). */
