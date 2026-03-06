@@ -40,7 +40,7 @@ When a tool is denied, a Slack button appears to approve it individually or allo
 
 ### Multi-Account Support
 
-Register up to 3 Claude accounts and switch between them. Each query uses `CLAUDE_CODE_OAUTH_TOKEN` env var injection — no credential file swapping.
+Register up to 3 Claude accounts and switch between them. Each query uses `CLAUDE_CODE_OAUTH_TOKEN` env var injection, and `~/.claude/.credentials.json` is automatically synced so your terminal CLI also picks up the active account.
 
 - `-account` — View all accounts with Set/Use/Unset buttons
 - Tokens are auto-refreshed on expiry (OAuth refresh flow)
