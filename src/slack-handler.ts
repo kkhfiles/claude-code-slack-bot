@@ -99,6 +99,7 @@ export class SlackHandler {
   // Multi-account management
   private accountManager = new AccountManager();
   private pendingAccountSetups: Map<string, { slot: AccountId; originalToken: string | null; locale: Locale }> = new Map();
+  private notifiedUnhealthyAccounts = new Set<string>(); // Prevent repeated token expiry notifications
 
   constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager) {
     this.app = app;
@@ -446,6 +447,7 @@ export class SlackHandler {
     const toolUsageCounts = new Map<string, number>();
     const channelModel = this.channelModels.get(channel);
     let apiKeyCostInfo: { queryCost: number; totalCost: number } | null = null;
+    let cliError = false;
 
     try {
       this.logger.info('Spawning Claude CLI process', {
@@ -669,11 +671,15 @@ export class SlackHandler {
             );
           }
 
-          // Handle rate limit from result
-          if (resultEvent.is_error && !rateLimitInfo) {
-            const resultText = resultEvent.result || '';
-            if (this.isRateLimitText(resultText)) {
-              rateLimitMessageText = resultText;
+          // Track error state
+          if (resultEvent.is_error) {
+            cliError = true;
+            // Handle rate limit from result
+            if (!rateLimitInfo) {
+              const resultText = resultEvent.result || '';
+              if (this.isRateLimitText(resultText)) {
+                rateLimitMessageText = resultText;
+              }
             }
           }
 
@@ -692,8 +698,8 @@ export class SlackHandler {
       }
 
       // Completed
-      const doneEmoji = isPlanMode ? '📋' : '✅';
-      const doneLabel = isPlanMode ? t('status.planReady', locale) : t('status.taskCompleted', locale);
+      const doneEmoji = cliError ? '❌' : isPlanMode ? '📋' : '✅';
+      const doneLabel = cliError ? t('status.errorOccurred', locale) : isPlanMode ? t('status.planReady', locale) : t('status.taskCompleted', locale);
       const toolSummary = toolUsageCounts.size > 0
         ? ' (' + Array.from(toolUsageCounts.entries()).map(([name, count]) => count > 1 ? `${name} ×${count}` : name).join(', ') + ')'
         : '';
@@ -2787,5 +2793,51 @@ export class SlackHandler {
       this.logger.debug('Running session cleanup');
       this.cliHandler.cleanupInactiveSessions(24 * 60 * 60 * 1000); // 24 hours
     }, 5 * 60 * 1000);
+
+    // Periodic token health check (every 1 hour)
+    setInterval(() => {
+      this.checkTokenHealth().catch(err =>
+        this.logger.error('Token health check failed', err),
+      );
+    }, 60 * 60 * 1000);
+    // Run once at startup (after 30 seconds to let Slack connect)
+    setTimeout(() => {
+      this.checkTokenHealth().catch(err =>
+        this.logger.error('Initial token health check failed', err),
+      );
+    }, 30 * 1000);
+  }
+
+  private async checkTokenHealth(): Promise<void> {
+    const unhealthy = await this.accountManager.checkTokenHealth();
+
+    // Clear notification state for accounts that recovered (e.g., user re-logged in)
+    for (const id of this.notifiedUnhealthyAccounts) {
+      if (!unhealthy.find(a => a.id === id)) {
+        this.notifiedUnhealthyAccounts.delete(id);
+      }
+    }
+
+    // Filter out already-notified accounts
+    const newUnhealthy = unhealthy.filter(a => !this.notifiedUnhealthyAccounts.has(a.id));
+    if (newUnhealthy.length === 0) return;
+
+    // Find a channel/user to send the notification to
+    const scheduleConfig = this.scheduleManager.getConfig();
+    if (!scheduleConfig) return; // No schedule = no one to notify
+
+    const locale = await this.getUserLocale(scheduleConfig.userId).catch(() => 'ko' as Locale);
+    const accountLabels = newUnhealthy.map(a => `\`${a.id}\` (${a.email || '?'})`).join(', ');
+    const message = t('account.tokenExpired', locale, { accounts: accountLabels });
+
+    await this.app.client.chat.postMessage({
+      channel: scheduleConfig.channel,
+      text: message,
+    });
+
+    for (const a of newUnhealthy) {
+      this.notifiedUnhealthyAccounts.add(a.id);
+    }
+    this.logger.info('Sent token expiry notification', { accounts: newUnhealthy.map(a => a.id) });
   }
 }

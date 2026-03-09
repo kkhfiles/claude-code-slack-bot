@@ -235,6 +235,7 @@ const messages: Record<string, Record<Locale, string>> = {
   'account.rateLimitSwitch': { en: 'Rate limit reached. Switching to `{{account}}` and retrying...', ko: 'Rate limit 도달. `{{account}}`으로 전환하여 재시도합니다...' },
   'account.switchedTerminalGuide': { en: '✅ Switched to `{{account}}`.', ko: '✅ `{{account}}`(으)로 전환했습니다.' },
   'account.hint': { en: '_Use `-account <id>` to switch (e.g., `-account 1`, `-account 2`)_', ko: '_`-account <id>`로 전환 (예: `-account 1`, `-account 2`)_' },
+  'account.tokenExpired': { en: '⚠️ *Token expired* for {{accounts}}. Please re-login with `-account` → `Set`.', ko: '⚠️ {{accounts}}의 *토큰이 만료*되었습니다. `-account` → `설정`으로 다시 로그인해주세요.' },
 
   // Setup wizard
   'account.setup.title': { en: '🔑 *Multi-Account Setup*', ko: '🔑 *다중 계정 설정*' },

@@ -157,10 +157,44 @@ export class AccountManager {
         this.logger.info('Token refreshed successfully', { accountId });
         return refreshed.accessToken;
       }
-      this.logger.warn('Token refresh failed, returning expired token', { accountId });
+      this.logger.warn('Token refresh failed, token is unusable', { accountId });
+      return null;
     }
 
     return tokenData.accessToken;
+  }
+
+  /**
+   * Check all configured accounts' token health by attempting refresh if expired.
+   * Returns list of accounts whose tokens are invalid (refresh failed).
+   */
+  async checkTokenHealth(): Promise<Array<{ id: AccountId; email?: string }>> {
+    const data = this.loadAccounts();
+    const unhealthy: Array<{ id: AccountId; email?: string }> = [];
+
+    for (const id of ACCOUNT_CHAIN) {
+      const tokenData = data.accounts[id];
+      if (!tokenData?.accessToken) continue; // Not configured, skip
+
+      // Check if token is expired or about to expire
+      if (tokenData.expiresAt && tokenData.expiresAt - TOKEN_EXPIRY_BUFFER_MS < Date.now()) {
+        if (!tokenData.refreshToken) {
+          unhealthy.push({ id, email: tokenData.email });
+          continue;
+        }
+        const refreshed = await this.refreshOAuthToken(tokenData.refreshToken);
+        if (refreshed) {
+          data.accounts[id] = { ...tokenData, ...refreshed };
+          this.saveAccounts(data);
+          this.logger.info('Token health check: refreshed successfully', { accountId: id });
+        } else {
+          unhealthy.push({ id, email: tokenData.email });
+          this.logger.warn('Token health check: refresh failed', { accountId: id, email: tokenData.email });
+        }
+      }
+    }
+
+    return unhealthy;
   }
 
   /** Switch to a specific account. Returns true on success. */
