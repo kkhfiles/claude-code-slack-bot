@@ -260,8 +260,12 @@ export class AccountManager {
     } catch { return null; }
   }
 
-  /** Capture current .credentials.json token data into the given account slot. */
-  captureForSlot(slot: AccountId): boolean {
+  /**
+   * Capture current .credentials.json token data into the given account slot.
+   * After capture, immediately refreshes to obtain an independent token pair
+   * so the bot's tokens won't be affected by the user's subsequent logins.
+   */
+  async captureForSlot(slot: AccountId): Promise<boolean> {
     try {
       const credData = JSON.parse(fs.readFileSync(this.credentialsFile, 'utf-8'));
       const oauth = credData.claudeAiOauth;
@@ -289,6 +293,19 @@ export class AccountManager {
       };
       this.saveAccounts(data);
       this.logger.info('Captured credentials for slot', { slot, email });
+
+      // Immediately refresh to get an independent token pair for the bot
+      if (oauth.refreshToken) {
+        const refreshed = await this.refreshOAuthToken(oauth.refreshToken);
+        if (refreshed) {
+          data.accounts[slot] = { ...data.accounts[slot]!, ...refreshed };
+          this.saveAccounts(data);
+          this.logger.info('Captured token refreshed for independence', { slot });
+        } else {
+          this.logger.warn('Post-capture refresh failed, using original token', { slot });
+        }
+      }
+
       return true;
     } catch (error) {
       this.logger.error('Failed to capture slot credentials', error);

@@ -2195,7 +2195,7 @@ export class SlackHandler {
           return;
         }
 
-        this.accountManager.captureForSlot(setup.slot);
+        await this.accountManager.captureForSlot(setup.slot);
         this.pendingAccountSetups.delete(setupId);
         const doneBlocks = this.buildAccountStatusBlocks(actionLocale, t('account.setup.done', actionLocale, { slot: setup.slot }));
         await respond({ replace_original: true, ...doneBlocks });
