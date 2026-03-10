@@ -1629,14 +1629,10 @@ export class SlackHandler {
     const argMatch = trimmed.match(/^-(?:account|ac)\s+(.+)$/i) || trimmed.match(/^계정\s+(.+)$/);
     const raw = argMatch ? argMatch[1].trim().toLowerCase() : '';
 
-    // -account <id> — direct switch shortcut
+    // -account <id> — direct switch (always run switchTo to re-sync .credentials.json)
     const targetId = raw ? this.parseAccountId(raw) : null;
     if (targetId) {
-      if (targetId === this.accountManager.getCurrentAccount()) {
-        await say({ text: t('account.alreadyCurrent', locale, { account: targetId }), thread_ts: threadTs });
-        return;
-      }
-      const ok = this.accountManager.switchTo(targetId);
+      const ok = await this.accountManager.switchTo(targetId);
       if (!ok) {
         const { text: statusText, blocks } = this.buildAccountStatusBlocks(locale);
         await say({ text: statusText, blocks, thread_ts: threadTs });
@@ -1676,21 +1672,12 @@ export class SlackHandler {
 
     for (const acc of accounts) {
       const emailSuffix = acc.email ? ` — ${acc.email}` : '';
-      if (acc.id === current) {
-        // Active account: show status + Set button for reconfiguring
-        blocks.push({
-          type: 'section',
-          text: { type: 'mrkdwn', text: t('account.entryActive', locale, { id: acc.id }) + emailSuffix },
-          accessory: {
-            type: 'button',
-            text: { type: 'plain_text', text: t('account.setBtn', locale) },
-            action_id: 'account_set_btn',
-            value: acc.id,
-          },
-        });
-      } else if (acc.exists) {
-        // Configured, not active: Use / Set / Unset
-        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: t('account.entryAvailable', locale, { id: acc.id }) + emailSuffix } });
+      if (acc.exists) {
+        // Configured account: Use / Set / Unset (Use re-syncs .credentials.json even if already active)
+        const statusText = acc.id === current
+          ? t('account.entryActive', locale, { id: acc.id }) + emailSuffix
+          : t('account.entryAvailable', locale, { id: acc.id }) + emailSuffix;
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: statusText } });
         blocks.push({
           type: 'actions',
           elements: [
@@ -2128,7 +2115,7 @@ export class SlackHandler {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const accountId = (body as any).actions[0].value as AccountId;
-      const ok = this.accountManager.switchTo(accountId);
+      const ok = await this.accountManager.switchTo(accountId);
       const note = ok
         ? t('account.switchedTerminalGuide', actionLocale, { account: accountId })
         : t('account.notFound', actionLocale, { account: accountId });
@@ -2141,7 +2128,7 @@ export class SlackHandler {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const accountId = (body as any).actions[0].value as AccountId;
-      const ok = this.accountManager.switchTo(accountId);
+      const ok = await this.accountManager.switchTo(accountId);
       const note = ok
         ? t('account.switchedTerminalGuide', actionLocale, { account: accountId })
         : t('account.notFound', actionLocale, { account: accountId });
@@ -2545,7 +2532,7 @@ export class SlackHandler {
           }).catch(() => {});
         }
 
-        const ok = this.accountManager.switchTo(account);
+        const ok = await this.accountManager.switchTo(account);
         if (!ok) {
           await respond({ response_type: 'ephemeral', text: t('account.notFound', actionLocale, { account }) });
           return;
