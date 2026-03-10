@@ -233,7 +233,7 @@ const messages: Record<string, Record<Locale, string>> = {
   'account.notFound': { en: '❌ Credentials file not found for `{{account}}`', ko: '❌ `{{account}}` 자격증명 파일을 찾을 수 없습니다' },
   'account.alreadyCurrent': { en: 'Already on `{{account}}`', ko: '이미 `{{account}}`을(를) 사용 중입니다' },
   'account.rateLimitSwitch': { en: 'Rate limit reached. Switching to `{{account}}` and retrying...', ko: 'Rate limit 도달. `{{account}}`으로 전환하여 재시도합니다...' },
-  'account.switchedTerminalGuide': { en: '✅ Switched to `{{account}}`.', ko: '✅ `{{account}}`(으)로 전환했습니다.' },
+  'account.switchedTerminalGuide': { en: '✅ Switched to `{{account}}`.\n_Terminal: `/exit` → `claude -c` or `claude -r` to apply._', ko: '✅ `{{account}}`(으)로 전환했습니다.\n_터미널: `/exit` 후 `claude -c` 또는 `claude -r`로 재시작하면 적용됩니다._' },
   'account.hint': { en: '_Use `-account <id>` to switch (e.g., `-account 1`, `-account 2`)_', ko: '_`-account <id>`로 전환 (예: `-account 1`, `-account 2`)_' },
   'account.tokenExpired': { en: '⚠️ *Token expired* for {{accounts}}. Please re-login with `-account` → `Set`.', ko: '⚠️ {{accounts}}의 *토큰이 만료*되었습니다. `-account` → `설정`으로 다시 로그인해주세요.' },
 
@@ -252,7 +252,7 @@ const messages: Record<string, Record<Locale, string>> = {
   'account.setup.captureNew.title': { en: '🔑 *Setup `{{slot}}`*\nIn your terminal:\n1. Type `/logout` and press Enter\n2. Run `claude` and login with your *`{{slot}}`* account\n\nClick ✅ Done when login is complete:', ko: '🔑 *`{{slot}}` 설정*\n터미널에서:\n1. `/logout` 입력 후 엔터\n2. `claude` 실행 후 *`{{slot}}`* 계정으로 로그인\n\n로그인 완료 후 ✅ 완료를 클릭하세요:' },
   'account.setup.captureNew.doneBtn': { en: '✅ Done', ko: '✅ 완료' },
   'account.setup.captureNew.notChanged': { en: '❌ Credentials haven\'t changed yet. Please complete the login first, then click Done again.', ko: '❌ 아직 크리덴셜이 변경되지 않았습니다. 로그인을 완료한 후 다시 클릭하세요.' },
-  'account.setup.done': { en: '✅ *`{{slot}}` setup complete!*\nThis account will be used automatically on rate limit failover.', ko: '✅ *`{{slot}}` 설정 완료!*\nRate limit 시 자동으로 이 계정으로 전환됩니다.' },
+  'account.setup.done': { en: '✅ *`{{slot}}` setup complete!*\nThis account will be used automatically on rate limit failover.\n_Terminal: `/exit` → `claude -c` or `claude -r` to resume with the original account._', ko: '✅ *`{{slot}}` 설정 완료!*\nRate limit 시 자동으로 이 계정으로 전환됩니다.\n_터미널: `/exit` 후 `claude -c` 또는 `claude -r`로 재시작하면 원래 계정으로 복원됩니다._' },
 
   // --- Error ---
   'error.generic': { en: 'Error: {{message}}', ko: '오류: {{message}}' },

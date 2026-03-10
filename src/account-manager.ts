@@ -197,10 +197,14 @@ export class AccountManager {
     return unhealthy;
   }
 
-  /** Switch to a specific account. Returns true on success. */
-  switchTo(accountId: AccountId): boolean {
+  /**
+   * Switch to a specific account. Syncs current token to .credentials.json
+   * for terminal CLI, then refreshes to get an independent token pair for the bot.
+   */
+  async switchTo(accountId: AccountId): Promise<boolean> {
     const data = this.loadAccounts();
-    if (!data.accounts[accountId]?.accessToken) {
+    const tokenData = data.accounts[accountId];
+    if (!tokenData?.accessToken) {
       this.logger.warn('Account not configured', { accountId });
       return false;
     }
@@ -208,8 +212,22 @@ export class AccountManager {
     this.currentAccount = accountId;
     data.currentAccount = accountId;
     this.saveAccounts(data);
+
+    // Sync current token to .credentials.json for terminal CLI
     this.syncToCredentialsFile(accountId, data);
     this.logger.info('Account switched', { from: prev, to: accountId });
+
+    // Refresh to get an independent token pair for the bot
+    if (tokenData.refreshToken) {
+      const refreshed = await this.refreshOAuthToken(tokenData.refreshToken);
+      if (refreshed) {
+        const freshData = this.loadAccounts();
+        freshData.accounts[accountId] = { ...freshData.accounts[accountId]!, ...refreshed };
+        this.saveAccounts(freshData);
+        this.logger.info('Token refreshed for independence after switch', { accountId });
+      }
+    }
+
     return true;
   }
 
@@ -314,10 +332,10 @@ export class AccountManager {
   }
 
   /** Switch to the next available account. Returns the new AccountId, or null if exhausted. */
-  switchToNext(): AccountId | null {
+  async switchToNext(): Promise<AccountId | null> {
     const next = this.getNextAccount();
     if (!next) return null;
-    return this.switchTo(next) ? next : null;
+    return (await this.switchTo(next)) ? next : null;
   }
 
   /** Remove credentials for a slot. */
