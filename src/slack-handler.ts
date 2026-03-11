@@ -491,6 +491,11 @@ export class SlackHandler {
         }
       }
 
+      // Sync tokens from terminal CLI before spawning (terminal→bot)
+      if (!queryEnv) {
+        this.accountManager.syncFromCredentialsFile();
+      }
+
       // Inject OAuth token (when not in API key mode)
       // Use event.accountId if specified (scheduled sessions), otherwise current account
       if (!queryEnv) {

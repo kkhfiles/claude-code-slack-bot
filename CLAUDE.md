@@ -51,9 +51,12 @@ update.bat                    # Windows
 - `-account`: 다중 계정 상태 조회 및 수동 전환 (`AccountManager`, `~/.claude/.bot-accounts.json` 영속화)
   - `-account` — 통합 상태 뷰 (Set/Use/Unset 버튼)
   - `-account 1` / `-account 2` / `-account 3` — 수동 전환
-  - 토큰 저장: `~/.claude/.bot-accounts.json` (accessToken, refreshToken, expiresAt, email)
-  - 전환: `CLAUDE_CODE_OAUTH_TOKEN` env var 주입 + `~/.claude/.credentials.json` 자동 동기화 (터미널 CLI도 전환 반영)
-  - 토큰 만료 시 자동 갱신 (OAuth refresh)
+  - 토큰 저장: `~/.claude/.bot-accounts.json` (accessToken, refreshToken, expiresAt, email, oauthAccount)
+  - 전환: `CLAUDE_CODE_OAUTH_TOKEN` env var 주입 + `~/.claude/.credentials.json` + `~/.claude.json` 자동 동기화 (터미널 CLI도 전환 반영)
+  - 토큰 만료 시 자동 갱신 (OAuth refresh), 갱신 실패 시 `null` 반환 (만료 토큰 사용 방지)
+  - **양방향 토큰 동기화**: 봇 refresh 시 `.credentials.json` 갱신 (봇→터미널), CLI 스폰 전 email 매칭으로 토큰 흡수 (터미널→봇)
+  - **토큰 독립성**: `captureForSlot()` 후 즉시 refresh → 봇/터미널 토큰 체인 분리
+  - **토큰 건강 체크**: 1시간마다 + 시작 시 전 계정 체크, 갱신 실패 시 Slack 알림 (계정당 1회)
   - rate limit 시 전환 체인: account-1 → account-2 → account-3 → API 키 버튼
 - `-schedule`: 세션 자동 시작 설정 관리 (`ScheduleManager`, `.schedule-config.json` 영속화)
   - 블록 UI: 계정별 `[+ email]` 추가 버튼(모달) + 시간별 `[✕]` 삭제 버튼 + `[🗑 Clear all]`
@@ -78,6 +81,7 @@ update.bat                    # Windows
 - API 키 fallback: rate limit 시 등록된 API 키로 전환 → 리셋 시간 후 구독 방식으로 자동 복귀
 - 다중 계정 fallback: rate limit 시 `AccountManager.switchToNext()` → account-1 → account-2 → account-3 → API 키 버튼 순으로 전환
 - 읽기 전용 도구 (Grep, Read, Glob 등)는 상태 메시지에서만 표시 (`STATUS_ONLY_TOOLS`)
+- CLI `is_error` 감지: `cliError` 플래그 추적 → 에러 시 ❌ 리액션 + `status.errorOccurred` 표시
 - 완료 시 도구 사용 요약 표시 (`toolUsageCounts` → `✅ Task completed (Grep ×5, Read ×2)`)
 - 로깅은 `Logger` 클래스 사용 (`this.logger.info/debug/warn/error`)
 

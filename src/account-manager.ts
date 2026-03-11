@@ -19,6 +19,7 @@ interface OAuthTokenData {
   subscriptionType?: string;
   rateLimitTier?: string;
   email?: string;
+  oauthAccount?: Record<string, unknown>; // Full ~/.claude.json oauthAccount for terminal sync
 }
 
 interface AccountsFileData {
@@ -154,6 +155,10 @@ export class AccountManager {
       if (refreshed) {
         data.accounts[accountId] = { ...tokenData, ...refreshed };
         this.saveAccounts(data);
+        // Sync refreshed token to .credentials.json so terminal also gets it (bot→terminal)
+        if (accountId === this.currentAccount) {
+          this.syncToCredentialsFile(accountId, data);
+        }
         this.logger.info('Token refreshed successfully', { accountId });
         return refreshed.accessToken;
       }
@@ -198,8 +203,10 @@ export class AccountManager {
   }
 
   /**
-   * Switch to a specific account. Syncs current token to .credentials.json
-   * for terminal CLI, then refreshes to get an independent token pair for the bot.
+   * Switch to a specific account. Syncs token to .credentials.json and
+   * oauthAccount to ~/.claude.json for terminal CLI.
+   * No refresh here — bot and terminal share the same token to avoid
+   * token rotation invalidating either side.
    */
   async switchTo(accountId: AccountId): Promise<boolean> {
     const data = this.loadAccounts();
@@ -213,20 +220,10 @@ export class AccountManager {
     data.currentAccount = accountId;
     this.saveAccounts(data);
 
-    // Sync current token to .credentials.json for terminal CLI
+    // Sync token to .credentials.json + oauthAccount to ~/.claude.json
     this.syncToCredentialsFile(accountId, data);
+    this.syncClaudeJson(tokenData);
     this.logger.info('Account switched', { from: prev, to: accountId });
-
-    // Refresh to get an independent token pair for the bot
-    if (tokenData.refreshToken) {
-      const refreshed = await this.refreshOAuthToken(tokenData.refreshToken);
-      if (refreshed) {
-        const freshData = this.loadAccounts();
-        freshData.accounts[accountId] = { ...freshData.accounts[accountId]!, ...refreshed };
-        this.saveAccounts(freshData);
-        this.logger.info('Token refreshed for independence after switch', { accountId });
-      }
-    }
 
     return true;
   }
@@ -270,12 +267,73 @@ export class AccountManager {
     }
   }
 
+  /** Sync oauthAccount to ~/.claude.json so terminal shows the correct account info. */
+  private syncClaudeJson(tokenData: OAuthTokenData): void {
+    if (!tokenData.oauthAccount) return;
+    try {
+      const claudeJsonPath = path.join(os.homedir(), '.claude.json');
+      let claudeJson: Record<string, unknown> = {};
+      try {
+        claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'));
+      } catch { /* start fresh */ }
+      claudeJson.oauthAccount = tokenData.oauthAccount;
+      const tmpFile = claudeJsonPath + '.tmp';
+      fs.writeFileSync(tmpFile, JSON.stringify(claudeJson, null, 2), 'utf-8');
+      fs.renameSync(tmpFile, claudeJsonPath);
+    } catch (error) {
+      this.logger.error('Failed to sync claude.json (non-fatal)', error);
+    }
+  }
+
   /** Read the accessToken from the current credentials file (for Set wizard login detection). */
   readCurrentToken(): string | null {
     try {
       const data = JSON.parse(fs.readFileSync(this.credentialsFile, 'utf-8'));
       return data.claudeAiOauth?.accessToken || null;
     } catch { return null; }
+  }
+
+  /**
+   * Sync tokens FROM .credentials.json into .bot-accounts.json (terminal→bot).
+   * Reads email from ~/.claude.json to identify which account was refreshed.
+   * Call before CLI spawn to pick up terminal's token refreshes.
+   */
+  syncFromCredentialsFile(): void {
+    try {
+      const credData = JSON.parse(fs.readFileSync(this.credentialsFile, 'utf-8'));
+      const oauth = credData.claudeAiOauth;
+      if (!oauth?.accessToken) return;
+
+      // Read email from ~/.claude.json to identify the account
+      let email: string | undefined;
+      try {
+        const claudeJsonPath = path.join(os.homedir(), '.claude.json');
+        const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'));
+        email = claudeJson.oauthAccount?.emailAddress as string | undefined;
+      } catch { return; } // Can't identify account without email
+      if (!email) return;
+
+      // Find matching account by email
+      const data = this.loadAccounts();
+      const matchingId = ACCOUNT_CHAIN.find(id => data.accounts[id]?.email === email);
+      if (!matchingId) return; // No matching account
+
+      const stored = data.accounts[matchingId]!;
+      // Skip if tokens are already the same
+      if (stored.accessToken === oauth.accessToken && stored.refreshToken === oauth.refreshToken) return;
+
+      // Absorb the newer tokens from .credentials.json
+      data.accounts[matchingId] = {
+        ...stored,
+        accessToken: oauth.accessToken,
+        refreshToken: oauth.refreshToken,
+        expiresAt: oauth.expiresAt,
+      };
+      this.saveAccounts(data);
+      this.logger.info('Synced tokens from credentials file (terminal→bot)', { accountId: matchingId, email });
+    } catch (error) {
+      this.logger.error('Failed to sync from credentials file (non-fatal)', error);
+    }
   }
 
   /**
@@ -291,12 +349,14 @@ export class AccountManager {
         this.logger.error('No OAuth data in credentials file');
         return false;
       }
-      // Read email from ~/.claude.json (updated by Claude on login)
+      // Read full oauthAccount from ~/.claude.json (updated by Claude on login)
+      let oauthAccount: Record<string, unknown> | undefined;
       let email: string | undefined;
       try {
         const claudeJsonPath = path.join(os.homedir(), '.claude.json');
         const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'));
-        email = claudeJson.oauthAccount?.emailAddress;
+        oauthAccount = claudeJson.oauthAccount;
+        email = oauthAccount?.emailAddress as string | undefined;
       } catch { /* ignore */ }
 
       const data = this.loadAccounts();
@@ -308,6 +368,7 @@ export class AccountManager {
         subscriptionType: oauth.subscriptionType,
         rateLimitTier: oauth.rateLimitTier,
         email,
+        oauthAccount,
       };
       this.saveAccounts(data);
       this.logger.info('Captured credentials for slot', { slot, email });
