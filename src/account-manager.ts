@@ -39,11 +39,32 @@ export class AccountManager {
   private readonly accountsFile: string;
 
   private currentAccount: AccountId = 'account-1';
+  private watchDebounceTimer?: ReturnType<typeof setTimeout>;
 
   constructor() {
     this.credentialsFile = path.join(this.claudeDir, '.credentials.json');
     this.accountsFile = path.join(this.claudeDir, '.bot-accounts.json');
     this.loadAccounts();
+    this.startCredentialsWatcher();
+  }
+
+  /**
+   * Watch .credentials.json for changes (terminal login, CLI refresh, etc.)
+   * and auto-sync new tokens into .bot-accounts.json.
+   * Polls every 10s — catches any token update regardless of source.
+   */
+  private startCredentialsWatcher(): void {
+    try {
+      fs.watchFile(this.credentialsFile, { interval: 10_000 }, () => {
+        if (this.watchDebounceTimer) clearTimeout(this.watchDebounceTimer);
+        this.watchDebounceTimer = setTimeout(() => {
+          this.syncFromCredentialsFile();
+        }, 1000);
+      });
+      this.logger.info('Started credentials file watcher');
+    } catch (error) {
+      this.logger.warn('Failed to start credentials watcher', error);
+    }
   }
 
   // --- Accounts file persistence ---
@@ -171,9 +192,12 @@ export class AccountManager {
 
   /**
    * Check all configured accounts' token health by attempting refresh if expired.
+   * Syncs from .credentials.json first to pick up any external token updates.
    * Returns list of accounts whose tokens are invalid (refresh failed).
    */
   async checkTokenHealth(): Promise<Array<{ id: AccountId; email?: string }>> {
+    this.syncFromCredentialsFile();
+
     const data = this.loadAccounts();
     const unhealthy: Array<{ id: AccountId; email?: string }> = [];
 
@@ -338,8 +362,8 @@ export class AccountManager {
 
   /**
    * Capture current .credentials.json token data into the given account slot.
-   * After capture, immediately refreshes to obtain an independent token pair
-   * so the bot's tokens won't be affected by the user's subsequent logins.
+   * Shares token chain with terminal — the file watcher keeps tokens in sync
+   * when either side refreshes.
    */
   async captureForSlot(slot: AccountId): Promise<boolean> {
     try {
@@ -372,18 +396,6 @@ export class AccountManager {
       };
       this.saveAccounts(data);
       this.logger.info('Captured credentials for slot', { slot, email });
-
-      // Immediately refresh to get an independent token pair for the bot
-      if (oauth.refreshToken) {
-        const refreshed = await this.refreshOAuthToken(oauth.refreshToken);
-        if (refreshed) {
-          data.accounts[slot] = { ...data.accounts[slot]!, ...refreshed };
-          this.saveAccounts(data);
-          this.logger.info('Captured token refreshed for independence', { slot });
-        } else {
-          this.logger.warn('Post-capture refresh failed, using original token', { slot });
-        }
-      }
 
       return true;
     } catch (error) {
@@ -418,6 +430,7 @@ export class AccountManager {
   }
 
   destroy(): void {
-    // No resources to clean up (watcher removed)
+    fs.unwatchFile(this.credentialsFile);
+    if (this.watchDebounceTimer) clearTimeout(this.watchDebounceTimer);
   }
 }
