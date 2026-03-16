@@ -185,8 +185,16 @@ export class AccountManager {
     const tokenData = data.accounts[accountId];
     if (!tokenData?.accessToken) return null;
 
-    // Check expiry (with 5-minute buffer)
+    // Check expiry (with proactive buffer)
     if (tokenData.expiresAt && tokenData.expiresAt - TOKEN_EXPIRY_BUFFER_MS < Date.now()) {
+      // Skip proactive refresh for terminal's active account if token is still valid —
+      // our refresh would invalidate the terminal's in-memory refresh token via OAuth rotation
+      const terminalEmail = this.getTerminalActiveEmail();
+      if (tokenData.email && tokenData.email === terminalEmail && tokenData.expiresAt > Date.now()) {
+        this.logger.debug('Skipping proactive refresh for terminal active account', { accountId });
+        return tokenData.accessToken;
+      }
+
       if (!tokenData.refreshToken) {
         this.logger.warn('Token expired but no refresh token available', { accountId });
         return null;
@@ -218,9 +226,20 @@ export class AccountManager {
     const data = this.loadAccounts();
     const unhealthy: Array<{ id: AccountId; email?: string }> = [];
 
+    // Don't proactively refresh terminal's active account — terminal manages its own refresh,
+    // and our refresh would invalidate its in-memory refresh token via OAuth rotation
+    const terminalEmail = this.getTerminalActiveEmail();
+
     for (const id of ACCOUNT_CHAIN) {
       const tokenData = data.accounts[id];
       if (!tokenData?.accessToken) continue; // Not configured, skip
+
+      // Skip proactive refresh for terminal's active account if token is still valid
+      if (tokenData.email && tokenData.email === terminalEmail
+          && tokenData.expiresAt && tokenData.expiresAt > Date.now()) {
+        this.logger.debug('Health check: skipping terminal active account', { accountId: id });
+        continue;
+      }
 
       // Check if token is expired or about to expire
       if (tokenData.expiresAt && tokenData.expiresAt - TOKEN_EXPIRY_BUFFER_MS < Date.now()) {
@@ -324,6 +343,17 @@ export class AccountManager {
       fs.renameSync(tmpFile, claudeJsonPath);
     } catch (error) {
       this.logger.error('Failed to sync claude.json (non-fatal)', error);
+    }
+  }
+
+  /** Read terminal's active account email from ~/.claude.json */
+  private getTerminalActiveEmail(): string | null {
+    try {
+      const claudeJsonPath = path.join(os.homedir(), '.claude.json');
+      const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'));
+      return (claudeJson.oauthAccount?.emailAddress as string) || null;
+    } catch {
+      return null;
     }
   }
 
