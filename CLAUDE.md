@@ -59,6 +59,7 @@ update.bat                    # Windows
   - 터미널→봇: 파일 워처 + CLI 스폰 전 동기화
   - **토큰 공유**: `captureForSlot()`은 캡처만 수행 (독립 refresh 삭제 — 토큰 체인 파괴 원인이었음)
   - **토큰 건강 체크**: 1시간마다 + 시작 시 전 계정 체크, 체크 전 `syncFromCredentialsFile()` 실행, 갱신 실패 시 Slack 알림 (계정당 1회)
+  - **터미널 보호**: 터미널 활성 계정은 선제적 갱신 건너뜀 (OAuth rotation이 터미널 인메모리 refresh token 무효화 방지), 토큰 실제 만료 시에만 갱신
   - rate limit 시 전환 체인: account-1 → account-2 → account-3 → API 키 버튼
 - `-schedule`: 세션 자동 시작 설정 관리 (`ScheduleManager`, `.schedule-config.json` 영속화)
   - 블록 UI: 계정별 `[+ email]` 추가 버튼(모달) + 시간별 `[✕]` 삭제 버튼 + `[🗑 Clear all]`
