@@ -30,7 +30,7 @@ interface AccountsFileData {
 const ACCOUNT_CHAIN: AccountId[] = ['account-1', 'account-2', 'account-3'];
 const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000; // Refresh 5 minutes before expiry
+const TOKEN_EXPIRY_BUFFER_MS = 90 * 60 * 1000; // Refresh 90 minutes before expiry (> 1h health check interval)
 
 export class AccountManager {
   private logger = new Logger('AccountManager');
