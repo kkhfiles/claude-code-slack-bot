@@ -158,6 +158,26 @@ export class AccountManager {
     return null;
   }
 
+  /**
+   * After refreshing a token, sync it to .credentials.json if this account
+   * is currently active on the terminal (matched by email from ~/.claude.json).
+   * Ensures any refresh — health check, CLI spawn, etc. — propagates to all consumers.
+   */
+  private syncToCredentialsIfActive(accountId: AccountId, data: AccountsFileData): void {
+    try {
+      const tokenData = data.accounts[accountId];
+      if (!tokenData?.email) return;
+
+      const claudeJsonPath = path.join(os.homedir(), '.claude.json');
+      const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'));
+      const terminalEmail = claudeJson.oauthAccount?.emailAddress as string | undefined;
+
+      if (tokenData.email === terminalEmail) {
+        this.syncToCredentialsFile(accountId, data);
+      }
+    } catch { /* non-fatal */ }
+  }
+
   /** Get a valid access token for the given account (or current account). Refreshes if expired. */
   async getAccessToken(id?: AccountId): Promise<string | null> {
     const accountId = id || this.currentAccount;
@@ -176,10 +196,7 @@ export class AccountManager {
       if (refreshed) {
         data.accounts[accountId] = { ...tokenData, ...refreshed };
         this.saveAccounts(data);
-        // Sync refreshed token to .credentials.json so terminal also gets it (bot→terminal)
-        if (accountId === this.currentAccount) {
-          this.syncToCredentialsFile(accountId, data);
-        }
+        this.syncToCredentialsIfActive(accountId, data);
         this.logger.info('Token refreshed successfully', { accountId });
         return refreshed.accessToken;
       }
@@ -215,6 +232,7 @@ export class AccountManager {
         if (refreshed) {
           data.accounts[id] = { ...tokenData, ...refreshed };
           this.saveAccounts(data);
+          this.syncToCredentialsIfActive(id, data);
           this.logger.info('Token health check: refreshed successfully', { accountId: id });
         } else {
           unhealthy.push({ id, email: tokenData.email });
