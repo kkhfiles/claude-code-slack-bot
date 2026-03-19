@@ -71,6 +71,7 @@ update.bat                    # Windows
   - **비업무일 스킵**: 주말 + 한국 공휴일(음력 포함) 자동 스킵 (`date-holidays` 패키지, 오프라인)
   - 팔로우업 타이머 디스크 영속화 (`pendingFollowUps`) — pm2 재시작 후에도 복원, 만료분은 즉시 발사
   - 랜덤 인사 메시지 (`say "hi"`, `3+7` 등) + haiku 모델로 새 세션 시작
+  - **일일 로테이션**: 2계정 교차 스케줄 시 짝수/홀수 dayOfYear로 계정 스왑 → 2주 합산 균형 (토글 버튼으로 ON/OFF)
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
   2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)
