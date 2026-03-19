@@ -19,6 +19,7 @@ interface ScheduleConfig {
   channel: string;  // Slack channel ID to post to
   userId: string;   // Slack user ID who set it up (for locale)
   pendingFollowUps?: PendingFollowUp[];
+  rotationEnabled?: boolean;  // Swap accounts on alternating days for balanced usage
 }
 
 /**
@@ -92,6 +93,43 @@ export class ScheduleManager {
 
   getEntries(): ScheduleEntry[] {
     return this.config?.entries ?? [];
+  }
+
+  /** Whether daily rotation is enabled. */
+  isRotationEnabled(): boolean {
+    return this.config?.rotationEnabled === true;
+  }
+
+  /** Toggle daily rotation on/off. */
+  setRotation(enabled: boolean): void {
+    if (!this.config) return;
+    this.config.rotationEnabled = enabled;
+    this.save();
+  }
+
+  /** Check if today is a "swapped" day (odd day-of-year). */
+  isSwapDay(date: Date = new Date()): boolean {
+    const start = new Date(date.getFullYear(), 0, 0);
+    const diff = date.getTime() - start.getTime();
+    const dayOfYear = Math.floor(diff / 86400000);
+    return dayOfYear % 2 === 1;
+  }
+
+  /** Get effective account after applying rotation swap. Only works with exactly 2 accounts. */
+  getEffectiveAccount(account: string, date?: Date): string {
+    if (!this.config?.rotationEnabled) return account;
+    const uniqueAccounts = [...new Set(this.config.entries.map(e => e.account))].sort();
+    if (uniqueAccounts.length !== 2) return account;
+    if (!this.isSwapDay(date)) return account;
+    return account === uniqueAccounts[0] ? uniqueAccounts[1] : uniqueAccounts[0];
+  }
+
+  /** Get today's effective entries (with rotation applied). */
+  getEffectiveEntries(date?: Date): ScheduleEntry[] {
+    return this.getEntries().map(e => ({
+      ...e,
+      account: this.getEffectiveAccount(e.account, date),
+    }));
   }
 
   private static readonly SESSION_WINDOW_HOURS = 5;
@@ -261,9 +299,10 @@ export class ScheduleManager {
         return;
       }
 
-      this.logger.info(`Firing scheduled session start: ${time} (account: ${account}, actual: ${new Date().toISOString()})`);
+      const effectiveAccount = this.getEffectiveAccount(account);
+      this.logger.info(`Firing scheduled session start: ${time} (account: ${account}, effective: ${effectiveAccount}, actual: ${new Date().toISOString()})`);
       try {
-        callback(channel, userId, time, account);
+        callback(channel, userId, time, effectiveAccount);
       } catch (error) {
         this.logger.error(`Error in scheduled callback for ${time}`, error);
       }
@@ -325,12 +364,13 @@ export class ScheduleManager {
         return;
       }
 
-      this.logger.info(`Firing follow-up session start for ${time} (account: ${account}, actual: ${new Date().toISOString()})`);
+      const effectiveAccount = this.getEffectiveAccount(account);
+      this.logger.info(`Firing follow-up session start for ${time} (account: ${account}, effective: ${effectiveAccount}, actual: ${new Date().toISOString()})`);
       const currentCfg = this.config;
       const currentEntry = currentCfg?.entries.find(e => e.time === time && e.account === account);
       if (currentCfg && currentEntry) {
         try {
-          callback(currentCfg.channel, currentCfg.userId, time, currentEntry.account);
+          callback(currentCfg.channel, currentCfg.userId, time, effectiveAccount);
         } catch (error) {
           this.logger.error(`Error in follow-up callback for ${time}`, error);
         }
@@ -352,11 +392,12 @@ export class ScheduleManager {
         valid.push(fu);
       } else {
         // Expired while offline — fire immediately
-        this.logger.info(`Firing missed follow-up for ${fu.time} (account: ${fu.account})`);
+        const effectiveAccount = this.getEffectiveAccount(fu.account);
+        this.logger.info(`Firing missed follow-up for ${fu.time} (account: ${fu.account}, effective: ${effectiveAccount})`);
         const entry = this.config.entries.find(e => e.time === fu.time && e.account === fu.account);
         if (entry) {
           try {
-            callback(this.config.channel, this.config.userId, fu.time, fu.account);
+            callback(this.config.channel, this.config.userId, fu.time, effectiveAccount);
           } catch (error) {
             this.logger.error(`Error in missed follow-up callback for ${fu.time}`, error);
           }

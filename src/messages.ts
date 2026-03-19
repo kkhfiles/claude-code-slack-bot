@@ -199,6 +199,12 @@ const messages: Record<string, Record<Locale, string>> = {
   'schedule.modal.close': { en: 'Cancel', ko: '취소' },
   'schedule.modal.body': { en: 'Add a scheduled time for *{{account}}*.\nA greeting will be sent at the specified time (+5~25min jitter), then again ~5h later.', ko: '*{{account}}*에 스케줄을 추가합니다.\n지정 시간(+5~25분 지터)에 인사 메시지 전송 후, ~5시간 뒤 재전송됩니다.' },
   'schedule.modal.label': { en: 'Time (hour or HH:MM)', ko: '시간 (시 또는 HH:MM)' },
+  'schedule.rotation.status': { en: '🔄 Daily rotation: *ON* (today = {{status}})', ko: '🔄 일일 로테이션: *ON* (오늘 = {{status}})' },
+  'schedule.rotation.normal': { en: 'as configured', ko: '기본 순서' },
+  'schedule.rotation.swapped': { en: 'swapped', ko: '교대 순서' },
+  'schedule.rotation.effective': { en: '_→ {{pattern}}_', ko: '_→ {{pattern}}_' },
+  'schedule.rotation.enableBtn': { en: '🔄 Enable rotation', ko: '🔄 로테이션 켜기' },
+  'schedule.rotation.disableBtn': { en: '🔄 Disable rotation', ko: '🔄 로테이션 끄기' },
 
   // --- Version ---
   'cmd.version.title': { en: '*Bot Version*', ko: '*봇 버전*' },

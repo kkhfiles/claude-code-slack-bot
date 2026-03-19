@@ -1365,6 +1365,29 @@ export class SlackHandler {
       }
     }
 
+    // Rotation status (only when 2 accounts in schedule and rotation enabled)
+    const uniqueAccountsInEntries = [...new Set(entries.map(e => e.account))];
+    const showRotation = uniqueAccountsInEntries.length === 2;
+
+    if (showRotation && this.scheduleManager.isRotationEnabled()) {
+      const isSwapped = this.scheduleManager.isSwapDay();
+      const status = isSwapped ? t('schedule.rotation.swapped', locale) : t('schedule.rotation.normal', locale);
+      blocks.push({
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: t('schedule.rotation.status', locale, { status }) }],
+      });
+      // Show today's effective pattern
+      const effectiveEntries = this.scheduleManager.getEffectiveEntries();
+      const pattern = effectiveEntries.map(e => {
+        const email = accounts.find(a => a.id === e.account)?.email || e.account;
+        return `\`${e.time}\` ${email}`;
+      }).join(', ');
+      blocks.push({
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: t('schedule.rotation.effective', locale, { pattern }) }],
+      });
+    }
+
     // Add buttons: one per configured account
     if (configuredAccounts.length > 0) {
       blocks.push({ type: 'divider' });
@@ -1377,6 +1400,18 @@ export class SlackHandler {
           value: JSON.stringify({ account: acc.id, channel, userId }),
         };
       });
+      // Rotation toggle button (only when 2 accounts in entries)
+      if (showRotation) {
+        const rotLabel = this.scheduleManager.isRotationEnabled()
+          ? t('schedule.rotation.disableBtn', locale)
+          : t('schedule.rotation.enableBtn', locale);
+        addButtons.push({
+          type: 'button',
+          text: { type: 'plain_text', text: rotLabel },
+          action_id: 'schedule_rotation_btn',
+          value: this.scheduleManager.isRotationEnabled() ? 'disable' : 'enable',
+        } as any);
+      }
       // Clear all button (only when entries exist)
       if (entries.length > 0) {
         addButtons.push({
@@ -2317,6 +2352,18 @@ export class SlackHandler {
       const ch = (body as any).channel?.id;
       const uid = (body as any).user.id;
       this.scheduleManager.clearTimes();
+      const { text, blocks } = this.buildScheduleBlocks(actionLocale, ch, uid);
+      await respond({ replace_original: true, text, blocks });
+    });
+
+    // Schedule: "Rotation" toggle button
+    this.app.action('schedule_rotation_btn', async ({ ack, body, respond }) => {
+      await ack();
+      const actionLocale = await this.getUserLocale((body as any).user.id);
+      const ch = (body as any).channel?.id;
+      const uid = (body as any).user.id;
+      const value = (body as any).actions[0].value;
+      this.scheduleManager.setRotation(value === 'enable');
       const { text, blocks } = this.buildScheduleBlocks(actionLocale, ch, uid);
       await respond({ replace_original: true, text, blocks });
     });
