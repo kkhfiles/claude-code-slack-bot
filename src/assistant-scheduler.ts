@@ -33,6 +33,24 @@ export interface SpawnOpts {
   env?: Record<string, string>;
 }
 
+// Google Calendar MCP tools available via Claude.ai platform OAuth
+const GCAL_READ_TOOLS = [
+  'mcp__claude_ai_Google_Calendar__gcal_list_events',
+  'mcp__claude_ai_Google_Calendar__gcal_list_calendars',
+  'mcp__claude_ai_Google_Calendar__gcal_get_event',
+  'mcp__claude_ai_Google_Calendar__gcal_find_my_free_time',
+  'mcp__claude_ai_Google_Calendar__gcal_find_meeting_times',
+];
+
+const GCAL_WRITE_TOOLS = [
+  'mcp__claude_ai_Google_Calendar__gcal_create_event',
+  'mcp__claude_ai_Google_Calendar__gcal_update_event',
+  'mcp__claude_ai_Google_Calendar__gcal_delete_event',
+  'mcp__claude_ai_Google_Calendar__gcal_respond_to_event',
+];
+
+const GCAL_ALL_TOOLS = [...GCAL_READ_TOOLS, ...GCAL_WRITE_TOOLS];
+
 export class AssistantScheduler {
   private config: AssistantConfig | null = null;
   private readonly configPath: string;
@@ -247,8 +265,7 @@ export class AssistantScheduler {
       permissionMode: 'default',
       allowedTools: [
         'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
-        'mcp__claude_ai_Google_Calendar__gcal_list_events',
-        'mcp__claude_ai_Google_Calendar__gcal_list_calendars',
+        ...GCAL_ALL_TOOLS,
       ],
     });
   }
@@ -285,8 +302,7 @@ export class AssistantScheduler {
         model: 'claude-haiku-4-5-20251001',
         permissionMode: 'plan',
         allowedTools: [
-          'mcp__claude_ai_Google_Calendar__gcal_list_events',
-          'mcp__claude_ai_Google_Calendar__gcal_list_calendars',
+          ...GCAL_READ_TOOLS,
         ],
       });
 
