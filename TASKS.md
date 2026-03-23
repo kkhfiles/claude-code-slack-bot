@@ -217,3 +217,58 @@ this.assistantScheduler.start();
 - [x] 새 명령어 3종 (-briefing, -report, -assistant) 파싱
 - [x] `npm run build` 성공
 - [x] TypeScript strict 타입 에러 없음
+
+---
+
+## DEFAULT_WORKING_DIRECTORY 추가 — DM 기본 작업 디렉토리
+
+DM에서 `-cwd` 없이 대화를 시작해도 자동으로 `claude-workflow`를 cwd로 사용하여 비서 컨텍스트(CLAUDE.md, config, prompts)가 로드되도록 한다.
+
+### 배경
+- `-cwd`는 특정 프로젝트 작업 전 사용자가 명시적으로 설정하는 용도
+- 개인비서는 아무 설정 없이 DM에서 바로 응답해야 함
+- `getWorkingDirectory()`가 `undefined`를 반환하면 현재는 에러 표시됨
+
+### 변경 사항
+
+#### 1. `.env` — 환경변수 추가
+```
+DEFAULT_WORKING_DIRECTORY=P:\github\claude-workflow
+```
+
+#### 2. `src/config.ts` — 필드 추가
+```typescript
+defaultWorkingDirectory: process.env.DEFAULT_WORKING_DIRECTORY || '',
+```
+`baseDirectory` 아래에 추가.
+
+#### 3. `src/working-directory-manager.ts` — fallback 추가
+`getWorkingDirectory()` 메서드의 마지막 `return undefined` 직전에:
+```typescript
+// Fall back to default working directory (for assistant context)
+if (config.defaultWorkingDirectory) {
+  this.logger.debug('Using default working directory', {
+    directory: config.defaultWorkingDirectory,
+  });
+  return config.defaultWorkingDirectory;
+}
+```
+
+### 동작 흐름 (우선순위)
+1. 스레드별 `-cwd` 설정 → 최우선
+2. 채널/DM 레벨 `-cwd` 설정 → 차선
+3. **`DEFAULT_WORKING_DIRECTORY` → 새 fallback**
+4. `undefined` → 에러 (이전과 동일)
+
+### 검증 방법
+1. `npm run build` 성공
+2. `.env`에 `DEFAULT_WORKING_DIRECTORY` 설정
+3. pm2 restart 후 DM에서 `-cwd` 없이 새 스레드 시작
+4. Claude가 `claude-workflow`의 CLAUDE.md를 인식하는지 확인
+5. 특정 스레드에서 `-cwd D:\CT2606\plan` → 해당 스레드는 오버라이드 확인
+
+### 완료 조건
+- [x] `src/config.ts` 수정
+- [x] `src/working-directory-manager.ts` 수정
+- [x] `.env` 값 추가
+- [x] `npm run build` 성공
