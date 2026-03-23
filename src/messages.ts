@@ -323,6 +323,40 @@ const messages: Record<string, Record<Locale, string>> = {
     en: '💡 If this session is open in a terminal, close the terminal window instead of `/exit` to preserve Slack work.',
     ko: '💡 이 세션이 터미널에서 열려있다면 `/exit` 대신 터미널 창을 닫아주세요. `/exit`는 Slack 작업 내역을 덮어씁니다.',
   },
+
+  // --- Assistant ---
+  'assistant.briefingRunning': {
+    en: '☀️ Running morning briefing...',
+    ko: '☀️ 모닝 브리핑 실행 중...',
+  },
+  'assistant.briefingScheduled': {
+    en: 'Next briefing: {{time}}',
+    ko: '다음 브리핑: {{time}}',
+  },
+  'assistant.configUpdated': {
+    en: 'Assistant config updated.',
+    ko: '어시스턴트 설정 업데이트됨.',
+  },
+  'assistant.configShow': {
+    en: 'Current assistant configuration:',
+    ko: '현재 어시스턴트 설정:',
+  },
+  'assistant.reminderPaused': {
+    en: '⚠️ Calendar auth renewal needed — reminders paused',
+    ko: '⚠️ 캘린더 인증 갱신 필요 — 리마인더 일시 중지됨',
+  },
+  'assistant.reportNotFound': {
+    en: 'No report found for: {{type}}',
+    ko: '보고서 없음: {{type}}',
+  },
+  'assistant.analysisRunning': {
+    en: '📊 Running {{type}} analysis...',
+    ko: '📊 {{type}} 분석 실행 중...',
+  },
+  'assistant.notConfigured': {
+    en: 'Assistant not configured. Set `ASSISTANT_DM_CHANNEL` and `ASSISTANT_CONFIG_DIR` in `.env`',
+    ko: '어시스턴트 미설정. `.env`에 `ASSISTANT_DM_CHANNEL`, `ASSISTANT_CONFIG_DIR` 설정 필요',
+  },
 };
 
 /**
@@ -395,7 +429,14 @@ export function getHelpText(locale: Locale): string {
     help += `\`-sc\` / \`-schedule\` / \`스케줄\` — 세션 자동 시작 스케줄 관리 (계정별 추가/삭제)\n`;
     help += `\`-ac\` / \`-account\` / \`계정\` — 현재 계정 및 등록된 계정 목록\n`;
     help += `\`-ac setup\` — 계정 설정 마법사 (대화형 안내)\n`;
-    help += `\`-ac <id>\` — 계정 전환 (예: \`-ac 1\`, \`-ac 2\`)\n`;
+    help += `\`-ac <id>\` — 계정 전환 (예: \`-ac 1\`, \`-ac 2\`)\n\n`;
+
+    help += `*어시스턴트*\n`;
+    help += `\`-br\` / \`-briefing\` / \`브리핑\` — 모닝 브리핑 즉시 실행\n`;
+    help += `\`-rp\` / \`-report [타입]\` — 최신 분석 보고서 조회\n`;
+    help += `\`-as config\` / \`-assistant config\` — 어시스턴트 설정 표시\n`;
+    help += `\`-as briefing HH:MM\` — 브리핑 시간 변경\n`;
+    help += `\`-as reminder N\` — 리마인더 사전 알림 시간(분) 변경\n\n`;
 
     help += `*팁*\n`;
     help += `• 같은 쓰레드 = 세션 자동 연속 (명령어 불필요)\n`;
@@ -436,7 +477,14 @@ export function getHelpText(locale: Locale): string {
   help += `\`-sc\` / \`-schedule\` — Manage session auto-start schedules (per-account add/remove)\n`;
   help += `\`-ac\` / \`-account\` — Show current account and registered accounts\n`;
   help += `\`-ac setup\` — Interactive wizard to configure accounts\n`;
-  help += `\`-ac <id>\` — Switch account (e.g., \`-ac 1\`, \`-ac 2\`)\n`;
+  help += `\`-ac <id>\` — Switch account (e.g., \`-ac 1\`, \`-ac 2\`)\n\n`;
+
+  help += `*Assistant*\n`;
+  help += `\`-br\` / \`-briefing\` — Run morning briefing now\n`;
+  help += `\`-rp\` / \`-report [type]\` — View latest analysis report\n`;
+  help += `\`-as config\` / \`-assistant config\` — Show assistant configuration\n`;
+  help += `\`-as briefing HH:MM\` — Change briefing time\n`;
+  help += `\`-as reminder N\` — Change reminder lead time (minutes)\n\n`;
 
   help += `*Tips*\n`;
   help += `• Same thread = session auto-continues (no command needed)\n`;

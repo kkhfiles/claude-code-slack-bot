@@ -1,3 +1,13 @@
+# 작업 지시서 확인 (최우선)
+
+세션 시작 시 `TASKS.md` 파일이 존재하는지 확인한다.
+파일이 있으면:
+1. 내용을 읽고 미완료(`[ ]`) 작업을 파악
+2. Plan Mode로 진입하여 구현 계획 작성
+3. 사용자 승인을 받은 후 구현 진행
+4. 완료된 작업은 `[x]`로 표시하고, 필요 시 결과 노트를 추가
+5. 모든 작업 완료 시 사용자에게 보고
+
 # Claude Code Slack Bot - Project Conventions
 
 ## Overview
@@ -72,6 +82,13 @@ update.bat                    # Windows
   - 팔로우업 타이머 디스크 영속화 (`pendingFollowUps`) — pm2 재시작 후에도 복원, 만료분은 즉시 발사
   - 랜덤 인사 메시지 (`say "hi"`, `3+7` 등) + haiku 모델로 새 세션 시작
   - **일일 로테이션**: 2계정 교차 스케줄 시 짝수/홀수 dayOfYear로 계정 스왑 → 2주 합산 균형 (토글 버튼으로 ON/OFF)
+- `-briefing`/`-br`/`브리핑`: 모닝 브리핑 즉시 실행 (`AssistantScheduler.runBriefing()`)
+- `-report [type]`/`-rp [type]`: reports/ 디렉토리에서 최신 분석 보고서 조회
+- `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
+  - `-as config`: 현재 설정 표시 (config.json 내용)
+  - `-as briefing HH:MM`: 브리핑 시간 변경 → fs.watchFile이 감지하여 자동 재스케줄
+  - `-as reminder N`: 리마인더 사전 알림 시간(분) 변경
+  - 환경변수 미설정 시 graceful 비활성 (`assistantScheduler = null`)
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
   2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)
@@ -154,6 +171,7 @@ git checkout -b feature/<name>
 | `src/cli-handler.ts` | CLI 프로세스 스폰 (`claude -p`), 세션 관리 |
 | `src/working-directory-manager.ts` | 작업 디렉터리 설정/조회/영속화 |
 | `src/schedule-manager.ts` | 세션 자동 시작 스케줄 관리 (`.schedule-config.json` 영속화) |
+| `src/assistant-scheduler.ts` | 개인비서 스케줄러 — 브리핑/캘린더 리마인더/주간 분석 자동화 |
 | `src/file-handler.ts` | 파일 업로드 다운로드/임베딩 |
 | `src/session-scanner.ts` | 전체 프로젝트 세션 스캔/피커 데이터 |
 | `src/messages.ts` | i18n 번역 카탈로그 (`t()` 함수, `Locale` 타입) |

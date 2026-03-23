@@ -12,6 +12,7 @@ import { McpManager } from './mcp-manager';
 import { SessionScanner, SessionInfo, formatRelativeTime } from './session-scanner';
 import { ScheduleManager } from './schedule-manager';
 import { AccountManager, AccountId } from './account-manager';
+import { AssistantScheduler, SpawnOpts } from './assistant-scheduler';
 import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
@@ -96,6 +97,9 @@ export class SlackHandler {
   // Session schedule
   private scheduleManager = new ScheduleManager();
 
+  // Assistant scheduler
+  private assistantScheduler: AssistantScheduler | null = null;
+
   // Multi-account management
   private accountManager = new AccountManager();
   private pendingAccountSetups: Map<string, { slot: AccountId; originalToken: string | null; locale: Locale }> = new Map();
@@ -109,6 +113,20 @@ export class SlackHandler {
     this.fileHandler = new FileHandler();
     this.todoManager = new TodoManager();
     this.loadApiKeys();
+
+    // Initialize assistant scheduler if configured
+    if (config.assistant.dmChannel && config.assistant.configDir) {
+      this.assistantScheduler = new AssistantScheduler(
+        async (text) => {
+          await this.app.client.chat.postMessage({
+            channel: config.assistant.dmChannel,
+            text,
+          });
+        },
+        async (prompt, opts) => this.runAssistantSession(prompt, opts),
+        config.assistant.configDir,
+      );
+    }
   }
 
   private async getUserLocale(userId: string): Promise<Locale> {
@@ -231,6 +249,47 @@ export class SlackHandler {
     // Schedule command
     if (text && this.isScheduleCommand(text)) {
       await this.handleScheduleCommand(channel, thread_ts, user, locale, say);
+      return;
+    }
+
+    // Briefing command
+    if (text && this.isBriefingCommand(text)) {
+      if (!this.assistantScheduler) {
+        await say({ text: t('assistant.notConfigured', locale), thread_ts: thread_ts || ts });
+        return;
+      }
+      await say({ text: t('assistant.briefingRunning', locale), thread_ts: thread_ts || ts });
+      try {
+        const result = await this.assistantScheduler.runBriefing();
+        await say({ text: result, thread_ts: thread_ts || ts });
+      } catch (error) {
+        this.logger.error('Manual briefing failed', error);
+        await say({ text: '❌ Briefing failed.', thread_ts: thread_ts || ts });
+      }
+      return;
+    }
+
+    // Report command
+    if (text && this.isReportCommand(text)) {
+      if (!this.assistantScheduler) {
+        await say({ text: t('assistant.notConfigured', locale), thread_ts: thread_ts || ts });
+        return;
+      }
+      const { type } = this.parseReportCommand(text);
+      await this.handleReportCommand(type, thread_ts || ts, locale, say);
+      return;
+    }
+
+    // Assistant command
+    if (text && this.isAssistantCommand(text)) {
+      if (!this.assistantScheduler) {
+        await say({ text: t('assistant.notConfigured', locale), thread_ts: thread_ts || ts });
+        return;
+      }
+      const parsed = this.parseAssistantCommand(text);
+      if (parsed) {
+        await this.handleAssistantSubcommand(parsed, thread_ts || ts, locale, say);
+      }
       return;
     }
 
@@ -1317,6 +1376,31 @@ export class SlackHandler {
     return /^`?-(?:schedule|sc)`?(?:\s|$)|^스케줄/i.test(text.trim());
   }
 
+  // --- Assistant commands ---
+
+  private isBriefingCommand(text: string): boolean {
+    return /^`?-(?:briefing|br)`?$/i.test(text.trim()) || /^브리핑$/i.test(text.trim());
+  }
+
+  private isReportCommand(text: string): boolean {
+    return /^`?-(?:report|rp)`?(?:\s|$)/i.test(text.trim());
+  }
+
+  private parseReportCommand(text: string): { type?: string } {
+    const match = text.trim().match(/^`?-(?:report|rp)`?\s*(.*)$/i);
+    return { type: match?.[1]?.trim() || undefined };
+  }
+
+  private isAssistantCommand(text: string): boolean {
+    return /^`?-(?:assistant|as)`?\s/i.test(text.trim());
+  }
+
+  private parseAssistantCommand(text: string): { subcommand: string; args?: string } | null {
+    const match = text.trim().match(/^`?-(?:assistant|as)`?\s+(\S+)(?:\s+(.+))?$/i);
+    if (!match) return null;
+    return { subcommand: match[1].toLowerCase(), args: match[2]?.trim() };
+  }
+
   private async handleScheduleCommand(
     channel: string,
     threadTs: string | undefined,
@@ -1326,6 +1410,78 @@ export class SlackHandler {
   ): Promise<void> {
     const { text, blocks } = this.buildScheduleBlocks(locale, channel, userId);
     await say({ text, blocks, thread_ts: threadTs });
+  }
+
+  private async handleReportCommand(type: string | undefined, threadTs: string, locale: Locale, say: any): Promise<void> {
+    const reportsDir = path.join(config.assistant.configDir, '..', 'reports');
+    if (!fs.existsSync(reportsDir)) {
+      await say({ text: t('assistant.reportNotFound', locale, { type: type || 'all' }), thread_ts: threadTs });
+      return;
+    }
+
+    // List report files, optionally filter by type
+    let files = fs.readdirSync(reportsDir).filter(f => f.endsWith('.md'));
+    if (type) {
+      files = files.filter(f => f.includes(type));
+    }
+
+    if (files.length === 0) {
+      await say({ text: t('assistant.reportNotFound', locale, { type: type || 'all' }), thread_ts: threadTs });
+      return;
+    }
+
+    // Get the most recent file (by name, which includes date)
+    files.sort().reverse();
+    const latestFile = files[0];
+    const content = fs.readFileSync(path.join(reportsDir, latestFile), 'utf-8');
+
+    // Truncate if too long for Slack (4000 char limit per message)
+    const maxLen = 3900;
+    const truncated = content.length > maxLen ? content.substring(0, maxLen) + '\n\n…(truncated)' : content;
+    await say({ text: `📄 *${latestFile}*\n\n${truncated}`, thread_ts: threadTs });
+  }
+
+  private async handleAssistantSubcommand(
+    parsed: { subcommand: string; args?: string },
+    threadTs: string,
+    locale: Locale,
+    say: any,
+  ): Promise<void> {
+    switch (parsed.subcommand) {
+      case 'config': {
+        const cfg = this.assistantScheduler?.getConfig();
+        if (!cfg) {
+          await say({ text: t('assistant.notConfigured', locale), thread_ts: threadTs });
+          return;
+        }
+        await say({
+          text: `${t('assistant.configShow', locale)}\n\`\`\`${JSON.stringify(cfg, null, 2)}\`\`\``,
+          thread_ts: threadTs,
+        });
+        break;
+      }
+      case 'briefing': {
+        if (parsed.args && /^\d{1,2}:\d{2}$/.test(parsed.args)) {
+          this.assistantScheduler?.updateConfig({ briefingTime: parsed.args });
+          await say({ text: t('assistant.configUpdated', locale), thread_ts: threadTs });
+        } else {
+          await say({ text: 'Usage: `-as briefing HH:MM`', thread_ts: threadTs });
+        }
+        break;
+      }
+      case 'reminder': {
+        const minutes = parsed.args ? parseInt(parsed.args, 10) : NaN;
+        if (!isNaN(minutes) && minutes > 0) {
+          this.assistantScheduler?.updateConfig({ reminderMinutes: minutes });
+          await say({ text: t('assistant.configUpdated', locale), thread_ts: threadTs });
+        } else {
+          await say({ text: 'Usage: `-as reminder <minutes>`', thread_ts: threadTs });
+        }
+        break;
+      }
+      default:
+        await say({ text: 'Unknown subcommand. Use: `config`, `briefing`, `reminder`', thread_ts: threadTs });
+    }
   }
 
   private buildScheduleBlocks(locale: Locale, channel?: string, userId?: string, note?: string): { text: string; blocks: any[] } {
@@ -1483,6 +1639,40 @@ export class SlackHandler {
         this.channelModels.delete(channel);
       }
     }
+  }
+
+  /**
+   * Run a Claude session and return the result text (one-shot, no streaming to Slack).
+   * Used by AssistantScheduler for briefing, reminders, and analysis.
+   * Reuses OAuth injection (line 500-506) + for-await loop (line 525) + extractTextFromContent (line 987).
+   */
+  private async runAssistantSession(prompt: string, opts: SpawnOpts): Promise<string> {
+    // OAuth token injection — handleMessage pattern (line 494-506)
+    this.accountManager.syncFromCredentialsFile();
+    const oauthToken = await this.accountManager.getAccessToken();
+    const env: Record<string, string> = { ...(opts.env || {}) };
+    if (oauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
+
+    const cliProcess = this.cliHandler.runQuery(prompt, {
+      workingDirectory: opts.workingDirectory,
+      model: opts.model,
+      permissionMode: opts.permissionMode,
+      allowedTools: opts.allowedTools,
+      appendSystemPrompt: opts.appendSystemPrompt,
+      env,
+    });
+
+    // Collect text from assistant events — for-await + extractTextFromContent pattern
+    let result = '';
+    for await (const event of cliProcess) {
+      if (event.type === 'assistant') {
+        const assistantEvent = event as CliAssistantEvent;
+        const content = assistantEvent.message.content || [];
+        const text = this.extractTextFromContent(content);
+        if (text) result += text;
+      }
+    }
+    return result;
   }
 
   /**
@@ -2031,6 +2221,9 @@ export class SlackHandler {
 
     // Start session scheduler
     this.restartScheduler();
+
+    // Start assistant scheduler (briefing, reminders, analysis)
+    this.assistantScheduler?.start();
 
     // --- Interactive button handlers ---
 

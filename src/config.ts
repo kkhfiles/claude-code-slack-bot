@@ -17,6 +17,10 @@ export const config = {
   },
   baseDirectory: process.env.BASE_DIRECTORY || '',
   debug: process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development',
+  assistant: {
+    dmChannel: process.env.ASSISTANT_DM_CHANNEL || '',
+    configDir: process.env.ASSISTANT_CONFIG_DIR || '',
+  },
 };
 
 export function validateConfig() {
