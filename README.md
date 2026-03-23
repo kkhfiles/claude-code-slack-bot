@@ -76,6 +76,15 @@ Claude Pro/Max subscriptions have session limits with 5-hour windows. Schedule a
 - **Non-working day skip**: Weekends and Korean public holidays (including lunar calendar) are automatically skipped
 - Schedule repeats daily, persisted in `.schedule-config.json`
 
+### Assistant Scheduler (Optional)
+
+Automate daily briefings, calendar reminders, and weekly analysis reports. Requires external config directory with prompt templates.
+
+- **Morning briefing** — Scheduled on working days, skips weekends and Korean holidays
+- **Calendar reminders** — Polls Google Calendar via MCP during working hours, dedup per event
+- **Weekly analysis** — Runs configurable analysis types (competitors, dependencies, etc.) and saves reports
+- Configure via environment variables: `ASSISTANT_DM_CHANNEL` and `ASSISTANT_CONFIG_DIR`
+
 ### Additional Features
 
 - **i18n**: Automatic Korean/English UI based on Slack user locale
@@ -146,6 +155,10 @@ SLACK_APP_TOKEN=xapp-your-app-token
 SLACK_SIGNING_SECRET=your-signing-secret
 BASE_DIRECTORY=P:\your\base\directory
 # DEBUG=true
+
+# Optional: Assistant scheduler
+# ASSISTANT_DM_CHANNEL=D0123456789
+# ASSISTANT_CONFIG_DIR=/path/to/assistant/config
 ```
 
 > No API key needed: Claude Code CLI uses local `claude login` authentication. Usage is billed to your Claude subscription (Pro/Max).
@@ -297,6 +310,16 @@ Conversations in the same thread automatically continue the session (no command 
 -schedule               # Block-based UI: add via modal, remove via ✕ button, clear all
 ```
 
+### Assistant
+
+| Command | Description |
+|---------|-------------|
+| `-briefing` / `-br` | Run morning briefing now |
+| `-report [type]` / `-rp` | View latest analysis report |
+| `-assistant config` / `-as config` | Show assistant configuration |
+| `-assistant briefing HH:MM` | Change briefing time |
+| `-assistant reminder N` | Change reminder lead time (minutes) |
+
 ### MCP Servers
 
 | Command | Description |
@@ -360,6 +383,7 @@ src/
 ├── working-directory-manager.ts # Working directory management (persistence)
 ├── account-manager.ts           # Multi-account OAuth token management
 ├── schedule-manager.ts          # Session auto-start scheduler
+├── assistant-scheduler.ts       # Assistant scheduler (briefing, reminders, analysis)
 ├── file-handler.ts              # File upload handling
 ├── session-scanner.ts           # Cross-project session scanning
 ├── messages.ts                  # i18n translation catalog (ko/en)
