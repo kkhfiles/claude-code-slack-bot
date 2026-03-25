@@ -316,11 +316,64 @@ export class CalendarPoller {
       });
   }
 
+  /**
+   * Resolve calendar aliases (e.g., "work", "department") to actual calendar IDs
+   * using the Google Calendar list API. "primary" is kept as-is.
+   */
+  private async resolveCalendarIds(accessToken: string, aliases: string[]): Promise<string[]> {
+    // If all are "primary" or look like email addresses, skip resolution
+    const needsResolution = aliases.some(a => a !== 'primary' && !a.includes('@'));
+    if (!needsResolution) return aliases;
+
+    try {
+      const response = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!response.ok) {
+        this.logger.warn('Calendar list API failed, using aliases as-is', { status: response.status });
+        return aliases;
+      }
+
+      const data = await response.json() as Record<string, unknown>;
+      const items = (data.items || []) as Array<Record<string, unknown>>;
+
+      // Build lookup: summary (display name) → id, also check summaryOverride
+      const nameToId = new Map<string, string>();
+      for (const item of items) {
+        const id = item.id as string;
+        if (!id) continue;
+        const summary = (item.summary || '') as string;
+        const override = (item.summaryOverride || '') as string;
+        if (summary) nameToId.set(summary.toLowerCase(), id);
+        if (override && override !== summary) nameToId.set(override.toLowerCase(), id);
+      }
+
+      this.logger.debug('Available calendars for alias resolution', {
+        names: [...nameToId.keys()],
+      });
+
+      return aliases.map(alias => {
+        if (alias === 'primary' || alias.includes('@')) return alias;
+        const resolved = nameToId.get(alias.toLowerCase());
+        if (resolved) {
+          this.logger.debug('Resolved calendar alias', { alias, id: resolved });
+          return resolved;
+        }
+        this.logger.warn('Calendar alias not found, using as-is', { alias });
+        return alias;
+      });
+    } catch (error) {
+      this.logger.warn('Calendar list resolution failed', error);
+      return aliases;
+    }
+  }
+
   private async fetchAllEvents(accessToken: string): Promise<GCalEvent[]> {
     const config = this.getConfig();
     if (!config) return [];
 
-    const calendarIds = config.briefing.calendars || ['primary'];
+    const rawCalendarIds = config.briefing.calendars || ['primary'];
+    const calendarIds = await this.resolveCalendarIds(accessToken, rawCalendarIds);
     const excludeCalendars = new Set(config.briefing.excludeCalendars || []);
 
     // Today 00:00 ~ 23:59 in local timezone
@@ -342,8 +395,9 @@ export class CalendarPoller {
         allEvents.push(...events);
       } else {
         const calId = calendarIds[i];
-        errorCollector.add('CalendarPoller', `캘린더 조회 실패 (${calId}): ${result.reason}`);
-        this.logger.warn('Calendar fetch failed', { calendarId: calId, reason: result.reason });
+        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        errorCollector.add('CalendarPoller', `캘린더 조회 실패 (${calId}): ${reason}`);
+        this.logger.warn('Calendar fetch failed', { calendarId: calId, reason });
       }
     }
 
