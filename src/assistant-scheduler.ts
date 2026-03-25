@@ -24,9 +24,21 @@ export interface AssistantConfig {
   analysis: {
     schedule: string;    // "saturday-03:00"
     deliveryTime: string;
-    enabled: Record<string, boolean>;
-    competitors: { tools: string[] };
     budgetUsd?: number;
+    defaults?: {
+      sessionBudgetUsd?: number;
+      allowedTools?: string[];
+      writablePaths?: string[];
+    };
+    types?: Record<string, {
+      enabled: boolean;
+      tools?: string[];
+      allowedTools?: string[];
+      writablePaths?: string[];
+    }>;
+    // Legacy flat format (for backwards compatibility)
+    enabled?: Record<string, boolean>;
+    competitors?: { tools: string[] };
     sessionBudgetUsd?: number;
   };
 }
@@ -311,7 +323,7 @@ export class AssistantScheduler {
     if (this.config.reminders.enabled) {
       this.startCalendarPoller();
     }
-    if (Object.values(this.config.analysis.enabled).some(v => v)) {
+    if (this.getEnabledAnalysisTypes().length > 0) {
       this.scheduleAnalysis();
     }
   }
@@ -506,11 +518,28 @@ export class AssistantScheduler {
     }, msUntil);
   }
 
+  /** Get enabled analysis types from either new (types) or legacy (enabled) config format. */
+  private getEnabledAnalysisTypes(): string[] {
+    if (!this.config) return [];
+    const analysis = this.config.analysis;
+    // New format: analysis.types
+    if (analysis.types) {
+      return Object.entries(analysis.types)
+        .filter(([, cfg]) => cfg.enabled)
+        .map(([type]) => type);
+    }
+    // Legacy format: analysis.enabled
+    if (analysis.enabled) {
+      return Object.entries(analysis.enabled)
+        .filter(([, enabled]) => enabled)
+        .map(([type]) => type);
+    }
+    return [];
+  }
+
   private async runAnalysis(): Promise<void> {
     if (!this.config) return;
-    const enabledTypes = Object.entries(this.config.analysis.enabled)
-      .filter(([, enabled]) => enabled)
-      .map(([type]) => type);
+    const enabledTypes = this.getEnabledAnalysisTypes();
 
     let remainingBudget = this.config.analysis.budgetUsd ?? 5.00;
     const completedTypes: string[] = [];
@@ -547,7 +576,12 @@ export class AssistantScheduler {
     }
 
     const prompt = fs.readFileSync(promptPath, 'utf-8');
-    const sessionBudget = this.config?.analysis.sessionBudgetUsd ?? 2.00;
+    const analysis = this.config!.analysis;
+    const defaults = analysis.defaults || {};
+    const typeConfig = analysis.types?.[type];
+    const sessionBudget = defaults.sessionBudgetUsd ?? analysis.sessionBudgetUsd ?? 2.00;
+    const allowedTools = typeConfig?.allowedTools || defaults.allowedTools || ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Write'];
+    const writablePaths = typeConfig?.writablePaths || defaults.writablePaths || ['reports/'];
     let sessionId: string | undefined;
 
     while (remainingBudget > 0.01) {
@@ -559,8 +593,8 @@ export class AssistantScheduler {
           workingDirectory: this.workingDir,
           permissionMode: 'default',
           maxBudgetUsd: perSession,
-          allowedTools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Write'],
-          appendSystemPrompt: 'CRITICAL: reports/ 디렉토리에만 새 파일 생성. 기존 파일 수정/삭제 금지.',
+          allowedTools,
+          appendSystemPrompt: `CRITICAL: ${writablePaths.join(', ')} 디렉토리에만 새 파일 생성/수정. 그 외 파일 수정/삭제 금지.`,
           env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1' },
           resumeSessionId: sessionId,
         },
