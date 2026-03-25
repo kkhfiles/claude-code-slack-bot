@@ -2,12 +2,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import Holidays from 'date-holidays';
 import { Logger } from './logger';
+import { CalendarPoller } from './calendar-poller';
+import { errorCollector } from './error-collector';
 
-interface AssistantConfig {
+export interface AssistantConfig {
   briefing: {
     time: string;        // "HH:MM"
     enabled: boolean;
     calendars: string[];
+    excludeCalendars?: string[];
+    maxBudgetUsd?: number;
   };
   reminders: {
     beforeMinutes: number;
@@ -15,12 +19,15 @@ interface AssistantConfig {
     enabled: boolean;
     workingHoursStart: string;  // "HH:00"
     workingHoursEnd: string;    // "HH:00"
+    maxBudgetUsd?: number;
   };
   analysis: {
     schedule: string;    // "saturday-03:00"
     deliveryTime: string;
     enabled: Record<string, boolean>;
     competitors: { tools: string[] };
+    budgetUsd?: number;
+    sessionBudgetUsd?: number;
   };
 }
 
@@ -31,25 +38,48 @@ export interface SpawnOpts {
   allowedTools?: string[];
   appendSystemPrompt?: string;
   env?: Record<string, string>;
+  maxBudgetUsd?: number;
+  resumeSessionId?: string;
 }
 
-// Google Calendar MCP tools available via Claude.ai platform OAuth
+export interface SessionResult {
+  text: string;
+  costUsd: number;
+  sessionId: string;
+  subtype: string;  // 'success' | 'error_max_budget_usd' | ...
+}
+
+// Google Calendar MCP tools via local @cocal/google-calendar-mcp server
 const GCAL_READ_TOOLS = [
-  'mcp__claude_ai_Google_Calendar__gcal_list_events',
-  'mcp__claude_ai_Google_Calendar__gcal_list_calendars',
-  'mcp__claude_ai_Google_Calendar__gcal_get_event',
-  'mcp__claude_ai_Google_Calendar__gcal_find_my_free_time',
-  'mcp__claude_ai_Google_Calendar__gcal_find_meeting_times',
+  'mcp__google-calendar__list-events',
+  'mcp__google-calendar__list-calendars',
+  'mcp__google-calendar__get-event',
+  'mcp__google-calendar__search-events',
+  'mcp__google-calendar__get-freebusy',
+  'mcp__google-calendar__get-current-time',
 ];
 
 const GCAL_WRITE_TOOLS = [
-  'mcp__claude_ai_Google_Calendar__gcal_create_event',
-  'mcp__claude_ai_Google_Calendar__gcal_update_event',
-  'mcp__claude_ai_Google_Calendar__gcal_delete_event',
-  'mcp__claude_ai_Google_Calendar__gcal_respond_to_event',
+  'mcp__google-calendar__create-event',
+  'mcp__google-calendar__create-events',
+  'mcp__google-calendar__update-event',
+  'mcp__google-calendar__delete-event',
+  'mcp__google-calendar__respond-to-event',
 ];
 
 const GCAL_ALL_TOOLS = [...GCAL_READ_TOOLS, ...GCAL_WRITE_TOOLS];
+
+// --- Cost tracking ---
+
+interface CostEntry {
+  timestamp: string;
+  type: string;
+  costUsd: number;
+  sessionId: string;
+}
+
+const COST_FILE = path.join(__dirname, '..', '.assistant-costs.json');
+const COST_RETENTION_DAYS = 30;
 
 export class AssistantScheduler {
   private config: AssistantConfig | null = null;
@@ -59,26 +89,24 @@ export class AssistantScheduler {
 
   // Timers
   private briefingTimer: ReturnType<typeof setTimeout> | null = null;
-  private reminderInterval: ReturnType<typeof setInterval> | null = null;
   private analysisTimer: ReturnType<typeof setTimeout> | null = null;
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
 
   // File watcher debounce (account-manager.ts:59-62 pattern)
   private watchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Reminder dedup (event text key, cleared at midnight)
-  private remindedEvents = new Set<string>();
+  // Calendar poller (replaces MCP-based reminder polling)
+  private calendarPoller: CalendarPoller | null = null;
 
-  // MCP auth failure tracking
-  private consecutiveAuthFailures = 0;
-  private reminderPaused = false;
+  // Cost tracking
+  private costEntries: CostEntry[] = [];
 
   private logger = new Logger('AssistantScheduler');
   private holidays = new Holidays('KR');
 
   constructor(
     private sendMessage: (text: string) => Promise<void>,
-    private spawnSession: (prompt: string, opts: SpawnOpts) => Promise<string>,
+    private spawnSession: (prompt: string, opts: SpawnOpts) => Promise<SessionResult>,
     configDir: string,
   ) {
     this.configPath = path.join(configDir, 'config.json');
@@ -90,6 +118,7 @@ export class AssistantScheduler {
 
   start(): void {
     this.loadConfig();
+    this.loadCosts();
     this.scheduleAll();
     this.startConfigWatcher();
     this.scheduleMidnightCleanup();
@@ -109,12 +138,19 @@ export class AssistantScheduler {
     this.logger.info('AssistantScheduler stopped');
   }
 
+  /** Expose working hours check for CalendarPoller callback. */
+  isWorkingHoursCheck(): boolean {
+    return this.isWorkingHours();
+  }
+
   /** Manual trigger for -briefing command. */
   async runBriefing(): Promise<string> {
     if (!this.config?.briefing.enabled) {
       return 'Briefing is disabled in config.';
     }
-    return this.executeBriefing();
+    const result = await this.executeBriefing();
+    this.recordCost('briefing', result.costUsd, result.sessionId);
+    return result.text + this.formatErrorReport() + this.formatCostLine();
   }
 
   /** Return current config for -assistant config command. */
@@ -134,6 +170,30 @@ export class AssistantScheduler {
     this.saveConfig();
   }
 
+  /** Return cost statistics for display. */
+  getCostStats(): { daily: number; weekly: number; monthly: number; analysisWeekly: number; analysisMonthly: number } {
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    let daily = 0, weekly = 0, monthly = 0;
+    let analysisWeekly = 0, analysisMonthly = 0;
+
+    for (const entry of this.costEntries) {
+      const age = now - new Date(entry.timestamp).getTime();
+      const isAnalysis = entry.type.startsWith('analysis-');
+      if (age <= dayMs) daily += entry.costUsd;
+      if (age <= 7 * dayMs) {
+        weekly += entry.costUsd;
+        if (isAnalysis) analysisWeekly += entry.costUsd;
+      }
+      if (age <= 30 * dayMs) {
+        monthly += entry.costUsd;
+        if (isAnalysis) analysisMonthly += entry.costUsd;
+      }
+    }
+
+    return { daily, weekly, monthly, analysisWeekly, analysisMonthly };
+  }
+
   // --- Config management ---
 
   private loadConfig(): void {
@@ -150,6 +210,7 @@ export class AssistantScheduler {
         this.logger.warn('Assistant config not found', { path: this.configPath });
       }
     } catch (error) {
+      errorCollector.add('AssistantScheduler', `설정 파일 로드 실패: ${(error as Error).message}`);
       this.logger.error('Failed to load assistant config', error);
     }
   }
@@ -159,6 +220,7 @@ export class AssistantScheduler {
     try {
       fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2), 'utf-8');
     } catch (error) {
+      errorCollector.add('AssistantScheduler', `설정 파일 저장 실패: ${(error as Error).message}`);
       this.logger.error('Failed to save assistant config', error);
     }
   }
@@ -177,6 +239,7 @@ export class AssistantScheduler {
       });
       this.logger.info('Started config file watcher');
     } catch (error) {
+      errorCollector.add('AssistantScheduler', `설정 파일 감시 실패: ${(error as Error).message}`);
       this.logger.warn('Failed to start config watcher', error);
     }
   }
@@ -189,6 +252,54 @@ export class AssistantScheduler {
     }
   }
 
+  // --- Cost tracking ---
+
+  private loadCosts(): void {
+    try {
+      if (fs.existsSync(COST_FILE)) {
+        const raw = fs.readFileSync(COST_FILE, 'utf-8');
+        const data = JSON.parse(raw);
+        const cutoff = Date.now() - COST_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+        this.costEntries = (data.entries || []).filter(
+          (e: CostEntry) => new Date(e.timestamp).getTime() > cutoff,
+        );
+      }
+    } catch (error) {
+      errorCollector.add('AssistantScheduler', `비용 데이터 로드 실패: ${(error as Error).message}`);
+      this.logger.error('Failed to load cost data', error);
+    }
+  }
+
+  private saveCosts(): void {
+    try {
+      fs.writeFileSync(COST_FILE, JSON.stringify({ entries: this.costEntries }, null, 2), 'utf-8');
+    } catch (error) {
+      errorCollector.add('AssistantScheduler', `비용 데이터 저장 실패: ${(error as Error).message}`);
+      this.logger.error('Failed to save cost data', error);
+    }
+  }
+
+  private recordCost(type: string, costUsd: number, sessionId: string): void {
+    if (costUsd <= 0) return;
+    this.costEntries.push({
+      timestamp: new Date().toISOString(),
+      type,
+      costUsd,
+      sessionId,
+    });
+    this.saveCosts();
+    this.logger.info('Recorded cost', { type, costUsd: costUsd.toFixed(4), sessionId });
+  }
+
+  private formatCostLine(): string {
+    const stats = this.getCostStats();
+    let line = `\n\n💰 *비용* — 오늘: $${stats.daily.toFixed(2)} | 이번 주: $${stats.weekly.toFixed(2)} | 이번 달: $${stats.monthly.toFixed(2)}`;
+    if (stats.analysisMonthly > 0) {
+      line += `\n📊 *분석* — 이번 주: $${stats.analysisWeekly.toFixed(2)} | 이번 달: $${stats.analysisMonthly.toFixed(2)}`;
+    }
+    return line;
+  }
+
   // --- Timer orchestration ---
 
   private scheduleAll(): void {
@@ -198,7 +309,7 @@ export class AssistantScheduler {
       this.scheduleBriefing();
     }
     if (this.config.reminders.enabled) {
-      this.startReminderPolling();
+      this.startCalendarPoller();
     }
     if (Object.values(this.config.analysis.enabled).some(v => v)) {
       this.scheduleAnalysis();
@@ -210,9 +321,9 @@ export class AssistantScheduler {
       clearTimeout(this.briefingTimer);
       this.briefingTimer = null;
     }
-    if (this.reminderInterval) {
-      clearInterval(this.reminderInterval);
-      this.reminderInterval = null;
+    if (this.calendarPoller) {
+      this.calendarPoller.stop();
+      this.calendarPoller = null;
     }
     if (this.analysisTimer) {
       clearTimeout(this.analysisTimer);
@@ -244,7 +355,9 @@ export class AssistantScheduler {
 
       try {
         const result = await this.executeBriefing();
-        await this.sendMessage(result);
+        this.recordCost('briefing', result.costUsd, result.sessionId);
+        // Append error report + cost stats line
+        await this.sendMessage(result.text + this.formatErrorReport() + this.formatCostLine());
       } catch (error) {
         this.logger.error('Briefing failed', error);
         await this.sendMessage('❌ Morning briefing failed. Check logs for details.').catch(() => {});
@@ -255,81 +368,105 @@ export class AssistantScheduler {
     }, msUntil);
   }
 
-  private async executeBriefing(): Promise<string> {
+  private async executeBriefing(): Promise<SessionResult> {
     const promptPath = path.join(this.promptsDir, 'morning-briefing.md');
-    const prompt = fs.readFileSync(promptPath, 'utf-8');
+    let prompt = fs.readFileSync(promptPath, 'utf-8');
 
-    return this.spawnSession(prompt, {
-      workingDirectory: this.workingDir,
-      model: 'claude-sonnet-4-6',
-      permissionMode: 'default',
-      allowedTools: [
-        'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
-        ...GCAL_ALL_TOOLS,
-      ],
-    });
-  }
-
-  // --- Calendar reminders ---
-
-  private startReminderPolling(): void {
-    if (!this.config) return;
-    const intervalMs = this.config.reminders.pollingIntervalMinutes * 60 * 1000;
-
-    this.reminderInterval = setInterval(() => {
-      this.pollCalendar().catch(error => {
-        this.logger.error('Calendar poll failed', error);
-      });
-    }, intervalMs);
-
-    this.logger.info('Started reminder polling', {
-      intervalMinutes: this.config.reminders.pollingIntervalMinutes,
-    });
-  }
-
-  private async pollCalendar(): Promise<void> {
-    if (!this.config) return;
-    if (!this.isWorkingHours()) return;
-    if (this.reminderPaused) return;
-
-    try {
-      const promptPath = path.join(this.promptsDir, 'calendar-reminder.md');
-      let prompt = fs.readFileSync(promptPath, 'utf-8');
-      prompt = prompt.replace(/\{beforeMinutes\}/g, String(this.config.reminders.beforeMinutes));
-
-      const result = await this.spawnSession(prompt, {
-        workingDirectory: this.workingDir,
-        model: 'claude-haiku-4-5-20251001',
-        permissionMode: 'plan',
-        allowedTools: [
-          ...GCAL_READ_TOOLS,
-        ],
-      });
-
-      // Reset auth failure count on success
-      this.consecutiveAuthFailures = 0;
-
-      // Skip if no upcoming events
-      if (result.includes('NONE')) return;
-
-      // Dedup by event text
-      const eventKey = result.trim().substring(0, 200);
-      if (this.remindedEvents.has(eventKey)) return;
-      this.remindedEvents.add(eventKey);
-
-      await this.sendMessage(result);
-    } catch (error) {
-      this.consecutiveAuthFailures++;
-      this.logger.warn('Calendar poll error', {
-        consecutiveFailures: this.consecutiveAuthFailures,
-        error,
-      });
-
-      if (this.consecutiveAuthFailures >= 3) {
-        this.reminderPaused = true;
-        await this.sendMessage('⚠️ 캘린더 인증 갱신 필요 — 리마인더 일시 중지됨').catch(() => {});
-      }
+    // Inject exclude calendars list
+    const excludeList = this.config?.briefing.excludeCalendars;
+    if (excludeList && excludeList.length > 0) {
+      prompt = prompt.replace(/\{excludeCalendars\}/g, excludeList.map(c => `\`${c}\``).join(', '));
+    } else {
+      prompt = prompt.replace(/\{excludeCalendars\}/g, '(없음)');
     }
+
+    // Inject cached calendar data if available (saves MCP cost)
+    const cache = this.calendarPoller?.getCache();
+    let allowedTools: string[];
+
+    if (cache && cache.events.length >= 0) {
+      const eventList = cache.events.map(e => {
+        const time = e.isAllDay ? '종일' : `${this.formatTimeFromISO(e.startTime)} ~ ${this.formatTimeFromISO(e.endTime)}`;
+        const loc = e.location ? ` — ${e.location}` : '';
+        return `- ${time} ${e.title}${loc} _${e.calendarName}_`;
+      }).join('\n') || '(일정 없음)';
+
+      prompt += `\n\n## 오늘의 캘린더 데이터 (캐시)\n${eventList}\n\n위 데이터를 사용하세요. 캘린더 도구를 호출하지 마세요.`;
+      allowedTools = ['Read', 'Glob', 'Grep']; // No GCAL tools needed
+    } else {
+      // Fallback to MCP if no cache
+      allowedTools = ['Read', 'Glob', 'Grep', ...GCAL_READ_TOOLS];
+    }
+
+    const result = await this.spawnSession(prompt, {
+      workingDirectory: this.workingDir,
+      model: 'claude-haiku-4-5-20251001',
+      permissionMode: 'default',
+      maxBudgetUsd: this.config?.briefing.maxBudgetUsd || 1.00,
+      allowedTools,
+      env: { CLAUDE_SCHEDULED: '1' },
+    });
+
+    // Extract only the final briefing output (starts with ☀️), dropping intermediate explanation text
+    const briefingStart = result.text.lastIndexOf('☀️');
+    if (briefingStart > 0) {
+      result.text = result.text.substring(briefingStart);
+    }
+
+    return result;
+  }
+
+  /** Format HH:MM from ISO datetime string. */
+  private formatTimeFromISO(iso: string): string {
+    try {
+      const d = new Date(iso);
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    } catch {
+      return iso;
+    }
+  }
+
+  // --- Calendar poller (direct HTTP, replaces MCP-based polling) ---
+
+  private startCalendarPoller(): void {
+    if (this.calendarPoller) {
+      this.calendarPoller.stop();
+    }
+
+    this.calendarPoller = new CalendarPoller(
+      this.sendMessage,
+      this.spawnSession,
+      this.promptsDir,
+      () => this.config,
+      (type, costUsd, sessionId) => this.recordCost(type, costUsd, sessionId),
+      () => this.isWorkingHours(),
+    );
+
+    this.calendarPoller.start();
+  }
+
+  // --- Error reporting ---
+
+  /** Format collected bot errors for briefing output. */
+  private formatErrorReport(): string {
+    const errors = errorCollector.getAndClear();
+    if (errors.length === 0) return '';
+
+    // Group by source
+    const grouped = new Map<string, string[]>();
+    for (const err of errors) {
+      const list = grouped.get(err.source) || [];
+      list.push(err.message);
+      grouped.set(err.source, list);
+    }
+
+    let report = '\n\n⚠️ *시스템 이슈*';
+    for (const [source, messages] of grouped) {
+      // Deduplicate identical messages
+      const unique = [...new Set(messages)];
+      report += `\n• _${source}_: ${unique.join(', ')}`;
+    }
+    return report;
   }
 
   private isWorkingHours(): boolean {
@@ -375,34 +512,80 @@ export class AssistantScheduler {
       .filter(([, enabled]) => enabled)
       .map(([type]) => type);
 
+    let remainingBudget = this.config.analysis.budgetUsd ?? 5.00;
+    const completedTypes: string[] = [];
+
     for (const type of enabledTypes) {
+      if (remainingBudget <= 0.01) {
+        this.logger.warn(`Analysis budget exhausted, skipping: ${type}`, {
+          remainingBudget,
+        });
+        break;
+      }
+
       try {
-        await this.runSingleAnalysis(type);
+        remainingBudget = await this.runSingleAnalysis(type, remainingBudget);
+        completedTypes.push(type);
       } catch (error) {
+        errorCollector.add('AssistantScheduler', `분석 실행 실패 (${type}): ${(error as Error).message}`);
         this.logger.error(`Analysis failed for type: ${type}`, error);
       }
     }
 
-    // Notify completion
-    await this.sendMessage(`📊 주간 분석 완료: ${enabledTypes.join(', ')}`).catch(() => {});
+    const totalBudget = this.config.analysis.budgetUsd ?? 5.00;
+    const spent = totalBudget - remainingBudget;
+    await this.sendMessage(
+      `📊 주간 분석 완료: ${completedTypes.join(', ')} ($${spent.toFixed(2)} / $${totalBudget.toFixed(2)})`,
+    ).catch(() => {});
   }
 
-  private async runSingleAnalysis(type: string): Promise<void> {
+  private async runSingleAnalysis(type: string, remainingBudget: number): Promise<number> {
     const promptPath = path.join(this.promptsDir, `analysis-${type}.md`);
     if (!fs.existsSync(promptPath)) {
       this.logger.warn(`Analysis prompt not found: ${promptPath}`);
-      return;
+      return remainingBudget;
     }
 
     const prompt = fs.readFileSync(promptPath, 'utf-8');
+    const sessionBudget = this.config?.analysis.sessionBudgetUsd ?? 2.00;
+    let sessionId: string | undefined;
 
-    await this.spawnSession(prompt, {
-      workingDirectory: this.workingDir,
-      permissionMode: 'default',
-      allowedTools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Write'],
-      appendSystemPrompt: 'CRITICAL: reports/ 디렉토리에만 새 파일 생성. 기존 파일 수정/삭제 금지.',
-      env: { ASSISTANT_MODE: 'analysis' },
-    });
+    while (remainingBudget > 0.01) {
+      const perSession = Math.min(remainingBudget, sessionBudget);
+
+      const result = await this.spawnSession(
+        sessionId ? 'continue' : prompt,
+        {
+          workingDirectory: this.workingDir,
+          permissionMode: 'default',
+          maxBudgetUsd: perSession,
+          allowedTools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Write'],
+          appendSystemPrompt: 'CRITICAL: reports/ 디렉토리에만 새 파일 생성. 기존 파일 수정/삭제 금지.',
+          env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1' },
+          resumeSessionId: sessionId,
+        },
+      );
+
+      remainingBudget -= result.costUsd;
+      this.recordCost(`analysis-${type}`, result.costUsd, result.sessionId);
+      sessionId = result.sessionId;
+
+      this.logger.info(`Analysis session completed`, {
+        type,
+        subtype: result.subtype,
+        costUsd: result.costUsd.toFixed(4),
+        remainingBudget: remainingBudget.toFixed(2),
+      });
+
+      // Normal completion
+      if (result.subtype === 'success') break;
+      // Budget hit → resume if budget remains
+      if (result.subtype === 'error_max_budget_usd') continue;
+      // Other error → stop
+      break;
+    }
+
+    return remainingBudget;
   }
 
   // --- Date/time utilities ---
@@ -471,7 +654,7 @@ export class AssistantScheduler {
     return days[day.toLowerCase()] ?? 6; // Default to Saturday
   }
 
-  /** Schedule midnight cleanup for remindedEvents dedup set. */
+  /** Schedule midnight cleanup (reserved for future per-day state resets). */
   private scheduleMidnightCleanup(): void {
     const now = new Date();
     const midnight = new Date(now);
@@ -479,8 +662,7 @@ export class AssistantScheduler {
     const msUntil = midnight.getTime() - now.getTime();
 
     this.midnightTimer = setTimeout(() => {
-      this.remindedEvents.clear();
-      this.logger.debug('Cleared remindedEvents at midnight');
+      this.logger.debug('Midnight cleanup');
       this.scheduleMidnightCleanup();
     }, msUntil);
   }

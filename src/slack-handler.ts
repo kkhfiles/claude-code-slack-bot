@@ -2,7 +2,7 @@ import { App } from '@slack/bolt';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { CliHandler, type CliEvent, type CliProcess, type CliAssistantEvent, type CliResultEvent, type CliRateLimitEvent } from './cli-handler';
+import { CliHandler, type CliEvent, type CliProcess, type CliAssistantEvent, type CliInitEvent, type CliResultEvent, type CliRateLimitEvent } from './cli-handler';
 import { PendingDenial } from './types';
 import { Logger } from './logger';
 import { WorkingDirectoryManager } from './working-directory-manager';
@@ -12,7 +12,7 @@ import { McpManager } from './mcp-manager';
 import { SessionScanner, SessionInfo, formatRelativeTime } from './session-scanner';
 import { ScheduleManager } from './schedule-manager';
 import { AccountManager, AccountId } from './account-manager';
-import { AssistantScheduler, SpawnOpts } from './assistant-scheduler';
+import { AssistantScheduler, SpawnOpts, SessionResult } from './assistant-scheduler';
 import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
@@ -1646,7 +1646,7 @@ export class SlackHandler {
    * Used by AssistantScheduler for briefing, reminders, and analysis.
    * Reuses OAuth injection (line 500-506) + for-await loop (line 525) + extractTextFromContent (line 987).
    */
-  private async runAssistantSession(prompt: string, opts: SpawnOpts): Promise<string> {
+  private async runAssistantSession(prompt: string, opts: SpawnOpts): Promise<SessionResult> {
     // OAuth token injection — handleMessage pattern (line 494-506)
     this.accountManager.syncFromCredentialsFile();
     const oauthToken = await this.accountManager.getAccessToken();
@@ -1659,20 +1659,35 @@ export class SlackHandler {
       permissionMode: opts.permissionMode,
       allowedTools: opts.allowedTools,
       appendSystemPrompt: opts.appendSystemPrompt,
+      maxBudgetUsd: opts.maxBudgetUsd,
+      resumeSessionId: opts.resumeSessionId,
       env,
     });
 
-    // Collect text from assistant events — for-await + extractTextFromContent pattern
-    let result = '';
+    // Collect text, sessionId, cost, and subtype from CLI events
+    let text = '';
+    let sessionId = '';
+    let costUsd = 0;
+    let subtype = 'success';
+
     for await (const event of cliProcess) {
+      if (event.type === 'system' && (event as any).subtype === 'init') {
+        sessionId = (event as CliInitEvent).session_id;
+      }
       if (event.type === 'assistant') {
         const assistantEvent = event as CliAssistantEvent;
         const content = assistantEvent.message.content || [];
-        const text = this.extractTextFromContent(content);
-        if (text) result += text;
+        const extracted = this.extractTextFromContent(content);
+        if (extracted) text = extracted;  // Keep only last assistant turn (drop intermediate explanations)
+      }
+      if (event.type === 'result') {
+        const resultEvent = event as CliResultEvent;
+        costUsd = resultEvent.total_cost_usd || 0;
+        subtype = resultEvent.subtype || 'success';
       }
     }
-    return result;
+
+    return { text, costUsd, sessionId, subtype };
   }
 
   /**

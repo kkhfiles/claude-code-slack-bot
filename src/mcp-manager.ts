@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Logger } from './logger';
+import { errorCollector } from './error-collector';
 import { Locale, t } from './messages';
 
 export type McpStdioServerConfig = {
@@ -74,6 +75,7 @@ export class McpManager {
 
       return this.config;
     } catch (error) {
+      errorCollector.add('McpManager', `MCP 설정 로드 실패: ${(error as Error).message}`);
       this.logger.error('Failed to load MCP configuration', error);
       return null;
     }

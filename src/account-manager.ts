@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { Logger } from './logger';
+import { errorCollector } from './error-collector';
 
 export type AccountId = 'account-1' | 'account-2' | 'account-3';
 
@@ -88,6 +89,7 @@ export class AccountManager {
     try {
       fs.writeFileSync(this.accountsFile, JSON.stringify(data, null, 2), 'utf-8');
     } catch (error) {
+      errorCollector.add('AccountManager', `계정 파일 저장 실패: ${(error as Error).message}`);
       this.logger.error('Failed to save accounts file', error);
     }
   }
@@ -107,6 +109,7 @@ export class AccountManager {
         body: body.toString(),
       });
       if (!response.ok) {
+        errorCollector.add('AccountManager', `토큰 갱신 실패 (HTTP ${response.status})`);
         this.logger.error('Token refresh failed', { status: response.status, statusText: response.statusText });
         return null;
       }
@@ -117,6 +120,7 @@ export class AccountManager {
         expiresAt: Date.now() + (result.expires_in as number) * 1000,
       };
     } catch (error) {
+      errorCollector.add('AccountManager', `토큰 갱신 에러: ${(error as Error).message}`);
       this.logger.error('Token refresh error', error);
       return null;
     }
@@ -324,6 +328,7 @@ export class AccountManager {
       fs.renameSync(tmpFile, this.credentialsFile);
       this.logger.info('Synced credentials file', { accountId });
     } catch (error) {
+      errorCollector.add('AccountManager', `자격 증명 파일 동기화 실패: ${(error as Error).message}`);
       this.logger.error('Failed to sync credentials file (non-fatal)', error);
     }
   }
@@ -404,6 +409,7 @@ export class AccountManager {
       this.saveAccounts(data);
       this.logger.info('Synced tokens from credentials file (terminal→bot)', { accountId: matchingId, email });
     } catch (error) {
+      errorCollector.add('AccountManager', `자격 증명 역동기화 실패: ${(error as Error).message}`);
       this.logger.error('Failed to sync from credentials file (non-fatal)', error);
     }
   }
@@ -447,6 +453,7 @@ export class AccountManager {
 
       return true;
     } catch (error) {
+      errorCollector.add('AccountManager', `계정 슬롯 캡처 실패: ${(error as Error).message}`);
       this.logger.error('Failed to capture slot credentials', error);
       return false;
     }
