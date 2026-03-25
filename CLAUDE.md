@@ -83,12 +83,22 @@ update.bat                    # Windows
   - 랜덤 인사 메시지 (`say "hi"`, `3+7` 등) + haiku 모델로 새 세션 시작
   - **일일 로테이션**: 2계정 교차 스케줄 시 짝수/홀수 dayOfYear로 계정 스왑 → 2주 합산 균형 (토글 버튼으로 ON/OFF)
 - `-briefing`/`-br`/`브리핑`: 모닝 브리핑 즉시 실행 (`AssistantScheduler.runBriefing()`)
+  - 캐시된 캘린더 데이터 사용 (MCP 미호출), 캐시 없으면 MCP fallback
+  - `ErrorCollector`에 수집된 봇 에러를 `⚠️ 시스템 이슈` 섹션으로 일괄 보고
+- **캘린더 리마인더**: `CalendarPoller` — 직접 Google Calendar REST API HTTP 폴링
+  - 5분 간격 폴링, diff 감지 시에만 AI 판단 (Haiku 모델, ~$0.005/회)
+  - 알림 큐 (`.calendar-notifications.json`) + 1분 간격 디스패치
+  - 토큰 공유: `~/.config/google-calendar-mcp/tokens.json` (MCP 서버와 동일)
+  - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
 - `-report [type]`/`-rp [type]`: reports/ 디렉토리에서 최신 분석 보고서 조회
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
   - `-as config`: 현재 설정 표시 (config.json 내용)
   - `-as briefing HH:MM`: 브리핑 시간 변경 → fs.watchFile이 감지하여 자동 재스케줄
   - `-as reminder N`: 리마인더 사전 알림 시간(분) 변경
   - 환경변수 미설정 시 graceful 비활성 (`assistantScheduler = null`)
+- 비용 제어: `--max-budget-usd` 플래그로 세션별 비용 한도, `.assistant-costs.json`에 비용 기록, 브리핑에 일간/주간/월간 통계 표시
+  - `config.json`에서 `briefing.maxBudgetUsd`, `reminders.maxBudgetUsd`, `analysis.budgetUsd`, `analysis.sessionBudgetUsd` 조정 가능
+  - 분석 세션: 비용 한도 도달 시 `--resume`로 이어서 진행 (총 `budgetUsd` 내에서)
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
   2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)
@@ -138,9 +148,16 @@ update.bat                    # Windows
 - 세션 피커 한도: `MAX_PICKER_SESSIONS = 15` (Slack 50블록 제한, 세션당 3블록+5오버헤드)
   - 15개 초과 시 "Show more" 대신 `-cwd` → `-sessions` → `-resume <id>` 안내 표시
 
+### MCP Integration
+- `mcp-servers.json` (프로젝트 루트, `.gitignore`에 포함): 로컬 MCP 서버 설정
+- `--mcp-config` 플래그로 CLI에 전달 (`cli-handler.ts:358-361`)
+- **Google Calendar**: `@cocal/google-calendar-mcp` 패키지 (stdio), OAuth 자격 증명은 `~/.claude/` 저장
+- platform MCP (`mcp__claude_ai_*`)는 `-p` 모드에서 미지원 → 로컬 MCP 사용
+- 설정 가이드: `docs/google-calendar-setup.md`
+
 ### Working Directory
 - 디스크 영속화: `.working-dirs.json`
-- 우선순위: Thread > Channel/DM
+- 우선순위: Thread > Channel/DM > DEFAULT_WORKING_DIRECTORY
 - DM 쓰레드에서 설정 시 DM 레벨 폴백 자동 생성
 
 ### i18n (Korean / English)
@@ -172,6 +189,8 @@ git checkout -b feature/<name>
 | `src/working-directory-manager.ts` | 작업 디렉터리 설정/조회/영속화 |
 | `src/schedule-manager.ts` | 세션 자동 시작 스케줄 관리 (`.schedule-config.json` 영속화) |
 | `src/assistant-scheduler.ts` | 개인비서 스케줄러 — 브리핑/캘린더 리마인더/주간 분석 자동화 |
+| `src/calendar-poller.ts` | 캘린더 직접 HTTP 폴링, diff, AI 판단, 알림 디스패치 |
+| `src/error-collector.ts` | 봇 전체 에러 수집 싱글턴 — 브리핑에서 일괄 보고 |
 | `src/file-handler.ts` | 파일 업로드 다운로드/임베딩 |
 | `src/session-scanner.ts` | 전체 프로젝트 세션 스캔/피커 데이터 |
 | `src/messages.ts` | i18n 번역 카탈로그 (`t()` 함수, `Locale` 타입) |
@@ -191,3 +210,6 @@ git checkout -b feature/<name>
 | `.working-dirs.json` | 프로젝트 루트 | ❌ |
 | `.session-state.json` | 프로젝트 루트 | ❌ |
 | `.schedule-config.json` | 프로젝트 루트 | ❌ |
+| `.assistant-costs.json` | 프로젝트 루트 | ❌ |
+| `.calendar-cache.json` | 프로젝트 루트 | ❌ |
+| `.calendar-notifications.json` | 프로젝트 루트 | ❌ |

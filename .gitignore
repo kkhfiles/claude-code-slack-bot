@@ -11,6 +11,9 @@ node_modules/
 .working-dirs.json
 .session-state.json
 .schedule-config.json
+.assistant-costs.json
+.calendar-cache.json
+.calendar-notifications.json
 
 # Bot runtime files
 bot.pid

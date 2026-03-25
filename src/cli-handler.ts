@@ -2,6 +2,7 @@ import { ChildProcess, spawn } from 'child_process';
 import { ConversationSession } from './types';
 import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
+import { errorCollector } from './error-collector';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -324,6 +325,7 @@ export class CliHandler {
     allowedTools?: string[];
     appendSystemPrompt?: string;
     env?: Record<string, string>;
+    maxBudgetUsd?: number;
   }): CliProcess {
     const args = ['-p', '--output-format', 'stream-json', '--verbose'];
 
@@ -343,6 +345,9 @@ export class CliHandler {
 
     // Model
     if (opts.model) args.push('--model', opts.model);
+
+    // Budget limit
+    if (opts.maxBudgetUsd) args.push('--max-budget-usd', String(opts.maxBudgetUsd));
 
 
     // Session resume
@@ -441,6 +446,7 @@ export class CliHandler {
         this.logger.info(`Loaded session state from disk`, { loaded, skipped });
       }
     } catch (error) {
+      errorCollector.add('CliHandler', `세션 상태 로드 실패: ${(error as Error).message}`);
       this.logger.error('Failed to load session state from disk', error);
     }
   }
@@ -458,6 +464,7 @@ export class CliHandler {
       }
       fs.writeFileSync(this.SESSION_STATE_FILE, JSON.stringify(data, null, 2), 'utf-8');
     } catch (error) {
+      errorCollector.add('CliHandler', `세션 상태 저장 실패: ${(error as Error).message}`);
       this.logger.error('Failed to save session state to disk', error);
     }
   }
