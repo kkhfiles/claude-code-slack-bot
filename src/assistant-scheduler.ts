@@ -118,7 +118,7 @@ export class AssistantScheduler {
   private holidays = new Holidays('KR');
 
   constructor(
-    private sendMessage: (text: string) => Promise<void>,
+    private sendMessage: (text: string, blocks?: unknown[]) => Promise<void>,
     private spawnSession: (prompt: string, opts: SpawnOpts) => Promise<SessionResult>,
     configDir: string,
   ) {
@@ -164,6 +164,11 @@ export class AssistantScheduler {
     const result = await this.executeBriefing();
     this.recordCost('briefing', result.costUsd, result.sessionId);
     return result.text + this.formatErrorReport() + this.formatCostLine();
+  }
+
+  /** Access CalendarPoller instance (for mute actions, etc.). */
+  getCalendarPoller(): CalendarPoller | null {
+    return this.calendarPoller;
   }
 
   /** Return current config for -assistant config command. */
