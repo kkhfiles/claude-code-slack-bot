@@ -1661,6 +1661,7 @@ export class SlackHandler {
       appendSystemPrompt: opts.appendSystemPrompt,
       maxBudgetUsd: opts.maxBudgetUsd,
       resumeSessionId: opts.resumeSessionId,
+      skipMcp: opts.skipMcp,
       env,
     });
 

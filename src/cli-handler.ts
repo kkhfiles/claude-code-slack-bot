@@ -326,6 +326,7 @@ export class CliHandler {
     appendSystemPrompt?: string;
     env?: Record<string, string>;
     maxBudgetUsd?: number;
+    skipMcp?: boolean;
   }): CliProcess {
     const args = ['-p', '--output-format', 'stream-json', '--verbose'];
 
@@ -359,10 +360,12 @@ export class CliHandler {
       args.push('--resume', opts.session.sessionId);
     }
 
-    // MCP config
-    const mcpConfigPath = this.mcpManager.getConfigPath();
-    if (mcpConfigPath) {
-      args.push('--mcp-config', mcpConfigPath);
+    // MCP config (skip for sessions that don't need external tools, e.g. assistant scheduler)
+    if (!opts.skipMcp) {
+      const mcpConfigPath = this.mcpManager.getConfigPath();
+      if (mcpConfigPath) {
+        args.push('--mcp-config', mcpConfigPath);
+      }
     }
 
     // System prompt
