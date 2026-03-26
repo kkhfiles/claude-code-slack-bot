@@ -635,21 +635,28 @@ export class CalendarPoller {
 
   // --- Muted events ---
 
+  // In-memory cache (file is persistence layer, not source of truth during runtime)
+  private mutedEvents: Record<string, { mutedAt: string; title?: string }> | null = null;
+
   /** Extract base event ID (strip recurring instance suffix like _20260326T090000Z). */
-  private getBaseEventId(eventId: string): string {
+  static getBaseEventId(eventId: string): string {
     return eventId.replace(/_\d{8}T\d{6}Z$/, '');
   }
 
   private loadMutedEvents(): Record<string, { mutedAt: string; title?: string }> {
+    if (this.mutedEvents !== null) return this.mutedEvents;
     try {
       if (fs.existsSync(this.mutedEventsFile)) {
-        return JSON.parse(fs.readFileSync(this.mutedEventsFile, 'utf-8'));
+        this.mutedEvents = JSON.parse(fs.readFileSync(this.mutedEventsFile, 'utf-8'));
+        return this.mutedEvents!;
       }
     } catch { /* corrupt file */ }
-    return {};
+    this.mutedEvents = {};
+    return this.mutedEvents;
   }
 
   private saveMutedEvents(muted: Record<string, { mutedAt: string; title?: string }>): void {
+    this.mutedEvents = muted;
     try {
       fs.writeFileSync(this.mutedEventsFile, JSON.stringify(muted, null, 2), 'utf-8');
     } catch (error) {
@@ -692,7 +699,7 @@ export class CalendarPoller {
     const unique = newNotifications.filter(n => {
       if (pendingKeys.has(`${n.eventId}:${n.type}`)) return false;
       // Skip muted events (match base event ID for recurring events)
-      const baseId = this.getBaseEventId(n.eventId);
+      const baseId = CalendarPoller.getBaseEventId(n.eventId);
       if (muted[baseId]) return false;
       return true;
     });
@@ -705,6 +712,7 @@ export class CalendarPoller {
 
   private async dispatchNotifications(): Promise<void> {
     const notifications = this.loadNotifications();
+    const muted = this.loadMutedEvents();
     const now = new Date().toISOString();
     let dispatched = 0;
 
@@ -712,8 +720,15 @@ export class CalendarPoller {
       if (notification.delivered) continue;
       if (notification.notifyAt > now) continue;
 
+      // Skip muted events (may have been muted after queueing)
+      const baseId = CalendarPoller.getBaseEventId(notification.eventId);
+      if (muted[baseId]) {
+        notification.delivered = true;
+        dispatched++;
+        continue;
+      }
+
       try {
-        const baseId = this.getBaseEventId(notification.eventId);
         const blocks = [
           { type: 'section', text: { type: 'mrkdwn', text: notification.message } },
           {
