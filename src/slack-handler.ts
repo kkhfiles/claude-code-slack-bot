@@ -13,6 +13,7 @@ import { SessionScanner, SessionInfo, formatRelativeTime } from './session-scann
 import { ScheduleManager } from './schedule-manager';
 import { AccountManager, AccountId } from './account-manager';
 import { AssistantScheduler, SpawnOpts, SessionResult } from './assistant-scheduler';
+import { CalendarPoller } from './calendar-poller';
 import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
@@ -3048,15 +3049,19 @@ export class SlackHandler {
 
       // Find event title from cache for display
       const cache = poller.getCache();
-      const event = cache?.events.find(e => e.id.replace(/_\d{8}T\d{6}Z$/, '') === baseEventId);
+      const event = cache?.events.find(e => CalendarPoller.getBaseEventId(e.id) === baseEventId);
       const title = event?.title || baseEventId;
 
       poller.muteEvent(baseEventId, title);
 
-      await respond({
-        replace_original: true,
-        text: `🔇 *${title}* — 이 일정의 알림을 껐습니다.`,
-      });
+      try {
+        await respond({
+          replace_original: true,
+          text: `🔇 *${title}* — 이 일정의 알림을 껐습니다.`,
+        });
+      } catch (error) {
+        this.logger.error('Failed to respond to mute action', error);
+      }
     });
 
     // Cleanup inactive sessions periodically
