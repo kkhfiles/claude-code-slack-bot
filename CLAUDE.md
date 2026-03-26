@@ -86,9 +86,11 @@ update.bat                    # Windows
   - 캐시된 캘린더 데이터 사용 (MCP 미호출), 캐시 없으면 MCP fallback
   - `ErrorCollector`에 수집된 봇 에러를 `⚠️ 시스템 이슈` 섹션으로 일괄 보고
 - **캘린더 리마인더**: `CalendarPoller` — 직접 Google Calendar REST API HTTP 폴링
+  - 전체 캘린더 조회 후 `excludeCalendars`로만 제외 (화이트리스트 없음)
   - 5분 간격 폴링, diff 감지 시에만 AI 판단 (Haiku 모델, ~$0.005/회)
   - 알림 큐 (`.calendar-notifications.json`) + 1분 간격 디스패치
   - 토큰 공유: `~/.config/google-calendar-mcp/tokens.json` (MCP 서버와 동일)
+  - 어시스턴트 세션은 `skipMcp: true`로 MCP 서버 연결 건너뜀
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
 - `-report [type]`/`-rp [type]`: reports/ 디렉토리에서 최신 분석 보고서 조회
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
