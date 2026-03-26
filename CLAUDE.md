@@ -91,6 +91,7 @@ update.bat                    # Windows
   - 알림 큐 (`.calendar-notifications.json`) + 1분 간격 디스패치
   - 토큰 공유: `~/.config/google-calendar-mcp/tokens.json` (MCP 서버와 동일)
   - 어시스턴트 세션은 `skipMcp: true`로 MCP 서버 연결 건너뜀
+  - 알림 뮤트: 🔇 버튼으로 반복 일정 알림 끄기 (`.calendar-muted-events.json`, base eventId로 시리즈 매칭)
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
 - `-report [type]`/`-rp [type]`: reports/ 디렉토리에서 최신 분석 보고서 조회
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
@@ -215,3 +216,4 @@ git checkout -b feature/<name>
 | `.assistant-costs.json` | 프로젝트 루트 | ❌ |
 | `.calendar-cache.json` | 프로젝트 루트 | ❌ |
 | `.calendar-notifications.json` | 프로젝트 루트 | ❌ |
+| `.calendar-muted-events.json` | 프로젝트 루트 | ❌ |
