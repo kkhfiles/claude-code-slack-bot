@@ -9,7 +9,7 @@ export interface AssistantConfig {
   briefing: {
     time: string;        // "HH:MM"
     enabled: boolean;
-    calendars: string[];
+    calendars?: string[];  // Deprecated: ignored, all calendars are fetched
     excludeCalendars?: string[];
     maxBudgetUsd?: number;
   };
@@ -52,6 +52,7 @@ export interface SpawnOpts {
   env?: Record<string, string>;
   maxBudgetUsd?: number;
   resumeSessionId?: string;
+  skipMcp?: boolean;
 }
 
 export interface SessionResult {
@@ -416,6 +417,7 @@ export class AssistantScheduler {
       permissionMode: 'default',
       maxBudgetUsd: this.config?.briefing.maxBudgetUsd || 1.00,
       allowedTools,
+      skipMcp: true,
       env: { CLAUDE_SCHEDULED: '1' },
     });
 
@@ -597,6 +599,7 @@ export class AssistantScheduler {
           appendSystemPrompt: `CRITICAL: ${writablePaths.join(', ')} 디렉토리에만 새 파일 생성/수정. 그 외 파일 수정/삭제 금지.`,
           env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1' },
           resumeSessionId: sessionId,
+          skipMcp: true,
         },
       );
 
