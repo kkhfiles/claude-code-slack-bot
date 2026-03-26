@@ -14,6 +14,7 @@ node_modules/
 .assistant-costs.json
 .calendar-cache.json
 .calendar-notifications.json
+.calendar-muted-events.json
 
 # Cross-session task files (may contain PII like channel IDs)
 TASKS.md

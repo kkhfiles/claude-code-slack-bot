@@ -97,6 +97,7 @@ export class CalendarPoller {
   // Data files (project root)
   private readonly cacheFile: string;
   private readonly notificationsFile: string;
+  private readonly mutedEventsFile: string;
 
   // Auth failure tracking
   private consecutiveAuthFailures = 0;
@@ -107,7 +108,7 @@ export class CalendarPoller {
   private lastPollDate = '';
 
   constructor(
-    private sendMessage: (text: string) => Promise<void>,
+    private sendMessage: (text: string, blocks?: unknown[]) => Promise<void>,
     private spawnSession: (prompt: string, opts: SpawnOpts) => Promise<SessionResult>,
     private promptsDir: string,
     private getConfig: () => AssistantConfig | null,
@@ -117,6 +118,7 @@ export class CalendarPoller {
     const projectRoot = path.join(__dirname, '..');
     this.cacheFile = path.join(projectRoot, '.calendar-cache.json');
     this.notificationsFile = path.join(projectRoot, '.calendar-notifications.json');
+    this.mutedEventsFile = path.join(projectRoot, '.calendar-muted-events.json');
   }
 
   // --- Public API ---
@@ -631,8 +633,54 @@ export class CalendarPoller {
     }
   }
 
+  // --- Muted events ---
+
+  /** Extract base event ID (strip recurring instance suffix like _20260326T090000Z). */
+  private getBaseEventId(eventId: string): string {
+    return eventId.replace(/_\d{8}T\d{6}Z$/, '');
+  }
+
+  private loadMutedEvents(): Record<string, { mutedAt: string; title?: string }> {
+    try {
+      if (fs.existsSync(this.mutedEventsFile)) {
+        return JSON.parse(fs.readFileSync(this.mutedEventsFile, 'utf-8'));
+      }
+    } catch { /* corrupt file */ }
+    return {};
+  }
+
+  private saveMutedEvents(muted: Record<string, { mutedAt: string; title?: string }>): void {
+    try {
+      fs.writeFileSync(this.mutedEventsFile, JSON.stringify(muted, null, 2), 'utf-8');
+    } catch (error) {
+      this.logger.error('Failed to save muted events', error);
+    }
+  }
+
+  /** Mute an event series. Called from Slack action handler. */
+  muteEvent(baseEventId: string, title?: string): void {
+    const muted = this.loadMutedEvents();
+    muted[baseEventId] = { mutedAt: new Date().toISOString(), title };
+    this.saveMutedEvents(muted);
+    this.logger.info('Muted event', { baseEventId, title });
+  }
+
+  /** Unmute an event series. */
+  unmuteEvent(baseEventId: string): void {
+    const muted = this.loadMutedEvents();
+    delete muted[baseEventId];
+    this.saveMutedEvents(muted);
+    this.logger.info('Unmuted event', { baseEventId });
+  }
+
+  /** Get all muted events (for UI display). */
+  getMutedEvents(): Record<string, { mutedAt: string; title?: string }> {
+    return this.loadMutedEvents();
+  }
+
   private addNotifications(newNotifications: CalendarNotification[]): void {
     const existing = this.loadNotifications();
+    const muted = this.loadMutedEvents();
 
     // Dedup: skip if same eventId + type is already pending
     const pendingKeys = new Set(
@@ -641,7 +689,13 @@ export class CalendarPoller {
         .map(n => `${n.eventId}:${n.type}`),
     );
 
-    const unique = newNotifications.filter(n => !pendingKeys.has(`${n.eventId}:${n.type}`));
+    const unique = newNotifications.filter(n => {
+      if (pendingKeys.has(`${n.eventId}:${n.type}`)) return false;
+      // Skip muted events (match base event ID for recurring events)
+      const baseId = this.getBaseEventId(n.eventId);
+      if (muted[baseId]) return false;
+      return true;
+    });
     if (unique.length === 0) return;
 
     existing.push(...unique);
@@ -659,7 +713,20 @@ export class CalendarPoller {
       if (notification.notifyAt > now) continue;
 
       try {
-        await this.sendMessage(notification.message);
+        const baseId = this.getBaseEventId(notification.eventId);
+        const blocks = [
+          { type: 'section', text: { type: 'mrkdwn', text: notification.message } },
+          {
+            type: 'actions',
+            elements: [{
+              type: 'button',
+              text: { type: 'plain_text', text: '🔇 이 일정 알림 끄기' },
+              action_id: 'calendar_mute_event',
+              value: baseId,
+            }],
+          },
+        ];
+        await this.sendMessage(notification.message, blocks);
         notification.delivered = true;
         dispatched++;
       } catch (error) {

@@ -117,10 +117,11 @@ export class SlackHandler {
     // Initialize assistant scheduler if configured
     if (config.assistant.dmChannel && config.assistant.configDir) {
       this.assistantScheduler = new AssistantScheduler(
-        async (text) => {
+        async (text, blocks?) => {
           await this.app.client.chat.postMessage({
             channel: config.assistant.dmChannel,
             text,
+            ...(blocks ? { blocks } : {}),
           });
         },
         async (prompt, opts) => this.runAssistantSession(prompt, opts),
@@ -3034,6 +3035,28 @@ export class SlackHandler {
       } catch (error) {
         this.logger.error('Error handling API key modal submission', error);
       }
+    });
+
+    // Calendar notification mute button
+    this.app.action('calendar_mute_event', async ({ ack, body, respond }) => {
+      await ack();
+      const baseEventId = (body as any).actions?.[0]?.value;
+      if (!baseEventId || !this.assistantScheduler) return;
+
+      const poller = this.assistantScheduler.getCalendarPoller();
+      if (!poller) return;
+
+      // Find event title from cache for display
+      const cache = poller.getCache();
+      const event = cache?.events.find(e => e.id.replace(/_\d{8}T\d{6}Z$/, '') === baseEventId);
+      const title = event?.title || baseEventId;
+
+      poller.muteEvent(baseEventId, title);
+
+      await respond({
+        replace_original: true,
+        text: `🔇 *${title}* — 이 일정의 알림을 껐습니다.`,
+      });
     });
 
     // Cleanup inactive sessions periodically
