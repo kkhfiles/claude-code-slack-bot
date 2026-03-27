@@ -713,12 +713,12 @@ export class CalendarPoller {
   private async dispatchNotifications(): Promise<void> {
     const notifications = this.loadNotifications();
     const muted = this.loadMutedEvents();
-    const now = new Date().toISOString();
+    const nowMs = Date.now();
     let dispatched = 0;
 
     for (const notification of notifications) {
       if (notification.delivered) continue;
-      if (notification.notifyAt > now) continue;
+      if (new Date(notification.notifyAt).getTime() > nowMs) continue;
 
       // Skip muted events (may have been muted after queueing)
       const baseId = CalendarPoller.getBaseEventId(notification.eventId);
