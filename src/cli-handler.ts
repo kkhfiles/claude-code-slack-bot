@@ -324,9 +324,12 @@ export class CliHandler {
     permissionMode?: 'default' | 'safe' | 'trust' | 'plan';
     allowedTools?: string[];
     appendSystemPrompt?: string;
+    systemPrompt?: string;
     env?: Record<string, string>;
     maxBudgetUsd?: number;
     skipMcp?: boolean;
+    noSessionPersistence?: boolean;
+    tools?: string[];
   }): CliProcess {
     const args = ['-p', '--output-format', 'stream-json', '--verbose'];
 
@@ -368,9 +371,21 @@ export class CliHandler {
       }
     }
 
-    // System prompt
-    if (opts.appendSystemPrompt) {
+    // System prompt: --system-prompt (replace) takes priority over --append-system-prompt (add)
+    if (opts.systemPrompt) {
+      args.push('--system-prompt', opts.systemPrompt);
+    } else if (opts.appendSystemPrompt) {
       args.push('--append-system-prompt', opts.appendSystemPrompt);
+    }
+
+    // Tools override (--tools "" disables all tools)
+    if (opts.tools !== undefined) {
+      args.push('--tools', ...opts.tools);
+    }
+
+    // Session persistence disable (prevents .jsonl file creation)
+    if (opts.noSessionPersistence) {
+      args.push('--no-session-persistence');
     }
 
     // Prompt is passed via stdin (not positional arg)

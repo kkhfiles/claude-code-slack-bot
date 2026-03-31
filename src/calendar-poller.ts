@@ -18,6 +18,7 @@ import * as crypto from 'crypto';
 import { Logger } from './logger';
 import { errorCollector } from './error-collector';
 import type { SpawnOpts, SessionResult } from './assistant-scheduler';
+import { isRateLimitText } from './rate-limit-utils';
 
 // --- Types ---
 
@@ -102,6 +103,8 @@ export class CalendarPoller {
   // Auth failure tracking
   private consecutiveAuthFailures = 0;
   private paused = false;
+  private aiJudgmentPaused = false;
+  private aiJudgmentResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Diff dedup
   private lastDiffHash = '';
@@ -167,7 +170,30 @@ export class CalendarPoller {
       clearInterval(this.dispatchTimer);
       this.dispatchTimer = null;
     }
+    if (this.aiJudgmentResumeTimer) {
+      clearTimeout(this.aiJudgmentResumeTimer);
+      this.aiJudgmentResumeTimer = null;
+    }
     this.logger.info('CalendarPoller stopped');
+  }
+
+  /** Pause AI judgment until next hour (rate limit backoff). HTTP polling continues. */
+  private pauseAiJudgment(): void {
+    this.aiJudgmentPaused = true;
+    const now = new Date();
+    const nextHour = new Date(now);
+    nextHour.setHours(now.getHours() + 1, 0, 0, 0);
+    const ms = nextHour.getTime() - now.getTime();
+
+    this.logger.warn(`AI judgment paused until ${nextHour.toTimeString().slice(0, 5)} (rate limit)`);
+    errorCollector.add('CalendarPoller', 'AI 판단 rate limit — 다음 정시까지 일시 중지');
+
+    if (this.aiJudgmentResumeTimer) clearTimeout(this.aiJudgmentResumeTimer);
+    this.aiJudgmentResumeTimer = setTimeout(() => {
+      this.aiJudgmentPaused = false;
+      this.aiJudgmentResumeTimer = null;
+      this.logger.info('AI judgment resumed after rate limit backoff');
+    }, ms);
   }
 
   restart(): void {
@@ -544,24 +570,41 @@ export class CalendarPoller {
       : existing.map(n => `- [${n.eventId}] type=${n.type} notifyAt=${n.notifyAt} "${n.message}"`).join('\n');
     prompt = prompt.replace(/\{existingNotifications\}/g, existingText);
 
+    if (this.aiJudgmentPaused) {
+      this.logger.debug('AI judgment paused (rate limit backoff), skipping');
+      return [];
+    }
+
     try {
-      const workingDir = path.join(__dirname, '..');
       const result = await this.spawnSession(prompt, {
-        workingDirectory: workingDir,
+        workingDirectory: os.tmpdir(),  // No CLAUDE.md → saves ~39K tokens
         model: 'claude-haiku-4-5-20251001',
         permissionMode: 'default',
         maxBudgetUsd: config.reminders.maxBudgetUsd || 0.02,
-        allowedTools: [],
+        systemPrompt: 'You judge calendar events and output JSON. No other output.',
+        tools: [],
+        noSessionPersistence: true,
         skipMcp: true,
         env: { CLAUDE_SCHEDULED: '1' },
       });
 
       this.recordCost('reminder-judgment', result.costUsd, result.sessionId);
 
+      // Check for rate limit in response text
+      if (isRateLimitText(result.text)) {
+        this.pauseAiJudgment();
+        return [];
+      }
+
       // Parse JSON from response
       return this.parseJudgmentResponse(result.text);
     } catch (error) {
-      errorCollector.add('CalendarPoller', `AI 판단 실패: ${(error as Error).message}`);
+      const msg = (error as Error).message || '';
+      if (isRateLimitText(msg)) {
+        this.pauseAiJudgment();
+        return [];
+      }
+      errorCollector.add('CalendarPoller', `AI 판단 실패: ${msg}`);
       this.logger.error('AI judgment failed', error);
       return [];
     }

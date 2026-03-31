@@ -17,6 +17,7 @@ import { CalendarPoller } from './calendar-poller';
 import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
+import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
 
 interface MessageEvent {
   user: string;
@@ -1438,9 +1439,10 @@ export class SlackHandler {
     const content = fs.readFileSync(path.join(reportsDir, latestFile), 'utf-8');
 
     // Truncate if too long for Slack (4000 char limit per message)
+    const fullPath = path.resolve(path.join(reportsDir, latestFile));
     const maxLen = 3900;
     const truncated = content.length > maxLen ? content.substring(0, maxLen) + '\n\n…(truncated)' : content;
-    await say({ text: `📄 *${latestFile}*\n\n${truncated}`, thread_ts: threadTs });
+    await say({ text: `📄 *${latestFile}*\n\`${fullPath}\`\n\n${truncated}`, thread_ts: threadTs });
   }
 
   private async handleAssistantSubcommand(
@@ -1661,9 +1663,12 @@ export class SlackHandler {
       permissionMode: opts.permissionMode,
       allowedTools: opts.allowedTools,
       appendSystemPrompt: opts.appendSystemPrompt,
+      systemPrompt: opts.systemPrompt,
       maxBudgetUsd: opts.maxBudgetUsd,
       resumeSessionId: opts.resumeSessionId,
       skipMcp: opts.skipMcp,
+      noSessionPersistence: opts.noSessionPersistence,
+      tools: opts.tools,
       env,
     });
 
@@ -1716,12 +1721,11 @@ export class SlackHandler {
   }
 
   private isRateLimitError(error: any): boolean {
-    const msg = error?.message || '';
-    return this.isRateLimitText(msg);
+    return isRateLimitErrorUtil(error);
   }
 
   private isRateLimitText(text: string): boolean {
-    return /rate.?limit|overloaded|429|too many requests|capacity|usage limit|spending.?cap|hit your limit|resets\s+\d{1,2}\s*(am|pm)/i.test(text);
+    return isRateLimitTextUtil(text);
   }
 
   // Extra buffer after reset time to avoid hitting limit again immediately
