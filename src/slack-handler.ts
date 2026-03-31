@@ -1422,9 +1422,10 @@ export class SlackHandler {
       return;
     }
 
-    // Scan subdirectories for .md files: reports/<type>/<date>.md
+    // Scan subdirectories for .md files: reports/<type>/<date>.md (skip archived/)
     const files: { relPath: string; absPath: string; type: string; name: string }[] = [];
     for (const dir of fs.readdirSync(reportsDir)) {
+      if (dir === 'archived') continue;
       const subdir = path.join(reportsDir, dir);
       if (!fs.statSync(subdir).isDirectory()) continue;
       for (const fname of fs.readdirSync(subdir)) {
@@ -1465,6 +1466,20 @@ export class SlackHandler {
         content,
         title: `📄 ${latest.relPath}`,
         initial_comment: `\`${latest.absPath}\`\n>${firstLines.split('\n').join('\n>')}`,
+      });
+      // Add Archive button
+      await say({
+        text: '',
+        blocks: [{
+          type: 'actions',
+          elements: [{
+            type: 'button',
+            text: { type: 'plain_text', text: '📂 Archive' },
+            action_id: 'archive_report',
+            value: JSON.stringify({ absPath: latest.absPath, relPath: latest.relPath }),
+          }],
+        }],
+        thread_ts: threadTs,
       });
     } catch (error) {
       // Fallback to text if upload fails
@@ -2289,6 +2304,38 @@ export class SlackHandler {
     this.assistantScheduler?.start();
 
     // --- Interactive button handlers ---
+
+    // Briefing: "보고서 확인" button — trigger -rp command
+    this.app.action('briefing_view_reports', async ({ ack, body }) => {
+      await ack();
+      const channel = (body as any).channel?.id || (body as any).container?.channel_id;
+      const threadTs = (body as any).message?.ts;
+      const userId = (body as any).user?.id;
+      if (!channel) return;
+      const locale = await this.getUserLocale(userId).catch(() => 'ko' as Locale);
+      await this.handleReportCommand(undefined, channel, threadTs, locale, async (msg: any) => {
+        await this.app.client.chat.postMessage({ channel, ...msg });
+      });
+    });
+
+    // Report: "Archive" button — move report to archived/
+    this.app.action('archive_report', async ({ ack, body, respond }) => {
+      await ack();
+      try {
+        const { absPath, relPath } = JSON.parse((body as any).actions[0].value);
+        if (!fs.existsSync(absPath)) {
+          await respond({ response_type: 'ephemeral', text: '⚠️ File not found (already archived?)' });
+          return;
+        }
+        const archivedDir = path.join(path.dirname(absPath), '..', 'archived', path.dirname(relPath));
+        fs.mkdirSync(archivedDir, { recursive: true });
+        fs.renameSync(absPath, path.join(archivedDir, path.basename(absPath)));
+        await respond({ response_type: 'ephemeral', text: `📂 Archived: ${relPath}` });
+      } catch (error) {
+        this.logger.error('Failed to archive report', error);
+        await respond({ response_type: 'ephemeral', text: '❌ Archive failed' });
+      }
+    });
 
     // Permission denial: "Allow All & Resume" — approve all denied tools and resume
     this.app.action('allow_all_denied_tools', async ({ ack, body, respond }) => {
