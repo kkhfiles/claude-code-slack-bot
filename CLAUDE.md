@@ -85,22 +85,27 @@ update.bat                    # Windows
 - `-briefing`/`-br`/`브리핑`: 모닝 브리핑 즉시 실행 (`AssistantScheduler.runBriefing()`)
   - 캐시된 캘린더 데이터 사용 (MCP 미호출), 캐시 없으면 MCP fallback
   - `ErrorCollector`에 수집된 봇 에러를 `⚠️ 시스템 이슈` 섹션으로 일괄 보고
+  - **재시작 시 catch-up**: `catchUpBriefingIfNeeded()` — `.assistant-costs.json`에서 마지막 브리핑 날짜 확인, 오늘 미실행이면 15초 후 즉시 실행
+  - **월요일 주간 요약**: `monday-briefing-extra.md` 프롬프트 자동 주입 (주간 비용 통계 + 보고서 요약)
 - **캘린더 리마인더**: `CalendarPoller` — 직접 Google Calendar REST API HTTP 폴링
   - 전체 캘린더 조회 후 `excludeCalendars`로만 제외 (화이트리스트 없음)
-  - 5분 간격 폴링, diff 감지 시에만 AI 판단 (Haiku 모델, ~$0.005/회)
+  - 5분 간격 폴링, diff 감지 시에만 AI 판단 (Haiku 모델, 경량 모드 ~$0.003/회)
+  - AI 판단 경량 모드: `cwd=tmpdir` + `--system-prompt` + `--tools ""` + `--no-session-persistence`
+  - AI 판단 rate limit 시 다음 정시까지 자동 일시 중지 (`aiJudgmentPaused`)
   - 알림 큐 (`.calendar-notifications.json`) + 1분 간격 디스패치
   - 토큰 공유: `~/.config/google-calendar-mcp/tokens.json` (MCP 서버와 동일)
   - 어시스턴트 세션은 `skipMcp: true`로 MCP 서버 연결 건너뜀
   - 알림 뮤트: 🔇 버튼으로 반복 일정 알림 끄기 (`.calendar-muted-events.json`, base eventId로 시리즈 매칭)
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
-- `-report [type]`/`-rp [type]`: reports/ 디렉토리에서 최신 분석 보고서 조회
+- `-report [type]`/`-rp [type]`: reports/ 하위 디렉토리 재귀 탐색, Slack 파일 업로드 (`filesUploadV2`, `files:write` 스코프 필요), 절대 경로 + 요약 표시, 업로드 실패 시 텍스트 fallback
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
   - `-as config`: 현재 설정 표시 (config.json 내용)
   - `-as briefing HH:MM`: 브리핑 시간 변경 → fs.watchFile이 감지하여 자동 재스케줄
   - `-as reminder N`: 리마인더 사전 알림 시간(분) 변경
   - 환경변수 미설정 시 graceful 비활성 (`assistantScheduler = null`)
 - 비용 제어: `--max-budget-usd` 플래그로 세션별 비용 한도, `.assistant-costs.json`에 비용 기록, 브리핑에 일간/주간/월간 통계 표시
-  - `config.json`에서 `briefing.maxBudgetUsd`, `reminders.maxBudgetUsd`, `analysis.budgetUsd`, `analysis.sessionBudgetUsd` 조정 가능
+  - `config.json`에서 `briefing.maxBudgetUsd`, `reminders.maxBudgetUsd`, `analysis.budgetUsd` 조정 가능
+  - 분석: `analysis.defaults` (sessionBudgetUsd, allowedTools, writablePaths) + `analysis.types` (타입별 override) 구조
   - 분석 세션: 비용 한도 도달 시 `--resume`로 이어서 진행 (총 `budgetUsd` 내에서)
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
@@ -110,7 +115,10 @@ update.bat                    # Windows
 
 ### Error Handling
 - CLI 프로세스 에러는 `try/catch`로 감싸고, Slack 메시지로 사용자에게 전달
-- Rate limit 감지: CLI `rate_limit_event` 이벤트 + `isRateLimitError()` 텍스트 패턴 매칭
+- Rate limit 감지: CLI `rate_limit_event` 이벤트 + `isRateLimitText()` 공유 유틸 (`src/rate-limit-utils.ts`)
+  - 사용자 세션: 4단계 UI (계정 전환 → API 키 → 예약 재시도 → 취소)
+  - 스케줄 세션: rate limit 감지 시 안내 메시지 전송 (브리핑), 분석 전체 중단
+  - 캘린더 판단: rate limit 시 다음 정시까지 AI 판단 일시 중지 (`pauseAiJudgment()`)
 - Rate limit 멘션 알림: 재시도/취소 시 자동 취소 (`notifyScheduledId`로 추적)
 - API 키 fallback: rate limit 시 등록된 API 키로 전환 → 리셋 시간 후 구독 방식으로 자동 복귀
 - 다중 계정 fallback: rate limit 시 `AccountManager.switchToNext()` → account-1 → account-2 → account-3 → API 키 버튼 순으로 전환
@@ -122,6 +130,12 @@ update.bat                    # Windows
 ### CLI Integration
 - `child_process.spawn('claude', ['-p', '--output-format', 'stream-json', ...])` 방식
 - `CliProcess` 클래스: AsyncIterable<CliEvent> 패턴으로 stdout 스트리밍
+- **경량 모드 옵션** (`runQuery()` opts):
+  - `systemPrompt`: `--system-prompt` (기본 프롬프트 교체, ~7K 토큰 절감)
+  - `tools`: `--tools` (빈 배열이면 전체 비활성)
+  - `noSessionPersistence`: `--no-session-persistence` (세션 파일 미생성)
+  - `cwd=os.tmpdir()`: CLAUDE.md 미로드 (~25-39K 토큰 절감)
+  - 캘린더 판단 세션에 적용: $0.051 → $0.003/세션 (94% 절감)
 - 권한 모드 계층 (제한적 → 자유):
   - Default (기본): `--permission-mode default` + `--allowedTools` (읽기 도구만)
   - `-safe`: `--permission-mode default` + `--allowedTools` (읽기 + 편집 도구)
@@ -200,6 +214,7 @@ git checkout -b feature/<name>
 | `src/mcp-manager.ts` | MCP 서버 설정 로드/관리 |
 | `src/account-manager.ts` | 다중 계정 관리 — OAuth 토큰 저장/갱신, env var 주입 방식 전환 |
 | `src/version.ts` | 버전 정보 + 업데이트 체크 (`getVersionInfo()`, `checkForUpdates()`) |
+| `src/rate-limit-utils.ts` | 공유 rate limit 감지 유틸 (`isRateLimitText()`, `isRateLimitError()`) |
 | `src/config.ts` | 환경변수 로드 |
 | `src/types.ts` | TypeScript 타입 정의 |
 | `src/logger.ts` | 구조화된 로깅 |
