@@ -1422,27 +1422,42 @@ export class SlackHandler {
       return;
     }
 
-    // List report files, optionally filter by type
-    let files = fs.readdirSync(reportsDir).filter(f => f.endsWith('.md'));
-    if (type) {
-      files = files.filter(f => f.includes(type));
+    // Scan subdirectories for .md files: reports/<type>/<date>.md
+    const files: { relPath: string; absPath: string; type: string; name: string }[] = [];
+    for (const dir of fs.readdirSync(reportsDir)) {
+      const subdir = path.join(reportsDir, dir);
+      if (!fs.statSync(subdir).isDirectory()) continue;
+      for (const fname of fs.readdirSync(subdir)) {
+        if (!fname.endsWith('.md') || fname === '.gitkeep') continue;
+        files.push({
+          relPath: `${dir}/${fname}`,
+          absPath: path.resolve(path.join(subdir, fname)),
+          type: dir,
+          name: fname,
+        });
+      }
     }
 
-    if (files.length === 0) {
-      await say({ text: t('assistant.reportNotFound', locale, { type: type || 'all' }), thread_ts: threadTs });
+    // Filter by type if specified
+    const filtered = type ? files.filter(f => f.type.includes(type) || f.name.includes(type)) : files;
+
+    if (filtered.length === 0) {
+      const types = [...new Set(files.map(f => f.type))];
+      const hint = types.length > 0
+        ? `\n${t('assistant.reportAvailableTypes', locale)}: ${types.join(', ')}`
+        : '';
+      await say({ text: t('assistant.reportNotFound', locale, { type: type || 'all' }) + hint, thread_ts: threadTs });
       return;
     }
 
     // Get the most recent file (by name, which includes date)
-    files.sort().reverse();
-    const latestFile = files[0];
-    const content = fs.readFileSync(path.join(reportsDir, latestFile), 'utf-8');
+    filtered.sort((a, b) => b.name.localeCompare(a.name));
+    const latest = filtered[0];
+    const content = fs.readFileSync(latest.absPath, 'utf-8');
 
-    // Truncate if too long for Slack (4000 char limit per message)
-    const fullPath = path.resolve(path.join(reportsDir, latestFile));
     const maxLen = 3900;
     const truncated = content.length > maxLen ? content.substring(0, maxLen) + '\n\n…(truncated)' : content;
-    await say({ text: `📄 *${latestFile}*\n\`${fullPath}\`\n\n${truncated}`, thread_ts: threadTs });
+    await say({ text: `📄 *${latest.relPath}*\n\`${latest.absPath}\`\n\n${truncated}`, thread_ts: threadTs });
   }
 
   private async handleAssistantSubcommand(
