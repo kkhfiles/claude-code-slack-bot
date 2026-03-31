@@ -409,8 +409,13 @@ export class AccountManager {
       this.saveAccounts(data);
       this.logger.info('Synced tokens from credentials file (terminal→bot)', { accountId: matchingId, email });
     } catch (error) {
-      errorCollector.add('AccountManager', `자격 증명 역동기화 실패: ${(error as Error).message}`);
-      this.logger.error('Failed to sync from credentials file (non-fatal)', error);
+      const msg = (error as Error).message || '';
+      if (msg.includes('ENOENT')) {
+        this.logger.debug('Credentials file not found (non-fatal)', { path: this.credentialsFile });
+      } else {
+        errorCollector.add('AccountManager', `자격 증명 역동기화 실패: ${msg}`);
+        this.logger.error('Failed to sync from credentials file (non-fatal)', error);
+      }
     }
   }
 

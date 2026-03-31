@@ -324,6 +324,21 @@ export class AssistantScheduler {
     return line;
   }
 
+  /** Check if there are unarchived reports in reports/ subdirectories. */
+  private hasUnreadReports(): boolean {
+    const reportsDir = path.join(this.workingDir, 'reports');
+    if (!fs.existsSync(reportsDir)) return false;
+    for (const dir of fs.readdirSync(reportsDir)) {
+      if (dir === 'archived') continue;
+      const subdir = path.join(reportsDir, dir);
+      if (!fs.statSync(subdir).isDirectory()) continue;
+      for (const fname of fs.readdirSync(subdir)) {
+        if (fname.endsWith('.md') && fname !== '.gitkeep') return true;
+      }
+    }
+    return false;
+  }
+
   // --- Timer orchestration ---
 
   private scheduleAll(): void {
@@ -388,6 +403,18 @@ export class AssistantScheduler {
         } else {
           // Append error report + cost stats line
           await this.sendMessage(result.text + this.formatErrorReport() + this.formatCostLine());
+
+          // If reports exist, add a button to view them
+          if (this.hasUnreadReports()) {
+            await this.sendMessage('', [{
+              type: 'actions',
+              elements: [{
+                type: 'button',
+                text: { type: 'plain_text', text: '📄 보고서 확인' },
+                action_id: 'briefing_view_reports',
+              }],
+            }]).catch(() => {});
+          }
         }
       } catch (error) {
         const msg = (error as Error).message || '';
