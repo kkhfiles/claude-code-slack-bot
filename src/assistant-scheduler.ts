@@ -4,6 +4,7 @@ import Holidays from 'date-holidays';
 import { Logger } from './logger';
 import { CalendarPoller } from './calendar-poller';
 import { errorCollector } from './error-collector';
+import { isRateLimitText } from './rate-limit-utils';
 
 export interface AssistantConfig {
   briefing: {
@@ -25,21 +26,19 @@ export interface AssistantConfig {
     schedule: string;    // "saturday-03:00"
     deliveryTime: string;
     budgetUsd?: number;
-    defaults?: {
-      sessionBudgetUsd?: number;
-      allowedTools?: string[];
-      writablePaths?: string[];
+    defaults: {
+      sessionBudgetUsd: number;
+      allowedTools: string[];
+      writablePaths: string[];
     };
-    types?: Record<string, {
+    types: Record<string, {
       enabled: boolean;
-      tools?: string[];
+      tools?: string[];          // type-specific data (e.g. competitors.tools)
       allowedTools?: string[];
       writablePaths?: string[];
+      sessionBudgetUsd?: number;
+      [key: string]: unknown;
     }>;
-    // Legacy flat format (for backwards compatibility)
-    enabled?: Record<string, boolean>;
-    competitors?: { tools: string[] };
-    sessionBudgetUsd?: number;
   };
 }
 
@@ -49,10 +48,13 @@ export interface SpawnOpts {
   permissionMode?: 'default' | 'plan' | 'trust';
   allowedTools?: string[];
   appendSystemPrompt?: string;
+  systemPrompt?: string;
   env?: Record<string, string>;
   maxBudgetUsd?: number;
   resumeSessionId?: string;
   skipMcp?: boolean;
+  noSessionPersistence?: boolean;
+  tools?: string[];
 }
 
 export interface SessionResult {
@@ -139,6 +141,10 @@ export class AssistantScheduler {
       configPath: this.configPath,
       workingDir: this.workingDir,
     });
+
+    // Catch-up briefing if missed today (e.g. bot restarted after briefing time)
+    setTimeout(() => this.catchUpBriefingIfNeeded().catch(e =>
+      this.logger.error('Catch-up briefing failed', e)), 15_000);
   }
 
   stop(): void {
@@ -374,16 +380,66 @@ export class AssistantScheduler {
       try {
         const result = await this.executeBriefing();
         this.recordCost('briefing', result.costUsd, result.sessionId);
-        // Append error report + cost stats line
-        await this.sendMessage(result.text + this.formatErrorReport() + this.formatCostLine());
+
+        // Check rate limit in result text
+        if (isRateLimitText(result.text)) {
+          this.logger.warn('Briefing hit rate limit');
+          await this.sendMessage('⏳ 브리핑 실행 중 rate limit 도달. 다음 업무일에 재시도합니다.').catch(() => {});
+        } else {
+          // Append error report + cost stats line
+          await this.sendMessage(result.text + this.formatErrorReport() + this.formatCostLine());
+        }
       } catch (error) {
-        this.logger.error('Briefing failed', error);
-        await this.sendMessage('❌ Morning briefing failed. Check logs for details.').catch(() => {});
+        const msg = (error as Error).message || '';
+        if (isRateLimitText(msg)) {
+          this.logger.warn('Briefing hit rate limit');
+          await this.sendMessage('⏳ 브리핑 실행 중 rate limit 도달. 다음 업무일에 재시도합니다.').catch(() => {});
+        } else {
+          this.logger.error('Briefing failed', error);
+          await this.sendMessage('❌ Morning briefing failed. Check logs for details.').catch(() => {});
+        }
       }
 
       // Reschedule for next working day
       this.scheduleBriefing();
     }, msUntil);
+  }
+
+  /** If briefing was missed today (e.g. bot restarted after briefing time), run it now. */
+  private async catchUpBriefingIfNeeded(): Promise<void> {
+    if (!this.config?.briefing.enabled) return;
+    if (this.isNonWorkingDay().skip) return;
+
+    // Check if briefing already ran today (KST)
+    const todayKST = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+    const lastBriefing = [...this.costEntries]
+      .reverse()
+      .find(e => e.type === 'briefing');
+
+    if (lastBriefing) {
+      const lastDateKST = new Date(new Date(lastBriefing.timestamp).getTime() + 9 * 3600_000)
+        .toISOString().slice(0, 10);
+      if (lastDateKST === todayKST) return; // Already ran today
+    }
+
+    // Check if briefing time has passed
+    const [h, m] = this.config.briefing.time.split(':').map(Number);
+    const nowKST = new Date(Date.now() + 9 * 3600_000);
+    if (nowKST.getUTCHours() < h || (nowKST.getUTCHours() === h && nowKST.getUTCMinutes() < m)) return;
+
+    this.logger.info('Catch-up briefing: missed today, running now');
+    try {
+      const result = await this.executeBriefing();
+      this.recordCost('briefing', result.costUsd, result.sessionId);
+      await this.sendMessage(result.text + this.formatErrorReport() + this.formatCostLine());
+    } catch (error) {
+      const msg = (error as Error).message || '';
+      if (isRateLimitText(msg)) {
+        await this.sendMessage('⏳ Catch-up 브리핑 중 rate limit 도달.').catch(() => {});
+      } else {
+        this.logger.error('Catch-up briefing failed', error);
+      }
+    }
   }
 
   private async executeBriefing(): Promise<SessionResult> {
@@ -396,6 +452,14 @@ export class AssistantScheduler {
       prompt = prompt.replace(/\{excludeCalendars\}/g, excludeList.map(c => `\`${c}\``).join(', '));
     } else {
       prompt = prompt.replace(/\{excludeCalendars\}/g, '(없음)');
+    }
+
+    // Monday: inject weekly summary prompt
+    if (new Date().getDay() === 1) {
+      const mondayExtra = path.join(this.promptsDir, 'monday-briefing-extra.md');
+      if (fs.existsSync(mondayExtra)) {
+        prompt += '\n\n' + fs.readFileSync(mondayExtra, 'utf-8');
+      }
     }
 
     // Inject cached calendar data if available (saves MCP cost)
@@ -422,6 +486,7 @@ export class AssistantScheduler {
       permissionMode: 'default',
       maxBudgetUsd: this.config?.briefing.maxBudgetUsd || 1.00,
       allowedTools,
+      noSessionPersistence: true,
       skipMcp: true,
       env: { CLAUDE_SCHEDULED: '1' },
     });
@@ -528,20 +593,9 @@ export class AssistantScheduler {
   /** Get enabled analysis types from either new (types) or legacy (enabled) config format. */
   private getEnabledAnalysisTypes(): string[] {
     if (!this.config) return [];
-    const analysis = this.config.analysis;
-    // New format: analysis.types
-    if (analysis.types) {
-      return Object.entries(analysis.types)
-        .filter(([, cfg]) => cfg.enabled)
-        .map(([type]) => type);
-    }
-    // Legacy format: analysis.enabled
-    if (analysis.enabled) {
-      return Object.entries(analysis.enabled)
-        .filter(([, enabled]) => enabled)
-        .map(([type]) => type);
-    }
-    return [];
+    return Object.entries(this.config.analysis.types)
+      .filter(([, cfg]) => cfg.enabled)
+      .map(([type]) => type);
   }
 
   private async runAnalysis(): Promise<void> {
@@ -561,9 +615,19 @@ export class AssistantScheduler {
 
       try {
         remainingBudget = await this.runSingleAnalysis(type, remainingBudget);
+        if (remainingBudget < 0) {
+          // Rate limit hit — stop all remaining analyses
+          remainingBudget = 0;
+          break;
+        }
         completedTypes.push(type);
       } catch (error) {
-        errorCollector.add('AssistantScheduler', `분석 실행 실패 (${type}): ${(error as Error).message}`);
+        const msg = (error as Error).message || '';
+        if (isRateLimitText(msg)) {
+          this.logger.warn(`Analysis ${type} hit rate limit, stopping all analyses`);
+          break;
+        }
+        errorCollector.add('AssistantScheduler', `분석 실행 실패 (${type}): ${msg}`);
         this.logger.error(`Analysis failed for type: ${type}`, error);
       }
     }
@@ -584,11 +648,11 @@ export class AssistantScheduler {
 
     const prompt = fs.readFileSync(promptPath, 'utf-8');
     const analysis = this.config!.analysis;
-    const defaults = analysis.defaults || {};
-    const typeConfig = analysis.types?.[type];
-    const sessionBudget = defaults.sessionBudgetUsd ?? analysis.sessionBudgetUsd ?? 2.00;
-    const allowedTools = typeConfig?.allowedTools || defaults.allowedTools || ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Write'];
-    const writablePaths = typeConfig?.writablePaths || defaults.writablePaths || ['reports/'];
+    const defaults = analysis.defaults;
+    const typeConfig = analysis.types[type];
+    const sessionBudget = typeConfig?.sessionBudgetUsd ?? defaults.sessionBudgetUsd;
+    const allowedTools = typeConfig?.allowedTools ?? defaults.allowedTools;
+    const writablePaths = typeConfig?.writablePaths ?? defaults.writablePaths;
     let sessionId: string | undefined;
 
     while (remainingBudget > 0.01) {
@@ -619,6 +683,11 @@ export class AssistantScheduler {
         remainingBudget: remainingBudget.toFixed(2),
       });
 
+      // Rate limit → stop all analyses (return negative to signal caller)
+      if (isRateLimitText(result.text)) {
+        this.logger.warn(`Analysis ${type} hit rate limit, stopping all analyses`);
+        return -1;
+      }
       // Normal completion
       if (result.subtype === 'success') break;
       // Budget hit → resume if budget remains

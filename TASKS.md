@@ -272,3 +272,300 @@ if (config.defaultWorkingDirectory) {
 - [x] `src/working-directory-manager.ts` 수정
 - [x] `.env` 값 추가
 - [x] `npm run build` 성공
+
+---
+
+## 스케줄 세션에 `CLAUDE_SCHEDULED=1` 환경변수 추가
+
+### 배경
+AssistantScheduler가 스폰하는 Claude 세션(브리핑, 캘린더 리마인더, 분석)이 종료될 때
+Stop hook(`notify-stop.py`)이 Windows 토스트 알림을 발생시킨다.
+스케줄 세션 결과는 이미 Slack DM으로 전달되므로 Windows 알림은 중복이다.
+
+hook 쪽은 이미 `os.environ.get('CLAUDE_SCHEDULED')` 체크를 추가 완료.
+슬랙봇에서 환경변수를 주입하면 자동 세션의 불필요 알림이 사라진다.
+
+### 변경 사항
+
+#### `src/assistant-scheduler.ts`
+
+`spawnSession` 호출부에 `env: { CLAUDE_SCHEDULED: '1' }` 추가. 총 3곳:
+
+1. **runBriefing()** (line ~345): `env` 필드 추가
+```typescript
+env: { CLAUDE_SCHEDULED: '1' },
+```
+
+2. **pollCalendar()** (line ~440): `env` 필드 추가
+```typescript
+env: { CLAUDE_SCHEDULED: '1' },
+```
+
+3. **runSingleAnalysis()** (line ~563): 기존 `ASSISTANT_MODE`에 병합
+```typescript
+env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1' },
+```
+
+### 검증
+1. `npm run build` 성공
+2. pm2 restart 후 리마인더 폴링 시 Windows 토스트가 뜨지 않는지 확인
+3. Slack DM 응답은 정상 전달되는지 확인
+
+### 완료 조건
+- [x] 3개 spawnSession 호출에 `CLAUDE_SCHEDULED: '1'` 추가 (briefing, analysis, calendar-poller judgment)
+- [x] `npm run build` 성공
+
+---
+
+## 분석 프레임워크 유연화 — 타입별 도구/권한 설정
+
+### 배경
+현재 `runSingleAnalysis()`에서 `allowedTools`와 `appendSystemPrompt`가 하드코딩되어 있다.
+분석 타입마다 필요한 도구와 쓰기 경로가 다르므로, config.json의 `defaults` + 타입별 오버라이드 구조로 변경한다.
+새 분석 타입 추가 시 프롬프트 파일 + config 항목만 추가하면 되도록 한다.
+
+### config.json 구조 (이미 claude-workflow에 반영 완료)
+
+```json
+"analysis": {
+  "budgetUsd": 5.00,
+  "defaults": {
+    "sessionBudgetUsd": 2.00,
+    "allowedTools": ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "Write"],
+    "writablePaths": ["reports/"]
+  },
+  "types": {
+    "skill-review": {
+      "enabled": true,
+      "allowedTools": ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "Write", "Edit"],
+      "writablePaths": ["reports/", "references/"]
+    },
+    "ai-practice": { "enabled": true },
+    "competitors": { "enabled": true, "tools": [...] },
+    ...
+  }
+}
+```
+
+### 변경 사항
+
+#### 1. `AssistantConfig` 인터페이스 변경
+
+```typescript
+// Before
+analysis: {
+  schedule: string;
+  deliveryTime: string;
+  enabled: Record<string, boolean>;
+  competitors: { tools: string[] };
+  budgetUsd?: number;
+  sessionBudgetUsd?: number;
+};
+
+// After
+analysis: {
+  schedule: string;
+  deliveryTime: string;
+  budgetUsd?: number;
+  defaults: {
+    sessionBudgetUsd: number;
+    allowedTools: string[];
+    writablePaths: string[];
+  };
+  types: Record<string, {
+    enabled: boolean;
+    allowedTools?: string[];
+    writablePaths?: string[];
+    sessionBudgetUsd?: number;
+    [key: string]: unknown;
+  }>;
+};
+```
+
+#### 2. `runAnalysis()` — `types`에서 활성 타입 읽기
+
+```typescript
+// Before
+const enabledTypes = Object.entries(this.config.analysis.enabled)
+  .filter(([, enabled]) => enabled)
+  .map(([type]) => type);
+
+// After
+const enabledTypes = Object.entries(this.config.analysis.types)
+  .filter(([, cfg]) => cfg.enabled)
+  .map(([type]) => type);
+```
+
+#### 3. `runSingleAnalysis()` — defaults와 타입 오버라이드 병합
+
+```typescript
+// Before (하드코딩)
+allowedTools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Write'],
+appendSystemPrompt: 'CRITICAL: reports/ 디렉토리에만 새 파일 생성. 기존 파일 수정/삭제 금지.',
+
+// After (동적 구성)
+const defaults = this.config.analysis.defaults;
+const typeConfig = this.config.analysis.types[type] || {};
+const sessionBudget = typeConfig.sessionBudgetUsd ?? defaults.sessionBudgetUsd;
+const allowedTools = typeConfig.allowedTools ?? defaults.allowedTools;
+const writablePaths = typeConfig.writablePaths ?? defaults.writablePaths;
+const pathList = writablePaths.join(', ');
+const systemPrompt = `CRITICAL: ${pathList} 디렉토리에만 파일 생성/수정 가능. 그 외 기존 파일 수정/삭제 금지.`;
+```
+
+### 완료 조건
+- [x] `AssistantConfig` 인터페이스 변경 (레거시 `enabled`/`competitors`/`sessionBudgetUsd` 제거)
+- [x] `runAnalysis()` — `types`에서 읽기로 전환 (레거시 fallback 제거)
+- [x] `runSingleAnalysis()` — defaults/override 병합 로직
+- [x] `npm run build` 성공
+
+---
+
+## 브리핑 누락 방지 — 재시작 시 catch-up
+
+### 배경
+2026-03-30(월) 아침 브리핑 누락. 원인: 봇 다운 후 월요일 정오경 재시작 → 08:30 타이머 이미 지남.
+`scheduleBriefing()`은 "다음 업무일 시간"만 계산하므로, 재시작 시점이 당일 브리핑 시간 이후면 하루 통째로 스킵.
+
+### 변경 사항
+
+#### `src/assistant-scheduler.ts`
+
+`scheduleAll()` 또는 `start()` 실행 시, 마지막 브리핑 실행 일자를 체크하여 오늘이 업무일이고 아직 실행되지 않았으면 즉시 실행.
+
+1. **마지막 브리핑 일자 추적**: `.assistant-costs.json`에서 가장 최근 `type: "briefing"` 엔트리의 timestamp를 읽어 KST 날짜 추출
+2. **catch-up 판정**: `오늘(KST) !== 마지막 브리핑 날짜(KST)` && `isNonWorkingDay() === false` && `현재 시각 > briefing.time`
+3. **즉시 실행**: 조건 충족 시 `executeBriefing()` 호출 후 정상 스케줄링 진행
+
+```typescript
+private async catchUpBriefingIfNeeded(): Promise<void> {
+  if (!this.config?.briefing.enabled) return;
+
+  const lastBriefingDate = this.getLastBriefingDate(); // from .assistant-costs.json
+  const todayKST = this.getTodayKST(); // YYYY-MM-DD in KST
+
+  if (lastBriefingDate === todayKST) return; // 오늘 이미 실행됨
+  if (this.isNonWorkingDay().skip) return;    // 비업무일
+
+  const [h, m] = this.config.briefing.time.split(':').map(Number);
+  const now = new Date();
+  if (now.getHours() < h || (now.getHours() === h && now.getMinutes() < m)) return; // 아직 시간 안 됨
+
+  this.logger.info('Catch-up briefing: missed today, running now');
+  try {
+    const result = await this.executeBriefing();
+    this.recordCost('briefing', result.costUsd, result.sessionId);
+    await this.sendMessage(result.text + this.formatErrorReport() + this.formatCostLine());
+  } catch (error) {
+    this.logger.error('Catch-up briefing failed', error);
+  }
+}
+```
+
+### 완료 조건
+- [x] `catchUpBriefingIfNeeded()` 구현
+- [x] `start()`에서 15초 후 호출
+- [x] `npm run build` 성공
+
+---
+
+## 월요일 주간 요약 브리핑
+
+### 배경
+현재 브리핑은 매일 동일한 형식 (당일 일정 + 대기 보고서). 월요일에는 지난 주 요약이 필요:
+- 주간 세션/비용 통계
+- 지난 주 생성된 보고서
+- 주요 작업 요약
+
+### 변경 사항
+
+#### 1. `assistant/prompts/monday-briefing-extra.md` (새 프롬프트 섹션)
+
+월요일일 때 기존 프롬프트에 추가 주입할 섹션:
+
+```markdown
+## 주간 요약 (월요일 전용)
+
+추가로 다음 정보를 수집하여 브리핑에 포함하세요:
+
+1. `.assistant-costs.json`을 읽어 지난 7일간 비용 통계:
+   - 일별 비용 합계 (briefing, reminder, analysis 구분)
+   - 주간 총 비용
+
+2. `reports/` 디렉토리에서 지난 7일간 생성된 보고서:
+   - 각 보고서의 제목과 절대 경로
+   - 핵심 발견사항 1줄 요약
+
+출력 형식에 다음 섹션을 추가하세요:
+
+📊 *주간 요약 (지난 7일)*
+• 총 비용: $X.XX (브리핑 $X.XX / 리마인더 $X.XX / 분석 $X.XX)
+• 보고서 N건:
+  - [유형] YYYY-MM-DD — 한 줄 요약
+    `절대경로`
+```
+
+#### 2. `src/assistant-scheduler.ts` — `executeBriefing()` 수정
+
+```typescript
+// 기존 prompt 로드 후, 월요일이면 추가 프롬프트 주입
+const dayOfWeek = new Date().getDay();
+if (dayOfWeek === 1) { // Monday
+  const mondayExtra = path.join(this.promptsDir, 'monday-briefing-extra.md');
+  if (fs.existsSync(mondayExtra)) {
+    prompt += '\n\n' + fs.readFileSync(mondayExtra, 'utf-8');
+  }
+}
+```
+
+### 완료 조건
+- [x] `assistant/prompts/monday-briefing-extra.md` 작성
+- [x] `executeBriefing()`에서 월요일 판정 + 추가 프롬프트 주입
+- [x] `npm run build` 성공
+
+---
+
+## 보고서 경로 표시 개선
+
+### 배경
+`-report` 명령과 브리핑에서 보고서를 표시할 때 파일명만 노출. 사용자가 직접 열 수 있는 절대 경로가 필요.
+
+### 변경 사항
+
+#### 1. `src/slack-handler.ts` — `handleReportCommand()` 수정
+
+현재 (line 1443):
+```typescript
+await say({ text: `📄 *${latestFile}*\n\n${truncated}`, thread_ts: threadTs });
+```
+
+변경:
+```typescript
+const fullPath = path.resolve(path.join(reportsDir, latestFile));
+await say({ text: `📄 *${latestFile}*\n\`${fullPath}\`\n\n${truncated}`, thread_ts: threadTs });
+```
+
+#### 2. `assistant/prompts/morning-briefing.md` — 보고서 출력 형식 수정
+
+현재:
+```
+📊 *대기 중인 보고서*
+• [보고서 유형] YYYY-MM-DD — 한 줄 요약
+```
+
+변경:
+```
+📊 *대기 중인 보고서*
+• [보고서 유형] YYYY-MM-DD — 한 줄 요약
+  `절대경로`
+```
+
+주의사항에 추가:
+```
+- 보고서 경로는 Glob 결과의 절대 경로를 그대로 표시하세요.
+```
+
+### 완료 조건
+- [x] `handleReportCommand()`에 절대 경로 표시
+- [x] `morning-briefing.md` 프롬프트에 경로 형식 추가
+- [x] `npm run build` 성공
