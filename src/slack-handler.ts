@@ -279,7 +279,7 @@ export class SlackHandler {
         return;
       }
       const { type } = this.parseReportCommand(text);
-      await this.handleReportCommand(type, thread_ts || ts, locale, say);
+      await this.handleReportCommand(type, channel, thread_ts || ts, locale, say);
       return;
     }
 
@@ -1415,7 +1415,7 @@ export class SlackHandler {
     await say({ text, blocks, thread_ts: threadTs });
   }
 
-  private async handleReportCommand(type: string | undefined, threadTs: string, locale: Locale, say: any): Promise<void> {
+  private async handleReportCommand(type: string | undefined, channel: string, threadTs: string, locale: Locale, say: any): Promise<void> {
     const reportsDir = path.join(config.assistant.configDir, '..', 'reports');
     if (!fs.existsSync(reportsDir)) {
       await say({ text: t('assistant.reportNotFound', locale, { type: type || 'all' }), thread_ts: threadTs });
@@ -1455,9 +1455,24 @@ export class SlackHandler {
     const latest = filtered[0];
     const content = fs.readFileSync(latest.absPath, 'utf-8');
 
-    const maxLen = 3900;
-    const truncated = content.length > maxLen ? content.substring(0, maxLen) + '\n\n…(truncated)' : content;
-    await say({ text: `📄 *${latest.relPath}*\n\`${latest.absPath}\`\n\n${truncated}`, thread_ts: threadTs });
+    // Upload as .md file to Slack (viewable + downloadable) with summary
+    const firstLines = content.split('\n').filter(l => l.trim()).slice(0, 3).join('\n');
+    try {
+      await this.app.client.filesUploadV2({
+        channel_id: channel,
+        thread_ts: threadTs,
+        filename: latest.relPath.replace('/', '_'),
+        content,
+        title: `📄 ${latest.relPath}`,
+        initial_comment: `\`${latest.absPath}\`\n>${firstLines.split('\n').join('\n>')}`,
+      });
+    } catch (error) {
+      // Fallback to text if upload fails
+      this.logger.warn('File upload failed, falling back to text', error);
+      const maxLen = 3900;
+      const truncated = content.length > maxLen ? content.substring(0, maxLen) + '\n\n…(truncated)' : content;
+      await say({ text: `📄 *${latest.relPath}*\n\`${latest.absPath}\`\n\n${truncated}`, thread_ts: threadTs });
+    }
   }
 
   private async handleAssistantSubcommand(
