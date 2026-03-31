@@ -346,8 +346,12 @@ const messages: Record<string, Record<Locale, string>> = {
     ko: '⚠️ 캘린더 인증 갱신 필요 — 리마인더 일시 중지됨',
   },
   'assistant.reportNotFound': {
-    en: 'No report found for: {{type}}',
-    ko: '보고서 없음: {{type}}',
+    en: '📄 No reports found for: {{type}}',
+    ko: '📄 보고서를 찾을 수 없습니다: {{type}}',
+  },
+  'assistant.reportAvailableTypes': {
+    en: 'Available types',
+    ko: '조회 가능한 유형',
   },
   'assistant.analysisRunning': {
     en: '📊 Running {{type}} analysis...',
