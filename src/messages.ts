@@ -205,6 +205,7 @@ const messages: Record<string, Record<Locale, string>> = {
   'schedule.rotation.effective': { en: '_→ {{pattern}}_', ko: '_→ {{pattern}}_' },
   'schedule.rotation.enableBtn': { en: '🔄 Enable rotation', ko: '🔄 로테이션 켜기' },
   'schedule.rotation.disableBtn': { en: '🔄 Disable rotation', ko: '🔄 로테이션 끄기' },
+  'schedule.accountNotSet': { en: 'Scheduled session skipped: {{account}} is not configured. Use `-account` to set it up, or remove the {{time}} schedule.', ko: '스케줄 세션 건너뜀: {{account}}가 설정되지 않았습니다. `-account`로 설정하거나, {{time}} 스케줄을 제거해 주세요.' },
 
   // --- Version ---
   'cmd.version.title': { en: '*Bot Version*', ko: '*봇 버전*' },

@@ -1630,8 +1630,19 @@ export class SlackHandler {
   private async runScheduledGreeting(channel: string, userId: string, time: string, account: string): Promise<void> {
     const locale = await this.getUserLocale(userId).catch(() => 'ko' as Locale);
 
+    // Skip if account is not configured (unset)
+    const accountInfo = this.accountManager.getAccountList().find(a => a.id === account);
+    if (!accountInfo?.email) {
+      this.logger.warn(`Skipping scheduled session: account ${account} not configured`);
+      await this.app.client.chat.postMessage({
+        channel,
+        text: `⚠️ ${t('schedule.accountNotSet', locale, { account, time })}`,
+      }).catch(() => {});
+      return;
+    }
+
     // Post session start notification as top-level message
-    const accountEmail = this.accountManager.getAccountList().find(a => a.id === account)?.email;
+    const accountEmail = accountInfo.email;
     const accountLabel = accountEmail ? `${account} (${accountEmail})` : account;
     const postResult = await this.app.client.chat.postMessage({
       channel,
