@@ -406,7 +406,10 @@ export class AssistantScheduler {
 
           // If reports exist, add a button to view them
           if (this.hasUnreadReports()) {
-            await this.sendMessage('', [{
+            await this.sendMessage('📄 대기 중인 보고서가 있습니다.', [{
+              type: 'section',
+              text: { type: 'mrkdwn', text: '📄 대기 중인 보고서가 있습니다.' },
+            }, {
               type: 'actions',
               elements: [{
                 type: 'button',
