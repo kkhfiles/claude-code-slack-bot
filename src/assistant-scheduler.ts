@@ -163,13 +163,16 @@ export class AssistantScheduler {
   }
 
   /** Manual trigger for -briefing command. */
-  async runBriefing(): Promise<string> {
+  async runBriefing(): Promise<{ text: string; hasReports: boolean }> {
     if (!this.config?.briefing.enabled) {
-      return 'Briefing is disabled in config.';
+      return { text: 'Briefing is disabled in config.', hasReports: false };
     }
     const result = await this.executeBriefing();
     this.recordCost('briefing', result.costUsd, result.sessionId);
-    return result.text + this.formatErrorReport() + this.formatCostLine();
+    return {
+      text: result.text + this.formatErrorReport() + this.formatCostLine(),
+      hasReports: this.hasUnreadReports(),
+    };
   }
 
   /** Access CalendarPoller instance (for mute actions, etc.). */
