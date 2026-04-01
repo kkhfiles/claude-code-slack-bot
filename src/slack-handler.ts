@@ -1451,42 +1451,41 @@ export class SlackHandler {
       return;
     }
 
-    // Get the most recent file (by name, which includes date)
+    // Sort by date (newest first), upload each report
     filtered.sort((a, b) => b.name.localeCompare(a.name));
-    const latest = filtered[0];
-    const content = fs.readFileSync(latest.absPath, 'utf-8');
 
-    // Upload as .md file to Slack (viewable + downloadable) with summary
-    const firstLines = content.split('\n').filter(l => l.trim()).slice(0, 3).join('\n');
-    try {
-      await this.app.client.filesUploadV2({
-        channel_id: channel,
-        thread_ts: threadTs,
-        filename: latest.relPath.replace('/', '_'),
-        content,
-        title: `📄 ${latest.relPath}`,
-        initial_comment: `\`${latest.absPath}\`\n>${firstLines.split('\n').join('\n>')}`,
-      });
-      // Add Archive button
-      await say({
-        text: '',
-        blocks: [{
-          type: 'actions',
-          elements: [{
-            type: 'button',
-            text: { type: 'plain_text', text: '📂 Archive' },
-            action_id: 'archive_report',
-            value: JSON.stringify({ absPath: latest.absPath, relPath: latest.relPath }),
+    for (const report of filtered) {
+      const content = fs.readFileSync(report.absPath, 'utf-8');
+      const firstLines = content.split('\n').filter(l => l.trim()).slice(0, 3).join('\n');
+
+      try {
+        await this.app.client.filesUploadV2({
+          channel_id: channel,
+          thread_ts: threadTs,
+          filename: report.relPath.replace('/', '_'),
+          content,
+          title: `📄 ${report.relPath}`,
+          initial_comment: `\`${report.absPath}\`\n>${firstLines.split('\n').join('\n>')}`,
+        });
+        await say({
+          text: '',
+          blocks: [{
+            type: 'actions',
+            elements: [{
+              type: 'button',
+              text: { type: 'plain_text', text: `📂 Archive ${report.type}` },
+              action_id: 'archive_report',
+              value: JSON.stringify({ absPath: report.absPath, relPath: report.relPath }),
+            }],
           }],
-        }],
-        thread_ts: threadTs,
-      });
-    } catch (error) {
-      // Fallback to text if upload fails
-      this.logger.warn('File upload failed, falling back to text', error);
-      const maxLen = 3900;
-      const truncated = content.length > maxLen ? content.substring(0, maxLen) + '\n\n…(truncated)' : content;
-      await say({ text: `📄 *${latest.relPath}*\n\`${latest.absPath}\`\n\n${truncated}`, thread_ts: threadTs });
+          thread_ts: threadTs,
+        });
+      } catch (error) {
+        this.logger.warn('File upload failed, falling back to text', { file: report.relPath, error });
+        const maxLen = 3900;
+        const truncated = content.length > maxLen ? content.substring(0, maxLen) + '\n\n…(truncated)' : content;
+        await say({ text: `📄 *${report.relPath}*\n\`${report.absPath}\`\n\n${truncated}`, thread_ts: threadTs });
+      }
     }
   }
 
