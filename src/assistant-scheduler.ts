@@ -459,6 +459,17 @@ export class AssistantScheduler {
       const result = await this.executeBriefing();
       this.recordCost('briefing', result.costUsd, result.sessionId);
       await this.sendMessage(result.text + this.formatErrorReport() + this.formatCostLine());
+
+      if (this.hasUnreadReports()) {
+        await this.sendMessage('', [{
+          type: 'actions',
+          elements: [{
+            type: 'button',
+            text: { type: 'plain_text', text: '📄 보고서 확인' },
+            action_id: 'briefing_view_reports',
+          }],
+        }]).catch(() => {});
+      }
     } catch (error) {
       const msg = (error as Error).message || '';
       if (isRateLimitText(msg)) {
