@@ -264,7 +264,24 @@ export class SlackHandler {
       await say({ text: t('assistant.briefingRunning', locale), thread_ts: thread_ts || ts });
       try {
         const result = await this.assistantScheduler.runBriefing();
-        await say({ text: result, thread_ts: thread_ts || ts });
+        await say({ text: result.text, thread_ts: thread_ts || ts });
+        if (result.hasReports) {
+          await say({
+            text: '📄 대기 중인 보고서가 있습니다.',
+            blocks: [{
+              type: 'section',
+              text: { type: 'mrkdwn', text: '📄 대기 중인 보고서가 있습니다.' },
+            }, {
+              type: 'actions',
+              elements: [{
+                type: 'button',
+                text: { type: 'plain_text', text: '📄 보고서 확인' },
+                action_id: 'briefing_view_reports',
+              }],
+            }],
+            thread_ts: thread_ts || ts,
+          });
+        }
       } catch (error) {
         this.logger.error('Manual briefing failed', error);
         await say({ text: '❌ Briefing failed.', thread_ts: thread_ts || ts });
