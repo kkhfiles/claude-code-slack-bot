@@ -597,7 +597,8 @@ export class CalendarPoller {
       }
 
       // Parse JSON from response
-      return this.parseJudgmentResponse(result.text);
+      const notifications = this.parseJudgmentResponse(result.text);
+      return this.clampNotifyAt(notifications, diff, config.reminders.beforeMinutes);
     } catch (error) {
       const msg = (error as Error).message || '';
       if (isRateLimitText(msg)) {
@@ -646,6 +647,39 @@ export class CalendarPoller {
       this.logger.error('Failed to parse AI judgment response', error);
       return [];
     }
+  }
+
+  /**
+   * Clamp notifyAt for "upcoming" notifications to eventStart - beforeMinutes.
+   * Prevents AI from setting notifications too early (e.g., immediately on detection).
+   */
+  private clampNotifyAt(
+    notifications: CalendarNotification[],
+    diff: CalendarDiff,
+    beforeMinutes: number,
+  ): CalendarNotification[] {
+    // Build eventId → startTime map from diff
+    const eventStartMap = new Map<string, string>();
+    for (const e of diff.added) eventStartMap.set(e.id, e.startTime);
+    for (const m of diff.modified) eventStartMap.set(m.current.id, m.current.startTime);
+
+    const now = Date.now();
+
+    for (const n of notifications) {
+      if (n.type !== 'upcoming') continue;
+
+      const startTime = eventStartMap.get(n.eventId);
+      if (!startTime) continue;
+
+      const idealNotifyAt = new Date(startTime).getTime() - beforeMinutes * 60_000;
+      if (idealNotifyAt > now) {
+        // Ideal time is still in the future — use it regardless of what AI returned
+        n.notifyAt = new Date(idealNotifyAt).toISOString();
+      }
+      // If idealNotifyAt already passed, keep AI's decision (immediate is correct)
+    }
+
+    return notifications;
   }
 
   // --- Notification queue ---
