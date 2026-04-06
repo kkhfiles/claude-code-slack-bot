@@ -529,7 +529,6 @@ export class AssistantScheduler {
       workingDirectory: this.workingDir,
       model: 'claude-haiku-4-5-20251001',
       permissionMode: 'default',
-      maxBudgetUsd: this.config?.briefing.maxBudgetUsd || 1.00,
       allowedTools,
       noSessionPersistence: true,
       skipMcp: true,
@@ -620,36 +619,16 @@ export class AssistantScheduler {
     const groups = this.groupTypesBySchedule();
 
     for (const [schedule, types] of groups) {
-      const nextFire = this.getNextAnalysisTime(schedule);
-      const msUntil = nextFire.getTime() - Date.now();
-
-      this.logger.info('Scheduled analysis group', {
-        schedule,
-        types,
-        nextFire: nextFire.toISOString(),
-      });
-
-      const timer = setTimeout(async () => {
-        try {
-          await this.runAnalysisGroup(types);
-        } catch (error) {
-          this.logger.error('Analysis run failed', { schedule, error });
-        }
-        // Reschedule this group
-        this.analysisTimers.delete(schedule);
-        this.scheduleAnalysisGroup(schedule, types);
-      }, msUntil);
-
-      this.analysisTimers.set(schedule, timer);
+      this.scheduleAnalysisGroup(schedule, types);
     }
   }
 
-  /** Schedule a single analysis group (used for rescheduling after completion). */
+  /** Schedule a single analysis group (used for initial scheduling and rescheduling). */
   private scheduleAnalysisGroup(schedule: string, types: string[]): void {
     const nextFire = this.getNextAnalysisTime(schedule);
     const msUntil = nextFire.getTime() - Date.now();
 
-    this.logger.info('Rescheduled analysis group', {
+    this.logger.info('Scheduled analysis group', {
       schedule,
       types,
       nextFire: nextFire.toISOString(),
@@ -657,10 +636,11 @@ export class AssistantScheduler {
 
     const timer = setTimeout(async () => {
       try {
-        await this.runAnalysisGroup(types);
+        await this.runAnalysisGroup(schedule, types);
       } catch (error) {
         this.logger.error('Analysis run failed', { schedule, error });
       }
+      // Reschedule for next regular occurrence
       this.analysisTimers.delete(schedule);
       this.scheduleAnalysisGroup(schedule, types);
     }, msUntil);
@@ -692,37 +672,34 @@ export class AssistantScheduler {
       .map(([type]) => type);
   }
 
-  private async runAnalysisGroup(types: string[]): Promise<void> {
+  private async runAnalysisGroup(schedule: string, types: string[]): Promise<void> {
     if (!this.config) return;
 
-    // Single-type group uses its own sessionBudget; multi-type group shares analysis.budgetUsd
-    const isSingle = types.length === 1;
-    const typeConfig = isSingle ? this.config.analysis.types[types[0]] : undefined;
-    let remainingBudget = isSingle
-      ? (typeConfig?.sessionBudgetUsd ?? this.config.analysis.defaults.sessionBudgetUsd)
-      : (this.config.analysis.budgetUsd ?? 5.00);
-
+    const isDaily = schedule.startsWith('daily');
     const completedTypes: string[] = [];
+    const failedRetryTypes: { type: string; sessionId: string }[] = [];
 
     for (const type of types) {
-      if (remainingBudget <= 0.01) {
-        this.logger.warn(`Analysis budget exhausted, skipping: ${type}`, {
-          remainingBudget,
-        });
-        break;
-      }
-
       try {
-        remainingBudget = await this.runSingleAnalysis(type, remainingBudget);
-        if (remainingBudget < 0) {
-          remainingBudget = 0;
-          break;
+        const result = await this.runSingleAnalysis(type);
+        if (result.rateLimited) {
+          this.logger.warn(`Analysis ${type} hit session limit`);
+
+          // Daily: no retry (data-sync 등)
+          // Weekly 또는 retryOnLimit=true: schedule retry
+          const typeConfig = this.config.analysis.types[type];
+          const shouldRetry = !isDaily && typeConfig?.retryOnLimit !== false;
+
+          if (shouldRetry && result.sessionId) {
+            failedRetryTypes.push({ type, sessionId: result.sessionId });
+          }
+          break; // Stop remaining types in this group
         }
         completedTypes.push(type);
       } catch (error) {
         const msg = (error as Error).message || '';
         if (isRateLimitText(msg)) {
-          this.logger.warn(`Analysis ${type} hit rate limit, stopping all analyses`);
+          this.logger.warn(`Analysis ${type} hit rate limit, stopping group`);
           break;
         }
         errorCollector.add('AssistantScheduler', `분석 실행 실패 (${type}): ${msg}`);
@@ -730,70 +707,95 @@ export class AssistantScheduler {
       }
     }
 
-    const label = isSingle ? '야간 동기화' : '주간 분석';
+    const label = isDaily ? '야간 동기화' : '주간 분석';
     await this.sendMessage(
       `📊 ${label} 완료: ${completedTypes.join(', ') || '(없음)'}`,
     ).catch(() => {});
+
+    // Schedule retry for session-limit failures (weekly only)
+    if (failedRetryTypes.length > 0) {
+      const retryTime = this.getNextHourPlus5Min();
+      const msUntil = retryTime.getTime() - Date.now();
+      const retryTypes = failedRetryTypes.map(f => f.type);
+
+      this.logger.info('Scheduling retry for session-limited types', {
+        types: retryTypes,
+        retryTime: retryTime.toISOString(),
+      });
+      await this.sendMessage(
+        `⏳ 세션 리미트 초과: ${retryTypes.join(', ')} → ${retryTime.toLocaleTimeString('ko-KR')} 재시도 예정`,
+      ).catch(() => {});
+
+      const retryTimerKey = `retry-${schedule}`;
+      const retryTimer = setTimeout(async () => {
+        this.analysisTimers.delete(retryTimerKey);
+        for (const { type, sessionId } of failedRetryTypes) {
+          try {
+            this.logger.info(`Retrying analysis: ${type}`, { sessionId });
+            await this.runSingleAnalysis(type, sessionId);
+          } catch (error) {
+            this.logger.error(`Retry failed for: ${type}`, error);
+          }
+        }
+        await this.sendMessage(
+          `📊 재시도 완료: ${retryTypes.join(', ')}`,
+        ).catch(() => {});
+      }, msUntil);
+
+      this.analysisTimers.set(retryTimerKey, retryTimer);
+    }
   }
 
-  private async runSingleAnalysis(type: string, remainingBudget: number): Promise<number> {
+  /** Calculate next hour + 5 minutes (retry buffer). */
+  private getNextHourPlus5Min(): Date {
+    const next = new Date();
+    next.setHours(next.getHours() + 1, 5, 0, 0);
+    return next;
+  }
+
+  private async runSingleAnalysis(
+    type: string,
+    resumeSessionId?: string,
+  ): Promise<{ rateLimited: boolean; sessionId?: string }> {
     const promptPath = path.join(this.promptsDir, `analysis-${type}.md`);
     if (!fs.existsSync(promptPath)) {
       this.logger.warn(`Analysis prompt not found: ${promptPath}`);
-      return remainingBudget;
+      return { rateLimited: false };
     }
 
     const prompt = fs.readFileSync(promptPath, 'utf-8');
-    const analysis = this.config!.analysis;
-    const defaults = analysis.defaults;
-    const typeConfig = analysis.types[type];
-    const sessionBudget = typeConfig?.sessionBudgetUsd ?? defaults.sessionBudgetUsd;
+    const defaults = this.config!.analysis.defaults;
+    const typeConfig = this.config!.analysis.types[type];
     const allowedTools = typeConfig?.allowedTools ?? defaults.allowedTools;
     const writablePaths = typeConfig?.writablePaths ?? defaults.writablePaths;
-    let sessionId: string | undefined;
 
-    while (remainingBudget > 0.01) {
-      const perSession = Math.min(remainingBudget, sessionBudget);
+    const result = await this.spawnSession(
+      resumeSessionId ? 'continue' : prompt,
+      {
+        workingDirectory: this.workingDir,
+        permissionMode: 'default',
+        allowedTools,
+        appendSystemPrompt: `CRITICAL: ${writablePaths.join(', ')} 디렉토리에만 새 파일 생성/수정. 그 외 파일 수정/삭제 금지.`,
+        env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1' },
+        resumeSessionId,
+        skipMcp: true,
+      },
+    );
 
-      const result = await this.spawnSession(
-        sessionId ? 'continue' : prompt,
-        {
-          workingDirectory: this.workingDir,
-          permissionMode: 'default',
-          maxBudgetUsd: perSession,
-          allowedTools,
-          appendSystemPrompt: `CRITICAL: ${writablePaths.join(', ')} 디렉토리에만 새 파일 생성/수정. 그 외 파일 수정/삭제 금지.`,
-          env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1' },
-          resumeSessionId: sessionId,
-          skipMcp: true,
-        },
-      );
+    this.recordCost(`analysis-${type}`, result.costUsd, result.sessionId);
 
-      remainingBudget -= result.costUsd;
-      this.recordCost(`analysis-${type}`, result.costUsd, result.sessionId);
-      sessionId = result.sessionId;
+    this.logger.info('Analysis session completed', {
+      type,
+      subtype: result.subtype,
+      costUsd: result.costUsd.toFixed(4),
+    });
 
-      this.logger.info(`Analysis session completed`, {
-        type,
-        subtype: result.subtype,
-        costUsd: result.costUsd.toFixed(4),
-        remainingBudget: remainingBudget.toFixed(2),
-      });
-
-      // Rate limit → stop all analyses (return negative to signal caller)
-      if (isRateLimitText(result.text)) {
-        this.logger.warn(`Analysis ${type} hit rate limit, stopping all analyses`);
-        return -1;
-      }
-      // Normal completion
-      if (result.subtype === 'success') break;
-      // Budget hit → resume if budget remains
-      if (result.subtype === 'error_max_budget_usd') continue;
-      // Other error → stop
-      break;
+    // Rate limit / session limit detection
+    if (isRateLimitText(result.text) || result.subtype === 'error_max_budget_usd') {
+      return { rateLimited: true, sessionId: result.sessionId };
     }
 
-    return remainingBudget;
+    return { rateLimited: false, sessionId: result.sessionId };
   }
 
   // --- Date/time utilities ---
