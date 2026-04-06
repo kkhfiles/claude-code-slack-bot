@@ -128,7 +128,7 @@ update.bat                    # Windows
 - 완료 시 도구 사용 요약 표시 (`toolUsageCounts` → `✅ Task completed (Grep ×5, Read ×2)`)
 - 로깅은 `Logger` 클래스 사용 (`this.logger.info/debug/warn/error`)
 - **시스템 메모리 워치독**: `ProcessMemoryWatchdog` — Windows 시스템 커밋 메모리 감시
-  - 30초 간격으로 시스템 커밋 사용률 체크 (PowerShell `Get-CimInstance Win32_OperatingSystem`)
+  - 5분 간격으로 시스템 커밋 사용률 체크 (PowerShell `Get-CimInstance Win32_OperatingSystem`)
   - 커밋 사용률 > 임계값(기본 80%) 시 가장 큰 프로세스 대상 Slack 확인 메시지 (Kill/Ignore 버튼)
   - 5분 무응답 시 자동 kill, 다음 주기에 재평가 → 여전히 초과이면 다음 대상
   - 시스템 프로세스 보호 목록 (svchost, dwm, csrss 등) + 자기 자신(봇) 제외
