@@ -214,6 +214,11 @@ export class CliProcess {
   get pid(): number | undefined {
     return this.proc.pid;
   }
+
+  /** Whether the process has exited */
+  get isDone(): boolean {
+    return this.done;
+  }
 }
 
 // --- Persisted session state ---

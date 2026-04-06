@@ -362,6 +362,28 @@ const messages: Record<string, Record<Locale, string>> = {
     en: 'Assistant not configured. Set `ASSISTANT_DM_CHANNEL` and `ASSISTANT_CONFIG_DIR` in `.env`',
     ko: '어시스턴트 미설정. `.env`에 `ASSISTANT_DM_CHANNEL`, `ASSISTANT_CONFIG_DIR` 설정 필요',
   },
+
+  // Memory watchdog
+  'watchdog.confirm': {
+    en: ':warning: *System Memory Warning*\nCommit memory: {{committedMB}} MB / {{limitMB}} MB ({{pct}}%)\n\nTarget: `{{name}}` (PID {{pid}}, {{commitMB}} MB)\nAuto-kill in {{minutes}} min if no response.',
+    ko: ':warning: *시스템 메모리 경고*\n커밋 메모리: {{committedMB}} MB / {{limitMB}} MB ({{pct}}%)\n\n대상: `{{name}}` (PID {{pid}}, {{commitMB}} MB)\n{{minutes}}분 후 응답 없으면 자동 종료.',
+  },
+  'watchdog.killed': {
+    en: ':skull: `{{name}}` (PID {{pid}}) killed — {{commitMB}} MB reclaimed.',
+    ko: ':skull: `{{name}}` (PID {{pid}}) 종료됨 — {{commitMB}} MB 회수.',
+  },
+  'watchdog.ignored': {
+    en: ':white_check_mark: `{{name}}` (PID {{pid}}) — kept.',
+    ko: ':white_check_mark: `{{name}}` (PID {{pid}}) — 유지.',
+  },
+  'watchdog.autoKill': {
+    en: ':skull: `{{name}}` (PID {{pid}}) auto-killed — no response in {{minutes}} min ({{commitMB}} MB).',
+    ko: ':skull: `{{name}}` (PID {{pid}}) 자동 종료됨 — {{minutes}}분간 응답 없음 ({{commitMB}} MB).',
+  },
+  'watchdog.alreadyGone': {
+    en: ':white_check_mark: `{{name}}` (PID {{pid}}) — already exited.',
+    ko: ':white_check_mark: `{{name}}` (PID {{pid}}) — 이미 종료됨.',
+  },
 };
 
 /**
