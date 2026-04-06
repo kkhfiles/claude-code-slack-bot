@@ -33,7 +33,8 @@ export interface AssistantConfig {
     };
     types: Record<string, {
       enabled: boolean;
-      tools?: string[];          // type-specific data (e.g. competitors.tools)
+      schedule?: string;           // per-type schedule override (e.g. "daily-02:00")
+      tools?: string[];            // type-specific data (e.g. competitors.tools)
       allowedTools?: string[];
       writablePaths?: string[];
       sessionBudgetUsd?: number;
@@ -104,7 +105,7 @@ export class AssistantScheduler {
 
   // Timers
   private briefingTimer: ReturnType<typeof setTimeout> | null = null;
-  private analysisTimer: ReturnType<typeof setTimeout> | null = null;
+  private analysisTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
 
   // File watcher debounce (account-manager.ts:59-62 pattern)
@@ -367,10 +368,10 @@ export class AssistantScheduler {
       this.calendarPoller.stop();
       this.calendarPoller = null;
     }
-    if (this.analysisTimer) {
-      clearTimeout(this.analysisTimer);
-      this.analysisTimer = null;
+    for (const timer of this.analysisTimers.values()) {
+      clearTimeout(timer);
     }
+    this.analysisTimers.clear();
   }
 
   // --- Briefing ---
@@ -611,27 +612,76 @@ export class AssistantScheduler {
 
   // --- Analysis ---
 
-  /** Schedule next analysis run (e.g., "saturday-03:00"). */
+  /** Schedule analysis runs, grouping types by their schedule. */
   private scheduleAnalysis(): void {
     if (!this.config) return;
 
-    const nextFire = this.getNextAnalysisTime();
+    // Group enabled types by schedule
+    const groups = this.groupTypesBySchedule();
+
+    for (const [schedule, types] of groups) {
+      const nextFire = this.getNextAnalysisTime(schedule);
+      const msUntil = nextFire.getTime() - Date.now();
+
+      this.logger.info('Scheduled analysis group', {
+        schedule,
+        types,
+        nextFire: nextFire.toISOString(),
+      });
+
+      const timer = setTimeout(async () => {
+        try {
+          await this.runAnalysisGroup(types);
+        } catch (error) {
+          this.logger.error('Analysis run failed', { schedule, error });
+        }
+        // Reschedule this group
+        this.analysisTimers.delete(schedule);
+        this.scheduleAnalysisGroup(schedule, types);
+      }, msUntil);
+
+      this.analysisTimers.set(schedule, timer);
+    }
+  }
+
+  /** Schedule a single analysis group (used for rescheduling after completion). */
+  private scheduleAnalysisGroup(schedule: string, types: string[]): void {
+    const nextFire = this.getNextAnalysisTime(schedule);
     const msUntil = nextFire.getTime() - Date.now();
 
-    this.logger.info('Scheduled analysis', {
-      schedule: this.config.analysis.schedule,
+    this.logger.info('Rescheduled analysis group', {
+      schedule,
+      types,
       nextFire: nextFire.toISOString(),
     });
 
-    this.analysisTimer = setTimeout(async () => {
+    const timer = setTimeout(async () => {
       try {
-        await this.runAnalysis();
+        await this.runAnalysisGroup(types);
       } catch (error) {
-        this.logger.error('Analysis run failed', error);
+        this.logger.error('Analysis run failed', { schedule, error });
       }
-      // Reschedule for next week
-      this.scheduleAnalysis();
+      this.analysisTimers.delete(schedule);
+      this.scheduleAnalysisGroup(schedule, types);
     }, msUntil);
+
+    this.analysisTimers.set(schedule, timer);
+  }
+
+  /** Group enabled analysis types by their schedule string. */
+  private groupTypesBySchedule(): Map<string, string[]> {
+    if (!this.config) return new Map();
+    const defaultSchedule = this.config.analysis.schedule;
+    const groups = new Map<string, string[]>();
+
+    for (const [type, cfg] of Object.entries(this.config.analysis.types)) {
+      if (!cfg.enabled) continue;
+      const schedule = cfg.schedule || defaultSchedule;
+      const list = groups.get(schedule) || [];
+      list.push(type);
+      groups.set(schedule, list);
+    }
+    return groups;
   }
 
   /** Get enabled analysis types from either new (types) or legacy (enabled) config format. */
@@ -642,14 +692,19 @@ export class AssistantScheduler {
       .map(([type]) => type);
   }
 
-  private async runAnalysis(): Promise<void> {
+  private async runAnalysisGroup(types: string[]): Promise<void> {
     if (!this.config) return;
-    const enabledTypes = this.getEnabledAnalysisTypes();
 
-    let remainingBudget = this.config.analysis.budgetUsd ?? 5.00;
+    // Single-type group uses its own sessionBudget; multi-type group shares analysis.budgetUsd
+    const isSingle = types.length === 1;
+    const typeConfig = isSingle ? this.config.analysis.types[types[0]] : undefined;
+    let remainingBudget = isSingle
+      ? (typeConfig?.sessionBudgetUsd ?? this.config.analysis.defaults.sessionBudgetUsd)
+      : (this.config.analysis.budgetUsd ?? 5.00);
+
     const completedTypes: string[] = [];
 
-    for (const type of enabledTypes) {
+    for (const type of types) {
       if (remainingBudget <= 0.01) {
         this.logger.warn(`Analysis budget exhausted, skipping: ${type}`, {
           remainingBudget,
@@ -660,7 +715,6 @@ export class AssistantScheduler {
       try {
         remainingBudget = await this.runSingleAnalysis(type, remainingBudget);
         if (remainingBudget < 0) {
-          // Rate limit hit — stop all remaining analyses
           remainingBudget = 0;
           break;
         }
@@ -676,10 +730,9 @@ export class AssistantScheduler {
       }
     }
 
-    const totalBudget = this.config.analysis.budgetUsd ?? 5.00;
-    const spent = totalBudget - remainingBudget;
+    const label = isSingle ? '야간 동기화' : '주간 분석';
     await this.sendMessage(
-      `📊 주간 분석 완료: ${completedTypes.join(', ')} ($${spent.toFixed(2)} / $${totalBudget.toFixed(2)})`,
+      `📊 ${label} 완료: ${completedTypes.join(', ') || '(없음)'}`,
     ).catch(() => {});
   }
 
@@ -778,25 +831,36 @@ export class AssistantScheduler {
     return next;
   }
 
-  /** Get next analysis time based on schedule like "saturday-03:00". */
-  private getNextAnalysisTime(): Date {
-    if (!this.config) return new Date();
-
-    const [dayStr, timeStr] = this.config.analysis.schedule.split('-');
+  /** Get next analysis time based on schedule like "saturday-03:00" or "daily-02:00". */
+  private getNextAnalysisTime(schedule: string): Date {
+    // Split on first '-' only: "daily-02:00" → ["daily", "02:00"], "wednesday-20:00" → ["wednesday", "20:00"]
+    const dashIdx = schedule.indexOf('-');
+    const dayStr = schedule.substring(0, dashIdx);
+    const timeStr = schedule.substring(dashIdx + 1);
     const [h, m] = timeStr.split(':').map(Number);
-    const targetDay = this.dayNameToNumber(dayStr);
 
     const now = new Date();
     const next = new Date(now);
     next.setHours(h, m, 0, 0);
 
-    // Find the next occurrence of target day
-    const currentDay = now.getDay();
-    let daysUntil = targetDay - currentDay;
-    if (daysUntil < 0 || (daysUntil === 0 && next <= now)) {
-      daysUntil += 7;
+    if (dayStr.toLowerCase() === 'daily') {
+      // Daily: next working day at the specified time
+      if (next <= now) {
+        next.setDate(next.getDate() + 1);
+      }
+      while (this.isNonWorkingDay(next).skip) {
+        next.setDate(next.getDate() + 1);
+      }
+    } else {
+      // Weekly: next occurrence of target day
+      const targetDay = this.dayNameToNumber(dayStr);
+      const currentDay = now.getDay();
+      let daysUntil = targetDay - currentDay;
+      if (daysUntil < 0 || (daysUntil === 0 && next <= now)) {
+        daysUntil += 7;
+      }
+      next.setDate(next.getDate() + daysUntil);
     }
-    next.setDate(next.getDate() + daysUntil);
 
     return next;
   }
