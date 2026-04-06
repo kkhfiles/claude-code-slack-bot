@@ -96,6 +96,7 @@ update.bat                    # Windows
   - 토큰 공유: `~/.config/google-calendar-mcp/tokens.json` (MCP 서버와 동일)
   - 어시스턴트 세션은 `skipMcp: true`로 MCP 서버 연결 건너뜀
   - 알림 뮤트: 🔇 버튼으로 반복 일정 알림 끄기 (`.calendar-muted-events.json`, base eventId로 시리즈 매칭)
+  - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
 - `-report [type]`/`-rp [type]`: reports/ 하위 디렉토리 재귀 탐색, Slack 파일 업로드 (`filesUploadV2`, `files:write` 스코프 필요), 절대 경로 + 요약 표시, 업로드 실패 시 텍스트 fallback
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
@@ -126,6 +127,13 @@ update.bat                    # Windows
 - CLI `is_error` 감지: `cliError` 플래그 추적 → 에러 시 ❌ 리액션 + `status.errorOccurred` 표시
 - 완료 시 도구 사용 요약 표시 (`toolUsageCounts` → `✅ Task completed (Grep ×5, Read ×2)`)
 - 로깅은 `Logger` 클래스 사용 (`this.logger.info/debug/warn/error`)
+- **시스템 메모리 워치독**: `ProcessMemoryWatchdog` — Windows 시스템 커밋 메모리 감시
+  - 30초 간격으로 시스템 커밋 사용률 체크 (PowerShell `Get-CimInstance Win32_OperatingSystem`)
+  - 커밋 사용률 > 임계값(기본 80%) 시 가장 큰 프로세스 대상 Slack 확인 메시지 (Kill/Ignore 버튼)
+  - 5분 무응답 시 자동 kill, 다음 주기에 재평가 → 여전히 초과이면 다음 대상
+  - 시스템 프로세스 보호 목록 (svchost, dwm, csrss 등) + 자기 자신(봇) 제외
+  - `ASSISTANT_DM_CHANNEL`로 알림 전송, Windows 전용 (`process.platform === 'win32'`)
+  - 환경변수: `MEMORY_WATCHDOG_ENABLED`, `MEMORY_WATCHDOG_THRESHOLD_PCT`, `MEMORY_WATCHDOG_INTERVAL_SEC`, `MEMORY_WATCHDOG_AUTO_KILL_SEC`
 
 ### CLI Integration
 - `child_process.spawn('claude', ['-p', '--output-format', 'stream-json', ...])` 방식
@@ -215,6 +223,7 @@ git checkout -b feature/<name>
 | `src/account-manager.ts` | 다중 계정 관리 — OAuth 토큰 저장/갱신, env var 주입 방식 전환 |
 | `src/version.ts` | 버전 정보 + 업데이트 체크 (`getVersionInfo()`, `checkForUpdates()`) |
 | `src/rate-limit-utils.ts` | 공유 rate limit 감지 유틸 (`isRateLimitText()`, `isRateLimitError()`) |
+| `src/process-memory-watchdog.ts` | 시스템 메모리 워치독 — 커밋 메모리 감시, 프로세스 kill, Slack 확인 UI |
 | `src/config.ts` | 환경변수 로드 |
 | `src/types.ts` | TypeScript 타입 정의 |
 | `src/logger.ts` | 구조화된 로깅 |

@@ -18,6 +18,7 @@ import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
+import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 
 interface MessageEvent {
   user: string;
@@ -107,6 +108,9 @@ export class SlackHandler {
   private pendingAccountSetups: Map<string, { slot: AccountId; originalToken: string | null; locale: Locale }> = new Map();
   private notifiedUnhealthyAccounts = new Set<string>(); // Prevent repeated token expiry notifications
 
+  // System memory watchdog
+  private memoryWatchdog: ProcessMemoryWatchdog | null = null;
+
   constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager) {
     this.app = app;
     this.cliHandler = cliHandler;
@@ -128,6 +132,40 @@ export class SlackHandler {
         },
         async (prompt, opts) => this.runAssistantSession(prompt, opts),
         config.assistant.configDir,
+      );
+    }
+
+    // Initialize system memory watchdog (Windows only)
+    if (config.memoryWatchdog.enabled && process.platform === 'win32' && config.assistant.dmChannel) {
+      this.memoryWatchdog = new ProcessMemoryWatchdog(
+        config.memoryWatchdog.thresholdPct,
+        config.memoryWatchdog.checkIntervalSec,
+        config.memoryWatchdog.autoKillDelaySec,
+        async (text, blocks?) => {
+          const result = await this.app.client.chat.postMessage({
+            channel: config.assistant.dmChannel,
+            text,
+            ...(blocks ? { blocks } : {}),
+          });
+          return result.ts as string;
+        },
+        async (ts, text, blocks?) => {
+          await this.app.client.chat.update({
+            channel: config.assistant.dmChannel,
+            ts,
+            text,
+            ...(blocks ? { blocks } : {}),
+          });
+        },
+        (pid) => {
+          // Clean up bot's active process if the killed PID matches
+          for (const [key, proc] of this.activeProcesses) {
+            if (proc.pid === pid) {
+              this.activeProcesses.delete(key);
+              break;
+            }
+          }
+        },
       );
     }
   }
@@ -3190,6 +3228,23 @@ export class SlackHandler {
         this.logger.error('Initial token health check failed', err),
       );
     }, 30 * 1000);
+
+    // System memory watchdog
+    if (this.memoryWatchdog) {
+      this.memoryWatchdog.start();
+
+      this.app.action('watchdog_kill', async ({ ack, body }) => {
+        await ack();
+        const pid = parseInt((body as any).actions[0].value, 10);
+        await this.memoryWatchdog?.handleKillAction(pid);
+      });
+
+      this.app.action('watchdog_ignore', async ({ ack, body }) => {
+        await ack();
+        const pid = parseInt((body as any).actions[0].value, 10);
+        await this.memoryWatchdog?.handleIgnoreAction(pid);
+      });
+    }
   }
 
   private async checkTokenHealth(): Promise<void> {

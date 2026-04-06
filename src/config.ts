@@ -22,6 +22,12 @@ export const config = {
     dmChannel: process.env.ASSISTANT_DM_CHANNEL || '',
     configDir: process.env.ASSISTANT_CONFIG_DIR || '',
   },
+  memoryWatchdog: {
+    enabled: process.env.MEMORY_WATCHDOG_ENABLED !== '0',
+    thresholdPct: parseInt(process.env.MEMORY_WATCHDOG_THRESHOLD_PCT || '80', 10),
+    checkIntervalSec: parseInt(process.env.MEMORY_WATCHDOG_INTERVAL_SEC || '300', 10),
+    autoKillDelaySec: parseInt(process.env.MEMORY_WATCHDOG_AUTO_KILL_SEC || '300', 10),
+  },
 };
 
 export function validateConfig() {
