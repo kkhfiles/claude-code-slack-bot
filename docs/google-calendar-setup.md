@@ -38,7 +38,9 @@ Claude Code's platform MCP tools (`mcp__claude_ai_*`) are not available in `-p` 
 6. **Test users**: Add your Google account email
 7. Click **Save and Continue**
 
-> **Note**: In test mode, OAuth tokens expire after 7 days. For production use, submit the app for verification.
+> **Important**: In test mode, OAuth refresh tokens expire after 7 days (`invalid_grant` error). You **must** publish the app to production to avoid this:
+>
+> Go to **Audience** (left sidebar) → click **Publish app**. This is free and does not require Google verification for personal-use apps. After publishing, re-authenticate (Step 7) to get a non-expiring refresh token.
 
 ## Step 4: Create OAuth Credentials
 
@@ -166,15 +168,18 @@ Test with `-briefing` command in Slack.
 
 ## Troubleshooting
 
-### Token Expired
+### Token Expired (`invalid_grant`)
 
-If you see authentication errors after 7 days (test mode):
+If you see `invalid_grant` errors, your refresh token has expired. This happens when the GCP app is in **Testing** mode (7-day token expiry).
 
-```bash
-npx -y @cocal/google-calendar-mcp auth
-```
+**Fix:**
+1. Publish the app: Google Cloud Console → Audience → **Publish app**
+2. Re-authenticate:
+   ```bash
+   GOOGLE_OAUTH_CREDENTIALS="$HOME/.claude/google-calendar-credentials.json" npx -y @cocal/google-calendar-mcp auth
+   ```
 
-Re-authenticate and tokens will be refreshed.
+After publishing, refresh tokens do not expire (unless manually revoked).
 
 ### Wrong Calendar
 
