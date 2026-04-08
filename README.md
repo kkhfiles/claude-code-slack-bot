@@ -371,6 +371,156 @@ CLAUDE_CODE_USE_VERTEX=1
 # Requires Google Cloud authentication
 ```
 
+## Optional Features Setup
+
+All optional features are **gracefully disabled** when not configured — the core bot works out of the box with just Slack tokens and `BASE_DIRECTORY`.
+
+### Assistant Scheduler (Briefing, Reminders, Analysis)
+
+Automates daily briefings, Google Calendar reminders, and weekly analysis reports.
+
+**Requirements:**
+- `ASSISTANT_DM_CHANNEL` — Slack DM channel ID for bot notifications (find via right-click channel > Copy link)
+- `ASSISTANT_CONFIG_DIR` — Path to a directory containing `config.json` and prompt templates
+
+**Config directory structure:**
+```
+assistant/
+├── config.json              # Main configuration
+└── prompts/
+    ├── morning-briefing.md  # Briefing prompt template
+    ├── calendar-judgment.md # Calendar reminder AI judgment prompt
+    └── analysis-*.md        # Weekly analysis prompts (one per type)
+```
+
+**Example `config.json`:**
+```json
+{
+  "briefing": {
+    "time": "08:00",
+    "enabled": true,
+    "maxBudgetUsd": 1.00,
+    "excludeCalendars": ["Holidays", "Birthdays"]
+  },
+  "reminders": {
+    "beforeMinutes": 15,
+    "pollingIntervalMinutes": 5,
+    "enabled": true,
+    "maxBudgetUsd": 0.05,
+    "workingHoursStart": "08:00",
+    "workingHoursEnd": "20:00"
+  },
+  "analysis": {
+    "schedule": "wednesday-20:00",
+    "deliveryTime": "08:30",
+    "budgetUsd": 5.00,
+    "defaults": {
+      "allowedTools": ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "Write"],
+      "writablePaths": ["reports/"]
+    },
+    "types": {
+      "ai-practice": { "enabled": true },
+      "competitors": { "enabled": true },
+      "session-efficiency": { "enabled": true },
+      "dependency-health": { "enabled": true }
+    }
+  }
+}
+```
+
+Changes to `config.json` are auto-detected (file watcher, 10s interval) — no restart needed.
+
+### Google Calendar Integration
+
+Enables calendar event creation, reminders, and briefing with calendar data. See [docs/google-calendar-setup.md](docs/google-calendar-setup.md) for the full setup guide.
+
+**Quick summary:**
+1. Create a GCP project and enable Google Calendar API
+2. Create OAuth credentials (Desktop app) and save to `~/.claude/google-calendar-credentials.json`
+3. **Publish the app** in Google Cloud Console → Audience → Publish app (otherwise refresh tokens expire after 7 days)
+4. Authenticate: `GOOGLE_OAUTH_CREDENTIALS="$HOME/.claude/gcp-oauth.keys.json" npx @cocal/google-calendar-mcp auth`
+5. Create `mcp-servers.json` in project root (see [docs/google-calendar-setup.md](docs/google-calendar-setup.md#step-6-configure-mcp-server))
+
+**Features unlocked:**
+- Ask Claude to create/update/delete events on any of your calendars via natural language
+- `CalendarPoller`: 5-min polling with AI-powered reminders during working hours
+- Morning briefing includes today's calendar agenda
+
+### Multi-Account Management
+
+Register up to 3 Claude accounts for rate limit rotation and seamless switching.
+
+**Setup:**
+1. Log in to your first Claude account: `claude login`
+2. In Slack, run `-account` → click **Set** on a slot → credentials are captured from `~/.claude/.credentials.json`
+3. Repeat for additional accounts (log in via terminal, then capture in Slack)
+
+**How it works:**
+- Tokens are stored in `~/.claude/.bot-accounts.json` (auto-created, in `.gitignore`)
+- Active account is injected via `CLAUDE_CODE_OAUTH_TOKEN` environment variable
+- Token health is checked hourly with auto-refresh (OAuth rotation)
+- Terminal CLI and bot stay in sync via bidirectional file watching
+
+### System Memory Watchdog (Windows only)
+
+Monitors system commit memory to prevent OOM crashes from runaway processes.
+
+**Requirements:**
+- Windows only (uses PowerShell `Get-CimInstance`)
+- `ASSISTANT_DM_CHANNEL` must be set (notifications go to this channel)
+
+**Environment variables (all optional):**
+```env
+MEMORY_WATCHDOG_ENABLED=1           # 0 to disable (default: enabled)
+MEMORY_WATCHDOG_THRESHOLD_PCT=80    # System commit % to trigger alert
+MEMORY_WATCHDOG_INTERVAL_SEC=300    # Check interval (default: 5 min)
+MEMORY_WATCHDOG_AUTO_KILL_SEC=300   # Auto-kill if no response (default: 5 min)
+```
+
+When triggered, sends a Slack message with Kill/Ignore buttons. Auto-kills the largest non-system process after the timeout if no response.
+
+### Session Auto-Start
+
+Schedule automatic session starts to maximize Claude Pro/Max session windows.
+
+**Setup:** Use `-schedule` in Slack — no environment variables needed. The block-based UI lets you add/remove times per account.
+
+**Behavior:**
+- Randomized jitter (+5~25 min) to avoid automation detection
+- Auto follow-up 5 hours later for the next session window
+- Non-working day skip (weekends + public holidays)
+- Persisted in `.schedule-config.json`
+
+## Known Limitations & Customization Notes
+
+### Holiday Calendar
+
+Public holiday detection is currently hardcoded to **South Korea** (`Holidays('KR')`) in `assistant-scheduler.ts` and `schedule-manager.ts`. To use a different country:
+
+1. Edit `src/assistant-scheduler.ts` line 121: `new Holidays('KR')` → `new Holidays('US')` (or your [ISO 3166-1 country code](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2))
+2. Edit `src/schedule-manager.ts` line 37: same change
+3. Rebuild: `npm run build && pm2 restart claude-slack-bot`
+
+> **Future improvement**: This should be configurable via environment variable (e.g., `HOLIDAYS_COUNTRY=US`). Contributions welcome.
+
+### Platform-Specific Features
+
+| Feature | Windows | macOS | Linux |
+|---------|---------|-------|-------|
+| Core bot | ✅ | ✅ | ✅ |
+| Session management | ✅ | ✅ | ✅ |
+| Assistant scheduler | ✅ | ✅ | ✅ |
+| Calendar integration | ✅ | ✅ | ✅ |
+| Memory watchdog | ✅ | — | — |
+
+### Prompt Templates
+
+The assistant scheduler requires prompt template files in `ASSISTANT_CONFIG_DIR/prompts/`. These are not included in the repository since they contain user-specific instructions (work context, preferences, etc.). You need to write your own prompts for:
+
+- **Morning briefing** (`morning-briefing.md`) — What information to include in your daily summary
+- **Calendar judgment** (`calendar-judgment.md`) — How to decide which events need reminders
+- **Analysis types** (`analysis-*.md`) — What to analyze weekly (one file per analysis type)
+
 ## Project Structure
 
 ```
@@ -389,6 +539,10 @@ src/
 ├── messages.ts                  # i18n translation catalog (ko/en)
 ├── todo-manager.ts              # Task list management
 ├── mcp-manager.ts               # MCP server management
+├── calendar-poller.ts           # Google Calendar direct HTTP polling
+├── error-collector.ts           # Error collection for briefing reports
+├── rate-limit-utils.ts          # Shared rate limit detection
+├── process-memory-watchdog.ts   # System memory watchdog (Windows)
 ├── version.ts                   # Version info and update checker
 └── logger.ts                    # Logging utility
 ```
