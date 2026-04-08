@@ -508,7 +508,13 @@ export class AssistantScheduler {
     }
 
     // Inject cached calendar data if available (saves MCP cost)
-    const cache = this.calendarPoller?.getCache();
+    // Validate cache is from today — stale cache shows yesterday's events
+    const today = new Date().toISOString().substring(0, 10);
+    let cache = this.calendarPoller?.getCache();
+    if (cache && !cache.fetchedAt.startsWith(today)) {
+      this.logger.info('Calendar cache is stale (not today), refreshing...');
+      cache = await this.calendarPoller?.refreshCache() ?? null;
+    }
     let allowedTools: string[];
 
     if (cache && cache.events.length >= 0) {
