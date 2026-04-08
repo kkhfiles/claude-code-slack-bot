@@ -214,6 +214,21 @@ export class CalendarPoller {
     return null;
   }
 
+  /** Fetch today's events and update cache. Returns fresh cache or null on failure. */
+  async refreshCache(): Promise<CalendarCache | null> {
+    const accessToken = await this.getAccessToken();
+    if (!accessToken) return null;
+
+    try {
+      const events = await this.fetchAllEvents(accessToken);
+      this.saveCache(events);
+      return this.getCache();
+    } catch (error) {
+      this.logger.error('Failed to refresh cache', error);
+      return null;
+    }
+  }
+
   // --- Token management ---
 
   private loadTokens(): GCalTokens | null {

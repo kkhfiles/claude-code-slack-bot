@@ -83,7 +83,7 @@ update.bat                    # Windows
   - 랜덤 인사 메시지 (`say "hi"`, `3+7` 등) + haiku 모델로 새 세션 시작
   - **일일 로테이션**: 2계정 교차 스케줄 시 짝수/홀수 dayOfYear로 계정 스왑 → 2주 합산 균형 (토글 버튼으로 ON/OFF)
 - `-briefing`/`-br`/`브리핑`: 모닝 브리핑 즉시 실행 (`AssistantScheduler.runBriefing()`)
-  - 캐시된 캘린더 데이터 사용 (MCP 미호출), 캐시 없으면 MCP fallback
+  - 캐시된 캘린더 데이터 사용 (MCP 미호출), 캐시 날짜가 오늘이 아니면 `refreshCache()` 호출 후 사용, 실패 시 MCP fallback
   - `ErrorCollector`에 수집된 봇 에러를 `⚠️ 시스템 이슈` 섹션으로 일괄 보고
   - **재시작 시 catch-up**: `catchUpBriefingIfNeeded()` — `.assistant-costs.json`에서 마지막 브리핑 날짜 확인, 오늘 미실행이면 15초 후 즉시 실행
   - **월요일 주간 요약**: `monday-briefing-extra.md` 프롬프트 자동 주입 (주간 비용 통계 + 보고서 요약)
