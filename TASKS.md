@@ -608,3 +608,83 @@ await say({ text: `📄 *${latestFile}*\n\`${fullPath}\`\n\n${truncated}`, threa
   - `session-efficiency` 분석 실행 → `reports/session-efficiency/2026-04-09.md` 생성 ($2.57)
 - [ ] 다음 브리핑에서 대기 보고서가 표시되는지 확인 (Slack `-briefing`으로 확인 필요)
 - [x] `npm run build` 성공
+
+---
+
+## 예약 문서 리마인더 Phase 2 — 캘린더 리마인더에 문서 내용 포함
+
+### 배경
+`claude-workflow`에 예약 문서 리마인더 기능이 구현되었다 (Phase 1 완료, 2026-04-09).
+사용자가 "정리해서 화요일 10시에 알려줘" → .md 문서 + 캘린더 이벤트 생성.
+현재 캘린더 리마인더는 이벤트 제목만 표시하고 문서 내용은 아침 브리핑에서만 전달된다.
+
+Phase 2는 캘린더 리마인더가 연결된 문서의 내용까지 포함하여 지정 시간에 완전한 알림을 보내는 것.
+
+### 규약
+- 캘린더 이벤트 설명(description)에 `[scheduled-doc] reports/scheduled/{파일명}` 태그 포함
+- 문서 위치: `P:/github/claude-workflow/reports/scheduled/{YYYY-MM-DD}-{slug}.md`
+- 문서 포맷: YAML frontmatter (title, scheduled_at, calendar_event_id) + `## 요약` + `## 상세`
+
+### 변경 사항
+
+#### 1. `src/calendar-poller.ts` — GCalEvent에 description 추가
+
+```typescript
+// GCalEvent 인터페이스에 추가
+description?: string;
+
+// fetchCalendarEvents()에서 이벤트 매핑 시 추가
+description: (item.description || '') as string,
+```
+
+#### 2. `src/calendar-poller.ts` — 이벤트 포맷팅에 description 포함
+
+`formatEventForPrompt()` 또는 diff 데이터 포맷팅 시 description 필드를 포함하여
+`calendar-judgment.md` 프롬프트가 이벤트 설명을 볼 수 있게 한다.
+
+```typescript
+// 포맷 예시
+`${event.summary} | ${event.start} ~ ${event.end} | ${event.location || ''} | desc: ${event.description || ''}`
+```
+
+#### 3. `assistant/prompts/calendar-judgment.md` — `[scheduled-doc]` 감지 규칙 추가
+
+기존 결정 기준에 추가:
+
+```
+6. 예약 문서 리마인더: 이벤트 설명에 `[scheduled-doc]`이 포함된 경우:
+   - type: "scheduled-doc"
+   - message에 문서 경로 포함: "📋 예약 문서 리마인더: {제목}\n`{문서경로}`"
+   - 해당 경로의 파일을 Read로 열어 ## 요약 섹션 내용을 message에 포함
+```
+
+출력 type에 `"scheduled-doc"` 추가:
+```
+- `type`: "upcoming" | "change" | "cancel" | "scheduled-doc"
+```
+
+#### 4. `src/assistant-scheduler.ts` — scheduled-doc 타입 알림 처리
+
+`processNotifications()` 또는 알림 전송 로직에서 `type === "scheduled-doc"` 시
+문서 파일을 읽어 내용을 Slack 메시지에 포함:
+
+```typescript
+if (notification.type === 'scheduled-doc') {
+  // notification.message에서 문서 경로 추출
+  // fs.readFileSync로 문서 읽기
+  // Slack 메시지에 요약 내용 포함
+}
+```
+
+### 검증 방법
+1. `npm run build` 성공
+2. 테스트 캘린더 이벤트 생성 (설명에 `[scheduled-doc]` 포함)
+3. 리마인더 폴링에서 이벤트 감지 → 문서 경로 추출 → 내용 포함 알림 확인
+4. 문서 없는 일반 이벤트는 기존 동작 유지 확인
+
+### 완료 조건
+- [x] `GCalEvent`에 `description` 필드 추가
+- [x] 이벤트 포맷팅에 description 포함
+- [x] `calendar-judgment.md`에 `[scheduled-doc]` 규칙 추가
+- [x] scheduled-doc 알림 시 문서 내용 포함 전송 (dispatch 시 `fs.readFileSync`로 `## 요약` 섹션 추출)
+- [x] `npm run build` 성공
