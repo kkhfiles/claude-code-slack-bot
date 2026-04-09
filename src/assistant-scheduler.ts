@@ -30,6 +30,8 @@ export interface AssistantConfig {
       sessionBudgetUsd: number;
       allowedTools: string[];
       writablePaths: string[];
+      maxDurationMinutes?: number;
+      maxRetries?: number;
     };
     types: Record<string, {
       enabled: boolean;
@@ -38,6 +40,8 @@ export interface AssistantConfig {
       allowedTools?: string[];
       writablePaths?: string[];
       sessionBudgetUsd?: number;
+      maxDurationMinutes?: number;
+      maxRetries?: number;
       [key: string]: unknown;
     }>;
   };
@@ -56,6 +60,7 @@ export interface SpawnOpts {
   skipMcp?: boolean;
   noSessionPersistence?: boolean;
   tools?: string[];
+  maxDurationMs?: number;
 }
 
 export interface SessionResult {
@@ -174,6 +179,40 @@ export class AssistantScheduler {
       text: result.text + this.formatErrorReport() + this.formatCostLine(),
       hasReports: this.hasUnreadReports(),
     };
+  }
+
+  /** Manual trigger for -analyze command. Run single type or all default-schedule types. */
+  async runAnalysisManual(type?: string): Promise<string> {
+    if (!this.config) return '⚠️ Config not loaded.';
+    const enabledTypes = this.getEnabledAnalysisTypes();
+    if (enabledTypes.length === 0) return '⚠️ No analysis types enabled.';
+
+    if (type) {
+      // Single type
+      if (!this.config.analysis.types[type]) {
+        return `⚠️ Unknown analysis type: ${type}\nAvailable: ${enabledTypes.join(', ')}`;
+      }
+      if (!this.config.analysis.types[type].enabled) {
+        return `⚠️ Analysis type '${type}' is disabled.`;
+      }
+      try {
+        const result = await this.runSingleAnalysis(type);
+        if (result.timedOut) return `⏱️ 분석 타임아웃: ${type}`;
+        if (result.rateLimited) return `⚠️ 세션 리미트 초과: ${type}`;
+        return `✅ 분석 완료: ${type} ($${result.costUsd.toFixed(4)})`;
+      } catch (error) {
+        return `❌ 분석 실패 (${type}): ${(error as Error).message}`;
+      }
+    }
+
+    // All types — run the default schedule group
+    const defaultSchedule = this.config.analysis.schedule;
+    const groups = this.groupTypesBySchedule();
+    const defaultTypes = groups.get(defaultSchedule) || [];
+    if (defaultTypes.length === 0) return '⚠️ No types in default schedule.';
+
+    await this.runAnalysisGroup(defaultSchedule, defaultTypes);
+    return '✅ 분석 실행 완료 — 결과는 위 메시지 참고';
   }
 
   /** Access CalendarPoller instance (for mute actions, etc.). */
@@ -682,41 +721,72 @@ export class AssistantScheduler {
     if (!this.config) return;
 
     const isDaily = schedule.startsWith('daily');
+    const defaults = this.config.analysis.defaults;
     const completedTypes: string[] = [];
+    const timedOutTypes: string[] = [];
     const failedRetryTypes: { type: string; sessionId: string }[] = [];
 
     for (const type of types) {
-      try {
-        const result = await this.runSingleAnalysis(type);
-        if (result.rateLimited) {
-          this.logger.warn(`Analysis ${type} hit session limit`);
+      const typeConfig = this.config.analysis.types[type];
+      const maxRetries = (typeConfig?.maxRetries as number | undefined)
+        ?? defaults.maxRetries ?? 2;
 
-          // Daily: no retry (data-sync 등)
-          // Weekly 또는 retryOnLimit=true: schedule retry
-          const typeConfig = this.config.analysis.types[type];
-          const shouldRetry = !isDaily && typeConfig?.retryOnLimit !== false;
+      let succeeded = false;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          const result = await this.runSingleAnalysis(type);
 
-          if (shouldRetry && result.sessionId) {
-            failedRetryTypes.push({ type, sessionId: result.sessionId });
+          if (result.timedOut) {
+            if (attempt < maxRetries) {
+              this.logger.warn(`Analysis ${type} timed out, retry ${attempt + 1}/${maxRetries}`);
+              continue; // Retry with fresh session (same WebFetch may hang again on resume)
+            }
+            this.logger.error(`Analysis ${type} timed out after ${attempt + 1} attempts`);
+            errorCollector.add('AssistantScheduler', `분석 타임아웃 (${type}): ${maxRetries}회 재시도 후 포기`);
+            timedOutTypes.push(type);
+            break;
           }
-          break; // Stop remaining types in this group
-        }
-        completedTypes.push(type);
-      } catch (error) {
-        const msg = (error as Error).message || '';
-        if (isRateLimitText(msg)) {
-          this.logger.warn(`Analysis ${type} hit rate limit, stopping group`);
+
+          if (result.rateLimited) {
+            this.logger.warn(`Analysis ${type} hit session limit`);
+            // Daily: no retry (data-sync 등)
+            // Weekly 또는 retryOnLimit=true: schedule retry
+            const shouldRetry = !isDaily && typeConfig?.retryOnLimit !== false;
+            if (shouldRetry && result.sessionId) {
+              failedRetryTypes.push({ type, sessionId: result.sessionId });
+            }
+            break; // Stop remaining types in this group (rate limit affects all)
+          }
+
+          succeeded = true;
+          completedTypes.push(type);
+          break;
+        } catch (error) {
+          const msg = (error as Error).message || '';
+          if (isRateLimitText(msg)) {
+            this.logger.warn(`Analysis ${type} hit rate limit, stopping group`);
+            break;
+          }
+          if (attempt < maxRetries) {
+            this.logger.warn(`Analysis ${type} failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying`, { error: msg });
+            continue;
+          }
+          errorCollector.add('AssistantScheduler', `분석 실행 실패 (${type}): ${msg}`);
+          this.logger.error(`Analysis failed for type: ${type}`, error);
           break;
         }
-        errorCollector.add('AssistantScheduler', `분석 실행 실패 (${type}): ${msg}`);
-        this.logger.error(`Analysis failed for type: ${type}`, error);
       }
+
+      // Rate limit breaks the entire group
+      if (failedRetryTypes.length > 0) break;
     }
 
     const label = isDaily ? '야간 동기화' : '주간 분석';
-    await this.sendMessage(
-      `📊 ${label} 완료: ${completedTypes.join(', ') || '(없음)'}`,
-    ).catch(() => {});
+    const parts = [`📊 ${label} 완료: ${completedTypes.join(', ') || '(없음)'}`];
+    if (timedOutTypes.length > 0) {
+      parts.push(`⏱️ 타임아웃: ${timedOutTypes.join(', ')}`);
+    }
+    await this.sendMessage(parts.join('\n')).catch(() => {});
 
     // Schedule retry for session-limit failures (weekly only)
     if (failedRetryTypes.length > 0) {
@@ -762,11 +832,11 @@ export class AssistantScheduler {
   private async runSingleAnalysis(
     type: string,
     resumeSessionId?: string,
-  ): Promise<{ rateLimited: boolean; sessionId?: string }> {
+  ): Promise<{ rateLimited: boolean; timedOut: boolean; sessionId?: string; costUsd: number }> {
     const promptPath = path.join(this.promptsDir, `analysis-${type}.md`);
     if (!fs.existsSync(promptPath)) {
       this.logger.warn(`Analysis prompt not found: ${promptPath}`);
-      return { rateLimited: false };
+      return { rateLimited: false, timedOut: false, costUsd: 0 };
     }
 
     const prompt = fs.readFileSync(promptPath, 'utf-8');
@@ -774,6 +844,8 @@ export class AssistantScheduler {
     const typeConfig = this.config!.analysis.types[type];
     const allowedTools = typeConfig?.allowedTools ?? defaults.allowedTools;
     const writablePaths = typeConfig?.writablePaths ?? defaults.writablePaths;
+    const maxDurationMinutes = (typeConfig?.maxDurationMinutes as number | undefined)
+      ?? defaults.maxDurationMinutes ?? 60;
 
     const result = await this.spawnSession(
       resumeSessionId ? 'continue' : prompt,
@@ -785,6 +857,7 @@ export class AssistantScheduler {
         env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1' },
         resumeSessionId,
         skipMcp: true,
+        maxDurationMs: maxDurationMinutes * 60_000,
       },
     );
 
@@ -796,12 +869,17 @@ export class AssistantScheduler {
       costUsd: result.costUsd.toFixed(4),
     });
 
-    // Rate limit / session limit detection
-    if (isRateLimitText(result.text) || result.subtype === 'error_max_budget_usd') {
-      return { rateLimited: true, sessionId: result.sessionId };
+    // Timeout detection
+    if (result.subtype === 'error_timeout') {
+      return { rateLimited: false, timedOut: true, sessionId: result.sessionId, costUsd: result.costUsd };
     }
 
-    return { rateLimited: false, sessionId: result.sessionId };
+    // Rate limit / session limit detection
+    if (isRateLimitText(result.text) || result.subtype === 'error_max_budget_usd') {
+      return { rateLimited: true, timedOut: false, sessionId: result.sessionId, costUsd: result.costUsd };
+    }
+
+    return { rateLimited: false, timedOut: false, sessionId: result.sessionId, costUsd: result.costUsd };
   }
 
   // --- Date/time utilities ---

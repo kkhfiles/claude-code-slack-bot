@@ -99,6 +99,7 @@ update.bat                    # Windows
   - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
 - `-report [type]`/`-rp [type]`: reports/ 하위 디렉토리 재귀 탐색, Slack 파일 업로드 (`filesUploadV2`, `files:write` 스코프 필요), 절대 경로 + 요약 표시, 업로드 실패 시 텍스트 fallback
+- `-analyze [type]`/`-an [type]`/`분석 [타입]`: 분석 수동 실행 — 타입 지정 시 단일 실행, 미지정 시 전체 실행
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
   - `-as config`: 현재 설정 표시 (config.json 내용)
   - `-as briefing HH:MM`: 브리핑 시간 변경 → fs.watchFile이 감지하여 자동 재스케줄
@@ -106,7 +107,8 @@ update.bat                    # Windows
   - 환경변수 미설정 시 graceful 비활성 (`assistantScheduler = null`)
 - 비용 제어: `--max-budget-usd` 플래그로 세션별 비용 한도, `.assistant-costs.json`에 비용 기록, 브리핑에 일간/주간/월간 통계 표시
   - `config.json`에서 `briefing.maxBudgetUsd`, `reminders.maxBudgetUsd`, `analysis.budgetUsd` 조정 가능
-  - 분석: `analysis.defaults` (sessionBudgetUsd, allowedTools, writablePaths) + `analysis.types` (타입별 override) 구조
+  - 분석: `analysis.defaults` (sessionBudgetUsd, allowedTools, writablePaths, maxDurationMinutes, maxRetries) + `analysis.types` (타입별 override) 구조
+  - 분석 세션 타임아웃: `maxDurationMinutes` (기본 60분) 초과 시 CLI 프로세스 강제 종료, `maxRetries` (기본 2) 회 재시도 후 포기 → 다음 타입으로 진행
   - 분석 세션: 비용 한도 도달 시 `--resume`로 이어서 진행 (총 `budgetUsd` 내에서)
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성

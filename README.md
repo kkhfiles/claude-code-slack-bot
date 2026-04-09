@@ -316,6 +316,7 @@ Conversations in the same thread automatically continue the session (no command 
 |---------|-------------|
 | `-briefing` / `-br` | Run morning briefing now |
 | `-report [type]` / `-rp` | View latest analysis report |
+| `-analyze [type]` / `-an` | Run analysis (single type or all) |
 | `-assistant config` / `-as config` | Show assistant configuration |
 | `-assistant briefing HH:MM` | Change briefing time |
 | `-assistant reminder N` | Change reminder lead time (minutes) |
