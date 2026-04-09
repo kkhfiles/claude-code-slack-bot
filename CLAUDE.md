@@ -96,6 +96,7 @@ update.bat                    # Windows
   - 토큰 공유: `~/.config/google-calendar-mcp/tokens.json` (MCP 서버와 동일)
   - 어시스턴트 세션은 `skipMcp: true`로 MCP 서버 연결 건너뜀
   - 알림 뮤트: 🔇 버튼으로 반복 일정 알림 끄기 (`.calendar-muted-events.json`, base eventId로 시리즈 매칭)
+  - 예약 문서 리마인더: 이벤트 description에 `[scheduled-doc] reports/scheduled/{파일명}` → type `"scheduled-doc"`, dispatch 시 `## 요약` 섹션 읽어서 Slack 메시지에 포함
   - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
 - `-report [type]`/`-rp [type]`: reports/ 하위 디렉토리 재귀 탐색, Slack 파일 업로드 (`filesUploadV2`, `files:write` 스코프 필요), 절대 경로 + 요약 표시, 업로드 실패 시 텍스트 fallback

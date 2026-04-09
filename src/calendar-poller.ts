@@ -31,6 +31,7 @@ export interface GCalEvent {
   startTime: string;      // ISO 8601 or "all-day:YYYY-MM-DD"
   endTime: string;
   isAllDay: boolean;
+  description: string;
   status: string;
   updated: string;
 }
@@ -50,7 +51,7 @@ export interface CalendarNotification {
   eventId: string;
   notifyAt: string;
   message: string;
-  type: 'upcoming' | 'change' | 'cancel';
+  type: 'upcoming' | 'change' | 'cancel' | 'scheduled-doc';
   delivered: boolean;
   createdAt: string;
 }
@@ -349,6 +350,7 @@ export class CalendarPoller {
           calendarId,
           calendarName,
           title: (item.summary || '(제목 없음)') as string,
+          description: (item.description || '') as string,
           location: (item.location || '') as string,
           startTime: isAllDay ? `all-day:${start!.date}` : (start?.dateTime || ''),
           endTime: isAllDay ? `all-day:${end?.date || start!.date}` : (end?.dateTime || ''),
@@ -561,7 +563,11 @@ export class CalendarPoller {
     const formatEvents = (events: GCalEvent[]) =>
       events.length === 0
         ? '(없음)'
-        : events.map(e => `- [${e.id}] \`${e.startTime}\` ${e.title} — ${e.location || '(장소 없음)'} _${e.calendarName}_`).join('\n');
+        : events.map(e => {
+            let line = `- [${e.id}] \`${e.startTime}\` ${e.title} — ${e.location || '(장소 없음)'} _${e.calendarName}_`;
+            if (e.description) line += ` | desc: ${e.description.substring(0, 200)}`;
+            return line;
+          }).join('\n');
 
     prompt = prompt.replace(/\{addedEvents\}/g, formatEvents(diff.added));
     prompt = prompt.replace(/\{removedEvents\}/g, formatEvents(diff.removed));
@@ -681,7 +687,7 @@ export class CalendarPoller {
     const now = Date.now();
 
     for (const n of notifications) {
-      if (n.type !== 'upcoming') continue;
+      if (n.type !== 'upcoming' && n.type !== 'scheduled-doc') continue;
 
       const startTime = eventStartMap.get(n.eventId);
       if (!startTime) continue;
@@ -821,6 +827,24 @@ export class CalendarPoller {
       }
 
       try {
+        // Scheduled-doc: read document and append summary to message
+        if (notification.type === 'scheduled-doc') {
+          const pathMatch = notification.message.match(/`(reports\/scheduled\/[^`]+)`/);
+          if (pathMatch) {
+            const workingDir = path.resolve(this.promptsDir, '..', '..');
+            const docPath = path.join(workingDir, pathMatch[1]);
+            try {
+              const content = fs.readFileSync(docPath, 'utf-8');
+              const summaryMatch = content.match(/## 요약\n([\s\S]*?)(?=\n## |$)/);
+              if (summaryMatch) {
+                notification.message += '\n\n' + summaryMatch[1].trim();
+              }
+            } catch {
+              this.logger.debug('Scheduled doc not found', { path: docPath });
+            }
+          }
+        }
+
         const blocks = [
           { type: 'section', text: { type: 'mrkdwn', text: notification.message } },
           {
