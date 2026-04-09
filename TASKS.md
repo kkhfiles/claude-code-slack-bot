@@ -569,3 +569,42 @@ await say({ text: `📄 *${latestFile}*\n\`${fullPath}\`\n\n${truncated}`, threa
 - [x] `handleReportCommand()`에 절대 경로 표시
 - [x] `morning-briefing.md` 프롬프트에 경로 형식 추가
 - [x] `npm run build` 성공
+
+---
+
+## 주간 분석 미실행 조사 + 브리핑 연동
+
+### 배경
+`config.json`에 `"schedule": "wednesday-20:00"`로 분석이 설정되어 있고, 11개 분석 타입이 모두 `enabled: true`이다. 하지만 `reports/` 하위 디렉토리(session-efficiency/, skill-review/, weekly/ 등)에 **보고서가 하나도 생성되지 않았다**. 실행 자체가 되지 않는 것으로 보인다.
+
+또한 분석 보고서가 생성되더라도 **다음 브리핑에 요약이 포함되는지** 확인이 필요하다.
+
+### 조사 항목
+
+1. **분석 실행 여부 확인**
+   - pm2 로그에서 `AssistantScheduler`의 analysis 관련 로그 확인
+   - `scheduleAnalysis()`가 실제로 타이머를 등록하는지
+   - 수요일 20:00 이후 실행 시도 로그가 있는지
+   - 에러가 발생했다면 어떤 에러인지
+
+2. **스케줄 파싱 확인**
+   - `"wednesday-20:00"` 형식이 `scheduleAnalysis()`에서 정확히 파싱되는지
+   - 타이머 등록 시 계산된 ms 값이 올바른지
+
+3. **분석 실행 테스트**
+   - `-report` 또는 수동 트리거로 단일 분석 타입(예: `session-efficiency`)을 실행하여 보고서 생성 확인
+   - 실패 시 에러 원인 파악
+
+4. **브리핑 연동 확인**
+   - `morning-briefing.md` 프롬프트가 `reports/` 디렉토리를 스캔하도록 되어 있는지
+   - 월요일 주간 요약(`monday-briefing-extra.md`)에서 보고서를 읽는 로직이 동작하는지
+
+### 완료 조건
+- [x] 분석 미실행 원인 파악 및 수정
+  - 원인: WebFetch가 응답 없이 행 → CLI 12시간+ 무한 실행 → 봇 재시작으로 소실
+  - 수정: `maxDurationMs` 타임아웃 + `maxRetries` 리트라이 (기본 60분, 2회)
+  - `-analyze [type]` 수동 트리거 명령어 추가
+- [x] 수동 트리거로 최소 1개 보고서 생성 확인
+  - `session-efficiency` 분석 실행 → `reports/session-efficiency/2026-04-09.md` 생성 ($2.57)
+- [ ] 다음 브리핑에서 대기 보고서가 표시되는지 확인 (Slack `-briefing`으로 확인 필요)
+- [x] `npm run build` 성공

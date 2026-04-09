@@ -338,6 +338,24 @@ export class SlackHandler {
       return;
     }
 
+    // Analyze command
+    if (text && this.isAnalyzeCommand(text)) {
+      if (!this.assistantScheduler) {
+        await say({ text: t('assistant.notConfigured', locale), thread_ts: thread_ts || ts });
+        return;
+      }
+      const { type } = this.parseAnalyzeCommand(text);
+      await say({ text: t('analysis.running', locale, { type: type || 'all' }), thread_ts: thread_ts || ts });
+      try {
+        const result = await this.assistantScheduler.runAnalysisManual(type);
+        await say({ text: result, thread_ts: thread_ts || ts });
+      } catch (error) {
+        this.logger.error('Manual analysis failed', error);
+        await say({ text: `❌ Analysis failed: ${(error as Error).message}`, thread_ts: thread_ts || ts });
+      }
+      return;
+    }
+
     // Assistant command
     if (text && this.isAssistantCommand(text)) {
       if (!this.assistantScheduler) {
@@ -1449,6 +1467,15 @@ export class SlackHandler {
     return { type: match?.[1]?.trim() || undefined };
   }
 
+  private isAnalyzeCommand(text: string): boolean {
+    return /^`?-(?:analyze|an)`?(?:\s|$)/i.test(text.trim()) || /^분석(?:\s|$)/i.test(text.trim());
+  }
+
+  private parseAnalyzeCommand(text: string): { type?: string } {
+    const match = text.trim().match(/^(?:`?-(?:analyze|an)`?|분석)\s*(.*)$/i);
+    return { type: match?.[1]?.trim() || undefined };
+  }
+
   private isAssistantCommand(text: string): boolean {
     return /^`?-(?:assistant|as)`?\s/i.test(text.trim());
   }
@@ -1782,6 +1809,19 @@ export class SlackHandler {
       env,
     });
 
+    // Session timeout — kill process if it exceeds maxDurationMs
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+    let timedOut = false;
+    if (opts.maxDurationMs) {
+      killTimer = setTimeout(() => {
+        timedOut = true;
+        this.logger.warn('Assistant session timeout, killing process', {
+          maxDurationMs: opts.maxDurationMs,
+        });
+        cliProcess.interrupt();
+      }, opts.maxDurationMs);
+    }
+
     // Collect text, sessionId, cost, and subtype from CLI events
     let text = '';
     let sessionId = '';
@@ -1803,6 +1843,12 @@ export class SlackHandler {
         costUsd = resultEvent.total_cost_usd || 0;
         subtype = resultEvent.subtype || 'success';
       }
+    }
+
+    if (killTimer) clearTimeout(killTimer);
+
+    if (timedOut) {
+      return { text, costUsd, sessionId, subtype: 'error_timeout' };
     }
 
     return { text, costUsd, sessionId, subtype };

@@ -362,6 +362,10 @@ const messages: Record<string, Record<Locale, string>> = {
     en: 'Assistant not configured. Set `ASSISTANT_DM_CHANNEL` and `ASSISTANT_CONFIG_DIR` in `.env`',
     ko: '어시스턴트 미설정. `.env`에 `ASSISTANT_DM_CHANNEL`, `ASSISTANT_CONFIG_DIR` 설정 필요',
   },
+  'analysis.running': {
+    en: '🔬 Running analysis: {{type}}...',
+    ko: '🔬 분석 실행 중: {{type}}...',
+  },
 
   // Memory watchdog
   'watchdog.confirm': {
@@ -509,6 +513,7 @@ export function getHelpText(locale: Locale): string {
   help += `*Assistant*\n`;
   help += `\`-br\` / \`-briefing\` — Run morning briefing now\n`;
   help += `\`-rp\` / \`-report [type]\` — View latest analysis report\n`;
+  help += `\`-an\` / \`-analyze [type]\` — Run analysis (single type or all)\n`;
   help += `\`-as config\` / \`-assistant config\` — Show assistant configuration\n`;
   help += `\`-as briefing HH:MM\` — Change briefing time\n`;
   help += `\`-as reminder N\` — Change reminder lead time (minutes)\n\n`;
