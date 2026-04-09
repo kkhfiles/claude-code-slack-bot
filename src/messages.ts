@@ -327,8 +327,8 @@ const messages: Record<string, Record<Locale, string>> = {
 
   // --- Assistant ---
   'assistant.briefingRunning': {
-    en: '☀️ Running morning briefing...',
-    ko: '☀️ 모닝 브리핑 실행 중...',
+    en: '📋 Running briefing...',
+    ko: '📋 브리핑 실행 중...',
   },
   'assistant.briefingScheduled': {
     en: 'Next briefing: {{time}}',
@@ -463,7 +463,7 @@ export function getHelpText(locale: Locale): string {
     help += `\`-ac <id>\` — 계정 전환 (예: \`-ac 1\`, \`-ac 2\`)\n\n`;
 
     help += `*어시스턴트*\n`;
-    help += `\`-br\` / \`-briefing\` / \`브리핑\` — 모닝 브리핑 즉시 실행\n`;
+    help += `\`-br\` / \`-briefing\` / \`브리핑\` — 브리핑 즉시 실행\n`;
     help += `\`-rp\` / \`-report [타입]\` — 최신 분석 보고서 조회\n`;
     help += `\`-as config\` / \`-assistant config\` — 어시스턴트 설정 표시\n`;
     help += `\`-as briefing HH:MM\` — 브리핑 시간 변경\n`;
@@ -511,7 +511,7 @@ export function getHelpText(locale: Locale): string {
   help += `\`-ac <id>\` — Switch account (e.g., \`-ac 1\`, \`-ac 2\`)\n\n`;
 
   help += `*Assistant*\n`;
-  help += `\`-br\` / \`-briefing\` — Run morning briefing now\n`;
+  help += `\`-br\` / \`-briefing\` — Run briefing now\n`;
   help += `\`-rp\` / \`-report [type]\` — View latest analysis report\n`;
   help += `\`-an\` / \`-analyze [type]\` — Run analysis (single type or all)\n`;
   help += `\`-as config\` / \`-assistant config\` — Show assistant configuration\n`;
