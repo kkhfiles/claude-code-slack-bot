@@ -548,9 +548,11 @@ export class AssistantScheduler {
 
     // Inject cached calendar data if available (saves MCP cost)
     // Validate cache is from today — stale cache shows yesterday's events
-    const today = new Date().toISOString().substring(0, 10);
+    // Use local timezone (KST), not UTC — at 08:00 KST, UTC date is still yesterday
+    const toLocalDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const todayLocal = toLocalDate(new Date());
     let cache = this.calendarPoller?.getCache();
-    if (cache && !cache.fetchedAt.startsWith(today)) {
+    if (cache && toLocalDate(new Date(cache.fetchedAt)) !== todayLocal) {
       this.logger.info('Calendar cache is stale (not today), refreshing...');
       cache = await this.calendarPoller?.refreshCache() ?? null;
     }
