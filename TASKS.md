@@ -688,3 +688,33 @@ if (notification.type === 'scheduled-doc') {
 - [x] `calendar-judgment.md`에 `[scheduled-doc]` 규칙 추가
 - [x] scheduled-doc 알림 시 문서 내용 포함 전송 (dispatch 시 `fs.readFileSync`로 `## 요약` 섹션 추출)
 - [x] `npm run build` 성공
+
+---
+
+## 아침 브리핑 날짜 오류 — 어제 캘린더가 표시됨
+
+### 배경
+2026-04-14(화) 아침 브리핑에 어제(월) 캘린더 일정이 표시됨.
+pm2 로그 기준 브리핑 실행 시각: `2026-04-13T23:00:18Z` (UTC) = 4월 14일 08:00 KST.
+실행 시각은 정상이나 캘린더 조회 시 "오늘"이 어제 날짜로 해석된 것으로 추정.
+
+### 조사 항목
+1. `executeBriefing()`에서 세션 스폰 시 시스템 timezone이 KST인지 UTC인지 확인
+2. `morning-briefing.md` 프롬프트의 "오늘 00:00 ~ 23:59"가 Claude 세션 내에서 어느 timezone 기준으로 해석되는지
+3. catch-up 브리핑인 경우 "오늘"이 스케줄 기준 날짜인지 실행 시점 날짜인지
+4. Google Calendar MCP `list-events`의 날짜 파라미터가 UTC인지 로컬인지
+
+### 수정 방향
+- 프롬프트에 명시적 날짜를 주입: `executeBriefing()`에서 KST 기준 오늘 날짜를 `{today}` 변수로 프롬프트에 삽입
+- 또는 `list-events` 호출 시 timezone 명시 (`timeZone: 'Asia/Seoul'`)
+
+### 완료 조건
+- [x] 원인 확인 (timezone 또는 catch-up 로직)
+  - 원인: `executeBriefing()` line 551에서 `new Date().toISOString().substring(0,10)` → UTC 날짜 반환
+  - 08:00 KST = 23:00 UTC **전날** → 캐시가 "어제" 저장됐어도 UTC 날짜가 같아 "fresh"로 판정
+  - `fetchAllEvents()`는 로컬 TZ 기준이라 정확하지만, 캐시 비교만 UTC 사용 → 불일치
+- [x] 수정 구현
+  - `toLocalDate()` 헬퍼로 로컬 TZ 기준 YYYY-MM-DD 비교 (`getFullYear/getMonth/getDate`)
+  - 캐시의 `fetchedAt`도 로컬 TZ로 변환 후 비교
+- [x] `npm run build` 성공
+- [ ] 다음 날 브리핑에서 정확한 날짜 일정 확인
