@@ -47,6 +47,7 @@ const PROTECTED_PROCESSES = new Set([
 export class ProcessMemoryWatchdog {
   private checkTimer: ReturnType<typeof setInterval> | null = null;
   private pendingKills: Map<number, PendingKill> = new Map();
+  private excludedPids: Set<number> = new Set();
   private cachedCommitLimitMB: number = 0;
   private logger = new Logger('MemoryWatchdog');
   private locale: Locale = 'ko';
@@ -124,6 +125,23 @@ export class ProcessMemoryWatchdog {
     this.logger.info(`Process kept by user: ${pending.name} (PID ${pid})`);
   }
 
+  /** Called from Slack action handler when user clicks [Exclude] */
+  async handleExcludeAction(pid: number): Promise<void> {
+    const pending = this.pendingKills.get(pid);
+    if (!pending) return;
+
+    clearTimeout(pending.timer);
+    this.pendingKills.delete(pid);
+
+    this.excludedPids.add(pid);
+
+    const text = t('watchdog.excluded', this.locale, { pid: String(pid), name: pending.name });
+    await this.updateMessage(pending.messageTs, text).catch(e =>
+      this.logger.error('Failed to update watchdog message', e),
+    );
+    this.logger.info(`PID ${pid} (${pending.name}) excluded from watchdog`);
+  }
+
   // --- Private methods ---
 
   private async checkMemory(): Promise<void> {
@@ -153,11 +171,19 @@ export class ProcessMemoryWatchdog {
     const processes = await this.getTopProcesses(20);
     if (processes.length === 0) return;
 
-    // Filter out protected processes, our own PID, and already-pending PIDs
+    // Clean up excluded PIDs for processes that have exited
+    for (const pid of this.excludedPids) {
+      if (!processes.some(p => p.pid === pid)) {
+        this.excludedPids.delete(pid);
+      }
+    }
+
+    // Filter out protected processes, excluded PIDs, our own PID, and already-pending PIDs
     const myPid = process.pid;
     const candidates = processes.filter(p =>
       p.pid !== myPid &&
       !PROTECTED_PROCESSES.has(p.name.toLowerCase()) &&
+      !this.excludedPids.has(p.pid) &&
       !this.pendingKills.has(p.pid),
     );
 
@@ -201,6 +227,12 @@ export class ProcessMemoryWatchdog {
             type: 'button',
             text: { type: 'plain_text', text: '⏸️ Ignore' },
             action_id: 'watchdog_ignore',
+            value: String(target.pid),
+          },
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: '🚫 Exclude' },
+            action_id: 'watchdog_exclude',
             value: String(target.pid),
           },
         ],
@@ -345,4 +377,5 @@ export class ProcessMemoryWatchdog {
       return false;
     }
   }
+
 }

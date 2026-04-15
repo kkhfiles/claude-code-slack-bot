@@ -3290,6 +3290,12 @@ export class SlackHandler {
         const pid = parseInt((body as any).actions[0].value, 10);
         await this.memoryWatchdog?.handleIgnoreAction(pid);
       });
+
+      this.app.action('watchdog_exclude', async ({ ack, body }) => {
+        await ack();
+        const pid = parseInt((body as any).actions[0].value, 10);
+        await this.memoryWatchdog?.handleExcludeAction(pid);
+      });
     }
   }
 

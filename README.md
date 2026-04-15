@@ -478,7 +478,7 @@ MEMORY_WATCHDOG_INTERVAL_SEC=300    # Check interval (default: 5 min)
 MEMORY_WATCHDOG_AUTO_KILL_SEC=300   # Auto-kill if no response (default: 5 min)
 ```
 
-When triggered, sends a Slack message with Kill/Ignore buttons. Auto-kills the largest non-system process after the timeout if no response.
+When triggered, sends a Slack message with Kill/Ignore/Exclude buttons. Auto-kills the largest non-system process after the timeout if no response. Exclude registers the PID as an exception for the current runtime (auto-cleared when the process exits).
 
 ### Session Auto-Start
 
