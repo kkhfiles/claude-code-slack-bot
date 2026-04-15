@@ -388,6 +388,10 @@ const messages: Record<string, Record<Locale, string>> = {
     en: ':white_check_mark: `{{name}}` (PID {{pid}}) — already exited.',
     ko: ':white_check_mark: `{{name}}` (PID {{pid}}) — 이미 종료됨.',
   },
+  'watchdog.excluded': {
+    en: ':no_entry_sign: `{{name}}` (PID {{pid}}) — excluded from future watchdog alerts.',
+    ko: ':no_entry_sign: `{{name}}` (PID {{pid}}) — 향후 워치독 감시에서 제외됨.',
+  },
 };
 
 /**
