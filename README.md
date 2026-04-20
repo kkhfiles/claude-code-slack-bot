@@ -417,17 +417,27 @@ assistant/
     "budgetUsd": 5.00,
     "defaults": {
       "allowedTools": ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "Write"],
-      "writablePaths": ["reports/"]
+      "writablePaths": ["reports/"],
+      "maxDurationMinutes": 60,
+      "maxRetries": 2
     },
     "types": {
-      "ai-practice": { "enabled": true },
-      "competitors": { "enabled": true },
-      "session-efficiency": { "enabled": true },
-      "dependency-health": { "enabled": true }
+      "ai-practice":        { "enabled": true, "cadence": "weekly" },
+      "session-efficiency": { "enabled": true, "cadence": "biweekly", "cadenceFrom": "2026-04-25" },
+      "dependency-health":  { "enabled": true, "cadence": "monthly", "monthlyWeek": "first" },
+      "competitors":        { "enabled": true, "cadence": "monthly", "monthlyWeek": "first", "mode": "change-detection" }
     }
   }
 }
 ```
+
+**Cadence options per type:**
+- `weekly` (default) — runs every firing of the analysis schedule
+- `biweekly` — runs every 14 days from `cadenceFrom` (ISO date anchor)
+- `monthly` + `monthlyWeek: "first" | "last"` — runs only on the first/last Saturday of the month
+- `mode: "change-detection"` — report file is optional (no file generated is treated as success)
+
+Off-cycle types are automatically skipped at scheduled firing time.
 
 Changes to `config.json` are auto-detected (file watcher, 10s interval) — no restart needed.
 
@@ -490,6 +500,7 @@ Schedule automatic session starts to maximize Claude Pro/Max session windows.
 - Randomized jitter (+5~25 min) to avoid automation detection
 - Auto follow-up 5 hours later for the next session window
 - Non-working day skip (weekends + public holidays)
+- Daily rotation (toggle button): for 2-account cross-schedules, swap accounts on alternating days (by day-of-year) to balance usage over 2 weeks
 - Persisted in `.schedule-config.json`
 
 ## Known Limitations & Customization Notes
