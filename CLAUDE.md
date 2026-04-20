@@ -109,6 +109,7 @@ update.bat                    # Windows
 - 비용 제어: `--max-budget-usd` 플래그로 세션별 비용 한도, `.assistant-costs.json`에 비용 기록, 브리핑에 일간/주간/월간 통계 표시
   - `config.json`에서 `briefing.maxBudgetUsd`, `reminders.maxBudgetUsd`, `analysis.budgetUsd` 조정 가능
   - 분석: `analysis.defaults` (sessionBudgetUsd, allowedTools, writablePaths, maxDurationMinutes, maxRetries) + `analysis.types` (타입별 override) 구조
+  - 분석 cadence: 타입별 `cadence` 필드 — `weekly`(기본) / `biweekly`(`cadenceFrom`부터 14일마다) / `monthly`(`monthlyWeek: 'first' | 'last'`) — 스케줄 실행 시 `shouldRunToday()` 로 off-cycle 타입 자동 스킵. `mode: 'change-detection'`은 보고서 미생성을 정상 결과로 처리
   - 분석 세션 타임아웃: `maxDurationMinutes` (기본 60분) 초과 시 CLI 프로세스 강제 종료, `maxRetries` (기본 2) 회 재시도 후 포기 → 다음 타입으로 진행
   - 분석 세션: 비용 한도 도달 시 `--resume`로 이어서 진행 (총 `budgetUsd` 내에서)
 - 새 명령어 추가 시:

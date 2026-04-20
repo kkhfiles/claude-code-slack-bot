@@ -36,6 +36,10 @@ export interface AssistantConfig {
     types: Record<string, {
       enabled: boolean;
       schedule?: string;           // per-type schedule override (e.g. "daily-02:00")
+      cadence?: 'weekly' | 'biweekly' | 'monthly';  // default 'weekly'
+      cadenceFrom?: string;        // biweekly anchor date (ISO YYYY-MM-DD)
+      monthlyWeek?: 'first' | 'last';  // monthly: which week's Saturday
+      mode?: 'change-detection';   // reports optional (no-file-generated is OK)
       tools?: string[];            // type-specific data (e.g. competitors.tools)
       allowedTools?: string[];
       writablePaths?: string[];
@@ -725,10 +729,29 @@ export class AssistantScheduler {
     const isDaily = schedule.startsWith('daily');
     const defaults = this.config.analysis.defaults;
     const completedTypes: string[] = [];
+    const skippedTypes: { type: string; reason: string }[] = [];
     const timedOutTypes: string[] = [];
     const failedRetryTypes: { type: string; sessionId: string }[] = [];
 
-    for (const type of types) {
+    // Filter by cadence (weekly / biweekly / monthly)
+    const today = new Date();
+    const runnableTypes = types.filter(type => {
+      const decision = this.shouldRunToday(type, today);
+      if (!decision.run) {
+        skippedTypes.push({ type, reason: decision.reason || 'cadence' });
+        this.logger.info(`Cadence skip: ${type}`, { reason: decision.reason });
+        return false;
+      }
+      return true;
+    });
+
+    if (skippedTypes.length > 0) {
+      this.logger.info(`Cadence filter: ${runnableTypes.length}/${types.length} types will run`, {
+        skipped: skippedTypes.map(s => `${s.type} (${s.reason})`).join('; '),
+      });
+    }
+
+    for (const type of runnableTypes) {
       const typeConfig = this.config.analysis.types[type];
       const maxRetries = (typeConfig?.maxRetries as number | undefined)
         ?? defaults.maxRetries ?? 2;
@@ -787,6 +810,9 @@ export class AssistantScheduler {
     const parts = [`📊 ${label} 완료: ${completedTypes.join(', ') || '(없음)'}`];
     if (timedOutTypes.length > 0) {
       parts.push(`⏱️ 타임아웃: ${timedOutTypes.join(', ')}`);
+    }
+    if (skippedTypes.length > 0) {
+      parts.push(`⏭️ cadence 스킵: ${skippedTypes.map(s => s.type).join(', ')}`);
     }
     await this.sendMessage(parts.join('\n')).catch(() => {});
 
@@ -885,6 +911,52 @@ export class AssistantScheduler {
   }
 
   // --- Date/time utilities ---
+
+  /**
+   * Check if a type should run today based on cadence config.
+   * - weekly (default): always true
+   * - biweekly: every 14 days from cadenceFrom
+   * - monthly + monthlyWeek='first': only first Saturday of the month
+   * - monthly + monthlyWeek='last': only last Saturday of the month
+   */
+  private shouldRunToday(type: string, today: Date = new Date()): { run: boolean; reason?: string } {
+    const cfg = this.config?.analysis.types[type];
+    if (!cfg) return { run: true };
+    const cadence = cfg.cadence ?? 'weekly';
+
+    if (cadence === 'weekly') return { run: true };
+
+    if (cadence === 'biweekly') {
+      if (!cfg.cadenceFrom) return { run: true, reason: 'biweekly without cadenceFrom, treating as weekly' };
+      const from = new Date(cfg.cadenceFrom + 'T00:00:00');
+      const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      const diffDays = Math.floor((todayMidnight.getTime() - from.getTime()) / 86_400_000);
+      if (diffDays < 0) return { run: false, reason: `biweekly not started (from=${cfg.cadenceFrom})` };
+      if (diffDays % 14 === 0) return { run: true };
+      return { run: false, reason: `biweekly off-cycle (day ${diffDays} from ${cfg.cadenceFrom})` };
+    }
+
+    if (cadence === 'monthly') {
+      const day = today.getDay();       // 6 = Saturday
+      const date = today.getDate();
+      if (day !== 6) return { run: false, reason: 'monthly: not Saturday' };
+
+      if (cfg.monthlyWeek === 'first') {
+        if (date <= 7) return { run: true };
+        return { run: false, reason: 'monthly-first: not first Saturday' };
+      }
+      if (cfg.monthlyWeek === 'last') {
+        const nextWeek = new Date(today);
+        nextWeek.setDate(date + 7);
+        if (nextWeek.getMonth() !== today.getMonth()) return { run: true };
+        return { run: false, reason: 'monthly-last: not last Saturday' };
+      }
+      // monthly without monthlyWeek → treat as first
+      return date <= 7 ? { run: true } : { run: false, reason: 'monthly: not first Saturday (default)' };
+    }
+
+    return { run: true };
+  }
 
   /** Check if today is a non-working day (schedule-manager.ts:231-241 pattern). */
   private isNonWorkingDay(date: Date = new Date()): { skip: boolean; reason?: string } {

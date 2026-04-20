@@ -718,3 +718,94 @@ pm2 로그 기준 브리핑 실행 시각: `2026-04-13T23:00:18Z` (UTC) = 4월 1
   - 캐시의 `fetchedAt`도 로컬 TZ로 변환 후 비교
 - [x] `npm run build` 성공
 - [ ] 다음 날 브리핑에서 정확한 날짜 일정 확인
+
+---
+
+## 분석 cadence 스케줄 지원 (weekly / biweekly / monthly)
+
+### 배경
+
+`claude-workflow`의 `assistant/config.json`에 `cadence`, `cadenceFrom`, `monthlyWeek` 필드가 새로 도입됨 (2026-04-20). 분석 타입별로 주기가 다름:
+
+- **주간**: `ai-practice`, `kg-health`, `cli-usage`, `kg-skill-update`, `kg-regression`, `notebooklm-recommend`
+- **격주**: `session-efficiency`, `skill-review`, `settings-drift` — `cadenceFrom: "2026-04-25"` 부터 14일마다
+- **월간**: `dependency-health`, `competitors` — `monthlyWeek: "first"` = 매월 첫 번째 토요일
+
+현재 `AssistantScheduler`는 이 필드를 무시하고 모든 활성 분석을 매 토요일 실행한다.
+
+### 변경 사항
+
+#### 1. `AssistantConfig` 인터페이스 확장
+
+```typescript
+types: Record<string, {
+  enabled: boolean;
+  cadence?: 'weekly' | 'biweekly' | 'monthly';  // 신규, 기본 'weekly'
+  cadenceFrom?: string;                          // 신규, biweekly 시작일 ISO
+  monthlyWeek?: 'first' | 'last';                // 신규, monthly 실행 주
+  mode?: 'change-detection';                     // 신규, competitors 등 조건부 보고서
+  allowedTools?: string[];
+  writablePaths?: string[];
+  [key: string]: unknown;
+}>;
+```
+
+#### 2. `runSingleAnalysis()` 또는 `runAnalysis()`에 실행 판정 로직 추가
+
+```typescript
+private shouldRunToday(typeConfig: AnalysisTypeConfig, today: Date): boolean {
+  const cadence = typeConfig.cadence ?? 'weekly';
+  if (cadence === 'weekly') return true;
+
+  if (cadence === 'biweekly') {
+    if (!typeConfig.cadenceFrom) return true; // fallback
+    const from = new Date(typeConfig.cadenceFrom);
+    const diffDays = Math.floor((today.getTime() - from.getTime()) / 86_400_000);
+    return diffDays >= 0 && diffDays % 14 === 0;
+  }
+
+  if (cadence === 'monthly') {
+    // monthlyWeek === 'first' → 이번 달 첫 번째 토요일인가
+    const day = today.getDay(); // 6 = Saturday
+    const date = today.getDate();
+    if (typeConfig.monthlyWeek === 'first') {
+      return day === 6 && date <= 7;
+    }
+    if (typeConfig.monthlyWeek === 'last') {
+      const nextWeek = new Date(today);
+      nextWeek.setDate(date + 7);
+      return day === 6 && nextWeek.getMonth() !== today.getMonth();
+    }
+  }
+  return true;
+}
+```
+
+#### 3. `runAnalysis()`에서 필터링
+
+```typescript
+const today = new Date();
+const enabledTypes = Object.entries(this.config.analysis.types)
+  .filter(([, cfg]) => cfg.enabled && this.shouldRunToday(cfg as AnalysisTypeConfig, today))
+  .map(([type]) => type);
+```
+
+#### 4. `mode === 'change-detection'` 고려
+
+`competitors` 등에서 변경 없으면 보고서 파일 자체를 생성하지 않을 수 있음 (프롬프트가 제어). 스케줄러는 **보고서 파일 미생성도 정상 결과**로 처리 (에러 아님). 기존에 파일 생성 여부로 성공 판정하고 있다면 이 로직 확인/완화 필요.
+
+### 검증 방법
+
+1. `npm run build` 성공
+2. 2026-04-25 (토) 실행: biweekly 3종 + weekly 모두 실행, monthly 2종은 스킵 (매월 첫 토요일이 아님)
+3. 2026-05-02 (토, 매월 첫 토요일): biweekly는 스킵, monthly 2종 실행
+4. 로그에 각 타입별 실행/스킵 판정 이유 출력
+
+### 완료 조건
+
+- [x] `AssistantConfig` 인터페이스 확장 (4개 필드)
+- [x] `shouldRunToday()` 구현
+- [x] `runAnalysis()` 필터링 로직 추가
+- [x] `mode: 'change-detection'`에서 파일 미생성 정상 처리 (기존 코드가 이미 파일 생성 여부를 확인하지 않음 — scheduler 변경 불필요)
+- [x] `npm run build` 성공
+- [ ] 첫 격주 실행일(2026-04-25) 로그 확인
