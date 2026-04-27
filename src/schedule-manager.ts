@@ -36,9 +36,9 @@ export class ScheduleManager {
   private logger = new Logger('ScheduleManager');
   private holidays = new Holidays('KR');
 
-  // Jitter range: actual fire time = scheduled time + random(5~25 min)
-  private static readonly MIN_JITTER_MS = 5 * 60 * 1000;
-  private static readonly MAX_JITTER_MS = 25 * 60 * 1000;
+  // Jitter range: actual fire time = scheduled time + random(0~10 min)
+  private static readonly MIN_JITTER_MS = 0;
+  private static readonly MAX_JITTER_MS = 10 * 60 * 1000;
 
   private static readonly SAY_WORDS: string[] = [
     'hi', 'ok', 'hey', 'yo', 'go', 'yes', 'hm', 'ah', 'sup', 'wow',

@@ -54,6 +54,11 @@ update.bat                    # Windows
 - `-stop`: `CliProcess.interrupt()`로 CLI 프로세스 중단 (세션 상태 보존)
 - `-plan <prompt>`: `permissionMode: 'plan'`으로 읽기 전용 실행 → Execute 버튼으로 세션 resume
 - `-default`/`-safe`/`-trust`: 권한 모드 전환 (default → safe → trust 순으로 자유도 증가)
+- 모델 선택 (`config.defaultModel`, env `DEFAULT_MODEL` — 기본 `sonnet`):
+  - `-m`/`-model [이름]`/`모델 [이름]` — 채널 모델 조회/설정 (`sonnet`, `opus`, `haiku`, full ID, `default`)
+  - `-opus`/`-o`, `-sonnet`/`-s`, `-haiku`/`-h` — 채널 모델을 별칭으로 즉시 전환
+  - `!o <prompt>`/`!s <prompt>`/`!h <prompt>` — 메시지 prefix로 일회성 모델 적용 (try/finally로 채널 모델 복원)
+  - alias 매핑: `SlackHandler.resolveModelAlias()` (full ID는 그대로 통과)
 - `-r`/`-resume`: 전체 프로젝트 세션 피커 (버튼 선택 → cwd 자동 전환 + 세션 재개)
 - `-sessions all`: 전체 프로젝트 세션 목록 (세션 피커와 동일)
 - `-version`: 봇 버전 + git hash + 업데이트 확인 (`src/version.ts`)
@@ -76,7 +81,7 @@ update.bat                    # Windows
   - 각 스케줄 엔트리는 특정 계정에 연결 (`ScheduleEntry: { time, account }`)
   - 같은 계정 내에서만 5시간 윈도우 충돌 검사 (다른 계정끼리는 겹쳐도 OK)
   - 모달 제출 후 원래 메시지를 `chat.update`로 즉시 갱신
-  - 예약 시간 +5~25분 랜덤 지터로 자동화 감지 방지
+  - 예약 시간 +0~10분 랜덤 지터로 자동화 감지 방지
   - **자동 팔로우업**: 첫 발송 후 5시간 뒤 두 번째 메시지 자동 발송 (다음 세션 윈도우 커버)
   - **비업무일 스킵**: 주말 + 한국 공휴일(음력 포함) 자동 스킵 (`date-holidays` 패키지, 오프라인)
   - 팔로우업 타이머 디스크 영속화 (`pendingFollowUps`) — pm2 재시작 후에도 복원, 만료분은 즉시 발사
@@ -100,6 +105,9 @@ update.bat                    # Windows
   - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
 - `-report [type]`/`-rp [type]`: reports/ 하위 디렉토리 재귀 탐색, Slack 파일 업로드 (`filesUploadV2`, `files:write` 스코프 필요), 절대 경로 + 요약 표시, 업로드 실패 시 텍스트 fallback
+  - 로컬 HTML 보고서 서버 (`src/report-server.ts`, `marked` 의존): 127.0.0.1 바인딩, per-process 토큰(`?t=<hex>`) 인증, `path.resolve` traversal 가드. `index.ts`에서 `config.reports.localServer.enabled && config.assistant.configDir` 조건으로 부팅. `EADDRINUSE` 시 +5까지 재시도 후 비활성화.
+  - 서버 활성 시 `-rp` 메시지에 인덱스 URL + 보고서별 URL 추가 — 브라우저 클릭 한 번으로 렌더된 HTML 열림 (`file:///`은 Slack 클라이언트가 차단하므로 HTTP 사용)
+  - 환경변수: `REPORTS_SERVER_ENABLED` (0이면 비활성), `REPORTS_SERVER_PORT` (기본 8765)
 - `-analyze [type]`/`-an [type]`/`분석 [타입]`: 분석 수동 실행 — 타입 지정 시 단일 실행, 미지정 시 전체 실행
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
   - `-as config`: 현재 설정 표시 (config.json 내용)
@@ -121,10 +129,13 @@ update.bat                    # Windows
 ### Error Handling
 - CLI 프로세스 에러는 `try/catch`로 감싸고, Slack 메시지로 사용자에게 전달
 - Rate limit 감지: CLI `rate_limit_event` 이벤트 + `isRateLimitText()` 공유 유틸 (`src/rate-limit-utils.ts`)
-  - 사용자 세션: 4단계 UI (계정 전환 → API 키 → 예약 재시도 → 취소)
+  - 사용자 세션: 4단계 UI (계정 전환 → API 키 → 자동 재실행 → 취소)
   - 스케줄 세션: rate limit 감지 시 안내 메시지 전송 (브리핑), 분석 전체 중단
   - 캘린더 판단: rate limit 시 다음 정시까지 AI 판단 일시 중지 (`pauseAiJudgment()`)
-- Rate limit 멘션 알림: 재시도/취소 시 자동 취소 (`notifyScheduledId`로 추적)
+- 자동 재실행 (`pendingRetries` + `pendingAutoRetries` + `pendingRetryCleanup`):
+  - "자동 재실행" 버튼 → reset 시각 +60초 버퍼에 `setTimeout` 큐잉 → 동일 thread에 원본 prompt로 `handleMessage()` 재진입
+  - "취소" 버튼 또는 10분 무클릭 → `clearRetryTimers()`로 모든 타이머/엔트리 정리
+  - 메모리 전용, 영속화 X (pm2 재시작 시 자연 소멸 — rate limit 정보 자체가 시한성)
 - API 키 fallback: rate limit 시 등록된 API 키로 전환 → 리셋 시간 후 구독 방식으로 자동 복귀
 - 다중 계정 fallback: rate limit 시 `AccountManager.switchToNext()` → account-1 → account-2 → account-3 → API 키 버튼 순으로 전환
 - 읽기 전용 도구 (Grep, Read, Glob 등)는 상태 메시지에서만 표시 (`STATUS_ONLY_TOOLS`)
@@ -229,6 +240,7 @@ git checkout -b feature/<name>
 | `src/version.ts` | 버전 정보 + 업데이트 체크 (`getVersionInfo()`, `checkForUpdates()`) |
 | `src/rate-limit-utils.ts` | 공유 rate limit 감지 유틸 (`isRateLimitText()`, `isRateLimitError()`) |
 | `src/process-memory-watchdog.ts` | 시스템 메모리 워치독 — 커밋 메모리 감시, 프로세스 kill, Slack 확인 UI |
+| `src/report-server.ts` | 로컬 HTML 보고서 서버 — Node http + marked, 127.0.0.1, 토큰 인증, traversal 가드 |
 | `src/config.ts` | 환경변수 로드 |
 | `src/types.ts` | TypeScript 타입 정의 |
 | `src/logger.ts` | 구조화된 로깅 |
