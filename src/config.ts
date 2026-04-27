@@ -17,10 +17,19 @@ export const config = {
   },
   baseDirectory: process.env.BASE_DIRECTORY || '',
   defaultWorkingDirectory: process.env.DEFAULT_WORKING_DIRECTORY || '',
+  // Default model used when channel has no explicit override.
+  // Aliases: 'sonnet' | 'opus' | 'haiku' | full Anthropic ID
+  defaultModel: process.env.DEFAULT_MODEL || 'sonnet',
   debug: process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development',
   assistant: {
     dmChannel: process.env.ASSISTANT_DM_CHANNEL || '',
     configDir: process.env.ASSISTANT_CONFIG_DIR || '',
+  },
+  reports: {
+    localServer: {
+      enabled: process.env.REPORTS_SERVER_ENABLED !== '0',
+      port: parseInt(process.env.REPORTS_SERVER_PORT || '8765', 10),
+    },
   },
   memoryWatchdog: {
     enabled: process.env.MEMORY_WATCHDOG_ENABLED !== '0',

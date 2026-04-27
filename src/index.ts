@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { App } from '@slack/bolt';
 import { config, validateConfig } from './config';
 import { CliHandler } from './cli-handler';
@@ -5,6 +6,7 @@ import { SlackHandler } from './slack-handler';
 import { McpManager } from './mcp-manager';
 import { Logger } from './logger';
 import { getVersionInfo, checkForUpdates } from './version';
+import { ReportServer } from './report-server';
 
 const logger = new Logger('Main');
 
@@ -36,9 +38,22 @@ async function start() {
     const mcpManager = new McpManager();
     const mcpConfig = mcpManager.loadConfiguration();
 
+    // Optionally start the local report HTTP server (127.0.0.1)
+    let reportServer: ReportServer | undefined;
+    if (config.reports.localServer.enabled && config.assistant.configDir) {
+      const reportsDir = path.resolve(config.assistant.configDir, '..', 'reports');
+      const server = new ReportServer(reportsDir);
+      try {
+        await server.start(config.reports.localServer.port);
+        reportServer = server;
+      } catch (error) {
+        logger.warn('Failed to start report server, continuing without it', error);
+      }
+    }
+
     // Initialize handlers
     const cliHandler = new CliHandler(mcpManager);
-    const slackHandler = new SlackHandler(app, cliHandler, mcpManager);
+    const slackHandler = new SlackHandler(app, cliHandler, mcpManager, reportServer);
 
     // Setup event handlers
     slackHandler.setupEventHandlers();

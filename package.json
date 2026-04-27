@@ -23,6 +23,7 @@
     "@types/node-fetch": "^2.6.12",
     "date-holidays": "^3.26.8",
     "dotenv": "^16.6.0",
+    "marked": "^18.0.2",
     "node-fetch": "^3.3.2"
   }
 }

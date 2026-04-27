@@ -19,6 +19,7 @@ import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n }
 import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
+import { ReportServer } from './report-server';
 
 interface MessageEvent {
   user: string;
@@ -46,6 +47,7 @@ export class SlackHandler {
   private fileHandler: FileHandler;
   private todoManager: TodoManager;
   private mcpManager: McpManager;
+  private reportServer?: ReportServer;
 
   // Active CLI process tracking (for interrupt/stop)
   private activeProcesses: Map<string, CliProcess> = new Map();
@@ -70,7 +72,9 @@ export class SlackHandler {
   private pendingOneTimeTools: Map<string, string[]> = new Map();
 
   // Rate limit retry
-  private pendingRetries: Map<string, { prompt: string; channel: string; threadTs: string; user: string; notifyScheduledId?: string }> = new Map();
+  private pendingRetries: Map<string, { prompt: string; channel: string; threadTs: string; user: string }> = new Map();
+  private pendingRetryCleanup: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private pendingAutoRetries: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
   // Plan mode: store session info for "Execute" button
   private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string; user: string }> = new Map();
@@ -111,10 +115,11 @@ export class SlackHandler {
   // System memory watchdog
   private memoryWatchdog: ProcessMemoryWatchdog | null = null;
 
-  constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager) {
+  constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager, reportServer?: ReportServer) {
     this.app = app;
     this.cliHandler = cliHandler;
     this.mcpManager = mcpManager;
+    this.reportServer = reportServer;
     this.workingDirManager = new WorkingDirectoryManager();
     this.fileHandler = new FileHandler();
     this.todoManager = new TodoManager();
@@ -187,6 +192,22 @@ export class SlackHandler {
   async handleMessage(event: MessageEvent, say: any) {
     const { user, channel, thread_ts, ts, text, files } = event;
     const locale = await this.getUserLocale(user);
+
+    // !o / !s / !h prefix — one-time model override for this single message
+    if (text) {
+      const prefixed = this.parseModelPrefix(text);
+      if (prefixed) {
+        const prevModel = this.channelModels.get(channel);
+        this.channelModels.set(channel, prefixed.model);
+        try {
+          await this.handleMessage({ ...event, text: prefixed.prompt }, say);
+        } finally {
+          if (prevModel !== undefined) this.channelModels.set(channel, prevModel);
+          else this.channelModels.delete(channel);
+        }
+        return;
+      }
+    }
 
     // Process any attached files
     let processedFiles: ProcessedFile[] = [];
@@ -406,11 +427,18 @@ export class SlackHandler {
       const modelArg = this.parseModelCommand(text);
       if (modelArg !== null) {
         if (modelArg === '') {
-          const current = this.channelModels.get(channel) || t('cmd.model.default', locale);
+          const stored = this.channelModels.get(channel);
+          const current = stored
+            ? `${stored} (channel)`
+            : `${config.defaultModel} (${t('cmd.model.default', locale)})`;
           await say({ text: `🤖 ${t('cmd.model.current', locale, { model: current })}`, thread_ts: thread_ts });
+        } else if (modelArg.toLowerCase() === 'default') {
+          this.channelModels.delete(channel);
+          await say({ text: `🤖 ${t('cmd.model.set', locale, { model: `${config.defaultModel} (${t('cmd.model.default', locale)})` })}`, thread_ts: thread_ts });
         } else {
-          this.channelModels.set(channel, modelArg);
-          await say({ text: `🤖 ${t('cmd.model.set', locale, { model: modelArg })}`, thread_ts: thread_ts });
+          const resolved = SlackHandler.resolveModelAlias(modelArg);
+          this.channelModels.set(channel, resolved);
+          await say({ text: `🤖 ${t('cmd.model.set', locale, { model: resolved })}`, thread_ts: thread_ts });
         }
         return;
       }
@@ -580,7 +608,7 @@ export class SlackHandler {
     let lastStatusText = '';
     let statusRepeatCount = 0;
     const toolUsageCounts = new Map<string, number>();
-    const channelModel = this.channelModels.get(channel);
+    const channelModel = SlackHandler.resolveModelAlias(this.channelModels.get(channel) || config.defaultModel);
     let apiKeyCostInfo: { queryCost: number; totalCost: number } | null = null;
     let cliError = false;
 
@@ -1048,6 +1076,19 @@ export class SlackHandler {
 
   // --- Rate limit UI helper ---
 
+  private clearRetryTimers(retryId: string): void {
+    const cleanup = this.pendingRetryCleanup.get(retryId);
+    if (cleanup) {
+      clearTimeout(cleanup);
+      this.pendingRetryCleanup.delete(retryId);
+    }
+    const auto = this.pendingAutoRetries.get(retryId);
+    if (auto) {
+      clearTimeout(auto);
+      this.pendingAutoRetries.delete(retryId);
+    }
+  }
+
   private async handleRateLimitUI(
     channel: string, threadTs: string, user: string,
     prompt: string, retryAfterSec: number, locale: Locale, say: any,
@@ -1058,32 +1099,12 @@ export class SlackHandler {
     const retryId = `retry-${Date.now()}`;
 
     this.pendingRetries.set(retryId, { prompt, channel, threadTs, user });
-    setTimeout(async () => {
-      const expiredRetry = this.pendingRetries.get(retryId);
-      if (expiredRetry?.notifyScheduledId) {
-        await this.app.client.chat.deleteScheduledMessage({
-          channel: expiredRetry.channel,
-          scheduled_message_id: expiredRetry.notifyScheduledId,
-        }).catch(() => {});
-      }
+    // Cleanup if user never clicks any button within 10 min (auto-retry button clears this timer)
+    const cleanupTimer = setTimeout(() => {
       this.pendingRetries.delete(retryId);
+      this.pendingRetryCleanup.delete(retryId);
     }, 10 * 60 * 1000);
-
-    // Auto-schedule a mention notification at reset time
-    try {
-      const notifyResult = await this.app.client.chat.scheduleMessage({
-        channel,
-        text: t('rateLimit.notify', locale, { user }),
-        post_at: postAt,
-        thread_ts: threadTs,
-      });
-      const retryInfo = this.pendingRetries.get(retryId);
-      if (retryInfo && notifyResult.scheduled_message_id) {
-        retryInfo.notifyScheduledId = notifyResult.scheduled_message_id;
-      }
-    } catch (notifyError) {
-      this.logger.warn('Failed to schedule rate limit notification', notifyError);
-    }
+    this.pendingRetryCleanup.set(retryId, cleanupTimer);
 
     const promptPreview = prompt.length > 200
       ? prompt.substring(0, 200) + '...'
@@ -1392,9 +1413,32 @@ export class SlackHandler {
   }
 
   private parseModelCommand(text: string): string | null {
-    const match = text.trim().match(/^-(?:model|m)(?:\s+(\S+))?$|^모델(?:\s+(\S+))?$/i);
-    if (match) return match[1] || match[2] || '';
+    const trimmed = text.trim();
+    // -model <name> | -m <name> | 모델 <name>  (empty arg = show current)
+    const longMatch = trimmed.match(/^-(?:model|m)(?:\s+(\S+))?$|^모델(?:\s+(\S+))?$/i);
+    if (longMatch) return longMatch[1] || longMatch[2] || '';
+    // Short alias commands: -opus | -o | -sonnet | -s | -haiku | -h
+    const shortMatch = trimmed.match(/^-(opus|sonnet|haiku|o|s|h)$/i);
+    if (shortMatch) return shortMatch[1].toLowerCase();
     return null;
+  }
+
+  // Resolve short alias to canonical model name. Pass-through for full IDs.
+  private static resolveModelAlias(input: string): string {
+    const map: Record<string, string> = {
+      o: 'opus', opus: 'opus',
+      s: 'sonnet', sonnet: 'sonnet',
+      h: 'haiku', haiku: 'haiku',
+    };
+    return map[input.toLowerCase()] ?? input;
+  }
+
+  // !o / !s / !h prefix → one-time model override + stripped prompt.
+  // Returns null if no prefix.
+  private parseModelPrefix(text: string): { model: string; prompt: string } | null {
+    const m = text.match(/^!([osh])\s+([\s\S]+)$/i);
+    if (!m) return null;
+    return { model: SlackHandler.resolveModelAlias(m[1]), prompt: m[2] };
   }
 
   private isCostCommand(text: string): boolean {
@@ -1536,9 +1580,17 @@ export class SlackHandler {
     // Sort by date (newest first), upload each report
     filtered.sort((a, b) => b.name.localeCompare(a.name));
 
+    if (this.reportServer) {
+      await say({
+        thread_ts: threadTs,
+        text: `📚 ${this.reportServer.buildIndexUrl()}`,
+      });
+    }
+
     for (const report of filtered) {
       const content = fs.readFileSync(report.absPath, 'utf-8');
       const firstLines = content.split('\n').filter(l => l.trim()).slice(0, 3).join('\n');
+      const linkLine = this.reportServer ? `🔗 ${this.reportServer.buildReportUrl(report.relPath)}\n` : '';
 
       try {
         await this.app.client.filesUploadV2({
@@ -1547,7 +1599,7 @@ export class SlackHandler {
           filename: report.relPath.replace('/', '_'),
           content,
           title: `📄 ${report.relPath}`,
-          initial_comment: `\`${report.absPath}\`\n>${firstLines.split('\n').join('\n>')}`,
+          initial_comment: `${linkLine}\`${report.absPath}\`\n>${firstLines.split('\n').join('\n>')}`,
         });
         await say({
           text: '',
@@ -1566,7 +1618,7 @@ export class SlackHandler {
         this.logger.warn('File upload failed, falling back to text', { file: report.relPath, error });
         const maxLen = 3900;
         const truncated = content.length > maxLen ? content.substring(0, maxLen) + '\n\n…(truncated)' : content;
-        await say({ text: `📄 *${report.relPath}*\n\`${report.absPath}\`\n\n${truncated}`, thread_ts: threadTs });
+        await say({ text: `📄 *${report.relPath}*\n${linkLine}\`${report.absPath}\`\n\n${truncated}`, thread_ts: threadTs });
       }
     }
   }
@@ -2859,94 +2911,63 @@ export class SlackHandler {
     });
 
 
-    // Rate limit retry — open modal with editable prompt
-    this.app.action('schedule_retry', async ({ ack, body }) => {
+    // Rate limit retry — auto-execute the original prompt at reset time
+    this.app.action('schedule_retry', async ({ ack, body, respond }) => {
       await ack();
       try {
-        const actionLocale = await this.getUserLocale((body as any).user.id);
+        const userId = (body as any).user.id;
+        const actionLocale = await this.getUserLocale(userId);
         const actionValue = JSON.parse((body as any).actions[0].value);
-        const retryInfo = this.pendingRetries.get(actionValue.retryId);
+        const { retryId, postAt, retryTimeStr } = actionValue;
+        const retryInfo = this.pendingRetries.get(retryId);
         if (!retryInfo) {
-          await this.app.client.chat.postEphemeral({
-            channel: (body as any).channel?.id || '',
-            user: (body as any).user.id,
-            text: `⚠️ ${t('rateLimit.retryExpired', actionLocale)}`,
-          }).catch(() => {});
+          await respond({ response_type: 'ephemeral', text: `⚠️ ${t('rateLimit.retryExpired', actionLocale)}` });
           return;
         }
 
-        const { postAt, retryTimeStr } = actionValue;
-
-        await this.app.client.views.open({
-          trigger_id: (body as any).trigger_id,
-          view: {
-            type: 'modal',
-            callback_id: 'schedule_retry_modal',
-            private_metadata: JSON.stringify({ retryId: actionValue.retryId, postAt }),
-            title: { type: 'plain_text', text: t('rateLimit.modalTitle', actionLocale) },
-            submit: { type: 'plain_text', text: t('rateLimit.modalSubmit', actionLocale, { time: retryTimeStr }) },
-            close: { type: 'plain_text', text: t('rateLimit.modalClose', actionLocale) },
-            blocks: [
-              {
-                type: 'section',
-                text: { type: 'mrkdwn', text: t('rateLimit.modalBody', actionLocale, { time: retryTimeStr }) },
-              },
-              {
-                type: 'input',
-                block_id: 'retry_prompt_block',
-                label: { type: 'plain_text', text: t('rateLimit.modalLabel', actionLocale) },
-                element: {
-                  type: 'plain_text_input',
-                  action_id: 'retry_prompt_input',
-                  multiline: true,
-                  initial_value: retryInfo.prompt,
-                },
-              },
-            ],
-          },
-        });
-      } catch (error) {
-        this.logger.error('Failed to open retry modal', error);
-      }
-    });
-
-    // Modal submission — schedule the message
-    this.app.view('schedule_retry_modal', async ({ ack, view }) => {
-      await ack();
-      try {
-        const metadata = JSON.parse(view.private_metadata);
-        const retryInfo = this.pendingRetries.get(metadata.retryId);
-        if (!retryInfo) return;
-
-        const viewLocale = await this.getUserLocale(retryInfo.user);
-        const editedPrompt = view.state.values.retry_prompt_block.retry_prompt_input.value || retryInfo.prompt;
-        const postAt = metadata.postAt;
-
-        await this.app.client.chat.scheduleMessage({
-          channel: retryInfo.channel,
-          text: editedPrompt,
-          post_at: postAt,
-          thread_ts: retryInfo.threadTs,
-        });
-
-        const retryTimeStr = formatTime(new Date(postAt * 1000), viewLocale);
-
-        // Cancel auto-notification (retry will auto-execute instead)
-        if (retryInfo.notifyScheduledId) {
-          await this.app.client.chat.deleteScheduledMessage({
-            channel: retryInfo.channel,
-            scheduled_message_id: retryInfo.notifyScheduledId,
-          }).catch(() => {});
+        // Auto-retry will own pendingRetries until fire — clear cleanup timer
+        const cleanupTimer = this.pendingRetryCleanup.get(retryId);
+        if (cleanupTimer) {
+          clearTimeout(cleanupTimer);
+          this.pendingRetryCleanup.delete(retryId);
         }
-        this.pendingRetries.delete(metadata.retryId);
 
-        await this.app.client.chat.postMessage({
-          channel: retryInfo.channel,
-          thread_ts: retryInfo.threadTs,
-          text: `✅ ${t('rateLimit.scheduled', viewLocale, { time: retryTimeStr })}`,
+        // Schedule auto-execution: postAt + 60s buffer for Anthropic clock skew
+        const fireMs = postAt * 1000 + 60_000;
+        const delay = Math.max(60_000, fireMs - Date.now());
+        const autoRetryTimer = setTimeout(async () => {
+          this.pendingAutoRetries.delete(retryId);
+          const info = this.pendingRetries.get(retryId);
+          if (!info) return;
+          this.pendingRetries.delete(retryId);
+          try {
+            const fireLocale = await this.getUserLocale(info.user);
+            await this.app.client.chat.postMessage({
+              channel: info.channel,
+              thread_ts: info.threadTs,
+              text: t('rateLimit.autoRetryFiring', fireLocale),
+            }).catch(() => {});
+            const event: MessageEvent = {
+              user: info.user,
+              channel: info.channel,
+              thread_ts: info.threadTs,
+              ts: info.threadTs,
+              text: info.prompt,
+            };
+            const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel: info.channel, ...msg });
+            await this.handleMessage(event, sayCb);
+          } catch (error) {
+            this.logger.error('Auto-retry execution failed', error);
+          }
+        }, delay);
+        this.pendingAutoRetries.set(retryId, autoRetryTimer);
+
+        await respond({
+          replace_original: true,
+          text: t('rateLimit.scheduled', actionLocale, { time: retryTimeStr }),
         });
       } catch (error) {
-        this.logger.error('Failed to schedule retry from modal', error);
+        this.logger.error('Failed to schedule auto-retry', error);
       }
     });
 
@@ -2954,14 +2975,7 @@ export class SlackHandler {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const retryId = (body as any).actions[0].value;
-      const retryInfo = this.pendingRetries.get(retryId);
-      // Cancel auto-notification
-      if (retryInfo?.notifyScheduledId) {
-        await this.app.client.chat.deleteScheduledMessage({
-          channel: retryInfo.channel,
-          scheduled_message_id: retryInfo.notifyScheduledId,
-        }).catch(() => {});
-      }
+      this.clearRetryTimers(retryId);
       this.pendingRetries.delete(retryId);
       await respond({ response_type: 'ephemeral', text: t('misc.cancelled', actionLocale) });
     });
@@ -2979,13 +2993,7 @@ export class SlackHandler {
           return;
         }
 
-        // Cancel auto-notification
-        if (retryInfo.notifyScheduledId) {
-          await this.app.client.chat.deleteScheduledMessage({
-            channel: retryInfo.channel,
-            scheduled_message_id: retryInfo.notifyScheduledId,
-          }).catch(() => {});
-        }
+        this.clearRetryTimers(retryId);
 
         const ok = await this.accountManager.switchTo(account);
         if (!ok) {
@@ -3030,13 +3038,7 @@ export class SlackHandler {
 
         const apiKey = this.userApiKeys.get(userId);
         if (apiKey) {
-          // Cancel auto-notification
-          if (retryInfo.notifyScheduledId) {
-            await this.app.client.chat.deleteScheduledMessage({
-              channel: retryInfo.channel,
-              scheduled_message_id: retryInfo.notifyScheduledId,
-            }).catch(() => {});
-          }
+          this.clearRetryTimers(retryId);
 
           // Activate API key mode for this channel
           this.activateApiKey(retryInfo.channel, retryInfo.threadTs, userId, retryAfter, actionLocale);
@@ -3186,13 +3188,7 @@ export class SlackHandler {
           // Called from rate limit flow — activate API key and retry
           const retryInfo = this.pendingRetries.get(metadata.retryId);
           if (retryInfo) {
-            // Cancel auto-notification
-            if (retryInfo.notifyScheduledId) {
-              await this.app.client.chat.deleteScheduledMessage({
-                channel: retryInfo.channel,
-                scheduled_message_id: retryInfo.notifyScheduledId,
-              }).catch(() => {});
-            }
+            this.clearRetryTimers(metadata.retryId);
 
             this.activateApiKey(retryInfo.channel, retryInfo.threadTs, userId, metadata.retryAfter, viewLocale);
 

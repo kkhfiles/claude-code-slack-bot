@@ -69,7 +69,7 @@ Claude Pro/Max subscriptions have session limits with 5-hour windows. Schedule a
 
 **How it works:**
 - Each schedule entry is tied to a specific account — use the `[+ email]` buttons to add times per account
-- At the scheduled hour, the bot sends a minimal greeting using the assigned account's token (randomized message, +5~25 min jitter)
+- At the scheduled hour, the bot sends a minimal greeting using the assigned account's token (randomized message, +0~10 min jitter)
 - **Auto follow-up**: 5 hours later, a second greeting fires automatically to cover the next session window (persisted to disk — survives restarts)
 - Different accounts can have overlapping times; conflict checking is per-account only (5-hour window)
 - Uses `claude-haiku-4-5-20251001` model for minimal token cost
@@ -315,7 +315,7 @@ Conversations in the same thread automatically continue the session (no command 
 | Command | Description |
 |---------|-------------|
 | `-briefing` / `-br` | Run morning briefing now |
-| `-report [type]` / `-rp` | View latest analysis report |
+| `-report [type]` / `-rp` | View latest analysis report (uploads file + local HTML link if server enabled) |
 | `-analyze [type]` / `-an` | Run analysis (single type or all) |
 | `-assistant config` / `-as config` | Show assistant configuration |
 | `-assistant briefing HH:MM` | Change briefing time |
@@ -497,7 +497,7 @@ Schedule automatic session starts to maximize Claude Pro/Max session windows.
 **Setup:** Use `-schedule` in Slack — no environment variables needed. The block-based UI lets you add/remove times per account.
 
 **Behavior:**
-- Randomized jitter (+5~25 min) to avoid automation detection
+- Randomized jitter (+0~10 min) to avoid automation detection
 - Auto follow-up 5 hours later for the next session window
 - Non-working day skip (weekends + public holidays)
 - Daily rotation (toggle button): for 2-account cross-schedules, swap accounts on alternating days (by day-of-year) to balance usage over 2 weeks

@@ -18,9 +18,9 @@ const messages: Record<string, Record<Locale, string>> = {
   'cmd.reset.done': { en: 'Session reset. Next message will start a new conversation.', ko: '세션이 초기화되었습니다. 다음 메시지부터 새 대화가 시작됩니다.' },
 
   // Model
-  'cmd.model.current': { en: 'Current model: `{{model}}`\n_Use `-model <name>` to change (`sonnet`, `opus`, `haiku`)_', ko: '현재 모델: `{{model}}`\n_`-model <이름>`으로 변경 (`sonnet`, `opus`, `haiku`)_' },
+  'cmd.model.current': { en: 'Current model: `{{model}}`\n_Change: `-opus`/`-o`, `-sonnet`/`-s`, `-haiku`/`-h`, `-m default`. One-time: prefix `!o `, `!s `, `!h `_', ko: '현재 모델: `{{model}}`\n_변경: `-opus`/`-o`, `-sonnet`/`-s`, `-haiku`/`-h`, `-m default`. 일회성: `!o `, `!s `, `!h ` 프리픽스_' },
   'cmd.model.set': { en: 'Model set to `{{model}}`', ko: '모델을 `{{model}}`(으)로 설정했습니다' },
-  'cmd.model.default': { en: 'default (determined by Claude Code)', ko: '기본 (Claude Code가 자동 결정)' },
+  'cmd.model.default': { en: 'default', ko: '기본값' },
 
 
   // Cost
@@ -144,22 +144,15 @@ const messages: Record<string, Record<Locale, string>> = {
   'rateLimit.reached': { en: '*Rate limit reached.*', ko: '*Rate limit에 도달했습니다.*' },
   'rateLimit.retryEstimate': { en: 'Estimated retry: *{{time}}* ({{minutes}} min later)', ko: '예상 재시도 시간: *{{time}}* ({{minutes}}분 후)' },
   'rateLimit.prompt': { en: '_Prompt: {{prompt}}_', ko: '_프롬프트: {{prompt}}_' },
-  'rateLimit.schedule': { en: 'Schedule ({{time}})', ko: '예약 ({{time}})' },
+  'rateLimit.schedule': { en: '🔁 Auto-retry ({{time}})', ko: '🔁 자동 재실행 ({{time}})' },
   'rateLimit.cancel': { en: 'Cancel', ko: '취소' },
-  'rateLimit.autoNotify': { en: '_You will be automatically notified when the limit resets._', ko: '_리셋 시간에 자동으로 알림을 보내드립니다._' },
-  'rateLimit.notify': { en: '<@{{user}}> Rate limit lifted. You can send a new message to Claude.', ko: '<@{{user}}> Rate limit이 해제되었습니다. Claude에게 새 메시지를 보낼 수 있습니다.' },
-  'rateLimit.scheduled': { en: 'Retry scheduled at {{time}}.', ko: '{{time}}에 재실행이 예약되었습니다.' },
+  'rateLimit.autoNotify': { en: "_Click 'Auto-retry' to re-run your prompt automatically when the limit resets._", ko: "_'자동 재실행'을 누르면 리셋 시간에 자동으로 같은 프롬프트가 다시 실행됩니다._" },
+  'rateLimit.scheduled': { en: '🔁 Auto-retry scheduled at *{{time}}*. The original prompt will run automatically.', ko: '🔁 *{{time}}*에 자동 재실행이 예약되었습니다. 같은 프롬프트로 자동 실행됩니다.' },
+  'rateLimit.autoRetryFiring': { en: '🔁 Auto-retry firing now…', ko: '🔁 자동 재실행을 시작합니다…' },
   'rateLimit.retryExpired': { en: 'Retry info expired. Please resend your message manually.', ko: '재시도 정보가 만료되었습니다. 수동으로 메시지를 재전송해주세요.' },
 
   'rateLimit.continueWithApiKey': { en: 'Continue with API key', ko: 'API 키로 계속' },
   'rateLimit.switchAccount': { en: '🔄 Switch to {{account}}', ko: '🔄 {{account}}으로 전환' },
-
-  // Rate limit modal
-  'rateLimit.modalTitle': { en: 'Schedule Retry', ko: '예약 재시도' },
-  'rateLimit.modalSubmit': { en: 'Schedule ({{time}})', ko: '예약 ({{time}})' },
-  'rateLimit.modalClose': { en: 'Cancel', ko: '취소' },
-  'rateLimit.modalBody': { en: 'Will resend the prompt at *{{time}}*.\nEdit if needed.', ko: '*{{time}}*에 아래 프롬프트를 재전송합니다.\n필요하면 편집하세요.' },
-  'rateLimit.modalLabel': { en: 'Prompt', ko: '프롬프트' },
 
   // API key
   'apiKey.modalTitle': { en: 'API Key', ko: 'API 키' },
@@ -452,7 +445,9 @@ export function getHelpText(locale: Locale): string {
     help += `\`-safe\` / \`안전\` — 안전 모드: 편집 자동 승인, Bash/MCP 승인 필요\n`;
     help += `\`-trust\` / \`신뢰\` — 신뢰 모드: 모든 도구 자동 승인\n\n`;
     help += `*설정*\n`;
-    help += `\`-m\` / \`-model [이름]\` / \`모델\` — 모델 조회/설정 (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
+    help += `\`-m\` / \`-model [이름]\` / \`모델\` — 모델 조회/설정 (\`sonnet\`, \`opus\`, \`haiku\`, \`default\`)\n`;
+    help += `\`-opus\` / \`-o\`, \`-sonnet\` / \`-s\`, \`-haiku\` / \`-h\` — 채널 모델을 한 번에 전환\n`;
+    help += `\`!o <prompt>\`, \`!s <prompt>\`, \`!h <prompt>\` — 이 메시지 한 번만 다른 모델로 실행\n`;
     help += `\`-cost\` / \`비용\` — 마지막 쿼리 비용 및 세션 ID\n`;
     help += `\`-v\` / \`-version\` / \`버전\` — 봇 버전 및 업데이트 확인\n\n`;
     help += `*MCP*\n`;
@@ -500,7 +495,9 @@ export function getHelpText(locale: Locale): string {
   help += `\`-safe\` — Safe: edits auto-approved, bash/MCP require approval\n`;
   help += `\`-trust\` — Trust: all tools auto-approved\n\n`;
   help += `*Settings*\n`;
-  help += `\`-m\` / \`-model [name]\` — Get/set model (\`sonnet\`, \`opus\`, \`haiku\`)\n`;
+  help += `\`-m\` / \`-model [name]\` — Get/set model (\`sonnet\`, \`opus\`, \`haiku\`, \`default\`)\n`;
+  help += `\`-opus\` / \`-o\`, \`-sonnet\` / \`-s\`, \`-haiku\` / \`-h\` — Switch channel model in one shot\n`;
+  help += `\`!o <prompt>\`, \`!s <prompt>\`, \`!h <prompt>\` — Run this single message with a different model\n`;
   help += `\`-cost\` — Show last query cost and session ID\n`;
   help += `\`-v\` / \`-version\` — Show bot version and check for updates\n\n`;
   help += `*MCP*\n`;
