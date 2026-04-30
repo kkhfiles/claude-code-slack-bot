@@ -15,5 +15,5 @@
     "sourceMap": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "src/permission-mcp-server.ts"]
+  "exclude": ["node_modules", "dist"]
 }

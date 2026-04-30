@@ -52,7 +52,7 @@ When Claude subscription limits are reached:
 
 1. **Auto account switch** — If multiple accounts are registered, the bot tries the next account automatically
 2. **Continue with API key** — Switch to your registered API key
-3. **Schedule retry** — Slack delivers your message at the estimated reset time
+3. **Auto-retry** — Bot automatically re-runs your original prompt when the rate limit resets (in-memory; expires after 10 min if no button is clicked)
 4. **Cancel** — Discard the pending message
 
 Pre-register your API key with `-apikey` so it's ready when needed. The modal also lets you set an optional **spending limit** — the bot auto-deactivates API key mode when the limit is reached. The bot automatically reverts to subscription auth when the rate limit resets.
@@ -89,7 +89,7 @@ Automate daily briefings, calendar reminders, and weekly analysis reports. Requi
 
 - **i18n**: Automatic Korean/English UI based on Slack user locale
 - **MCP**: Integrate MCP servers via `mcp-servers.json` (`-mcp`, `-mcp reload`)
-- **Model selection**: `-model sonnet`, `-model opus`, `-model haiku`
+- **Model selection**: `-model sonnet`, `-model opus`, `-model haiku` (or short aliases `-s`, `-o`, `-h`). Prefix a single message with `!o `, `!s `, or `!h ` for a one-shot override without changing the channel default.
 - **Cost tracking**: API key mode shows per-query and cumulative cost in completion messages; `-cost` for last query details
 - **Spending limit**: Set via `-apikey` modal or `-limit <amount>`; auto-deactivates API key mode when reached
 - **Streaming**: Real-time response updates with tool progress display
@@ -555,6 +555,7 @@ src/
 ├── error-collector.ts           # Error collection for briefing reports
 ├── rate-limit-utils.ts          # Shared rate limit detection
 ├── process-memory-watchdog.ts   # System memory watchdog (Windows)
+├── report-server.ts             # Local HTML report server (127.0.0.1, token auth)
 ├── version.ts                   # Version info and update checker
 └── logger.ts                    # Logging utility
 ```

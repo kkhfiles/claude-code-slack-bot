@@ -173,24 +173,14 @@ const messages: Record<string, Record<Locale, string>> = {
   'schedule.sessionStart': { en: '🌅 Starting new Claude session...', ko: '🌅 새 Claude 세션을 시작합니다...' },
   'schedule.noConfig': { en: '_No schedules configured. Use the buttons below to add._', ko: '_설정된 스케줄이 없습니다. 아래 버튼으로 추가하세요._' },
   'schedule.status.header': { en: '*Session Auto-Start*', ko: '*세션 자동 시작*' },
-  'schedule.status.channel': { en: 'Target: <#{{channel}}>', ko: '대상 채널: <#{{channel}}>' },
-  'schedule.status.times': { en: 'Times: {{times}} (each fires at :05~:25, then again ~5h later)', ko: '예약 시간: {{times}} (매 정시 +5~25분 발송, 이후 ~5시간 뒤 재발송)' },
-  'schedule.status.next': { en: 'Next: `{{time}}` (~{{minutes}} min)', ko: '다음 전송: `{{time}}` 전후 (약 {{minutes}}분 후)' },
-  'schedule.status.noTimes': { en: 'No times set.', ko: '설정된 시간 없음.' },
-  'schedule.status.hint': { en: '_`-schedule add <hour>` to add, `-schedule remove <hour>` to remove, `-schedule clear` to reset_', ko: '_`-schedule add <시간>` 추가, `-schedule remove <시간>` 제거, `-schedule clear` 초기화_' },
-  'schedule.added': { en: '✅ `{{hour}}` added. A greeting will be auto-sent around `{{hour}}:05~:25`, then again ~5h later (`{{followUpHour}}:05~:25`) to cover the next session window. Target: <#{{channel}}>', ko: '✅ {{hour}}시 추가됨. {{hour}}:05~:25 사이 자동 전송 후, 다음 세션 윈도우를 위해 ~5시간 뒤 `{{followUpHour}}:05~:25`에도 자동 전송됩니다. 대상: <#{{channel}}>' },
-  'schedule.alreadyExists': { en: '`{{time}}` is already configured.', ko: '`{{time}}`은 이미 설정되어 있습니다.' },
   'schedule.conflictWithExisting': { en: '`{{time}}` is within the 5-hour window of `{{existing}}` — the follow-up at ~`{{existing}}+5h` already covers this slot. Remove `{{existing}}` first with `-schedule remove {{existingHour}}` if you want to change the base time.', ko: '`{{time}}`은 `{{existing}}`의 5시간 세션 범위 안에 있습니다 — `{{existing}}+5h` 자동 팔로우업이 이미 해당 시간대를 커버합니다. 기준 시간을 변경하려면 먼저 `-schedule remove {{existingHour}}`로 제거하세요.' },
-  'schedule.removed': { en: '✅ Removed `{{time}}`.', ko: '✅ `{{time}}` 제거됨.' },
-  'schedule.notFound': { en: '`{{time}}` not found.', ko: '`{{time}}`이 설정에 없습니다.' },
-  'schedule.cleared': { en: '✅ All session start times cleared.', ko: '✅ 모든 세션 시작 시간이 초기화되었습니다.' },
   'schedule.invalidTime': { en: 'Invalid time. Use an hour (e.g., `6`, `16`).', ko: '잘못된 시간. 시(hour)를 입력하세요 (예: `6`, `16`).' },
   'schedule.clearBtn': { en: '🗑 Clear all', ko: '🗑 전체 삭제' },
   'schedule.noAccounts': { en: '_No accounts configured. Use `-account` to set up accounts first._', ko: '_설정된 계정이 없습니다. `-account`로 먼저 계정을 설정하세요._' },
   'schedule.modal.title': { en: 'Add Schedule', ko: '스케줄 추가' },
   'schedule.modal.submit': { en: 'Add', ko: '추가' },
   'schedule.modal.close': { en: 'Cancel', ko: '취소' },
-  'schedule.modal.body': { en: 'Add a scheduled time for *{{account}}*.\nA greeting will be sent at the specified time (+5~25min jitter), then again ~5h later.', ko: '*{{account}}*에 스케줄을 추가합니다.\n지정 시간(+5~25분 지터)에 인사 메시지 전송 후, ~5시간 뒤 재전송됩니다.' },
+  'schedule.modal.body': { en: 'Add a scheduled time for *{{account}}*.\nA greeting will be sent at the specified time (+0~10min jitter), then again ~5h later.', ko: '*{{account}}*에 스케줄을 추가합니다.\n지정 시간(+0~10분 지터)에 인사 메시지 전송 후, ~5시간 뒤 재전송됩니다.' },
   'schedule.modal.label': { en: 'Time (hour or HH:MM)', ko: '시간 (시 또는 HH:MM)' },
   'schedule.rotation.status': { en: '🔄 Daily rotation: *ON* (today = {{status}})', ko: '🔄 일일 로테이션: *ON* (오늘 = {{status}})' },
   'schedule.rotation.normal': { en: 'as configured', ko: '기본 순서' },
@@ -435,7 +425,7 @@ export function getHelpText(locale: Locale): string {
     help += `\`-r\` / \`resume\` / \`continue\` / \`계속\` — 최근 세션 피커 (모바일 친화)\n`;
     help += `\`-c\` / \`-continue [메시지]\` — 마지막 CLI 세션 재개\n`;
     help += `\`-resume <세션ID>\` — 특정 세션 재개\n`;
-    help += `\`-s\` / \`-sessions\` / \`세션\` — 현재 cwd의 세션 목록\n`;
+    help += `\`-sessions\` / \`세션\` — 현재 cwd의 세션 목록\n`;
     help += `\`-sessions all\` / \`세션 전체\` — 전체 프로젝트 세션 목록\n`;
     help += `\`-stop\` — 실행 중인 쿼리 중단 (graceful interrupt)\n`;
     help += `\`-reset\` / \`초기화\` — 세션 종료 (다음 메시지부터 새 대화)\n\n`;
@@ -485,7 +475,7 @@ export function getHelpText(locale: Locale): string {
   help += `\`-r\` / \`resume\` / \`continue\` / \`계속\` — Recent sessions picker (mobile-friendly)\n`;
   help += `\`-c\` / \`-continue [message]\` — Resume last CLI session\n`;
   help += `\`-resume <session-id>\` — Resume a specific session\n`;
-  help += `\`-s\` / \`-sessions\` — List sessions for current cwd\n`;
+  help += `\`-sessions\` — List sessions for current cwd\n`;
   help += `\`-sessions all\` — List sessions across all projects\n`;
   help += `\`-stop\` — Cancel the running query (graceful interrupt)\n`;
   help += `\`-reset\` — End current session (next message starts fresh)\n\n`;
