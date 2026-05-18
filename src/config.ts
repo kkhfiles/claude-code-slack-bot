@@ -33,10 +33,10 @@ export const config = {
   },
   memoryWatchdog: {
     enabled: process.env.MEMORY_WATCHDOG_ENABLED !== '0',
-    thresholdPct: parseInt(process.env.MEMORY_WATCHDOG_THRESHOLD_PCT || '80', 10),
-    checkIntervalSec: parseInt(process.env.MEMORY_WATCHDOG_INTERVAL_SEC || '300', 10),
-    autoKillDelaySec: parseInt(process.env.MEMORY_WATCHDOG_AUTO_KILL_SEC || '300', 10),
-    processThresholdMB: parseInt(process.env.MEMORY_WATCHDOG_PROCESS_THRESHOLD_MB || '5120', 10),
+    thresholdPct: parseInt(process.env.MEMORY_WATCHDOG_THRESHOLD_PCT || '90', 10),
+    checkIntervalSec: parseInt(process.env.MEMORY_WATCHDOG_INTERVAL_SEC || '180', 10),
+    autoKillDelaySec: parseInt(process.env.MEMORY_WATCHDOG_AUTO_KILL_SEC || '600', 10),
+    processThresholdMB: parseInt(process.env.MEMORY_WATCHDOG_PROCESS_THRESHOLD_MB || '7168', 10),
   },
 };
 
