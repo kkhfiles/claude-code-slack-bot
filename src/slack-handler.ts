@@ -141,6 +141,12 @@ export class SlackHandler {
         async (prompt, opts) => this.runAssistantSession(prompt, opts),
         config.assistant.configDir,
       );
+
+      // Loopback trigger endpoint for manual analysis (Phase 1.7 / 1.8 / 1.9).
+      if (this.reportServer) {
+        const scheduler = this.assistantScheduler;
+        this.reportServer.setTriggerCallback(async (type: string) => scheduler.runAnalysisManual(type));
+      }
     }
 
     // Initialize system memory watchdog (Windows only)

@@ -23,10 +23,21 @@ export class ReportServer {
   private readonly token: string;
   private readonly reportsDir: string;
   private actualPort: number = 0;
+  private triggerCallback?: (type: string) => Promise<unknown>;
 
   constructor(reportsDir: string) {
     this.reportsDir = path.resolve(reportsDir);
     this.token = crypto.randomBytes(16).toString('hex');
+  }
+
+  /** Wire a fire-and-forget analysis trigger. Bound to POST /trigger?type=... on the loopback port. */
+  setTriggerCallback(cb: (type: string) => Promise<unknown>): void {
+    this.triggerCallback = cb;
+  }
+
+  /** Port the loopback HTTP server bound to (0 until start resolves). */
+  get port(): number {
+    return this.actualPort;
   }
 
   async start(preferredPort: number): Promise<void> {
@@ -71,6 +82,28 @@ export class ReportServer {
   private handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     try {
       const url = new URL(req.url || '/', `http://127.0.0.1:${this.actualPort}`);
+
+      // Loopback-only trigger endpoint; no token required because the server is
+      // bound to 127.0.0.1 in start(). Used for Phase 1.7/1.8 manual analysis runs.
+      if (url.pathname === '/trigger' && req.method === 'POST') {
+        const type = url.searchParams.get('type') || '';
+        if (!this.triggerCallback) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'trigger not wired' }));
+          return;
+        }
+        if (!type) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'missing type' }));
+          return;
+        }
+        this.logger.info('Trigger received', { type });
+        this.triggerCallback(type).catch(err => this.logger.error('Trigger callback failed', err));
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, type, accepted: true }));
+        return;
+      }
+
       if (url.searchParams.get('t') !== this.token) {
         res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Unauthorized');
