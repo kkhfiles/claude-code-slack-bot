@@ -920,11 +920,18 @@ export class AssistantScheduler {
       ?? defaults.maxDurationMinutes ?? 60;
 
     const useSdk = shouldUseSdk(`analysis:${type}`);
+    // Pin model explicitly so future SDK default changes can't silently promote
+    // analyses to Opus (which would burn the $100/mo credit fast).
+    // Override per-type via config.analysis.types[type].model or ANALYSIS_MODEL env.
+    const analysisModel = (typeConfig as any)?.model
+      ?? process.env.ANALYSIS_MODEL
+      ?? 'claude-sonnet-4-6';
 
     const result = await this.spawnSession(
       resumeSessionId ? 'continue' : prompt,
       {
         workingDirectory: this.workingDir,
+        model: analysisModel,
         permissionMode: 'default',
         allowedTools,
         appendSystemPrompt: `CRITICAL: ${writablePaths.join(', ')} 디렉토리에만 새 파일 생성/수정. 그 외 파일 수정/삭제 금지.`,
