@@ -19,6 +19,7 @@ import { Logger } from './logger';
 import { errorCollector } from './error-collector';
 import type { SpawnOpts, SessionResult } from './assistant-scheduler';
 import { isRateLimitText } from './rate-limit-utils';
+import { shouldUseSdk } from './sdk-handler';
 
 // --- Types ---
 
@@ -116,7 +117,7 @@ export class CalendarPoller {
     private spawnSession: (prompt: string, opts: SpawnOpts) => Promise<SessionResult>,
     private promptsDir: string,
     private getConfig: () => AssistantConfig | null,
-    private recordCost: (type: string, costUsd: number, sessionId: string) => void,
+    private recordCost: (type: string, result: SessionResult) => void,
     private isWorkingHours: () => boolean,
   ) {
     const projectRoot = path.join(__dirname, '..');
@@ -597,6 +598,7 @@ export class CalendarPoller {
     }
 
     try {
+      const useSdk = shouldUseSdk('calendar');
       const result = await this.spawnSession(prompt, {
         workingDirectory: os.tmpdir(),  // No CLAUDE.md → saves ~39K tokens
         model: 'claude-haiku-4-5-20251001',
@@ -607,9 +609,10 @@ export class CalendarPoller {
         noSessionPersistence: true,
         skipMcp: true,
         env: { CLAUDE_SCHEDULED: '1' },
+        useSdk,
       });
 
-      this.recordCost('reminder-judgment', result.costUsd, result.sessionId);
+      this.recordCost('reminder-judgment', result);
 
       // Check for rate limit in response text
       if (isRateLimitText(result.text)) {

@@ -194,7 +194,7 @@ export class AssistantScheduler {
       return { text: 'Briefing is disabled in config.', hasReports: false };
     }
     const result = await this.executeBriefing();
-    this.recordCost('briefing', result.costUsd, result.sessionId);
+    this.recordSessionCost('briefing', result);
     return {
       text: result.text + this.formatErrorReport() + this.formatCostLine(),
       hasReports: this.hasUnreadReports(),
@@ -366,6 +366,13 @@ export class AssistantScheduler {
     }
   }
 
+  private recordSessionCost(type: string, result: SessionResult): void {
+    this.recordCost(type, result.costUsd, result.sessionId, {
+      usage: result.usage,
+      via: result.usage ? 'sdk' : 'cli',
+    });
+  }
+
   private recordCost(
     type: string,
     costUsd: number,
@@ -476,7 +483,7 @@ export class AssistantScheduler {
 
       try {
         const result = await this.executeBriefing();
-        this.recordCost('briefing', result.costUsd, result.sessionId);
+        this.recordSessionCost('briefing', result);
 
         // Check rate limit in result text
         if (isRateLimitText(result.text)) {
@@ -542,7 +549,7 @@ export class AssistantScheduler {
     this.logger.info('Catch-up briefing: missed today, running now');
     try {
       const result = await this.executeBriefing();
-      this.recordCost('briefing', result.costUsd, result.sessionId);
+      this.recordSessionCost('briefing', result);
       await this.sendMessage(result.text + this.formatErrorReport() + this.formatCostLine());
 
       if (this.hasUnreadReports()) {
@@ -611,6 +618,7 @@ export class AssistantScheduler {
       allowedTools = ['Read', 'Glob', 'Grep', ...GCAL_READ_TOOLS];
     }
 
+    const useSdk = shouldUseSdk('briefing');
     const result = await this.spawnSession(prompt, {
       workingDirectory: this.workingDir,
       model: 'claude-haiku-4-5-20251001',
@@ -619,6 +627,7 @@ export class AssistantScheduler {
       noSessionPersistence: true,
       skipMcp: true,
       env: { CLAUDE_SCHEDULED: '1' },
+      useSdk,
     });
 
     // Extract only the final briefing output (starts with ☀️), dropping intermediate explanation text
@@ -652,7 +661,7 @@ export class AssistantScheduler {
       this.spawnSession,
       this.promptsDir,
       () => this.config,
-      (type, costUsd, sessionId) => this.recordCost(type, costUsd, sessionId),
+      (type, result) => this.recordSessionCost(type, result),
       () => this.isWorkingHours(),
     );
 
@@ -928,10 +937,7 @@ export class AssistantScheduler {
       },
     );
 
-    this.recordCost(`analysis-${type}`, result.costUsd, result.sessionId, {
-      usage: result.usage,
-      via: useSdk ? 'sdk' : 'cli',
-    });
+    this.recordSessionCost(`analysis-${type}`, result);
 
     this.logger.info('Analysis session completed', {
       type,
