@@ -355,6 +355,10 @@ const messages: Record<string, Record<Locale, string>> = {
     en: ':warning: *System Memory Warning*\nCommit memory: {{committedMB}} MB / {{limitMB}} MB ({{pct}}%)\n\nTarget: `{{name}}` (PID {{pid}}, {{commitMB}} MB)\nAuto-kill in {{minutes}} min if no response.',
     ko: ':warning: *시스템 메모리 경고*\n커밋 메모리: {{committedMB}} MB / {{limitMB}} MB ({{pct}}%)\n\n대상: `{{name}}` (PID {{pid}}, {{commitMB}} MB)\n{{minutes}}분 후 응답 없으면 자동 종료.',
   },
+  'watchdog.confirmProcess': {
+    en: ':warning: *Process Memory Warning*\n`{{name}}` (PID {{pid}}) is using {{commitMB}} MB — over the per-process threshold ({{processThresholdMB}} MB).\nSystem commit: {{committedMB}} MB / {{limitMB}} MB ({{pct}}%).\nAuto-kill in {{minutes}} min if no response.',
+    ko: ':warning: *프로세스 메모리 경고*\n`{{name}}` (PID {{pid}}) 가 {{commitMB}} MB 사용 중 — 프로세스 임계치({{processThresholdMB}} MB) 초과.\n시스템 커밋: {{committedMB}} MB / {{limitMB}} MB ({{pct}}%).\n{{minutes}}분 후 응답 없으면 자동 종료.',
+  },
   'watchdog.killed': {
     en: ':skull: `{{name}}` (PID {{pid}}) killed — {{commitMB}} MB reclaimed.',
     ko: ':skull: `{{name}}` (PID {{pid}}) 종료됨 — {{commitMB}} MB 회수.',

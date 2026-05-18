@@ -146,6 +146,7 @@ export class SlackHandler {
         config.memoryWatchdog.thresholdPct,
         config.memoryWatchdog.checkIntervalSec,
         config.memoryWatchdog.autoKillDelaySec,
+        config.memoryWatchdog.processThresholdMB,
         async (text, blocks?) => {
           const result = await this.app.client.chat.postMessage({
             channel: config.assistant.dmChannel,

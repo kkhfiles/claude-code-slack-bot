@@ -149,7 +149,8 @@ update.bat                    # Windows
   - 5분 무응답 시 자동 kill, 다음 주기에 재평가 → 여전히 초과이면 다음 대상
   - 시스템 프로세스 보호 목록 (svchost, dwm, csrss 등) + 자기 자신(봇) 제외
   - `ASSISTANT_DM_CHANNEL`로 알림 전송, Windows 전용 (`process.platform === 'win32'`)
-  - 환경변수: `MEMORY_WATCHDOG_ENABLED`, `MEMORY_WATCHDOG_THRESHOLD_PCT`, `MEMORY_WATCHDOG_INTERVAL_SEC`, `MEMORY_WATCHDOG_AUTO_KILL_SEC`
+  - 단일 프로세스 커밋이 `processThresholdMB` (기본 5120MB) 초과 시 시스템 임계치 미달이어도 확인 메시지 발송
+  - 환경변수: `MEMORY_WATCHDOG_ENABLED`, `MEMORY_WATCHDOG_THRESHOLD_PCT`, `MEMORY_WATCHDOG_PROCESS_THRESHOLD_MB`, `MEMORY_WATCHDOG_INTERVAL_SEC`, `MEMORY_WATCHDOG_AUTO_KILL_SEC`
 
 ### CLI Integration
 - `child_process.spawn('claude', ['-p', '--output-format', 'stream-json', ...])` 방식
