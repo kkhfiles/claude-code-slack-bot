@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { CliHandler, type CliEvent, type CliProcess, type CliAssistantEvent, type CliInitEvent, type CliResultEvent, type CliRateLimitEvent } from './cli-handler';
+import { SdkHandler } from './sdk-handler';
 import { PendingDenial } from './types';
 import { Logger } from './logger';
 import { WorkingDirectoryManager } from './working-directory-manager';
@@ -12,7 +13,7 @@ import { McpManager } from './mcp-manager';
 import { SessionScanner, SessionInfo, formatRelativeTime } from './session-scanner';
 import { ScheduleManager } from './schedule-manager';
 import { AccountManager, AccountId } from './account-manager';
-import { AssistantScheduler, SpawnOpts, SessionResult } from './assistant-scheduler';
+import { AssistantScheduler, SpawnOpts, SessionResult, SessionUsage } from './assistant-scheduler';
 import { CalendarPoller } from './calendar-poller';
 import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
@@ -42,6 +43,7 @@ interface MessageEvent {
 export class SlackHandler {
   private app: App;
   private cliHandler: CliHandler;
+  private sdkHandler: SdkHandler;
   private logger = new Logger('SlackHandler');
   private workingDirManager: WorkingDirectoryManager;
   private fileHandler: FileHandler;
@@ -118,6 +120,7 @@ export class SlackHandler {
   constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager, reportServer?: ReportServer) {
     this.app = app;
     this.cliHandler = cliHandler;
+    this.sdkHandler = new SdkHandler(mcpManager);
     this.mcpManager = mcpManager;
     this.reportServer = reportServer;
     this.workingDirManager = new WorkingDirectoryManager();
@@ -1846,7 +1849,7 @@ export class SlackHandler {
     const env: Record<string, string> = { ...(opts.env || {}) };
     if (oauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
 
-    const cliProcess = this.cliHandler.runQuery(prompt, {
+    const commonOpts = {
       workingDirectory: opts.workingDirectory,
       model: opts.model,
       permissionMode: opts.permissionMode,
@@ -1859,7 +1862,13 @@ export class SlackHandler {
       noSessionPersistence: opts.noSessionPersistence,
       tools: opts.tools,
       env,
-    });
+    };
+
+    const proc = opts.useSdk
+      ? this.sdkHandler.runQuery(prompt, { ...commonOpts, thinkingBudgetTokens: opts.thinkingBudgetTokens })
+      : this.cliHandler.runQuery(prompt, commonOpts);
+
+    this.logger.info('Assistant session started', { via: opts.useSdk ? 'sdk' : 'cli' });
 
     // Session timeout — kill process if it exceeds maxDurationMs
     let killTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1870,17 +1879,18 @@ export class SlackHandler {
         this.logger.warn('Assistant session timeout, killing process', {
           maxDurationMs: opts.maxDurationMs,
         });
-        cliProcess.interrupt();
+        proc.interrupt();
       }, opts.maxDurationMs);
     }
 
-    // Collect text, sessionId, cost, and subtype from CLI events
+    // Collect text, sessionId, cost, subtype, and usage from events
     let text = '';
     let sessionId = '';
     let costUsd = 0;
     let subtype = 'success';
+    let usage: SessionUsage | undefined;
 
-    for await (const event of cliProcess) {
+    for await (const event of proc) {
       if (event.type === 'system' && (event as any).subtype === 'init') {
         sessionId = (event as CliInitEvent).session_id;
       }
@@ -1894,16 +1904,25 @@ export class SlackHandler {
         const resultEvent = event as CliResultEvent;
         costUsd = resultEvent.total_cost_usd || 0;
         subtype = resultEvent.subtype || 'success';
+        const rawUsage = (event as any).usage;
+        if (rawUsage) {
+          usage = {
+            inputTokens: rawUsage.input_tokens ?? 0,
+            outputTokens: rawUsage.output_tokens ?? 0,
+            cacheCreateTokens: rawUsage.cache_creation_input_tokens ?? 0,
+            cacheReadTokens: rawUsage.cache_read_input_tokens ?? 0,
+          };
+        }
       }
     }
 
     if (killTimer) clearTimeout(killTimer);
 
     if (timedOut) {
-      return { text, costUsd, sessionId, subtype: 'error_timeout' };
+      return { text, costUsd, sessionId, subtype: 'error_timeout', usage };
     }
 
-    return { text, costUsd, sessionId, subtype };
+    return { text, costUsd, sessionId, subtype, usage };
   }
 
   /**

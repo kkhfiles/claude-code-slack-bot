@@ -5,6 +5,7 @@ import { Logger } from './logger';
 import { CalendarPoller } from './calendar-poller';
 import { errorCollector } from './error-collector';
 import { isRateLimitText } from './rate-limit-utils';
+import { shouldUseSdk } from './sdk-handler';
 
 export interface AssistantConfig {
   briefing: {
@@ -65,6 +66,15 @@ export interface SpawnOpts {
   noSessionPersistence?: boolean;
   tools?: string[];
   maxDurationMs?: number;
+  useSdk?: boolean;
+  thinkingBudgetTokens?: number;
+}
+
+export interface SessionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreateTokens: number;
+  cacheReadTokens: number;
 }
 
 export interface SessionResult {
@@ -72,6 +82,7 @@ export interface SessionResult {
   costUsd: number;
   sessionId: string;
   subtype: string;  // 'success' | 'error_max_budget_usd' | ...
+  usage?: SessionUsage;
 }
 
 // Google Calendar MCP tools via local @cocal/google-calendar-mcp server
@@ -101,6 +112,11 @@ interface CostEntry {
   type: string;
   costUsd: number;
   sessionId: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheCreateTokens?: number;
+  cacheReadTokens?: number;
+  via?: 'cli' | 'sdk';
 }
 
 const COST_FILE = path.join(__dirname, '..', '.assistant-costs.json');
@@ -350,16 +366,35 @@ export class AssistantScheduler {
     }
   }
 
-  private recordCost(type: string, costUsd: number, sessionId: string): void {
+  private recordCost(
+    type: string,
+    costUsd: number,
+    sessionId: string,
+    extras?: { usage?: SessionUsage; via?: 'cli' | 'sdk' },
+  ): void {
     if (costUsd <= 0) return;
-    this.costEntries.push({
+    const entry: CostEntry = {
       timestamp: new Date().toISOString(),
       type,
       costUsd,
       sessionId,
-    });
+    };
+    if (extras?.usage) {
+      entry.inputTokens = extras.usage.inputTokens;
+      entry.outputTokens = extras.usage.outputTokens;
+      entry.cacheCreateTokens = extras.usage.cacheCreateTokens;
+      entry.cacheReadTokens = extras.usage.cacheReadTokens;
+    }
+    if (extras?.via) entry.via = extras.via;
+    this.costEntries.push(entry);
     this.saveCosts();
-    this.logger.info('Recorded cost', { type, costUsd: costUsd.toFixed(4), sessionId });
+    this.logger.info('Recorded cost', {
+      type,
+      costUsd: costUsd.toFixed(4),
+      sessionId,
+      via: extras?.via,
+      cacheRead: extras?.usage?.cacheReadTokens,
+    });
   }
 
   private formatCostLine(): string {
@@ -875,6 +910,8 @@ export class AssistantScheduler {
     const maxDurationMinutes = (typeConfig?.maxDurationMinutes as number | undefined)
       ?? defaults.maxDurationMinutes ?? 60;
 
+    const useSdk = shouldUseSdk(`analysis:${type}`);
+
     const result = await this.spawnSession(
       resumeSessionId ? 'continue' : prompt,
       {
@@ -886,15 +923,22 @@ export class AssistantScheduler {
         resumeSessionId,
         skipMcp: true,
         maxDurationMs: maxDurationMinutes * 60_000,
+        useSdk,
+        thinkingBudgetTokens: useSdk ? 5000 : undefined,
       },
     );
 
-    this.recordCost(`analysis-${type}`, result.costUsd, result.sessionId);
+    this.recordCost(`analysis-${type}`, result.costUsd, result.sessionId, {
+      usage: result.usage,
+      via: useSdk ? 'sdk' : 'cli',
+    });
 
     this.logger.info('Analysis session completed', {
       type,
       subtype: result.subtype,
       costUsd: result.costUsd.toFixed(4),
+      via: useSdk ? 'sdk' : 'cli',
+      cacheRead: result.usage?.cacheReadTokens,
     });
 
     // Timeout detection
