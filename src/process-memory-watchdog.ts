@@ -56,6 +56,7 @@ export class ProcessMemoryWatchdog {
     private thresholdPct: number,
     private checkIntervalSec: number,
     private autoKillDelaySec: number,
+    private processThresholdMB: number,
     private sendMessage: SendMessageFn,
     private updateMessage: UpdateMessageFn,
     private onProcessKilled?: OnProcessKilledFn,
@@ -66,7 +67,7 @@ export class ProcessMemoryWatchdog {
       this.logger.info('Memory watchdog is Windows-only, skipping');
       return;
     }
-    this.logger.info(`Memory watchdog started (threshold: ${this.thresholdPct}%, interval: ${this.checkIntervalSec}s, autoKill: ${this.autoKillDelaySec}s)`);
+    this.logger.info(`Memory watchdog started (threshold: ${this.thresholdPct}%, processThreshold: ${this.processThresholdMB} MB, interval: ${this.checkIntervalSec}s, autoKill: ${this.autoKillDelaySec}s)`);
     // Run first check after a short delay
     setTimeout(() => this.checkMemory().catch(e => this.logger.error('Memory check failed', e)), 10_000);
     this.checkTimer = setInterval(
@@ -160,16 +161,15 @@ export class ProcessMemoryWatchdog {
     const status = await this.getSystemCommitStatus();
     if (!status) return;
 
-    if (status.usagePct < this.thresholdPct) {
-      this.logger.debug(`System commit: ${status.committedMB.toLocaleString()}/${status.limitMB.toLocaleString()} MB (${status.usagePct}%) — OK`);
-      return;
-    }
-
-    // Threshold breached
-    this.logger.warn(`System commit HIGH: ${status.committedMB.toLocaleString()}/${status.limitMB.toLocaleString()} MB (${status.usagePct}%) — threshold ${this.thresholdPct}%`);
+    const systemHigh = status.usagePct >= this.thresholdPct;
 
     const processes = await this.getTopProcesses(20);
-    if (processes.length === 0) return;
+    if (processes.length === 0) {
+      if (!systemHigh) {
+        this.logger.debug(`System commit: ${status.committedMB.toLocaleString()}/${status.limitMB.toLocaleString()} MB (${status.usagePct}%) — OK`);
+      }
+      return;
+    }
 
     // Clean up excluded PIDs for processes that have exited
     for (const pid of this.excludedPids) {
@@ -187,24 +187,38 @@ export class ProcessMemoryWatchdog {
       !this.pendingKills.has(p.pid),
     );
 
-    if (candidates.length === 0) {
+    const target = candidates[0]; // already sorted descending by commitMB
+    const processHigh = target !== undefined && target.commitMB >= this.processThresholdMB;
+
+    if (!systemHigh && !processHigh) {
+      this.logger.debug(`System commit: ${status.committedMB.toLocaleString()}/${status.limitMB.toLocaleString()} MB (${status.usagePct}%) — OK`);
+      return;
+    }
+
+    if (systemHigh) {
+      this.logger.warn(`System commit HIGH: ${status.committedMB.toLocaleString()}/${status.limitMB.toLocaleString()} MB (${status.usagePct}%) — threshold ${this.thresholdPct}%`);
+    }
+    if (processHigh && !systemHigh) {
+      this.logger.warn(`Process commit HIGH: ${target!.name} (PID ${target!.pid}, ${target!.commitMB} MB) — threshold ${this.processThresholdMB} MB`);
+    }
+
+    if (!target) {
       this.logger.warn('No killable candidates found despite high commit usage');
       return;
     }
 
-    // Target the largest process
-    const target = candidates[0]; // already sorted descending by commitMB
-    await this.sendKillConfirmation(target, status);
+    await this.sendKillConfirmation(target, status, processHigh && !systemHigh);
   }
 
-  private async sendKillConfirmation(target: ProcessInfo, status: CommitStatus): Promise<void> {
-    const text = t('watchdog.confirm', this.locale, {
+  private async sendKillConfirmation(target: ProcessInfo, status: CommitStatus, processOnly: boolean): Promise<void> {
+    const text = t(processOnly ? 'watchdog.confirmProcess' : 'watchdog.confirm', this.locale, {
       committedMB: status.committedMB.toLocaleString(),
       limitMB: status.limitMB.toLocaleString(),
       pct: String(status.usagePct),
       pid: String(target.pid),
       name: target.name,
       commitMB: String(target.commitMB.toLocaleString()),
+      processThresholdMB: this.processThresholdMB.toLocaleString(),
       minutes: String(Math.round(this.autoKillDelaySec / 60)),
     });
 
