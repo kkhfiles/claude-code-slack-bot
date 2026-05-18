@@ -169,7 +169,10 @@ export class SdkHandler {
 
     const sdkOptions: any = {
       permissionMode: sdkPermissionMode,
-      settingSources: ['project'],
+      // 'project' alone misses .claude/settings.local.json where operator-only
+      // permissions live (e.g. Bash(python:*) for analysis scripts). CLI auto-merges
+      // all three; SDK requires explicit listing. Precedence: user < project < local.
+      settingSources: ['user', 'project', 'local'],
       persistSession: false,
       systemPrompt: { type: 'preset', preset: 'claude_code' },
       includePartialMessages: false,
