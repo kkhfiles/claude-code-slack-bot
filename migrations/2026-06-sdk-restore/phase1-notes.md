@@ -321,3 +321,36 @@ Phase 0.11 sandbox 100회 측정:
 - **SdkHandler 로깅 간략** — CLI는 매 메시지·tool 호출 로깅, SDK는 진입·종료 메타만 로깅. Phase 2에서 보강 후보. 디버깅 시 어려움 우려.
 - **캐시 적중 매우 좋음** — 100K 1H cache read. 향후 모든 분석을 SDK로 옮겨도 동일 효과 기대.
 
+
+### 2026-05-18: Phase 1.8 — 산출물 동등성 + 1H 캐시 검증
+
+**산출물 동등성**:
+SDK 1차 호출 후 `~/.claude/skills/mycelium/skill.md` mtime 미변경 = SDK가 "변경 없음" 판단. baseline 5/16 → 5/18 KG state diff 직접 확인:
+
+| 지표 | 5/16 baseline | 5/18 현재 | Δ |
+|---|---|---|---|
+| Total nodes | 25,915 | 26,021 | +106 |
+| Type 종류 | 16 | 16 | 0 |
+| Major examples (person/org/project/tool/concept) | — | 유효 | 0 |
+
+`source_file +38, java_class +6, jira_issue +28, pull_request +34` — 정기 sync 누적 delta만. 도메인 힌트 본문 변경 불필요. **SDK 판단 정확**.
+
+**1H prompt cache 동작**:
+
+| 호출 | 시각 (UTC) | 직전 호출과 gap | cacheCreate | cacheRead | output | costUsd |
+|---|---|---|---|---|---|---|
+| 1차 | 03:07:30 | — | 39,510 | 100,108 | 9,637 | $0.324 |
+| 2차 | 05:54:19 | +2h 47m | 41,212 | **469,864** | 9,610 | $0.441 |
+
+- 2차 cacheRead가 1차의 4.7배 — 시스템 캐시 + 1차 호출에서 생성된 캐시 누적
+- 1H TTL 60분 초과 후에도 cacheRead 적중 (Anthropic API 동작 — 정확한 TTL 정책 불명확, 누적 read 합계 가능성)
+- cacheCreate가 매 호출 새로 발생 → 비용 변동 +36% (2차)
+- **CLI 평균 $0.606 대비**: 1차 -47% / 2차 -27% / **평균 -37% 절감**
+
+### Phase 1.8 결론
+
+- ✅ SDK 출력 정확성: KG state 일치 검증으로 "변경 없음" 판단 신뢰
+- ✅ 1H 캐시 작동: cacheRead 적중 일관됨
+- ⚠️ 호출간 비용 변동성: cacheCreate 재발생으로 절감 폭이 -27%~-47% 변동. **일관 -90% 같은 결과는 아님** (Phase 0 단순 sandbox는 system prompt 정적, 실 분석 호출은 도구 호출·thinking이 변동 발생)
+- 결정: SDK 라우팅 의미 있는 절감 (-37% 평균) → Phase 2 확대 진행 가능
+
