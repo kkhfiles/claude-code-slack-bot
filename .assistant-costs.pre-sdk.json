@@ -1,0 +1,604 @@
+{
+  "entries": [
+    {
+      "timestamp": "2026-04-15T11:13:42.154Z",
+      "type": "analysis-skill-review",
+      "costUsd": 2.5255595,
+      "sessionId": "d80fd68f-9024-4571-b4b2-182cf212e4fe"
+    },
+    {
+      "timestamp": "2026-04-15T11:18:09.592Z",
+      "type": "analysis-ai-practice",
+      "costUsd": 1.1159065,
+      "sessionId": "6b70b306-512d-4307-9a74-f6af0313b6ea"
+    },
+    {
+      "timestamp": "2026-04-15T11:25:57.532Z",
+      "type": "analysis-competitors",
+      "costUsd": 2.0149702499999997,
+      "sessionId": "0b0a1214-a9ac-4d3c-8c3b-0489d0eb15b0"
+    },
+    {
+      "timestamp": "2026-04-15T11:33:31.178Z",
+      "type": "analysis-session-efficiency",
+      "costUsd": 1.7001361,
+      "sessionId": "534d8d35-eb91-4c4f-8a55-e933fe99d46b"
+    },
+    {
+      "timestamp": "2026-04-15T11:38:41.035Z",
+      "type": "analysis-settings-drift",
+      "costUsd": 0.9800318,
+      "sessionId": "a86b5977-9551-4ef5-b6c6-79fc4d3cacf5"
+    },
+    {
+      "timestamp": "2026-04-15T11:46:14.481Z",
+      "type": "analysis-dependency-health",
+      "costUsd": 5.227606800000003,
+      "sessionId": "4188eec7-728b-42ed-92bd-8a61830b41d3"
+    },
+    {
+      "timestamp": "2026-04-15T11:48:10.811Z",
+      "type": "analysis-kg-health",
+      "costUsd": 0.4513444999999999,
+      "sessionId": "0f02f4b9-8706-4de0-8b3c-e99faa99e49c"
+    },
+    {
+      "timestamp": "2026-04-15T11:50:20.030Z",
+      "type": "analysis-kg-skill-update",
+      "costUsd": 0.34411875000000003,
+      "sessionId": "d865e9a3-de7a-4229-b263-c89c91c4ee9b"
+    },
+    {
+      "timestamp": "2026-04-15T11:53:53.156Z",
+      "type": "analysis-cli-usage",
+      "costUsd": 0.6425480499999999,
+      "sessionId": "2c45f601-a49d-4880-9446-6040223692b4"
+    },
+    {
+      "timestamp": "2026-04-15T12:09:09.315Z",
+      "type": "analysis-cli-usage",
+      "costUsd": 1.20200525,
+      "sessionId": "2c45f601-a49d-4880-9446-6040223692b4"
+    },
+    {
+      "timestamp": "2026-04-15T17:11:51.287Z",
+      "type": "analysis-data-sync",
+      "costUsd": 0.8364605,
+      "sessionId": "ab8c3453-e6e2-45b5-8604-4f02b7f27fcc"
+    },
+    {
+      "timestamp": "2026-04-15T23:00:40.353Z",
+      "type": "briefing",
+      "costUsd": 0.09162075,
+      "sessionId": "d5b9b95a-33b7-4eaa-b5d8-f4b08be4e2db"
+    },
+    {
+      "timestamp": "2026-04-15T23:41:02.569Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.009052000000000001,
+      "sessionId": "c4a58ed1-35b4-4bda-b58c-a3233fd994ff"
+    },
+    {
+      "timestamp": "2026-04-16T00:00:39.759Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.015983999999999998,
+      "sessionId": "1bfa8022-a647-4d36-b042-0b2103a00e44"
+    },
+    {
+      "timestamp": "2026-04-16T15:13:47.373Z",
+      "type": "analysis-data-sync",
+      "costUsd": 0.6176305000000001,
+      "sessionId": "5aefdf4b-0d52-442d-97a4-588888ef85ee"
+    },
+    {
+      "timestamp": "2026-04-16T23:00:39.595Z",
+      "type": "briefing",
+      "costUsd": 0.07991229999999999,
+      "sessionId": "748f35e0-b43d-40ee-b8f0-fd838dd14bdb"
+    },
+    {
+      "timestamp": "2026-04-17T00:55:35.637Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.008299,
+      "sessionId": "b8c2e98a-ede6-4c57-befb-d0d800390ecf"
+    },
+    {
+      "timestamp": "2026-04-17T04:35:42.465Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.01468525,
+      "sessionId": "f911f705-8466-47b8-9b26-cd25c4925cfb"
+    },
+    {
+      "timestamp": "2026-04-17T15:12:47.722Z",
+      "type": "analysis-skill-review",
+      "costUsd": 4.861295500000001,
+      "sessionId": "be55ff02-9702-4189-bf93-eed79975e831"
+    },
+    {
+      "timestamp": "2026-04-17T15:17:22.676Z",
+      "type": "analysis-ai-practice",
+      "costUsd": 1.5904469999999997,
+      "sessionId": "6b70d0df-584e-4b03-be8f-91baae6579d7"
+    },
+    {
+      "timestamp": "2026-04-17T15:22:02.037Z",
+      "type": "analysis-competitors",
+      "costUsd": 1.764117,
+      "sessionId": "d28f8234-b5d1-4aef-be7f-6c1e16647b7e"
+    },
+    {
+      "timestamp": "2026-04-17T15:27:28.399Z",
+      "type": "analysis-session-efficiency",
+      "costUsd": 1.9910124999999996,
+      "sessionId": "fb646d3c-7690-4971-88d9-99d279e865f0"
+    },
+    {
+      "timestamp": "2026-04-17T15:32:06.764Z",
+      "type": "analysis-settings-drift",
+      "costUsd": 1.151521,
+      "sessionId": "8d8700f1-106b-4ed2-b4ac-de11eeb60e4f"
+    },
+    {
+      "timestamp": "2026-04-17T15:35:36.726Z",
+      "type": "analysis-dependency-health",
+      "costUsd": 1.5383535,
+      "sessionId": "a888438d-3644-4576-bfd5-618bbb2fff28"
+    },
+    {
+      "timestamp": "2026-04-17T15:38:14.913Z",
+      "type": "analysis-kg-health",
+      "costUsd": 0.9249247499999999,
+      "sessionId": "7f785b0b-a4dc-4e6a-b2e3-e052afe4aa86"
+    },
+    {
+      "timestamp": "2026-04-17T15:39:16.479Z",
+      "type": "analysis-kg-skill-update",
+      "costUsd": 0.30289925,
+      "sessionId": "c4569e19-afa2-4823-8ff5-61024401de08"
+    },
+    {
+      "timestamp": "2026-04-17T15:42:38.511Z",
+      "type": "analysis-cli-usage",
+      "costUsd": 0.8192232500000001,
+      "sessionId": "58e5f3ae-0c0b-4d70-bb31-27bf8faf1fe6"
+    },
+    {
+      "timestamp": "2026-04-17T16:05:29.258Z",
+      "type": "analysis-cli-usage",
+      "costUsd": 0.39174575,
+      "sessionId": "58e5f3ae-0c0b-4d70-bb31-27bf8faf1fe6"
+    },
+    {
+      "timestamp": "2026-04-19T16:00:02.871Z",
+      "type": "analysis-data-sync",
+      "costUsd": 1.16021325,
+      "sessionId": "ae2eb8b4-9ee2-487f-9b70-cacab6dd8b92"
+    },
+    {
+      "timestamp": "2026-04-19T16:01:12.633Z",
+      "type": "analysis-data-sync",
+      "costUsd": 0.5258222499999999,
+      "sessionId": "dee665db-c3c9-432a-938f-267d6ebb0960"
+    },
+    {
+      "timestamp": "2026-04-19T23:00:53.941Z",
+      "type": "briefing",
+      "costUsd": 0.0945353,
+      "sessionId": "381f03a3-5793-4aca-8cc2-c18c2251bff6"
+    },
+    {
+      "timestamp": "2026-04-20T05:22:34.225Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.008704,
+      "sessionId": "9b0a9f56-6895-4cd8-b3fd-917412d0d3ae"
+    },
+    {
+      "timestamp": "2026-04-20T15:21:31.281Z",
+      "type": "analysis-data-sync",
+      "costUsd": 1.5956845,
+      "sessionId": "d69b6949-541f-47d1-a8aa-6f81ea98b90f"
+    },
+    {
+      "timestamp": "2026-04-20T23:00:36.415Z",
+      "type": "briefing",
+      "costUsd": 0.08005504999999999,
+      "sessionId": "ab231bc8-eff7-456f-945d-d9a84c7840a4"
+    },
+    {
+      "timestamp": "2026-04-21T00:04:02.095Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.011004,
+      "sessionId": "f31c6f1f-31de-4fb9-a45c-64fbcc6369da"
+    },
+    {
+      "timestamp": "2026-04-21T15:17:04.424Z",
+      "type": "analysis-data-sync",
+      "costUsd": 2.1231775,
+      "sessionId": "f4e66f98-0d35-4cea-bb29-42adaa7e329c"
+    },
+    {
+      "timestamp": "2026-04-21T23:00:25.581Z",
+      "type": "briefing",
+      "costUsd": 0.0722385,
+      "sessionId": "fb904ee4-1727-4b70-8036-f5f345f34f67"
+    },
+    {
+      "timestamp": "2026-04-22T02:19:08.396Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.0134115,
+      "sessionId": "0b8a27ed-2da0-486d-82f6-3ea3e2081cab"
+    },
+    {
+      "timestamp": "2026-04-22T15:15:52.171Z",
+      "type": "analysis-data-sync",
+      "costUsd": 1.6371632500000002,
+      "sessionId": "6b29b539-c587-4f21-a01c-10d0b668a8c8"
+    },
+    {
+      "timestamp": "2026-04-22T23:00:26.249Z",
+      "type": "briefing",
+      "costUsd": 0.0740142,
+      "sessionId": "8a7e14d0-77f3-4671-9b2d-d7f7d9406da5"
+    },
+    {
+      "timestamp": "2026-04-22T23:49:07.527Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.0113865,
+      "sessionId": "0298f5c9-5f77-4031-8931-d6d67d6b7375"
+    },
+    {
+      "timestamp": "2026-04-23T23:00:41.673Z",
+      "type": "briefing",
+      "costUsd": 0.07996565,
+      "sessionId": "1a0442e4-a9bb-4b32-842e-1d7f3579d5fc"
+    },
+    {
+      "timestamp": "2026-04-23T23:24:11.547Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.01207625,
+      "sessionId": "1dc86f9c-7e1f-49e1-bc9a-6eaaec7d521b"
+    },
+    {
+      "timestamp": "2026-04-27T02:34:19.788Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.010886,
+      "sessionId": "40167a26-a75a-47aa-ba19-d4a4b4bfc29c"
+    },
+    {
+      "timestamp": "2026-04-27T04:14:22.971Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.012359000000000002,
+      "sessionId": "cad6fe73-e6e8-4d05-a3ce-bb5defe52239"
+    },
+    {
+      "timestamp": "2026-04-27T04:49:23.204Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.01362075,
+      "sessionId": "459be913-edd4-4d1f-aca8-01d64359f6ed"
+    },
+    {
+      "timestamp": "2026-04-27T07:19:06.377Z",
+      "type": "briefing",
+      "costUsd": 0.10183515,
+      "sessionId": "6c0154a3-2828-43b7-9480-15b15a860743"
+    },
+    {
+      "timestamp": "2026-04-27T16:16:48.095Z",
+      "type": "analysis-data-sync",
+      "costUsd": 3.214257000000001,
+      "sessionId": "b4ae7d19-26ec-489f-95eb-ce54f60443ba"
+    },
+    {
+      "timestamp": "2026-04-27T23:00:18.728Z",
+      "type": "briefing",
+      "costUsd": 0.07291325000000001,
+      "sessionId": "fbfb7d92-d00d-4010-a0d4-2c24a893418b"
+    },
+    {
+      "timestamp": "2026-04-28T00:23:01.896Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.013764,
+      "sessionId": "0f65a475-c013-40df-b752-b58078ae15ec"
+    },
+    {
+      "timestamp": "2026-04-28T15:15:24.945Z",
+      "type": "analysis-data-sync",
+      "costUsd": 2.67212475,
+      "sessionId": "6e65a014-cf5c-4bd4-ab63-ccb68a50cfd1"
+    },
+    {
+      "timestamp": "2026-04-28T23:00:22.577Z",
+      "type": "briefing",
+      "costUsd": 0.07841525,
+      "sessionId": "e91fff78-b8d9-44a9-87d2-65eb7df9417a"
+    },
+    {
+      "timestamp": "2026-04-29T15:15:58.512Z",
+      "type": "analysis-data-sync",
+      "costUsd": 1.5194062499999998,
+      "sessionId": "adff8265-1e30-4545-a06b-502a1dac152d"
+    },
+    {
+      "timestamp": "2026-04-29T23:00:32.607Z",
+      "type": "briefing",
+      "costUsd": 0.08720455,
+      "sessionId": "53b9a12b-831b-4ed7-b7fc-9eca0963e079"
+    },
+    {
+      "timestamp": "2026-04-30T15:12:14.551Z",
+      "type": "analysis-data-sync",
+      "costUsd": 1.045917,
+      "sessionId": "1cdf1c45-f6f2-40d0-8f45-0d9998b26a0f"
+    },
+    {
+      "timestamp": "2026-04-30T23:00:33.593Z",
+      "type": "briefing",
+      "costUsd": 0.09184804999999999,
+      "sessionId": "bcadce52-7d35-4c79-a864-e7a8c0d710bc"
+    },
+    {
+      "timestamp": "2026-05-01T15:06:10.983Z",
+      "type": "analysis-ai-practice",
+      "costUsd": 2.30840875,
+      "sessionId": "2e88bc32-cdf0-424f-a292-84d8bfb19c06"
+    },
+    {
+      "timestamp": "2026-05-01T15:13:09.173Z",
+      "type": "analysis-competitors",
+      "costUsd": 3.062671250000001,
+      "sessionId": "a95d3817-95ca-4056-b37b-8e9c4ea4ab0c"
+    },
+    {
+      "timestamp": "2026-05-01T15:16:55.514Z",
+      "type": "analysis-dependency-health",
+      "costUsd": 2.06924625,
+      "sessionId": "a08fcf73-1dae-4b16-9eb8-e033fefc0a8f"
+    },
+    {
+      "timestamp": "2026-05-01T15:21:00.752Z",
+      "type": "analysis-kg-health",
+      "costUsd": 1.1009945,
+      "sessionId": "4ec47c8e-84df-43dd-8515-4ff6bfeb8891"
+    },
+    {
+      "timestamp": "2026-05-01T15:22:44.274Z",
+      "type": "analysis-kg-skill-update",
+      "costUsd": 0.474028,
+      "sessionId": "51e42b03-58e7-4104-b8e0-28082316e9e2"
+    },
+    {
+      "timestamp": "2026-05-01T15:27:11.899Z",
+      "type": "analysis-cli-usage",
+      "costUsd": 1.7459962500000001,
+      "sessionId": "2eab7fcc-2c3d-4569-9c2f-cc8dfed496cc"
+    },
+    {
+      "timestamp": "2026-05-01T16:05:22.971Z",
+      "type": "analysis-cli-usage",
+      "costUsd": 0.520539,
+      "sessionId": "2eab7fcc-2c3d-4569-9c2f-cc8dfed496cc"
+    },
+    {
+      "timestamp": "2026-05-03T15:05:14.311Z",
+      "type": "analysis-data-sync",
+      "costUsd": 1.7217525000000002,
+      "sessionId": "f6092c50-0e6f-4a1b-8057-ae367658f4f2"
+    },
+    {
+      "timestamp": "2026-05-03T23:00:55.601Z",
+      "type": "briefing",
+      "costUsd": 0.13089185,
+      "sessionId": "f84eece6-a0a9-41b5-b136-d0f3c8704a2d"
+    },
+    {
+      "timestamp": "2026-05-04T09:58:32.687Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.01578825,
+      "sessionId": "1b0e9af7-3e1a-4c8c-9d5c-9146ac4afa70"
+    },
+    {
+      "timestamp": "2026-05-04T10:03:11.041Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.01383325,
+      "sessionId": "0864bd1b-83d7-4907-a245-62f3f10aec76"
+    },
+    {
+      "timestamp": "2026-05-05T15:06:33.998Z",
+      "type": "analysis-data-sync",
+      "costUsd": 1.4532112499999998,
+      "sessionId": "d1d260cf-5f0e-486e-bfa9-ac76d392255d"
+    },
+    {
+      "timestamp": "2026-05-05T23:00:49.024Z",
+      "type": "briefing",
+      "costUsd": 0.11034769999999999,
+      "sessionId": "f249cc14-a202-4994-9ab9-6df63fc2a715"
+    },
+    {
+      "timestamp": "2026-05-06T15:00:23.030Z",
+      "type": "analysis-data-sync",
+      "costUsd": 0.293095,
+      "sessionId": "fb81f562-ee28-4a74-8e15-afd5adca1e9e"
+    },
+    {
+      "timestamp": "2026-05-06T23:01:30.951Z",
+      "type": "briefing",
+      "costUsd": 0.13753435,
+      "sessionId": "7342bad7-a209-448e-94ba-a339a30ab26d"
+    },
+    {
+      "timestamp": "2026-05-06T23:03:30.386Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.01491975,
+      "sessionId": "07d96a37-db89-4ff3-8b60-9c7b31d1b7f5"
+    },
+    {
+      "timestamp": "2026-05-07T00:53:36.484Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.019236,
+      "sessionId": "30001aa6-86df-41e4-b164-574801658aa7"
+    },
+    {
+      "timestamp": "2026-05-07T23:01:14.527Z",
+      "type": "briefing",
+      "costUsd": 0.12097865000000001,
+      "sessionId": "ae88777f-af81-46b5-99c5-184de81744a5"
+    },
+    {
+      "timestamp": "2026-05-08T15:12:04.672Z",
+      "type": "analysis-skill-review",
+      "costUsd": 4.072032999999999,
+      "sessionId": "7ea75d67-70f3-4a2c-b438-f00953097ea3"
+    },
+    {
+      "timestamp": "2026-05-08T15:16:40.444Z",
+      "type": "analysis-ai-practice",
+      "costUsd": 1.39201575,
+      "sessionId": "582e3ed9-6899-4b2c-906d-c4108fdf6b34"
+    },
+    {
+      "timestamp": "2026-05-08T15:24:05.543Z",
+      "type": "analysis-session-efficiency",
+      "costUsd": 3.15781075,
+      "sessionId": "c768d778-569c-44de-8fc3-0baa6f14dfc8"
+    },
+    {
+      "timestamp": "2026-05-08T15:30:32.717Z",
+      "type": "analysis-settings-drift",
+      "costUsd": 2.4300895000000002,
+      "sessionId": "45fe92e6-5507-44c9-80ef-879c97e7fcfe"
+    },
+    {
+      "timestamp": "2026-05-08T15:33:42.013Z",
+      "type": "analysis-kg-health",
+      "costUsd": 0.7705575,
+      "sessionId": "be90e374-4203-4993-9e0a-278bf6c25ee7"
+    },
+    {
+      "timestamp": "2026-05-08T15:35:57.691Z",
+      "type": "analysis-kg-skill-update",
+      "costUsd": 0.64249375,
+      "sessionId": "2ab21db0-4fda-4ab6-8fa8-6f3e82b6103c"
+    },
+    {
+      "timestamp": "2026-05-08T15:40:40.845Z",
+      "type": "analysis-cli-usage",
+      "costUsd": 1.8179147500000001,
+      "sessionId": "27c6e585-f365-45dd-a2e7-4901c9531e5e"
+    },
+    {
+      "timestamp": "2026-05-08T16:05:28.186Z",
+      "type": "analysis-cli-usage",
+      "costUsd": 0.698864,
+      "sessionId": "27c6e585-f365-45dd-a2e7-4901c9531e5e"
+    },
+    {
+      "timestamp": "2026-05-10T15:00:20.176Z",
+      "type": "analysis-data-sync",
+      "costUsd": 0.28193874999999996,
+      "sessionId": "d8717417-1368-4282-ad66-5bee7fe51c5d"
+    },
+    {
+      "timestamp": "2026-05-10T23:00:43.311Z",
+      "type": "briefing",
+      "costUsd": 0.08738594999999999,
+      "sessionId": "595386d2-3b16-434f-a0ae-1143b54455eb"
+    },
+    {
+      "timestamp": "2026-05-11T16:00:38.809Z",
+      "type": "analysis-data-sync",
+      "costUsd": 0.5127317499999999,
+      "sessionId": "8de6dec8-8af2-48ce-af3d-035f31035e2a"
+    },
+    {
+      "timestamp": "2026-05-11T23:00:32.087Z",
+      "type": "briefing",
+      "costUsd": 0.08192785,
+      "sessionId": "56c1942a-9540-4da4-b794-df0bdecaaa9c"
+    },
+    {
+      "timestamp": "2026-05-12T00:34:03.371Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.01431675,
+      "sessionId": "4faf2e9e-c142-4d3b-be78-0a091a2942b8"
+    },
+    {
+      "timestamp": "2026-05-12T04:44:06.649Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.0168075,
+      "sessionId": "d054ed55-5469-4738-9710-cdf2f8dcf6f1"
+    },
+    {
+      "timestamp": "2026-05-12T04:49:06.326Z",
+      "type": "reminder-judgment",
+      "costUsd": 0.0149875,
+      "sessionId": "8aa9e660-baf4-4bf0-ae9e-aa681b9220db"
+    },
+    {
+      "timestamp": "2026-05-12T15:00:14.347Z",
+      "type": "analysis-data-sync",
+      "costUsd": 0.36666575,
+      "sessionId": "57fefc93-97db-43bf-8858-0d838eca46bd"
+    },
+    {
+      "timestamp": "2026-05-12T23:00:37.366Z",
+      "type": "briefing",
+      "costUsd": 0.11335875000000001,
+      "sessionId": "03d35124-733f-49c4-942d-85c4796e33b2"
+    },
+    {
+      "timestamp": "2026-05-13T23:00:38.249Z",
+      "type": "briefing",
+      "costUsd": 0.12552425,
+      "sessionId": "1181e52c-5819-48d9-a71e-698ba11551ea"
+    },
+    {
+      "timestamp": "2026-05-15T04:06:02.787Z",
+      "type": "briefing",
+      "costUsd": 0.1145857,
+      "sessionId": "ab179f1a-0455-46b9-8ec7-7d42c7540403"
+    },
+    {
+      "timestamp": "2026-05-15T15:06:40.384Z",
+      "type": "analysis-ai-practice",
+      "costUsd": 2.5160697499999998,
+      "sessionId": "dd58f1f0-88aa-4272-a87b-6bec16d10f62"
+    },
+    {
+      "timestamp": "2026-05-15T15:09:30.969Z",
+      "type": "analysis-kg-health",
+      "costUsd": 0.9020352500000001,
+      "sessionId": "782bcd19-b5d0-48c8-b106-f50113fadeb3"
+    },
+    {
+      "timestamp": "2026-05-15T15:11:35.503Z",
+      "type": "analysis-kg-skill-update",
+      "costUsd": 0.7009660000000001,
+      "sessionId": "434ab70e-b718-466b-a14f-cfd518c43108"
+    },
+    {
+      "timestamp": "2026-05-15T15:20:24.302Z",
+      "type": "analysis-cli-usage",
+      "costUsd": 4.2162215000000005,
+      "sessionId": "d451ad10-9a4c-40f0-861d-24347115b314"
+    },
+    {
+      "timestamp": "2026-05-15T16:05:24.771Z",
+      "type": "analysis-cli-usage",
+      "costUsd": 0.8877235,
+      "sessionId": "d451ad10-9a4c-40f0-861d-24347115b314"
+    },
+    {
+      "timestamp": "2026-05-17T15:11:56.500Z",
+      "type": "analysis-data-sync",
+      "costUsd": 2.6030057499999995,
+      "sessionId": "b2817560-6a0d-4523-8198-a0d439aae5ea"
+    },
+    {
+      "timestamp": "2026-05-17T23:00:45.659Z",
+      "type": "briefing",
+      "costUsd": 0.18567659999999997,
+      "sessionId": "c369ddf1-b1f2-48ec-a43b-ed74558e6492"
+    }
+  ]
+}
