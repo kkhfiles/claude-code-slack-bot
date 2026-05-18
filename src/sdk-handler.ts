@@ -173,10 +173,14 @@ export class SdkHandler {
   runQuery(prompt: string, opts: SdkRunOptions): SdkProcess {
     const abortController = new AbortController();
 
+    // 'default' would prompt the user for risky tool calls, but background
+    // analyses cannot answer prompts and the call hangs/denies. 'dontAsk' uses
+    // pre-approved permission patterns from settings (via settingSources) and
+    // silently denies anything else — matches CLI --print behavior with settings.local.json.
     const sdkPermissionMode: SdkPermissionMode =
       opts.permissionMode === 'trust' ? 'bypassPermissions' :
       opts.permissionMode === 'plan'  ? 'plan' :
-                                         'default';
+                                         'dontAsk';
 
     const sdkOptions: any = {
       permissionMode: sdkPermissionMode,
