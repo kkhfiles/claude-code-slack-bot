@@ -44,6 +44,17 @@ export function shouldUseSdk(scope: string): boolean {
   return false;
 }
 
+/**
+ * Strip CLI-style permission pattern off a tool name.
+ *   'Bash(python:*)' → 'Bash'
+ *   'Read'           → 'Read'
+ *   'mcp__x__y'      → 'mcp__x__y'
+ */
+function toBaseToolName(entry: string): string {
+  const idx = entry.indexOf('(');
+  return idx > 0 ? entry.substring(0, idx) : entry;
+}
+
 // --- SDK message → CliEvent translation -----------------------------------
 
 /**
@@ -201,11 +212,14 @@ export class SdkHandler {
     }
 
     // Tools: explicit override > allowedTools. Empty tools[] = no tools.
+    // CLI accepts permission patterns ('Bash(python:*)') in allowedTools, but
+    // the SDK expects bare tool names ('Bash'). Pattern-level allow/deny is
+    // applied separately from settings.local.json via settingSources above.
     let resolvedAllowedTools: string[] | undefined;
     if (opts.tools !== undefined) {
-      resolvedAllowedTools = opts.tools;
+      resolvedAllowedTools = opts.tools.map(toBaseToolName);
     } else if (opts.allowedTools && opts.allowedTools.length > 0 && sdkPermissionMode !== 'bypassPermissions') {
-      resolvedAllowedTools = opts.allowedTools;
+      resolvedAllowedTools = Array.from(new Set(opts.allowedTools.map(toBaseToolName)));
     }
 
     // MCP
