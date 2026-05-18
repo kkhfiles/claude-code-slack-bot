@@ -952,6 +952,7 @@ export class AssistantScheduler {
       costUsd: result.costUsd.toFixed(4),
       via: useSdk ? 'sdk' : 'cli',
       cacheRead: result.usage?.cacheReadTokens,
+      textPreview: result.text?.substring(0, 600),
     });
 
     // Timeout detection
