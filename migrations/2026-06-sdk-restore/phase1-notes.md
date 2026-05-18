@@ -279,3 +279,45 @@ Phase 0.11 sandbox 100회 측정:
 - ☐ 1.11 rate-limit dump
 - ☐ 1.13 retry 통합 테스트
 - ☐ 1.12 회고
+
+### 2026-05-18: Phase 1.7 — 자동 트리거 실행 결과
+
+| 항목 | 값 |
+|---|---|
+| trigger 시각 | 2026-05-18T03:05:05.213Z |
+| Recorded cost 시각 | 2026-05-18T03:07:30.752Z |
+| 총 소요 | 2분 25초 |
+| via | sdk ✅ |
+| cacheReadTokens | 100,108 (1H prompt cache hit) |
+| cacheCreateTokens | 39,510 |
+| inputTokens | 4 |
+| outputTokens | 9,637 |
+| costUsd | $0.32417 |
+| pm2 안정성 | online, error 없음 |
+
+**비용 비교** (analysis-kg-skill-update entry, 최근 4회):
+
+| 일자 | via | costUsd |
+|---|---|---|
+| 2026-05-01 | cli | $0.4740 |
+| 2026-05-08 | cli | $0.6425 |
+| 2026-05-15 | cli | $0.7010 |
+| 2026-05-18 | **sdk** | **$0.3242** |
+
+직전 CLI 3회 평균 $0.606 대비 **-47%** 절감.
+
+### Phase 1.7 Go 통과 — 6 step 검증
+
+1. ✅ build clean (tsc)
+2. ✅ pm2 restart, online
+3. ✅ ReportServer listening on http://127.0.0.1:8765
+4. ✅ POST /trigger?type=kg-skill-update → 202 Accepted
+5. ✅ pm2 로그에 `SdkHandler Building SDK query` + `via:'sdk'` 진입 신호 + `Recorded cost` 완료 신호 관측
+6. ✅ .assistant-costs.json 마지막 entry 정상 (via:'sdk', cacheRead 100K)
+
+### 관찰 / 다음 트랙
+
+- **SKILL.md mtime 미변경** — SDK가 "변경 없음" 판단했을 가능성. Phase 1.8 (#17)에서 baseline 비교 + 필요시 동일 입력으로 CLI 재실행 비교.
+- **SdkHandler 로깅 간략** — CLI는 매 메시지·tool 호출 로깅, SDK는 진입·종료 메타만 로깅. Phase 2에서 보강 후보. 디버깅 시 어려움 우려.
+- **캐시 적중 매우 좋음** — 100K 1H cache read. 향후 모든 분석을 SDK로 옮겨도 동일 효과 기대.
+
