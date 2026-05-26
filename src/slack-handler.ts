@@ -748,12 +748,21 @@ export class SlackHandler {
         }
 
         // Rate limit event from CLI
+        // SDKRateLimitInfo.status: 'allowed' | 'allowed_warning' | 'rejected'
+        // Only 'rejected' means the request is actually blocked. 'allowed_warning' is a
+        // heads-up that the user is approaching a limit but the request still succeeded.
         if (event.type === 'rate_limit_event') {
           const rlEvent = event as CliRateLimitEvent;
           const info = rlEvent.rate_limit_info;
-          if (info.status !== 'allowed') {
+          this.logger.debug('Rate limit event from CLI', {
+            status: info.status,
+            rateLimitType: info.rateLimitType,
+            resetsAt: info.resetsAt,
+            overageStatus: info.overageStatus,
+          });
+          if (info.status === 'rejected' && info.resetsAt) {
             const retryAfterSec = Math.max(60, info.resetsAt - Math.floor(Date.now() / 1000));
-            rateLimitInfo = { retryAfterSec, resetsAt: info.resetsAt, rateLimitType: info.rateLimitType };
+            rateLimitInfo = { retryAfterSec, resetsAt: info.resetsAt, rateLimitType: info.rateLimitType ?? 'unknown' };
           }
           continue;
         }
