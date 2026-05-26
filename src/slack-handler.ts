@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { CliHandler, type CliEvent, type CliProcess, type CliAssistantEvent, type CliInitEvent, type CliResultEvent, type CliRateLimitEvent } from './cli-handler';
-import { SdkHandler } from './sdk-handler';
+import { SdkHandler, SdkProcess, shouldUseSdk } from './sdk-handler';
 import { PendingDenial } from './types';
 import { Logger } from './logger';
 import { WorkingDirectoryManager } from './working-directory-manager';
@@ -52,7 +52,7 @@ export class SlackHandler {
   private reportServer?: ReportServer;
 
   // Active CLI process tracking (for interrupt/stop)
-  private activeProcesses: Map<string, CliProcess> = new Map();
+  private activeProcesses: Map<string, CliProcess | SdkProcess> = new Map();
 
   // UI state
   private todoMessages: Map<string, string> = new Map();
@@ -682,17 +682,22 @@ export class SlackHandler {
       const resumeSessionId = resumeData?.mode === 'uuid' ? resumeData.resumeOptions.resumeSessionId : undefined;
       const continueLastSession = resumeData?.mode === 'continue' ? true : undefined;
 
-      const cliProcess = this.cliHandler.runQuery(finalPrompt, {
+      const useSdk = shouldUseSdk('interactive');
+      const runOpts = {
         session,
         workingDirectory,
         resumeSessionId,
         continueLastSession,
         model: channelModel,
-        permissionMode: isPlanMode ? 'plan' : botPermLevel,
+        permissionMode: isPlanMode ? 'plan' as const : botPermLevel,
         allowedTools,
         env: queryEnv,
-      });
+      };
+      const cliProcess = useSdk
+        ? this.sdkHandler.runQuery(finalPrompt, runOpts)
+        : this.cliHandler.runQuery(finalPrompt, runOpts);
 
+      this.logger.info('Interactive session started', { via: useSdk ? 'sdk' : 'cli' });
       this.activeProcesses.set(sessionKey, cliProcess);
 
       for await (const event of cliProcess) {
