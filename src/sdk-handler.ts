@@ -12,6 +12,7 @@ import type {
   CliEvent,
   CliInitEvent,
   CliAssistantEvent,
+  CliStreamEvent,
   CliUserEvent,
   CliRateLimitEvent,
   CliResultEvent,
@@ -61,8 +62,10 @@ function toBaseToolName(entry: string): string {
  * SDK 0.3.143 message stream → CliEvent shape (Phase 1.5 §6 interpretSdkEvents).
  *
  * SDKMessage `type` values mostly mirror stream-json types so we cast through.
- * Partial / stream_event / hook events are dropped (caller already worked
- * without them under cli-handler).
+ * SDKPartialAssistantMessage carries `type: 'stream_event'` and is structurally
+ * compatible with CliStreamEvent (same `event.type`/`content_block`/`delta`/
+ * `index` shape) — used by interactive Slack chat for real-time tool status.
+ * Hook events remain dropped.
  */
 export function interpretSdkMessage(msg: SDKMessage): CliEvent | null {
   const t = (msg as any).type as string | undefined;
@@ -74,6 +77,8 @@ export function interpretSdkMessage(msg: SDKMessage): CliEvent | null {
       return msg as unknown as CliAssistantEvent;
     case 'user':
       return msg as unknown as CliUserEvent;
+    case 'stream_event':
+      return msg as unknown as CliStreamEvent;
     case 'rate_limit_event':
       return msg as unknown as CliRateLimitEvent;
     case 'result':
@@ -193,7 +198,11 @@ export class SdkHandler {
       // never showed up in ~/.claude/projects/ when run via SDK.
       persistSession: !opts.noSessionPersistence,
       systemPrompt: { type: 'preset', preset: 'claude_code' },
-      includePartialMessages: false,
+      // Interactive Slack chat shows "Using <tool>" status by listening to
+      // content_block_start stream events. SDKPartialAssistantMessage carries
+      // these; assistant-scheduler/calendar paths just ignore unrecognised
+      // events, so flipping this on is safe across all callers.
+      includePartialMessages: true,
       abortController,
     };
 
