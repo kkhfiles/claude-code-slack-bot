@@ -172,6 +172,33 @@ update.bat                    # Windows
 - Resume 우선순위: 명시적 resumeSessionId > Slack 세션 > 새 대화
 - Slack은 backtick(`)으로 텍스트를 감쌀 수 있음 → 정규식에서 선택적 backtick 처리
 
+### Runtime Routing (CLI / SDK)
+
+`claude -p` subprocess 경로(`cli-handler.ts`)와 in-process `@anthropic-ai/claude-agent-sdk` 경로(`sdk-handler.ts`)를 호출별로 선택. 두 경로는 동일한 `CliEvent` shape을 산출하므로 호출자(`slack-handler`, `assistant-scheduler`, `calendar-poller`)는 동일 for-await 루프로 처리.
+
+**Scope 토글 (`shouldUseSdk(scope)`)**:
+- `SLACKBOT_SDK_ENABLED`: 콤마(또는 `+`) 구분 scope 토큰 리스트, 또는 `all`/`1`/`true`. 빈 값이면 모두 CLI.
+- `scope`는 `category` 또는 `category:detail` 형식. detail이 있으면 category prefix도 매칭. 예: `analysis` 토큰은 `analysis:kg-skill-update` scope를 통과시킴.
+- `SLACKBOT_FORCE_CLI=1`: 긴급 롤백 — 모든 SDK 경로 무시하고 CLI로 강제.
+
+**Scope별 호출 위치**:
+| Scope | 호출 위치 | 용도 |
+|---|---|---|
+| `interactive` | `slack-handler.ts:685` | 사용자 메인 채팅 (handleMessage 경유) |
+| `briefing` | `assistant-scheduler.ts:621` | 모닝 브리핑 |
+| `calendar` | `calendar-poller.ts:601` | 캘린더 변경 AI 판단 |
+| `analysis:${type}` | `assistant-scheduler.ts:922` | 12종 분석 (타입별 detail) |
+
+**SDK 핸들러 운영 컨벤션** (2026-05-26 phase2 fix에서 정합화):
+- **env 머지**: `opts.env` 전달 시 `{...process.env, ...opts.env}`로 머지. SDK는 `env` 옵션을 받으면 `process.env` 디폴트를 통째로 치환하므로 PATH·HOME·TZ 같은 표준 env 손실 방지.
+- **appendSystemPrompt → preset.append**: SDK public Options에 `appendSystemPrompt` 키 없음. `systemPrompt: { type: 'preset', preset: 'claude_code', append: <text> }` 형태로 넘겨야 모델에 전달됨.
+- **`tools` vs `allowedTools` 분리**: SDK는 두 개념을 별도 옵션으로 받음 — `tools`는 가용 도구 제한 (`[]`이면 모든 built-in 비활성), `allowedTools`는 auto-approve 리스트. CLI의 한 플래그(`--tools` variadic)와 다름.
+- **`persistSession` 호출자 제어**: SDK 디폴트 `true`, `opts.noSessionPersistence: true`일 때만 `false`. CLI 디폴트(`--no-session-persistence` 미사용 시 persist)와 동등.
+- **in-process 실행**: `SdkProcess.pid`는 항상 `undefined`. `activeProcesses: Map<string, CliProcess | SdkProcess>` 타입. `process-memory-watchdog`의 PID 매칭 정리는 SDK 호출에 무관 (외부 프로세스 없음).
+- **`includePartialMessages: true`**: 인터랙티브 채팅의 실시간 tool status(`stream_event`/`content_block_start`) 보존. 다른 호출자는 미인식 이벤트를 그냥 건너뛰므로 안전.
+
+자세한 회고는 `migrations/2026-06-sdk-restore/phase{0,1,2}-{notes,retrospective}.md` 참고.
+
 ### UX
 - 쓰레드 힌트: 새 세션 첫 응답 시 기본 명령어 안내 (`-stop`, `-reset`, `-plan`, `-help`) 표시
 - 앵커 리액션: 쿼리 실행 중 ⏳ 리액션 유지 → 리액션 수 0↔1 변동으로 인한 Slack 줄 점프 방지
@@ -228,6 +255,7 @@ git checkout -b feature/<name>
 |------|------|
 | `src/slack-handler.ts` | Slack 이벤트 처리, 명령어 파싱, 메시지 포맷팅 |
 | `src/cli-handler.ts` | CLI 프로세스 스폰 (`claude -p`), 세션 관리 |
+| `src/sdk-handler.ts` | Agent SDK in-process 호출 (`@anthropic-ai/claude-agent-sdk`), `shouldUseSdk(scope)` 게이트 |
 | `src/working-directory-manager.ts` | 작업 디렉터리 설정/조회/영속화 |
 | `src/schedule-manager.ts` | 세션 자동 시작 스케줄 관리 (`.schedule-config.json` 영속화) |
 | `src/assistant-scheduler.ts` | 개인비서 스케줄러 — 브리핑/캘린더 리마인더/주간 분석 자동화 |
