@@ -201,7 +201,10 @@ export class SdkHandler {
     if (opts.model) sdkOptions.model = opts.model;
     if (opts.maxBudgetUsd && opts.maxBudgetUsd > 0) sdkOptions.maxBudgetUsd = opts.maxBudgetUsd;
     if (opts.workingDirectory) sdkOptions.cwd = opts.workingDirectory;
-    if (opts.env) sdkOptions.env = opts.env;
+    // SDK destructures Options as `env: H = {...process.env}` — passing opts.env REPLACES
+    // process.env entirely, dropping PATH/HOME/TZ/USERPROFILE etc. Merge instead so the
+    // subprocess keeps standard env and only opts.env overrides on top.
+    if (opts.env) sdkOptions.env = { ...process.env, ...opts.env };
     if (opts.canUseTool) sdkOptions.canUseTool = opts.canUseTool;
 
     if (opts.thinkingBudgetTokens && opts.thinkingBudgetTokens > 0) {
@@ -209,10 +212,16 @@ export class SdkHandler {
     }
 
     // System prompt: replace > append (matches cli-handler precedence)
+    // Top-level `appendSystemPrompt` is NOT a public SDK option — silently dropped.
+    // The public surface is systemPrompt: { type:'preset', preset:'claude_code', append }.
     if (opts.systemPrompt) {
       sdkOptions.systemPrompt = opts.systemPrompt;
     } else if (opts.appendSystemPrompt) {
-      sdkOptions.appendSystemPrompt = opts.appendSystemPrompt;
+      sdkOptions.systemPrompt = {
+        type: 'preset',
+        preset: 'claude_code',
+        append: opts.appendSystemPrompt,
+      };
     }
 
     // Tools: explicit override > allowedTools. Empty tools[] = no tools.
