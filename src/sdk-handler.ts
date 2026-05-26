@@ -188,7 +188,10 @@ export class SdkHandler {
       // permissions live (e.g. Bash(python:*) for analysis scripts). CLI auto-merges
       // all three; SDK requires explicit listing. Precedence: user < project < local.
       settingSources: ['user', 'project', 'local'],
-      persistSession: false,
+      // CLI persists sessions by default; opt out only when caller asks. Previously
+      // hardcoded to false, so the interface field was a lie and analysis sessions
+      // never showed up in ~/.claude/projects/ when run via SDK.
+      persistSession: !opts.noSessionPersistence,
       systemPrompt: { type: 'preset', preset: 'claude_code' },
       includePartialMessages: false,
       abortController,
@@ -224,14 +227,19 @@ export class SdkHandler {
       };
     }
 
-    // Tools: explicit override > allowedTools. Empty tools[] = no tools.
-    // CLI accepts permission patterns ('Bash(python:*)') in allowedTools, but
-    // the SDK expects bare tool names ('Bash'). Pattern-level allow/deny is
-    // applied separately from settings.local.json via settingSources above.
-    let resolvedAllowedTools: string[] | undefined;
+    // SDK separates two concepts that the CLI bridges through one variadic flag:
+    //   - `tools`: base set of built-in tools the model can see at all. [] disables all.
+    //   - `allowedTools`: tools auto-approved without a permission prompt.
+    // Previously opts.tools was misrouted into allowedTools, so `tools: []` (calendar
+    // judgment) only worked because dontAsk mode silently denied unlisted tools, not
+    // because tools were actually unavailable. Route each option to its real target.
+    // CLI accepts permission patterns ('Bash(python:*)'); SDK expects bare names.
     if (opts.tools !== undefined) {
-      resolvedAllowedTools = opts.tools.map(toBaseToolName);
-    } else if (opts.allowedTools && opts.allowedTools.length > 0 && sdkPermissionMode !== 'bypassPermissions') {
+      sdkOptions.tools = opts.tools.length === 0 ? [] : opts.tools.map(toBaseToolName);
+    }
+
+    let resolvedAllowedTools: string[] | undefined;
+    if (opts.allowedTools && opts.allowedTools.length > 0 && sdkPermissionMode !== 'bypassPermissions') {
       resolvedAllowedTools = Array.from(new Set(opts.allowedTools.map(toBaseToolName)));
     }
 
