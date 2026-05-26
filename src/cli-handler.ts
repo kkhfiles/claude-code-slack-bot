@@ -53,10 +53,12 @@ export interface CliUserEvent {
 export interface CliRateLimitEvent {
   type: 'rate_limit_event';
   rate_limit_info: {
-    status: string;
-    resetsAt: number;
-    rateLimitType: string;
-    overageStatus: string;
+    // 'allowed' = under limit, 'allowed_warning' = approaching limit but still allowed,
+    // 'rejected' = actually blocked. Only 'rejected' should surface the rate-limit UI.
+    status: 'allowed' | 'allowed_warning' | 'rejected' | string;
+    resetsAt?: number;
+    rateLimitType?: string;
+    overageStatus?: string;
   };
   session_id: string;
 }
