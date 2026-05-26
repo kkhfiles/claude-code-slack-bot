@@ -6,6 +6,7 @@ import { CalendarPoller } from './calendar-poller';
 import { errorCollector } from './error-collector';
 import { isRateLimitText } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
+import { runAgy } from './agy-handler';
 
 export interface AssistantConfig {
   briefing: {
@@ -911,6 +912,13 @@ export class AssistantScheduler {
       return { rateLimited: false, timedOut: false, costUsd: 0 };
     }
 
+    // 외부 정보 수집 분석(ai-practice, competitors)은 agy로 위임 — 6/15 이후
+    // Agent SDK $100 크레딧 풀 보존. agy는 세션 resume 미지원이므로 retry 시는
+    // 기존 SDK/CLI 경로로 자연 폴백.
+    if (!resumeSessionId && this.shouldUseAgy(type)) {
+      return this.runAgyAnalysis(type, promptPath);
+    }
+
     const prompt = fs.readFileSync(promptPath, 'utf-8');
     const defaults = this.config!.analysis.defaults;
     const typeConfig = this.config!.analysis.types[type];
@@ -966,6 +974,63 @@ export class AssistantScheduler {
     }
 
     return { rateLimited: false, timedOut: false, sessionId: result.sessionId, costUsd: result.costUsd };
+  }
+
+  /**
+   * agy(외부 모델)로 위임할 분석 type 여부.
+   * 기본: ai-practice, competitors (외부 정보 수집 — WebSearch 의존).
+   * ANALYSIS_AGY_TYPES env로 override (콤마 구분).
+   */
+  private shouldUseAgy(type: string): boolean {
+    const raw = process.env.ANALYSIS_AGY_TYPES ?? 'ai-practice,competitors';
+    return raw.split(',').map(s => s.trim()).filter(Boolean).includes(type);
+  }
+
+  private async runAgyAnalysis(
+    type: string,
+    promptPath: string,
+  ): Promise<{ rateLimited: boolean; timedOut: boolean; sessionId?: string; costUsd: number }> {
+    const dateStr = new Date().toISOString().substring(0, 10);
+    const outDir = path.join(this.workingDir, 'reports', type);
+    const outPath = path.join(outDir, `.agy-raw-${dateStr}.txt`);
+    const sessionId = `agy-${dateStr}-${type}`;
+
+    this.logger.info('Running agy analysis', { type, promptPath, outPath });
+
+    try {
+      const result = await runAgy({
+        promptPath,
+        workingDirectory: this.workingDir,
+        outPath,
+        timeoutSeconds: 600,
+        quietSecs: 30,
+        logger: this.logger,
+      });
+
+      this.logger.info('agy analysis completed', {
+        type,
+        via: 'agy',
+        sessionId,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        generatedFiles: result.generatedFiles,
+        timedOut: result.timedOut,
+      });
+
+      if (result.exitCode !== 0 || result.timedOut) {
+        errorCollector.add(
+          'AssistantScheduler',
+          `agy ${type} 실패: exitCode=${result.exitCode}, timedOut=${result.timedOut}`,
+        );
+        return { rateLimited: false, timedOut: result.timedOut, sessionId, costUsd: 0 };
+      }
+
+      return { rateLimited: false, timedOut: false, sessionId, costUsd: 0 };
+    } catch (error) {
+      this.logger.error('agy analysis exception', error);
+      errorCollector.add('AssistantScheduler', `agy ${type} 예외: ${(error as Error).message}`);
+      return { rateLimited: false, timedOut: false, costUsd: 0 };
+    }
   }
 
   // --- Date/time utilities ---
