@@ -3,7 +3,7 @@
 Start Claude Code tasks on your local machine from Slack — on your phone, on the go, from anywhere.
 Resume previous sessions, switch between projects, and manage everything through conversation threads.
 
-> Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot). Uses Claude Code CLI (`claude -p`) with Socket Mode (no public URL needed). Cross-platform: Windows / macOS / Linux.
+> Forked from [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot). Routes each query through the Claude Code CLI (`claude -p`) or the Agent SDK (`@anthropic-ai/claude-agent-sdk`) per `SLACKBOT_SDK_ENABLED` scope, over Slack Socket Mode (no public URL needed). Cross-platform: Windows / macOS / Linux.
 
 ## Key Features
 
