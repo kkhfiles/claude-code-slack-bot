@@ -104,7 +104,7 @@ update.bat                    # Windows
   - 예약 문서 리마인더: 이벤트 description에 `[scheduled-doc] reports/scheduled/{파일명}` → type `"scheduled-doc"`, dispatch 시 `## 요약` 섹션 읽어서 Slack 메시지에 포함
   - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
-- `-report [type]`/`-rp [type]`: reports/ 하위 디렉토리 재귀 탐색, Slack 파일 업로드 (`filesUploadV2`, `files:write` 스코프 필요), 절대 경로 + 요약 표시, 업로드 실패 시 텍스트 fallback
+- `-report [type]`/`-rp [type]`: `reports/scheduled-reports/<type>/`의 정기 보고서만 탐색 (1단계; 작업 보고서는 `reports/` 다른 하위라 제외 — claude-workflow §9. 같은 scope를 `hasUnreadReports()`·`report-server.ts`도 공유), Slack 파일 업로드 (`filesUploadV2`, `files:write` 스코프 필요), 절대 경로 + 요약 표시, 업로드 실패 시 텍스트 fallback. Archive 버튼은 `reports/archived/<type>/`로 이동
   - 로컬 HTML 보고서 서버 (`src/report-server.ts`, `marked` 의존): 127.0.0.1 바인딩, per-process 토큰(`?t=<hex>`) 인증, `path.resolve` traversal 가드. `index.ts`에서 `config.reports.localServer.enabled && config.assistant.configDir` 조건으로 부팅. `EADDRINUSE` 시 +5까지 재시도 후 비활성화.
   - 서버 활성 시 `-rp` 메시지에 인덱스 URL + 보고서별 URL 추가 — 브라우저 클릭 한 번으로 렌더된 HTML 열림 (`file:///`은 Slack 클라이언트가 차단하므로 HTTP 사용)
   - 환경변수: `REPORTS_SERVER_ENABLED` (0이면 비활성), `REPORTS_SERVER_PORT` (기본 8765)
