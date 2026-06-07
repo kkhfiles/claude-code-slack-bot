@@ -41,7 +41,9 @@ async function start() {
     // Optionally start the local report HTTP server (127.0.0.1)
     let reportServer: ReportServer | undefined;
     if (config.reports.localServer.enabled && config.assistant.configDir) {
-      const reportsDir = path.resolve(config.assistant.configDir, '..', 'reports');
+      // Only regular reports (CLAUDE.md §9). Ad-hoc work reports under
+      // reports/<other>/ are intentionally excluded from the report viewer.
+      const reportsDir = path.resolve(config.assistant.configDir, '..', 'reports', 'scheduled-reports');
       const server = new ReportServer(reportsDir);
       try {
         await server.start(config.reports.localServer.port);
