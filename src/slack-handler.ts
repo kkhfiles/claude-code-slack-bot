@@ -1570,20 +1570,22 @@ export class SlackHandler {
   }
 
   private async handleReportCommand(type: string | undefined, channel: string, threadTs: string, locale: Locale, say: any): Promise<void> {
-    const reportsDir = path.join(config.assistant.configDir, '..', 'reports');
+    // Only regular reports (CLAUDE.md §9). Ad-hoc work reports under
+    // reports/<other>/ are intentionally excluded from this surface.
+    const reportsDir = path.join(config.assistant.configDir, '..', 'reports', 'scheduled-reports');
     if (!fs.existsSync(reportsDir)) {
       await say({ text: t('assistant.reportNotFound', locale, { type: type || 'all' }), thread_ts: threadTs });
       return;
     }
 
-    // Scan subdirectories for .md files: reports/<type>/<date>.md (skip archived/)
+    // Scan subdirectories for .md files: scheduled-reports/<type>/<date>.md (skip archived/)
     const files: { relPath: string; absPath: string; type: string; name: string }[] = [];
     for (const dir of fs.readdirSync(reportsDir)) {
       if (dir === 'archived') continue;
       const subdir = path.join(reportsDir, dir);
       if (!fs.statSync(subdir).isDirectory()) continue;
       for (const fname of fs.readdirSync(subdir)) {
-        if (!fname.endsWith('.md') || fname === '.gitkeep') continue;
+        if (!fname.endsWith('.md') || fname === '.gitkeep' || fname === 'README.md') continue;
         files.push({
           relPath: `${dir}/${fname}`,
           absPath: path.resolve(path.join(subdir, fname)),
@@ -2523,7 +2525,9 @@ export class SlackHandler {
           await respond({ response_type: 'ephemeral', text: '⚠️ File not found (already archived?)' });
           return;
         }
-        const archivedDir = path.join(path.dirname(absPath), '..', 'archived', path.dirname(relPath));
+        // absPath = reports/scheduled-reports/<type>/<file>; archive to reports/archived/<type>/ (§9).
+        // Two '..' from the type dir reach reports/, so archived/ stays a sibling of scheduled-reports/.
+        const archivedDir = path.join(path.dirname(absPath), '..', '..', 'archived', path.dirname(relPath));
         fs.mkdirSync(archivedDir, { recursive: true });
         fs.renameSync(absPath, path.join(archivedDir, path.basename(absPath)));
         await respond({ response_type: 'ephemeral', text: `📂 Archived: ${relPath}` });

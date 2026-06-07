@@ -140,7 +140,7 @@ export class ReportServer {
       const subdir = path.join(this.reportsDir, dir);
       if (!fs.statSync(subdir).isDirectory()) continue;
       for (const fname of fs.readdirSync(subdir)) {
-        if (!fname.endsWith('.md') || fname === '.gitkeep') continue;
+        if (!fname.endsWith('.md') || fname === '.gitkeep' || fname === 'README.md') continue;
         const absPath = path.join(subdir, fname);
         try {
           const stat = fs.statSync(absPath);

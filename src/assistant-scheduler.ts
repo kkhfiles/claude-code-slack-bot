@@ -414,16 +414,21 @@ export class AssistantScheduler {
     return line;
   }
 
-  /** Check if there are unarchived reports in reports/ subdirectories. */
+  /**
+   * Check if there are unread regular reports.
+   * Scans only reports/scheduled-reports/<type>/ — the same scope the briefing
+   * prompt uses (CLAUDE.md §9). Ad-hoc work reports under reports/<other>/ are
+   * intentionally excluded so they never leak into the briefing surface.
+   */
   private hasUnreadReports(): boolean {
-    const reportsDir = path.join(this.workingDir, 'reports');
+    const reportsDir = path.join(this.workingDir, 'reports', 'scheduled-reports');
     if (!fs.existsSync(reportsDir)) return false;
     for (const dir of fs.readdirSync(reportsDir)) {
       if (dir === 'archived') continue;
       const subdir = path.join(reportsDir, dir);
       if (!fs.statSync(subdir).isDirectory()) continue;
       for (const fname of fs.readdirSync(subdir)) {
-        if (fname.endsWith('.md') && fname !== '.gitkeep') return true;
+        if (fname.endsWith('.md') && fname !== '.gitkeep' && fname !== 'README.md') return true;
       }
     }
     return false;
