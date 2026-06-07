@@ -165,6 +165,14 @@ export interface SdkRunOptions {
   // SDK-specific extensions:
   canUseTool?: CanUseTool;
   thinkingBudgetTokens?: number;
+  /**
+   * Skill catalog injected into the system prompt so the model can invoke the
+   * `Skill` tool by name. SDK Options docs say "omitted = no SDK auto-config",
+   * which in headless (`-p`) mode means user-level `~/.claude/skills/` are not
+   * surfaced to the model unless this is explicit. Pass `'all'` to expose every
+   * discovered skill or a list of skill names to scope.
+   */
+  skills?: 'all' | string[];
 }
 
 export class SdkHandler {
@@ -222,6 +230,8 @@ export class SdkHandler {
     if (opts.thinkingBudgetTokens && opts.thinkingBudgetTokens > 0) {
       sdkOptions.thinking = { type: 'enabled', budgetTokens: opts.thinkingBudgetTokens };
     }
+
+    if (opts.skills !== undefined) sdkOptions.skills = opts.skills;
 
     // System prompt: replace > append (matches cli-handler precedence)
     // Top-level `appendSystemPrompt` is NOT a public SDK option — silently dropped.

@@ -693,8 +693,12 @@ export class SlackHandler {
         allowedTools,
         env: queryEnv,
       };
+      // skills: 'all' surfaces ~/.claude/skills/ to the model so it can invoke
+      // domain skills (notion-publish, mycelium, bbapi, …) by name. SDK headless
+      // mode does not auto-configure skills; CLI branch already exposes them
+      // through its own defaults.
       const cliProcess = useSdk
-        ? this.sdkHandler.runQuery(finalPrompt, runOpts)
+        ? this.sdkHandler.runQuery(finalPrompt, { ...runOpts, skills: 'all' })
         : this.cliHandler.runQuery(finalPrompt, runOpts);
 
       this.logger.info('Interactive session started', { via: useSdk ? 'sdk' : 'cli' });
