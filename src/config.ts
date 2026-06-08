@@ -31,6 +31,11 @@ export const config = {
       port: parseInt(process.env.REPORTS_SERVER_PORT || '8765', 10),
     },
   },
+  // Scheduled greeting: at configured times, auto-spawn a haiku session via a
+  // trivial greeting message (.schedule-config.json + ScheduleManager).
+  scheduledGreeting: {
+    enabled: process.env.SCHEDULED_GREETING_ENABLED !== '0',
+  },
   memoryWatchdog: {
     enabled: process.env.MEMORY_WATCHDOG_ENABLED !== '0',
     thresholdPct: parseInt(process.env.MEMORY_WATCHDOG_THRESHOLD_PCT || '90', 10),

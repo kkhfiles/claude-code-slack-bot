@@ -1798,6 +1798,13 @@ export class SlackHandler {
   }
 
   private restartScheduler(): void {
+    if (!config.scheduledGreeting.enabled) {
+      // Feature disabled via SCHEDULED_GREETING_ENABLED=0. Cancel any timers and
+      // skip scheduling (and follow-up restore) so no greeting sessions fire.
+      this.scheduleManager.cancelAll();
+      this.logger.info('Scheduled greeting disabled (SCHEDULED_GREETING_ENABLED=0) — no sessions scheduled');
+      return;
+    }
     this.scheduleManager.scheduleAll((ch, uid, time, account) => {
       this.runScheduledGreeting(ch, uid, time, account).catch(err =>
         this.logger.error('Scheduled greeting failed', err),
