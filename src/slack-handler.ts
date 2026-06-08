@@ -1569,6 +1569,62 @@ export class SlackHandler {
     await say({ text, blocks, thread_ts: threadTs });
   }
 
+  /**
+   * Reads reports/scheduled-reports/_status.json (produced by the daily
+   * auto_archive_reports step) → Map<relPath, {clean, severity, oneLine}>.
+   * Best-effort: missing/corrupt manifest yields an empty map (callers degrade
+   * gracefully — reports show without severity, bulk "all" still works).
+   */
+  private loadReportManifest(reportsDir: string): Map<string, { clean: boolean; severity: string; oneLine: string }> {
+    const map = new Map<string, { clean: boolean; severity: string; oneLine: string }>();
+    try {
+      const p = path.join(reportsDir, '_status.json');
+      if (!fs.existsSync(p)) return map;
+      const data = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      for (const r of (data.active || [])) {
+        map.set(r.relPath, { clean: !!r.clean, severity: r.severity || '', oneLine: r.oneLine || '' });
+      }
+    } catch { /* best-effort */ }
+    return map;
+  }
+
+  /**
+   * Bulk-archive scheduled reports → reports/archived/<type>/ (CLAUDE.md §9,
+   * sibling of scheduled-reports/). scope='all' archives every report; 'clean'
+   * archives only those flagged clean in the manifest. Returns moved/failed relPaths.
+   */
+  private archiveReportsBulk(scope: 'all' | 'clean', typeFilter: string): { moved: string[]; failed: string[] } {
+    const reportsDir = path.join(config.assistant.configDir, '..', 'reports', 'scheduled-reports');
+    const manifest = scope === 'clean' ? this.loadReportManifest(reportsDir) : null;
+    const moved: string[] = [];
+    const failed: string[] = [];
+    if (!fs.existsSync(reportsDir)) return { moved, failed };
+    for (const dir of fs.readdirSync(reportsDir)) {
+      if (dir === 'archived') continue;
+      const subdir = path.join(reportsDir, dir);
+      if (!fs.statSync(subdir).isDirectory()) continue;
+      if (typeFilter && !dir.includes(typeFilter)) continue;
+      for (const fname of fs.readdirSync(subdir)) {
+        if (!fname.endsWith('.md') || fname === '.gitkeep' || fname === 'README.md') continue;
+        const relPath = `${dir}/${fname}`;
+        if (scope === 'clean') {
+          const m = manifest!.get(relPath);
+          if (!m || !m.clean) continue; // only known-clean
+        }
+        const absPath = path.resolve(path.join(subdir, fname));
+        const archivedDir = path.join(reportsDir, '..', 'archived', dir);
+        try {
+          fs.mkdirSync(archivedDir, { recursive: true });
+          fs.renameSync(absPath, path.join(archivedDir, fname));
+          moved.push(relPath);
+        } catch {
+          failed.push(relPath);
+        }
+      }
+    }
+    return { moved, failed };
+  }
+
   private async handleReportCommand(type: string | undefined, channel: string, threadTs: string, locale: Locale, say: any): Promise<void> {
     // Only regular reports (CLAUDE.md §9). Ad-hoc work reports under
     // reports/<other>/ are intentionally excluded from this surface.
@@ -1607,20 +1663,34 @@ export class SlackHandler {
       return;
     }
 
-    // Sort by date (newest first), upload each report
-    filtered.sort((a, b) => b.name.localeCompare(a.name));
+    // Enrich with the daily status manifest (clean/severity) when available.
+    const manifest = this.loadReportManifest(reportsDir);
+    type Row = { relPath: string; absPath: string; type: string; name: string; clean: boolean | null; severity: string };
+    const rows: Row[] = filtered.map(f => {
+      const m = manifest.get(f.relPath);
+      return { ...f, clean: m ? m.clean : null, severity: m ? m.severity : '' };
+    });
+    // actionable (🔴/🟡) first, then unknown, then clean; each newest-first.
+    const rank = (r: Row) => (r.clean === false ? 0 : r.clean === null ? 1 : 2);
+    rows.sort((a, b) => rank(a) - rank(b) || b.name.localeCompare(a.name));
 
-    if (this.reportServer) {
-      await say({
-        thread_ts: threadTs,
-        text: `📚 ${this.reportServer.buildIndexUrl()}`,
-      });
-    }
+    const actionable = rows.filter(r => r.clean === false);
+    const cleanRows = rows.filter(r => r.clean === true);
+    const haveManifest = manifest.size > 0;
 
-    for (const report of filtered) {
+    // Summary line + web index (one rollup instead of N individual headers).
+    let summary = `📊 보고서 ${rows.length}건`;
+    if (haveManifest) summary += ` — 🔴/🟡 ${actionable.length}건 · clean ${cleanRows.length}건`;
+    if (this.reportServer) summary += `\n📚 ${this.reportServer.buildIndexUrl()}`;
+    await say({ text: summary, thread_ts: threadTs });
+
+    // Upload individually: actionable only when manifest present, else all (legacy fallback).
+    const toUpload = haveManifest ? actionable : rows;
+    for (const report of toUpload) {
       const content = fs.readFileSync(report.absPath, 'utf-8');
       const firstLines = content.split('\n').filter(l => l.trim()).slice(0, 3).join('\n');
       const linkLine = this.reportServer ? `🔗 ${this.reportServer.buildReportUrl(report.relPath)}\n` : '';
+      const badge = report.severity ? `${report.severity} ` : '';
 
       try {
         await this.app.client.filesUploadV2({
@@ -1628,7 +1698,7 @@ export class SlackHandler {
           thread_ts: threadTs,
           filename: report.relPath.replace('/', '_'),
           content,
-          title: `📄 ${report.relPath}`,
+          title: `📄 ${badge}${report.relPath}`,
           initial_comment: `${linkLine}\`${report.absPath}\`\n>${firstLines.split('\n').join('\n>')}`,
         });
         await say({
@@ -1651,6 +1721,33 @@ export class SlackHandler {
         await say({ text: `📄 *${report.relPath}*\n${linkLine}\`${report.absPath}\`\n\n${truncated}`, thread_ts: threadTs });
       }
     }
+
+    // Clean reports: compact list (no upload — they auto-archive). Only when manifest present.
+    if (haveManifest && cleanRows.length > 0) {
+      const lines = cleanRows.map(r => {
+        const link = this.reportServer ? ` — ${this.reportServer.buildReportUrl(r.relPath)}` : '';
+        return `• 🟢 \`${r.relPath}\`${link}`;
+      }).join('\n');
+      await say({ text: `🧹 *clean ${cleanRows.length}건* _(자동 정리 예정)_\n${lines}`, thread_ts: threadTs });
+    }
+
+    // Bulk archive buttons — one click instead of N.
+    const bulkElements: any[] = [{
+      type: 'button',
+      text: { type: 'plain_text', text: `🗂 전체 아카이브 (${rows.length})` },
+      style: 'danger',
+      action_id: 'archive_all_reports',
+      value: JSON.stringify({ scope: 'all', type: type || '' }),
+    }];
+    if (haveManifest && cleanRows.length > 0) {
+      bulkElements.unshift({
+        type: 'button',
+        text: { type: 'plain_text', text: `🧹 clean 전체 (${cleanRows.length})` },
+        action_id: 'archive_clean_reports',
+        value: JSON.stringify({ scope: 'clean', type: type || '' }),
+      });
+    }
+    await say({ text: '', blocks: [{ type: 'actions', elements: bulkElements }], thread_ts: threadTs });
   }
 
   private async handleAssistantSubcommand(
@@ -2541,6 +2638,33 @@ export class SlackHandler {
       } catch (error) {
         this.logger.error('Failed to archive report', error);
         await respond({ response_type: 'ephemeral', text: '❌ Archive failed' });
+      }
+    });
+
+    // Report: "Archive all" button — bulk-archive every currently-listed report.
+    this.app.action('archive_all_reports', async ({ ack, body, respond }) => {
+      await ack();
+      try {
+        const { type } = JSON.parse((body as any).actions[0].value);
+        const { moved, failed } = this.archiveReportsBulk('all', type || '');
+        const tail = failed.length ? ` (실패 ${failed.length})` : '';
+        await respond({ response_type: 'ephemeral', text: `🗂 ${moved.length}건 아카이브 완료${tail}` });
+      } catch (error) {
+        this.logger.error('Failed to bulk-archive reports', error);
+        await respond({ response_type: 'ephemeral', text: '❌ 일괄 아카이브 실패' });
+      }
+    });
+
+    // Report: "Archive clean" button — bulk-archive only manifest-clean reports.
+    this.app.action('archive_clean_reports', async ({ ack, body, respond }) => {
+      await ack();
+      try {
+        const { moved, failed } = this.archiveReportsBulk('clean', '');
+        const tail = failed.length ? ` (실패 ${failed.length})` : '';
+        await respond({ response_type: 'ephemeral', text: `🧹 clean ${moved.length}건 아카이브 완료${tail}` });
+      } catch (error) {
+        this.logger.error('Failed to bulk-archive clean reports', error);
+        await respond({ response_type: 'ephemeral', text: '❌ clean 일괄 아카이브 실패' });
       }
     });
 
