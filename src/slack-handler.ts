@@ -1684,8 +1684,10 @@ export class SlackHandler {
     if (this.reportServer) summary += `\n📚 ${this.reportServer.buildIndexUrl()}`;
     await say({ text: summary, thread_ts: threadTs });
 
-    // Upload individually: actionable only when manifest present, else all (legacy fallback).
-    const toUpload = haveManifest ? actionable : rows;
+    // Upload individually: when manifest present, upload everything except known-clean
+    // (actionable + unknown — a report not yet in the manifest must never be hidden).
+    // Without a manifest, upload all (legacy fallback).
+    const toUpload = haveManifest ? rows.filter(r => r.clean !== true) : rows;
     for (const report of toUpload) {
       const content = fs.readFileSync(report.absPath, 'utf-8');
       const firstLines = content.split('\n').filter(l => l.trim()).slice(0, 3).join('\n');
@@ -1747,7 +1749,7 @@ export class SlackHandler {
         value: JSON.stringify({ scope: 'clean', type: type || '' }),
       });
     }
-    await say({ text: '', blocks: [{ type: 'actions', elements: bulkElements }], thread_ts: threadTs });
+    await say({ text: '🗂 일괄 아카이브', blocks: [{ type: 'actions', elements: bulkElements }], thread_ts: threadTs });
   }
 
   private async handleAssistantSubcommand(
