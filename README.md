@@ -315,7 +315,7 @@ Conversations in the same thread automatically continue the session (no command 
 | Command | Description |
 |---------|-------------|
 | `-briefing` / `-br` | Run morning briefing now |
-| `-report [type]` / `-rp` | View latest analysis report (uploads file + local HTML link if server enabled) |
+| `-report [type]` / `-rp` | View reports — rollup summary (actionable uploaded individually, clean listed compactly) + bulk archive buttons (`🗂 all` / `🧹 clean`) |
 | `-analyze [type]` / `-an` | Run analysis (single type or all) |
 | `-assistant config` / `-as config` | Show assistant configuration |
 | `-assistant briefing HH:MM` | Change briefing time |
