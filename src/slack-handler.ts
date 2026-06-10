@@ -40,6 +40,9 @@ interface MessageEvent {
   }>;
 }
 
+// result 이벤트 후 스트림이 닫히기를 기다리는 한계 (자식 프로세스/훅 hang 대비)
+const RESULT_GRACE_MS = 120_000;
+
 export class SlackHandler {
   private app: App;
   private cliHandler: CliHandler;
@@ -2005,6 +2008,7 @@ export class SlackHandler {
 
     // Session timeout — kill process if it exceeds maxDurationMs
     let killTimer: ReturnType<typeof setTimeout> | null = null;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
     let timedOut = false;
     if (opts.maxDurationMs) {
       killTimer = setTimeout(() => {
@@ -2022,6 +2026,7 @@ export class SlackHandler {
     let costUsd = 0;
     let subtype = 'success';
     let usage: SessionUsage | undefined;
+    let resultReceived = false;
 
     for await (const event of proc) {
       if (event.type === 'system' && (event as any).subtype === 'init') {
@@ -2033,7 +2038,8 @@ export class SlackHandler {
         const extracted = this.extractTextFromContent(content);
         if (extracted) text = extracted;  // Keep only last assistant turn (drop intermediate explanations)
       }
-      if (event.type === 'result') {
+      if (event.type === 'result' && !resultReceived) {
+        resultReceived = true;
         const resultEvent = event as CliResultEvent;
         costUsd = resultEvent.total_cost_usd || 0;
         subtype = resultEvent.subtype || 'success';
@@ -2046,12 +2052,24 @@ export class SlackHandler {
             cacheReadTokens: rawUsage.cache_read_input_tokens ?? 0,
           };
         }
+        // 정상이라면 result 직후 스트림이 닫힌다. 닫히지 않으면(자식 프로세스/훅
+        // hang — 2026-06-11 data-sync가 00:39 완료 후 01:00 wall-clock 캡까지
+        // 잡혀 error_timeout으로 오분류) grace 후 강제 종료하되 결과는 살린다.
+        graceTimer = setTimeout(() => {
+          this.logger.warn('Assistant session stream still open after result, aborting (grace)', {
+            sessionId,
+            graceMs: RESULT_GRACE_MS,
+          });
+          proc.interrupt();
+        }, RESULT_GRACE_MS);
       }
     }
 
     if (killTimer) clearTimeout(killTimer);
+    if (graceTimer) clearTimeout(graceTimer);
 
-    if (timedOut) {
+    // result를 받은 뒤의 abort(grace/wall-clock)는 timeout이 아니라 정상 완료.
+    if (timedOut && !resultReceived) {
       return { text, costUsd, sessionId, subtype: 'error_timeout', usage };
     }
 
