@@ -11,7 +11,7 @@
  * (버튼 클릭으로 큐가 변해도 항상 최신). 디렉터리 카드는 1 unit 1버튼셋
  * (폴더 통째 — 내부 파일 개별로 묻지 않음, 2026-06-11 사용자 결정).
  */
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import * as path from 'path';
 import { config } from './config';
 
@@ -37,6 +37,8 @@ export interface NasQueueItem {
 export interface NasQueue {
   files: NasQueueItem[];
   dirs: NasQueueItem[];
+  /** 승인됐으나 이동 미완(락 충돌 등) 잔류 카드 — 재시도 대상 */
+  stuck?: NasQueueItem[];
 }
 
 export interface NasCategory {
@@ -79,7 +81,17 @@ function runConfirmNas(args: string[], timeoutMs: number): Promise<{ code: numbe
     let stderr = '';
     proc.stdout?.on('data', (c: Buffer) => { stdout += c.toString('utf-8'); });
     proc.stderr?.on('data', (c: Buffer) => { stderr += c.toString('utf-8'); });
-    const killTimer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, timeoutMs);
+    const killTimer = setTimeout(() => {
+      try {
+        if (process.platform === 'win32' && proc.pid) {
+          // shell:true 래퍼(cmd.exe)만 죽이면 python 자식이 고아로 계속 실행되며
+          // acquire_job 락을 쥔다 — 트리 전체 kill
+          execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+        } else {
+          proc.kill('SIGKILL');
+        }
+      } catch {}
+    }, timeoutMs);
     proc.on('error', (err) => { clearTimeout(killTimer); reject(err); });
     proc.on('close', (code) => {
       clearTimeout(killTimer);
@@ -106,20 +118,32 @@ export async function listNasQueue(): Promise<NasQueue> {
 }
 
 let categoriesCache: NasCategory[] | null = null;
+let categoriesCacheAt = 0;
+const CATEGORIES_CACHE_TTL_MS = 60 * 60 * 1000; // categories.yaml 변경 반영 상한 1시간
 
 export async function listNasCategories(): Promise<NasCategory[]> {
-  if (categoriesCache) return categoriesCache;
+  if (categoriesCache && Date.now() - categoriesCacheAt < CATEGORIES_CACHE_TTL_MS) {
+    return categoriesCache;
+  }
   const { code, stdout, stderr } = await runConfirmNas(['--categories', '--json'], 30_000);
   if (code !== 0) {
     throw new Error(`confirm_nas --categories failed (rc=${code}): ${tail(stderr || stdout)}`);
   }
   categoriesCache = (JSON.parse(stdout) as { categories: NasCategory[] }).categories;
+  categoriesCacheAt = Date.now();
   return categoriesCache;
+}
+
+/** shell:true spawn 방어 — id prefix는 hex만 허용 (위·변조 payload 차단). */
+function validPrefixes(ids: string[]): string[] | null {
+  const prefixes = ids.map(idPrefix);
+  return prefixes.every(p => /^[0-9a-f]{8,64}$/i.test(p)) ? prefixes : null;
 }
 
 /** 승인: confirmed_for_nas 마킹 → 즉시 NAS 이동(apply-confirmed)까지. */
 export async function confirmAndApply(ids: string[]): Promise<NasCliResult> {
-  const prefixes = ids.map(idPrefix);
+  const prefixes = validPrefixes(ids);
+  if (!prefixes) return { ok: false, detail: 'invalid id prefix' };
   const mark = await runConfirmNas(['--confirm', '--ids', ...prefixes, '--apply'], 30_000);
   if (mark.code !== 0) {
     const out = mark.stderr || mark.stdout;
@@ -135,7 +159,8 @@ export async function confirmAndApply(ids: string[]): Promise<NasCliResult> {
 }
 
 export async function rejectItems(ids: string[]): Promise<NasCliResult> {
-  const prefixes = ids.map(idPrefix);
+  const prefixes = validPrefixes(ids);
+  if (!prefixes) return { ok: false, detail: 'invalid id prefix' };
   const r = await runConfirmNas(['--reject', '--ids', ...prefixes, '--apply'], 30_000);
   if (r.code !== 0) {
     const out = r.stderr || r.stdout;
@@ -146,8 +171,14 @@ export async function rejectItems(ids: string[]): Promise<NasCliResult> {
 
 /** 분류 변경 (드롭다운): category 교체 + target 재계산. 상태는 pending 유지. */
 export async function retargetItem(id: string, category: string): Promise<NasCliResult> {
+  // shell:true spawn 방어 — category는 yaml 고정값이지만 payload 위·변조 대비 화이트리스트 검증
+  if (!/^[A-Za-z0-9_-]+$/.test(category)) {
+    return { ok: false, detail: `invalid category value: ${category.slice(0, 50)}` };
+  }
+  const prefixes = validPrefixes([id]);
+  if (!prefixes) return { ok: false, detail: 'invalid id prefix' };
   const r = await runConfirmNas(
-    ['--retarget', '--ids', idPrefix(id), '--category', category, '--apply'], 30_000);
+    ['--retarget', '--ids', prefixes[0], '--category', category, '--apply'], 30_000);
   if (r.code !== 0) {
     const out = r.stderr || r.stdout;
     return { ok: false, detail: isLockConflict(out) ? 'lock' : tail(out) };
@@ -187,7 +218,8 @@ function itemText(item: NasQueueItem): string {
  */
 export async function buildNasQueueBlocks(queue: NasQueue): Promise<any[] | null> {
   const items = [...queue.files, ...queue.dirs];
-  if (items.length === 0) return null;
+  const stuck = queue.stuck ?? [];
+  if (items.length === 0 && stuck.length === 0) return null;
   // 🔴(7일 초과) 우선, 오래된 순
   items.sort((a, b) => Number(b.overdue) - Number(a.overdue) || b.waiting_days - a.waiting_days);
   const shown = items.slice(0, MAX_ITEMS);
@@ -200,14 +232,17 @@ export async function buildNasQueueBlocks(queue: NasQueue): Promise<any[] | null
   }
   const overdueCount = items.filter(i => i.overdue).length;
 
-  const blocks: any[] = [{
-    type: 'section',
-    text: {
-      type: 'mrkdwn',
-      text: `📦 *NAS 이동 컨펌 대기 — ${items.length}건*` +
-        (overdueCount ? ` (🔴 7일 초과 ${overdueCount}건)` : ''),
-    },
-  }];
+  const blocks: any[] = [];
+  if (items.length > 0) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `📦 *NAS 이동 컨펌 대기 — ${items.length}건*` +
+          (overdueCount ? ` (🔴 7일 초과 ${overdueCount}건)` : ''),
+      },
+    });
+  }
 
   for (const item of shown) {
     const section: any = {
@@ -258,6 +293,29 @@ export async function buildNasQueueBlocks(queue: NasQueue): Promise<any[] | null
     blocks.push({
       type: 'context',
       elements: [{ type: 'mrkdwn', text: `…외 ${items.length - shown.length}건 — \`-nas\`로 다시 조회` }],
+    });
+  }
+
+  // 승인됐으나 이동 미완 잔류(락 충돌·NAS 불통 등) — 재시도 버튼.
+  // nas_confirm_item 핸들러 재사용: confirm 단계는 SKIP(이미 confirmed)되고
+  // apply-confirmed가 잔류분을 일괄 이동한다.
+  if (stuck.length > 0) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `⏳ *이동 대기 잔류 ${stuck.length}건* — 승인됐으나 이동 미완 (락 충돌 등)\n` +
+          stuck.slice(0, 5).map(s => `• ${s.name} → \`${shortTarget(s.target_path)}\``).join('\n'),
+      },
+    });
+    blocks.push({
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: `▶️ 이동 재시도 (${stuck.length}건)` },
+        action_id: 'nas_confirm_item',
+        value: idPrefix(stuck[0].id),
+      }],
     });
   }
 
