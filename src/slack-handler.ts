@@ -2761,16 +2761,26 @@ export class SlackHandler {
 
     this.app.action('nas_confirm_item', async ({ ack, body, respond }) => {
       await ack();
-      const id = (body as any).actions[0].value as string;
-      const r = await confirmAndApply([id]).catch(e => ({ ok: false, detail: String(e) }));
-      await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `✅ NAS 이동 완료 (\`${id}\`)`));
+      try {
+        const id = (body as any).actions[0].value as string;
+        const r = await confirmAndApply([id]).catch(e => ({ ok: false, detail: String(e) }));
+        await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `✅ NAS 이동 완료 (\`${id}\`)`));
+      } catch (error) {
+        this.logger.error('NAS confirm item failed', error);
+        await respond({ response_type: 'ephemeral', text: '❌ 처리 실패' }).catch(() => {});
+      }
     });
 
     this.app.action('nas_reject_item', async ({ ack, body, respond }) => {
       await ack();
-      const id = (body as any).actions[0].value as string;
-      const r = await rejectItems([id]).catch(e => ({ ok: false, detail: String(e) }));
-      await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `❌ 거부 처리 — 파일은 Z:\\ABYSS에 남습니다 (\`${id}\`)`));
+      try {
+        const id = (body as any).actions[0].value as string;
+        const r = await rejectItems([id]).catch(e => ({ ok: false, detail: String(e) }));
+        await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `❌ 거부 처리 — 파일은 Z:\\ABYSS에 남습니다 (\`${id}\`)`));
+      } catch (error) {
+        this.logger.error('NAS reject item failed', error);
+        await respond({ response_type: 'ephemeral', text: '❌ 처리 실패' }).catch(() => {});
+      }
     });
 
     this.app.action('nas_hold_item', async ({ ack, respond }) => {
