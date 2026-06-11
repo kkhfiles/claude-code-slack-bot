@@ -21,6 +21,7 @@ import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 import { ReportServer } from './report-server';
+import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
 
 interface MessageEvent {
   user: string;
@@ -354,6 +355,15 @@ export class SlackHandler {
             thread_ts: thread_ts || ts,
           });
         }
+        // NAS 이동 컨펌 큐 버튼 (스케줄 브리핑 후처리와 동일)
+        try {
+          const nasBlocks = await buildNasQueueBlocks(await listNasQueue());
+          if (nasBlocks) {
+            await say({ text: '📦 NAS 이동 컨펌 대기', blocks: nasBlocks, thread_ts: thread_ts || ts });
+          }
+        } catch (err) {
+          this.logger.warn('NAS confirm queue check failed (manual briefing)', err);
+        }
       } catch (error) {
         this.logger.error('Manual briefing failed', error);
         await say({ text: '❌ Briefing failed.', thread_ts: thread_ts || ts });
@@ -369,6 +379,12 @@ export class SlackHandler {
       }
       const { type } = this.parseReportCommand(text);
       await this.handleReportCommand(type, channel, thread_ts || ts, locale, say);
+      return;
+    }
+
+    // NAS confirm command — inbox auto-classify company 분류분 결정 버튼
+    if (text && this.isNasCommand(text)) {
+      await this.handleNasCommand(thread_ts || ts, say);
       return;
     }
 
@@ -1542,6 +1558,58 @@ export class SlackHandler {
     return { type: match?.[1]?.trim() || undefined };
   }
 
+  private isNasCommand(text: string): boolean {
+    return /^`?-(?:nas)`?(?:\s|$)/i.test(text.trim());
+  }
+
+  /** NAS 이동 컨펌 큐를 버튼 메시지로 게시 (`-nas` / 브리핑 후처리 공용). */
+  private async handleNasCommand(threadTs: string, say: any): Promise<void> {
+    try {
+      const blocks = await buildNasQueueBlocks(await listNasQueue());
+      if (!blocks) {
+        await say({ text: '📦 NAS 이동 컨펌 대기 큐가 비어 있습니다.', thread_ts: threadTs });
+        return;
+      }
+      await say({ text: '📦 NAS 이동 컨펌 대기', blocks, thread_ts: threadTs });
+    } catch (error) {
+      this.logger.error('NAS confirm queue listing failed', error);
+      await say({ text: `❌ NAS 컨펌 큐 조회 실패: ${(error as Error).message}`, thread_ts: threadTs });
+    }
+  }
+
+  /**
+   * NAS 컨펌 버튼 처리 후 원 메시지를 최신 큐로 재렌더 (respond replace_original).
+   * note = 방금 처리한 결과 한 줄 (context 블록으로 상단 표시).
+   */
+  private async rerenderNasMessage(respond: any, note: string): Promise<void> {
+    try {
+      const blocks = await buildNasQueueBlocks(await listNasQueue());
+      const noteBlock = { type: 'context', elements: [{ type: 'mrkdwn', text: note }] };
+      if (!blocks) {
+        await respond({
+          replace_original: true,
+          text: note,
+          blocks: [noteBlock, {
+            type: 'section',
+            text: { type: 'mrkdwn', text: '📦 컨펌 대기 큐가 비었습니다. 🎉' },
+          }],
+        });
+      } else {
+        await respond({ replace_original: true, text: '📦 NAS 이동 컨펌 대기', blocks: [noteBlock, ...blocks] });
+      }
+    } catch (error) {
+      this.logger.error('NAS message rerender failed', error);
+      await respond({ response_type: 'ephemeral', text: `${note}\n⚠️ 목록 갱신 실패 — \`-nas\`로 재조회하세요.` });
+    }
+  }
+
+  /** CLI 결과를 사용자 표시용 한 줄로 (락 충돌은 안내 메시지). */
+  private nasResultNote(ok: boolean, detail: string, okText: string): string {
+    if (ok) return okText;
+    if (detail === 'lock') return '⏳ 다른 sync 작업이 진행 중입니다 — 잠시 후 다시 시도하세요.';
+    return `❌ 처리 실패:\n\`\`\`${detail.slice(0, 500)}\`\`\``;
+  }
+
   private isAnalyzeCommand(text: string): boolean {
     return /^`?-(?:analyze|an)`?(?:\s|$)/i.test(text.trim()) || /^분석(?:\s|$)/i.test(text.trim());
   }
@@ -2685,6 +2753,69 @@ export class SlackHandler {
       } catch (error) {
         this.logger.error('Failed to bulk-archive clean reports', error);
         await respond({ response_type: 'ephemeral', text: '❌ clean 일괄 아카이브 실패' });
+      }
+    });
+
+    // --- NAS 이동 컨펌 버튼 (inbox auto-classify) ---
+    // 카드 단위 결정: 파일 1건 또는 폴더 통째(dir 카드). value = id hex prefix.
+
+    this.app.action('nas_confirm_item', async ({ ack, body, respond }) => {
+      await ack();
+      const id = (body as any).actions[0].value as string;
+      const r = await confirmAndApply([id]).catch(e => ({ ok: false, detail: String(e) }));
+      await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `✅ NAS 이동 완료 (\`${id}\`)`));
+    });
+
+    this.app.action('nas_reject_item', async ({ ack, body, respond }) => {
+      await ack();
+      const id = (body as any).actions[0].value as string;
+      const r = await rejectItems([id]).catch(e => ({ ok: false, detail: String(e) }));
+      await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `❌ 거부 처리 — 파일은 Z:\\ABYSS에 남습니다 (\`${id}\`)`));
+    });
+
+    this.app.action('nas_hold_item', async ({ ack, respond }) => {
+      await ack();
+      // DB 무변경 — 큐에 남아 다음 브리핑에 다시 표시 (무기한 대기 + 7일 🔴 정책)
+      await respond({ response_type: 'ephemeral', text: '⏸️ 보류 — 다음 브리핑에 다시 표시됩니다.' });
+    });
+
+    this.app.action('nas_confirm_all_safe', async ({ ack, body, respond }) => {
+      await ack();
+      try {
+        const { ids } = JSON.parse((body as any).actions[0].value);
+        const r = await confirmAndApply(ids);
+        await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `✅ ${ids.length}건 NAS 이동 완료 (⚠️ 항목은 개별 결정)`));
+      } catch (error) {
+        this.logger.error('NAS bulk confirm failed', error);
+        await respond({ response_type: 'ephemeral', text: '❌ 일괄 승인 실패' });
+      }
+    });
+
+    this.app.action('nas_reject_all', async ({ ack, body, respond }) => {
+      await ack();
+      try {
+        const { ids } = JSON.parse((body as any).actions[0].value);
+        const r = await rejectItems(ids);
+        await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `❌ ${ids.length}건 거부 — 파일은 Z:\\ABYSS에 남습니다`));
+      } catch (error) {
+        this.logger.error('NAS bulk reject failed', error);
+        await respond({ response_type: 'ephemeral', text: '❌ 일괄 거부 실패' });
+      }
+    });
+
+    // 분류 변경 드롭다운 — block_id `nas_<idPrefix>`에서 대상 카드 식별
+    this.app.action('nas_retarget_item', async ({ ack, body, respond }) => {
+      await ack();
+      try {
+        const action = (body as any).actions[0];
+        const id = String(action.block_id || '').replace(/^nas_/, '');
+        const category = action.selected_option?.value as string;
+        if (!id || !category) return;
+        const r = await retargetItem(id, category);
+        await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `📂 분류 변경 → \`${category}\` (target 재계산됨 — ✅로 확정)`));
+      } catch (error) {
+        this.logger.error('NAS retarget failed', error);
+        await respond({ response_type: 'ephemeral', text: '❌ 분류 변경 실패' });
       }
     });
 

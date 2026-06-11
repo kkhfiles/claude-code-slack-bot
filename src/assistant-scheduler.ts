@@ -7,6 +7,7 @@ import { errorCollector } from './error-collector';
 import { isRateLimitText } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
+import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 
 export interface AssistantConfig {
   briefing: {
@@ -512,6 +513,16 @@ export class AssistantScheduler {
                 action_id: 'briefing_view_reports',
               }],
             }]).catch(() => {});
+          }
+
+          // NAS 이동 컨펌 큐 — 항목별 결정 버튼 (inbox auto-classify company 분류분)
+          try {
+            const nasBlocks = await buildNasQueueBlocks(await listNasQueue());
+            if (nasBlocks) {
+              await this.sendMessage('📦 NAS 이동 컨펌 대기', nasBlocks).catch(() => {});
+            }
+          } catch (err) {
+            this.logger.warn('NAS confirm queue check failed', err);
           }
         }
       } catch (error) {
