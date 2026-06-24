@@ -835,9 +835,11 @@ export class AssistantScheduler {
 
           if (result.rateLimited) {
             this.logger.warn(`Analysis ${type} hit session limit`);
-            // Daily: no retry (data-sync 등)
-            // Weekly 또는 retryOnLimit=true: schedule retry
-            const shouldRetry = !isDaily && typeConfig?.retryOnLimit !== false;
+            // Daily: 기본 no retry (data-sync 등) — 단, retryOnLimit=true면 +1h 단발 예약 재시도 1회 허용
+            //        (2026-06-24: API 529·타임아웃으로 데일리 통째 누락 방지. 단발 지연 재시도라 7-spawn 사고와 무관)
+            // Weekly: 기본 retry (retryOnLimit=false면 차단)
+            const shouldRetry = typeConfig?.retryOnLimit === true
+              || (!isDaily && typeConfig?.retryOnLimit !== false);
             if (shouldRetry && result.sessionId) {
               failedRetryTypes.push({ type, sessionId: result.sessionId });
             }
