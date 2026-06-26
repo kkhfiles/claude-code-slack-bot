@@ -869,7 +869,8 @@ export class AssistantScheduler {
       if (failedRetryTypes.length > 0) break;
     }
 
-    const label = isDaily ? '야간 동기화' : '주간 분석';
+    // data-sync(daily-00:00)=야간, data-sync-noon(daily-12:00)=정오. 둘 다 startsWith('daily').
+    const label = !isDaily ? '주간 분석' : (schedule === 'daily-12:00' ? '정오 동기화' : '야간 동기화');
     const parts = [`📊 ${label} 완료: ${completedTypes.join(', ') || '(없음)'}`];
     if (timedOutTypes.length > 0) {
       parts.push(`⏱️ 타임아웃: ${timedOutTypes.join(', ')}`);
