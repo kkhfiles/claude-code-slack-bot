@@ -1,5 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
+import { spawn, execSync } from 'child_process';
 import Holidays from 'date-holidays';
 import { Logger } from './logger';
 import { CalendarPoller } from './calendar-poller';
@@ -173,6 +175,11 @@ export class AssistantScheduler {
     // Catch-up briefing if missed today (e.g. bot restarted after briefing time)
     setTimeout(() => this.catchUpBriefingIfNeeded().catch(e =>
       this.logger.error('Catch-up briefing failed', e)), 15_000);
+
+    // Catch-up spinner fresh batch if missing (e.g. PC off at 00:00 data-sync → no novelty).
+    // Lightweight: only fresh_pool_generator + build_daily_pool, not the full data-sync.
+    setTimeout(() => this.catchUpSpinnerFreshIfNeeded().catch(e =>
+      this.logger.error('Catch-up spinner fresh failed', e)), 20_000);
   }
 
   stop(): void {
@@ -587,6 +594,72 @@ export class AssistantScheduler {
         this.logger.error('Catch-up briefing failed', error);
       }
     }
+  }
+
+  /**
+   * If today's spinner fresh batch is missing, generate it now.
+   *
+   * The daily-00:00 data-sync (which runs fresh_pool_generator) has no catch-up: if the
+   * PC/bot is down at 00:00 the run is silently skipped, leaving morning sessions on the
+   * baseline+categorical pool with no novelty until the noon data-sync (12:00) fills it.
+   * This closes that 00:00→12:00 morning gap on bot startup. Best-effort — any failure
+   * leaves the pool on its graceful baseline fallback.
+   */
+  private async catchUpSpinnerFreshIfNeeded(): Promise<void> {
+    if (this.isNonWorkingDay().skip) return; // fresh not generated on holidays/weekends
+
+    const spinnerDir = path.join(os.homedir(), '.claude', 'spinner-verbs');
+    const todayKST = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+    const freshPath = path.join(spinnerDir, `daily-fresh-${todayKST}.yaml`);
+    if (fs.existsSync(freshPath)) return; // 00:00 ran, or an earlier catch-up already did it
+
+    this.logger.info('Catch-up spinner fresh: today batch missing, generating now', { freshPath });
+    try {
+      const gen = await this.runSpinnerScript('fresh_pool_generator.py', spinnerDir, 240_000);
+      if (gen.code !== 0 || !fs.existsSync(freshPath)) {
+        // fresh_pool_generator is graceful (exit 0 + no file on agy/parse failure) — leave baseline.
+        this.logger.warn('Catch-up spinner fresh: generator produced no batch (graceful skip)', {
+          code: gen.code,
+          stderrTail: gen.stderr.trim().split('\n').slice(-3).join(' | '),
+        });
+        return;
+      }
+      await this.runSpinnerScript('build_daily_pool.py', spinnerDir, 60_000);
+      this.logger.info('Catch-up spinner fresh: done');
+    } catch (error) {
+      this.logger.error('Catch-up spinner fresh failed', error);
+    }
+  }
+
+  /** Run a spinner-verbs python script in its own dir. Mirrors nas-confirm.ts spawn pattern. */
+  private runSpinnerScript(
+    script: string,
+    cwd: string,
+    timeoutMs: number,
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn('python', ['-X', 'utf8', script], {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: process.platform === 'win32',
+        env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
+      });
+      let stdout = '';
+      let stderr = '';
+      proc.stdout?.on('data', (c: Buffer) => { stdout += c.toString('utf-8'); });
+      proc.stderr?.on('data', (c: Buffer) => { stderr += c.toString('utf-8'); });
+      const killTimer = setTimeout(() => {
+        try {
+          if (process.platform === 'win32' && proc.pid) {
+            execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+          } else {
+            proc.kill('SIGKILL');
+          }
+        } catch {}
+      }, timeoutMs);
+      proc.on('error', (err) => { clearTimeout(killTimer); reject(err); });
+      proc.on('close', (code) => { clearTimeout(killTimer); resolve({ code: code ?? -1, stdout, stderr }); });
+    });
   }
 
   private async executeBriefing(): Promise<SessionResult> {
