@@ -136,6 +136,7 @@ export class AssistantScheduler {
   private briefingTimer: ReturnType<typeof setTimeout> | null = null;
   private analysisTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
+  private daouKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
 
   // File watcher debounce (account-manager.ts:59-62 pattern)
   private watchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -180,6 +181,16 @@ export class AssistantScheduler {
     // Lightweight: only fresh_pool_generator + build_daily_pool, not the full data-sync.
     setTimeout(() => this.catchUpSpinnerFreshIfNeeded().catch(e =>
       this.logger.error('Catch-up spinner fresh failed', e)), 20_000);
+
+    // Daou session keep-alive — runs EVERY calendar day (incl. weekends/holidays), unlike the
+    // working-day-gated data-sync. The Daou session dies from server-side idle timeout (~2-3d);
+    // the weekday data-sync's /app/asset ping resets it Mon-Fri, but weekends have no ping →
+    // session dies over the weekend → manual re-login every Monday (auto-relogin is CAPTCHA-blocked).
+    // A daily ping on the always-on PC keeps one manual login alive indefinitely. Best-effort ping
+    // on startup (covers a bot restart) + a recurring daily timer.
+    setTimeout(() => this.runDaouKeepAlive().catch(e =>
+      this.logger.error('Daou keep-alive (startup) failed', e)), 25_000);
+    this.scheduleDaouKeepAlive();
   }
 
   stop(): void {
@@ -471,6 +482,10 @@ export class AssistantScheduler {
       clearTimeout(timer);
     }
     this.analysisTimers.clear();
+    if (this.daouKeepAliveTimer) {
+      clearTimeout(this.daouKeepAliveTimer);
+      this.daouKeepAliveTimer = null;
+    }
   }
 
   // --- Briefing ---
@@ -660,6 +675,76 @@ export class AssistantScheduler {
       proc.on('error', (err) => { clearTimeout(killTimer); reject(err); });
       proc.on('close', (code) => { clearTimeout(killTimer); resolve({ code: code ?? -1, stdout, stderr }); });
     });
+  }
+
+  /**
+   * Ping Daou to reset its server-side idle timer, keeping the operator's session alive.
+   * Reuses groupware_daily's --keepalive mode (session_alive() + alert upsert, no fetch/worker),
+   * run from the claude-workflow repo root (this.workingDir). Best-effort — never throws.
+   */
+  private runDaouKeepAlive(): Promise<void> {
+    return new Promise((resolve) => {
+      const proc = spawn(
+        'python',
+        ['-X', 'utf8', '-m', 'mycelium.sync.groupware_daily', '--keepalive', '--json'],
+        {
+          cwd: this.workingDir,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          shell: process.platform === 'win32',
+          env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
+        },
+      );
+      let stdout = '';
+      let stderr = '';
+      proc.stdout?.on('data', (c: Buffer) => { stdout += c.toString('utf-8'); });
+      proc.stderr?.on('data', (c: Buffer) => { stderr += c.toString('utf-8'); });
+      const killTimer = setTimeout(() => {
+        try {
+          if (process.platform === 'win32' && proc.pid) {
+            execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+          } else {
+            proc.kill('SIGKILL');
+          }
+        } catch {}
+      }, 60_000);
+      proc.on('error', (err) => {
+        clearTimeout(killTimer);
+        this.logger.error('Daou keep-alive spawn error', err);
+        resolve();
+      });
+      proc.on('close', () => {
+        clearTimeout(killTimer);
+        const alive = /"session_alive":\s*true/.test(stdout);
+        this.logger.info('Daou keep-alive ping', {
+          alive,
+          out: (stdout.trim() || stderr.trim()).slice(0, 200),
+        });
+        resolve();
+      });
+    });
+  }
+
+  /** Schedule the Daou keep-alive at 13:00 EVERY calendar day (no working-day skip). */
+  private scheduleDaouKeepAlive(): void {
+    const nextFire = this.getNextEveryDayTime('13:00');
+    const msUntil = Math.max(0, nextFire.getTime() - Date.now());
+    this.logger.info('Scheduled Daou keep-alive', { nextFire: nextFire.toISOString() });
+    this.daouKeepAliveTimer = setTimeout(async () => {
+      await this.runDaouKeepAlive().catch(e => this.logger.error('Daou keep-alive failed', e));
+      this.scheduleDaouKeepAlive();
+    }, msUntil);
+  }
+
+  /** Next occurrence of HH:MM on ANY day — unlike getNextWorkingDay, does not skip weekends/holidays. */
+  private getNextEveryDayTime(time: string): Date {
+    const [h, m] = time.split(':').map(Number);
+    const now = new Date();
+    const next = new Date(now);
+    next.setHours(h, m, 0, 0);
+    if (next <= now) {
+      next.setDate(next.getDate() + 1);
+    }
+    return next;
   }
 
   private async executeBriefing(): Promise<SessionResult> {
