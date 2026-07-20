@@ -188,9 +188,9 @@ export class AssistantScheduler {
     // session dies over the weekend → manual re-login every Monday (auto-relogin is CAPTCHA-blocked).
     // A daily ping on the always-on PC keeps one manual login alive indefinitely. Best-effort ping
     // on startup (covers a bot restart) + a recurring daily timer.
+    // (the recurring daily timer itself is registered by scheduleAll() above)
     setTimeout(() => this.runDaouKeepAlive().catch(e =>
       this.logger.error('Daou keep-alive (startup) failed', e)), 25_000);
-    this.scheduleDaouKeepAlive();
   }
 
   stop(): void {
@@ -464,6 +464,12 @@ export class AssistantScheduler {
     if (this.config.reminders.enabled) {
       this.startCalendarPoller();
     }
+    // Unconditional — not gated by any config section. Must live here (not only in start())
+    // because clearAllTimers() kills daouKeepAliveTimer on every config reload; scheduleAll()
+    // is its re-registration counterpart. Omitting it silently ended the keep-alive chain on
+    // the first config write after startup (2026-07-15 → session died 5 days later).
+    this.scheduleDaouKeepAlive();
+
     if (this.getEnabledAnalysisTypes().length > 0) {
       this.scheduleAnalysis();
     }
@@ -726,6 +732,8 @@ export class AssistantScheduler {
 
   /** Schedule the Daou keep-alive at 13:00 EVERY calendar day (no working-day skip). */
   private scheduleDaouKeepAlive(): void {
+    // Idempotent: drop any existing timer so a double-call can't fork the self-rescheduling chain.
+    if (this.daouKeepAliveTimer) clearTimeout(this.daouKeepAliveTimer);
     const nextFire = this.getNextEveryDayTime('13:00');
     const msUntil = Math.max(0, nextFire.getTime() - Date.now());
     this.logger.info('Scheduled Daou keep-alive', { nextFire: nextFire.toISOString() });
