@@ -84,6 +84,10 @@ export async function runAgy(opts: AgyRunOptions): Promise<AgyRunResult> {
       cwd: opts.workingDirectory,
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
+      // Without this the console window flashes on screen every run. Python is a
+      // console program, and on Windows `shell: true` routes through cmd.exe —
+      // both would otherwise be given a visible console by the OS.
+      windowsHide: true,
     });
 
     let stdoutBuf = '';
