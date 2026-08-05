@@ -421,6 +421,10 @@ export class CliHandler {
       env: spawnEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: process.platform === 'win32', // Use shell on Windows for PATH resolution
+      // 콘솔 창이 화면에 깜빡이지 않게 한다. 이 프로세스에는 콘솔이 없어서
+      // 윈도우가 자식마다 새 콘솔을 만들어 주고, `shell: true` 는 cmd.exe 를
+      // 거치므로 특히 필요하다. 출력은 이미 파이프로 받고 있어 잃는 것이 없다.
+      windowsHide: true,
     });
 
     // Write prompt to stdin and close it
