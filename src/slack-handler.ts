@@ -26,6 +26,7 @@ import { ChatHost } from './chat-host';
 import { LetterRelay } from './letter-relay';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
+import { briefShort, captureToInbox, isWorkAssistantEnabled, openCaptureCount } from './work-assistant';
 
 interface MessageEvent {
   user: string;
@@ -455,6 +456,12 @@ export class SlackHandler {
     // NAS confirm command — inbox auto-classify company 분류분 결정 버튼
     if (text && this.isNasCommand(text)) {
       await this.handleNasCommand(thread_ts || ts, say);
+      return;
+    }
+
+    // 개인 업무 — 내용이 붙으면 캡처, 없으면 짧은 요약
+    if (text && this.isWorkCommand(text)) {
+      await this.handleWorkCommand(text, thread_ts || ts, say);
       return;
     }
 
@@ -1632,7 +1639,52 @@ export class SlackHandler {
     return /^`?-(?:nas)`?(?:\s|$)/i.test(text.trim());
   }
 
+  /** `-업무` / `-work` / `-task` — 뒤에 내용이 붙으면 캡처, 없으면 요약. */
+  private isWorkCommand(text: string): boolean {
+    return /^`?-(?:업무|work|task)`?(?:\s|$)/i.test(text.trim());
+  }
+
   /** NAS 이동 컨펌 큐를 버튼 메시지로 게시 (`-nas` / 브리핑 후처리 공용). */
+  /**
+   * `-업무` — 개인 업무 비서.
+   *
+   * 내용이 붙으면 **캡처만** 한다. 해석·등록은 세션이 한다 — 순서가 규칙이다
+   * (원문 저장 → 해석 → 닫기). 여기서 해석하려 들면 실패했을 때 원문까지 같이
+   * 사라진다. 캡처는 파일 append 라 노션·파이썬이 죽어 있어도 성공한다.
+   *
+   * 내용이 없으면 짧은 요약을 낸다. **목록을 옮겨오지 않는다** — 슬랙에서 다
+   * 읽히면 세션을 안 열게 되고, 그러면 판단하는 자리가 사라진다.
+   */
+  private async handleWorkCommand(text: string, threadTs: string, say: any): Promise<void> {
+    if (!isWorkAssistantEnabled()) {
+      await say({ text: '⚠️ 업무 비서 경로를 찾지 못했습니다 (WORK_ASSISTANT_ROOT).', thread_ts: threadTs });
+      return;
+    }
+    const body = text.trim().replace(/^`?-(?:업무|work|task)`?\s*/i, '').trim();
+
+    if (body) {
+      const rec = captureToInbox(body, 'slack', threadTs);
+      if (!rec) {
+        await say({ text: '❌ 캡처 실패 — 원문이 저장되지 않았습니다. 다시 보내주세요.', thread_ts: threadTs });
+        return;
+      }
+      const n = openCaptureCount();
+      await say({
+        text: `📥 캡처했습니다 \`${rec.id}\`\n> ${body.slice(0, 180)}\n` +
+          `_등록·마감·추정은 세션에서 정합니다 (미처리 ${n}건)_`,
+        thread_ts: threadTs,
+      });
+      return;
+    }
+
+    try {
+      await say({ text: await briefShort(), thread_ts: threadTs, unfurl_links: false });
+    } catch (error) {
+      this.logger.error('work brief failed', error);
+      await say({ text: `❌ 업무 요약 실패: ${(error as Error).message}`, thread_ts: threadTs });
+    }
+  }
+
   private async handleNasCommand(threadTs: string, say: any): Promise<void> {
     try {
       const blocks = await buildNasQueueBlocks(await listNasQueue());
