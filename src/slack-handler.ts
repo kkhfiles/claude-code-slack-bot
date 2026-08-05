@@ -24,6 +24,7 @@ import { LunchPoller } from './lunch-poller';
 import { LunchButtons, readLunchBotToken } from './lunch-buttons';
 import { ChatHost } from './chat-host';
 import { LetterRelay } from './letter-relay';
+import { LetterBooking } from './letter-booking';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
 
@@ -197,12 +198,23 @@ export class SlackHandler {
         mode: 'dm',
         allowUsers: config.letter.allowUsers,
         managerUserId: config.letter.managerUserId,
-        // 칭찬 전달은 대화가 아니다 — 같은 앱에 슬래시 명령·모달로 따로 붙는다.
-        attach: new LetterRelay({
-          managerUserId: config.letter.managerUserId,
-          members: config.letter.members,
-          logPath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', 'relay.jsonl'),
-        }).register,
+        // 칭찬 전달과 1on1 예약은 대화가 아니다 — 같은 앱에 슬래시 명령·모달로 따로 붙는다.
+        // **앱은 하나뿐이다**(소켓을 두 번 열면 슬랙이 한쪽에만 보내 조용히 실패한다).
+        // 그래서 둘 다 같은 앱에 얹는다.
+        attach: (app) => {
+          new LetterRelay({
+            managerUserId: config.letter.managerUserId,
+            members: config.letter.members,
+            logPath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', 'relay.jsonl'),
+          }).register(app);
+          if (config.letter.booking.enabled) {
+            new LetterBooking({
+              managerUserId: config.letter.managerUserId,
+              members: config.letter.members,
+              logPath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', '1on1.jsonl'),
+            }).register(app);
+          }
+        },
       }));
     }
     // 점심봇은 이미 자기 앱과 앱 토큰이 있다(버튼용). 채널 대화도 같은 앱으로 한다.
