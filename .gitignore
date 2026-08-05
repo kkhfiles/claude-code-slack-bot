@@ -26,6 +26,8 @@ mcp-servers.json
 
 # Build output
 dist/
+# 배포 전에 손으로 떠 두는 빌드 산출물 사본. dist/ 와 같은 성격이라 올리지 않는다.
+dist.backup-*/
 
 # IDE
 .vscode/
