@@ -27,8 +27,10 @@ export const config = {
   },
   // 개인 업무 비서(work-assistant). 태스크 정본은 개인 노션이고, 이 레포는
   // 결정론 조회 계층만 갖는다. 경로가 비면 관련 기능 전체가 조용히 꺼진다.
+  // **기본값을 두지 않는다** — 이 저장소는 공개라, 운영자 PC 의 경로를 소스에 박으면
+  // 그대로 남는다. 쓰려면 `.env` 의 `WORK_ASSISTANT_ROOT` 에 적는다.
   workAssistant: {
-    root: process.env.WORK_ASSISTANT_ROOT || 'P:/github/work-assistant',
+    root: process.env.WORK_ASSISTANT_ROOT || '',
   },
   // **이 봇을 쓸 수 있는 사람.** 봇은 운영자 PC 에서 도는 Claude Code 세션을
   // 그대로 내준다 — 개인 업무 목록·사내 지식그래프·파일 접근이 딸려 있다.
