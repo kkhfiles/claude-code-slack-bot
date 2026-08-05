@@ -21,7 +21,11 @@ import { Logger } from './logger';
  * 조이지 않기로 했다.
  */
 
+/** 넣는 쪽. **실장도 이걸로 넣는다** — 자기 창구를 직접 써 봐야 무엇이 불편한지 안다. */
 const COMMAND = '/1on1';
+/** 받는 쪽(실장 전용). 넣는 명령과 나눠 둔 것은 실장도 신청을 해 볼 수 있게 하기 위해서다. */
+const LIST_COMMAND = '/1on1-list';
+
 const ASK = 'booking_ask';
 const CANCEL = 'booking_cancel';
 const DONE = 'booking_done';
@@ -83,15 +87,33 @@ export class LetterBooking {
         return;
       }
       try {
-        await client.views.open({
-          trigger_id: command.trigger_id,
-          view: me === this.opts.managerUserId ? this.managerView() : this.memberView(me),
-        });
+        await client.views.open({ trigger_id: command.trigger_id, view: this.memberView(me) });
       } catch (error) {
         this.logger.warn('신청 창을 못 열었습니다', error);
         await respond({
           response_type: 'ephemeral',
           text: `신청 창을 열지 못했습니다. 한 번 더 시도해 주세요.\n\`${String(error).slice(0, 200)}\``,
+        });
+      }
+    });
+
+    app.command(LIST_COMMAND, async ({ command, ack, respond, client }) => {
+      await ack();
+      if (command.user_id !== this.opts.managerUserId) {
+        this.logger.info(`${command.user_id} 가 ${LIST_COMMAND} 를 불렀지만 실장이 아닙니다`);
+        await respond({
+          response_type: 'ephemeral',
+          text: `이 명령은 실장만 쓸 수 있습니다. 신청은 \`${COMMAND}\` 입니다.`,
+        });
+        return;
+      }
+      try {
+        await client.views.open({ trigger_id: command.trigger_id, view: this.managerView() });
+      } catch (error) {
+        this.logger.warn('신청 목록 창을 못 열었습니다', error);
+        await respond({
+          response_type: 'ephemeral',
+          text: `목록을 열지 못했습니다. 한 번 더 시도해 주세요.\n\`${String(error).slice(0, 200)}\``,
         });
       }
     });
@@ -134,7 +156,7 @@ export class LetterBooking {
         `*1on1 신청 · ${name}*\n`
         + `${when ? `편한 때: ${when}\n` : '편한 때: 안 적음\n'}`
         + `${note ? `> ${note}\n` : ''}`
-        + `시간을 잡아 직접 알려주세요. 처리하신 뒤 \`${COMMAND}\` 에서 내리시면 됩니다.`);
+        + `\`${LIST_COMMAND}\` 에서 시간을 알려주시면 됩니다.`);
     });
 
     // 무르기 — 되돌릴 수 있는 일이라 확인 단계를 두지 않는다. 한 단계를 더 붙이면
@@ -225,7 +247,7 @@ export class LetterBooking {
       await this.refresh(client, payload.view?.id, this.managerView(`${asked.user_name} 님 신청을 내렸습니다.`));
     });
 
-    this.logger.info(`${COMMAND} 준비됨 (신청 가능 ${this.opts.members.length}명 · 한 달 한 번)`);
+    this.logger.info(`${COMMAND}·${LIST_COMMAND} 준비됨 (신청 가능 ${this.opts.members.length}명 · 한 달 한 번)`);
   };
 
   // ── 화면 ──────────────────────────────────────────────────────────────
@@ -315,9 +337,9 @@ export class LetterBooking {
     }
     blocks.push({
       type: 'context',
-      elements: [{ type: 'mrkdwn', text: '*시간 알리기* 는 봇이 대신 알려 드립니다. 이미 직접 말씀하셨으면 *그냥 내리기* 를 쓰세요(그때는 아무 말도 안 갑니다).' }],
+      elements: [{ type: 'mrkdwn', text: `*시간 알리기* 는 봇이 대신 알려 드립니다. 이미 직접 말씀하셨으면 *그냥 내리기* 를 쓰세요(그때는 아무 말도 안 갑니다).\n신청은 \`${COMMAND}\` — 실장도 그쪽으로 넣습니다.` }],
     });
-    return this.modal(blocks);
+    return this.modal(blocks, undefined, undefined, '들어온 1on1 신청');
   }
 
   /** 실장이 정한 시각을 적는 창. 이 칸에 적은 그대로 신청자에게 간다. */
@@ -348,10 +370,10 @@ export class LetterBooking {
     };
   }
 
-  private modal(blocks: any[], callback?: string, submit?: string): any {
+  private modal(blocks: any[], callback?: string, submit?: string, title?: string): any {
     const view: any = {
       type: 'modal',
-      title: { type: 'plain_text', text: '1on1 신청' },
+      title: { type: 'plain_text', text: title ?? '1on1 신청' },
       close: { type: 'plain_text', text: '닫기' },
       blocks,
     };
