@@ -20,6 +20,10 @@ import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n }
 import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
+import { LunchPoller } from './lunch-poller';
+import { LunchButtons, readLunchBotToken } from './lunch-buttons';
+import { ChatHost } from './chat-host';
+import { LetterRelay } from './letter-relay';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
 
@@ -121,6 +125,13 @@ export class SlackHandler {
   // System memory watchdog
   private memoryWatchdog: ProcessMemoryWatchdog | null = null;
 
+  // Lunch recruitment bot (external script, its own Slack identity)
+  private lunchPoller: LunchPoller | null = null;
+  private lunchButtons: LunchButtons | null = null;
+
+  // agy 대화 계층 (봇마다 자기 슬랙 앱 · 자기 소켓 연결)
+  private chatHosts: ChatHost[] = [];
+
   constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager, reportServer?: ReportServer) {
     this.app = app;
     this.cliHandler = cliHandler;
@@ -150,6 +161,65 @@ export class SlackHandler {
       if (this.reportServer) {
         const scheduler = this.assistantScheduler;
         this.reportServer.setTriggerCallback(async (type: string) => scheduler.runAnalysisManual(type));
+      }
+    }
+
+    // Initialize lunch poller (only when a script path is configured)
+    if (config.lunchBot.script) {
+      this.lunchPoller = new LunchPoller(
+        config.lunchBot.python,
+        config.lunchBot.script,
+        config.lunchBot.intervalMinutes,
+        config.lunchBot.windowStart,
+        config.lunchBot.windowEnd,
+      );
+      // Buttons need the lunch app's own Socket Mode connection. Without the
+      // app token the message still works — the 🤖 emoji is the fallback.
+      if (config.lunchBot.appToken) {
+        this.lunchButtons = new LunchButtons(
+          config.lunchBot.python,
+          config.lunchBot.script,
+          config.lunchBot.appToken,
+        );
+      }
+    }
+
+    // 대화 봇들 — 토큰과 turn.py 경로가 다 있을 때만 켠다. 하나라도 없으면 꺼진 채로 둔다.
+    const turnScript = config.chat.turnScript;
+    if (turnScript && config.letter.enabled
+        && config.letter.botToken && config.letter.appToken) {
+      this.chatHosts.push(new ChatHost({
+        name: 'letter',
+        botToken: config.letter.botToken,
+        appToken: config.letter.appToken,
+        python: config.chat.python,
+        script: turnScript,
+        mode: 'dm',
+        allowUsers: config.letter.allowUsers,
+        managerUserId: config.letter.managerUserId,
+        // 칭찬 전달은 대화가 아니다 — 같은 앱에 슬래시 명령·모달로 따로 붙는다.
+        attach: new LetterRelay({
+          managerUserId: config.letter.managerUserId,
+          members: config.letter.members,
+          logPath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', 'relay.jsonl'),
+        }).register,
+      }));
+    }
+    // 점심봇은 이미 자기 앱과 앱 토큰이 있다(버튼용). 채널 대화도 같은 앱으로 한다.
+    if (turnScript && config.lunchBot.appToken && config.lunchBot.chatChannel) {
+      const token = readLunchBotToken(config.lunchBot.script);
+      if (token) {
+        this.chatHosts.push(new ChatHost({
+          name: 'lunch',
+          botToken: token,
+          appToken: config.lunchBot.appToken,
+          python: config.chat.python,
+          script: turnScript,
+          mode: 'channel',
+          channels: [config.lunchBot.chatChannel],
+          managerUserId: config.letter.managerUserId,
+          buttIn: config.chat.buttIn.enabled ? config.chat.buttIn : null,
+        }));
       }
     }
 
@@ -3610,6 +3680,17 @@ export class SlackHandler {
         this.logger.error('Initial token health check failed', err),
       );
     }, 30 * 1000);
+
+    // Lunch recruitment bot
+    this.lunchPoller?.start();
+    this.lunchButtons?.start().catch((err) =>
+      this.logger.warn('Lunch button listener failed to start', err),
+    );
+
+    // 대화 봇들 (레터 DM · 점심봇 채널)
+    for (const host of this.chatHosts) {
+      host.start().catch((err) => this.logger.warn('Chat host failed to start', err));
+    }
 
     // System memory watchdog
     if (this.memoryWatchdog) {
