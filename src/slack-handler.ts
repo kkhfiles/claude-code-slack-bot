@@ -287,6 +287,28 @@ export class SlackHandler {
     return !!user && config.bot.allowUsers.includes(user);
   }
 
+  /**
+   * 버튼 핸들러 등록 — 허용된 사람이 누른 것만 통과시킨다.
+   *
+   * 메시지 경로만 막으면 반쪽이다. 컨펌 블록이 채널에 뿌려지면 남이 그 버튼을
+   * 누를 수 있고, 그중에는 도구 사용 승인처럼 세션 권한을 넓히는 것도 있다.
+   * `this.app.action` 을 직접 부르지 말고 이걸 쓴다.
+   *
+   * 거부해도 `ack()` 은 한다 — 안 하면 슬랙이 3초 뒤 오류를 띄워 버튼이 고장난
+   * 것처럼 보인다. 조용히 아무 일도 안 일어나는 쪽이 맞다.
+   */
+  private action(actionId: string | RegExp, fn: (args: any) => Promise<void>): void {
+    this.app.action(actionId as any, async (args: any) => {
+      const user = args?.body?.user?.id;
+      if (!this.isAllowedUser(user)) {
+        this.logger.warn('Rejected button from unauthorized user', { user, actionId });
+        try { await args.ack(); } catch { /* 이미 응답됨 */ }
+        return;
+      }
+      await fn(args);
+    });
+  }
+
   async handleMessage(event: MessageEvent, say: any) {
     const { user, channel, thread_ts, ts, text, files } = event;
 
@@ -2795,7 +2817,7 @@ export class SlackHandler {
     // --- Interactive button handlers ---
 
     // Briefing: "보고서 확인" button — trigger -rp command
-    this.app.action('briefing_view_reports', async ({ ack, body }) => {
+    this.action('briefing_view_reports', async ({ ack, body }) => {
       await ack();
       const channel = (body as any).channel?.id || (body as any).container?.channel_id;
       const threadTs = (body as any).message?.ts;
@@ -2808,7 +2830,7 @@ export class SlackHandler {
     });
 
     // Report: "Archive" button — move report to archived/
-    this.app.action('archive_report', async ({ ack, body, respond }) => {
+    this.action('archive_report', async ({ ack, body, respond }) => {
       await ack();
       try {
         const { absPath, relPath } = JSON.parse((body as any).actions[0].value);
@@ -2829,7 +2851,7 @@ export class SlackHandler {
     });
 
     // Report: "Archive all" button — bulk-archive every currently-listed report.
-    this.app.action('archive_all_reports', async ({ ack, body, respond }) => {
+    this.action('archive_all_reports', async ({ ack, body, respond }) => {
       await ack();
       try {
         const { type } = JSON.parse((body as any).actions[0].value);
@@ -2843,7 +2865,7 @@ export class SlackHandler {
     });
 
     // Report: "Archive clean" button — bulk-archive only manifest-clean reports.
-    this.app.action('archive_clean_reports', async ({ ack, body, respond }) => {
+    this.action('archive_clean_reports', async ({ ack, body, respond }) => {
       await ack();
       try {
         const { moved, failed } = this.archiveReportsBulk('clean', '');
@@ -2858,7 +2880,7 @@ export class SlackHandler {
     // --- NAS 이동 컨펌 버튼 (inbox auto-classify) ---
     // 카드 단위 결정: 파일 1건 또는 폴더 통째(dir 카드). value = id hex prefix.
 
-    this.app.action('nas_confirm_item', async ({ ack, body, respond }) => {
+    this.action('nas_confirm_item', async ({ ack, body, respond }) => {
       await ack();
       try {
         const id = (body as any).actions[0].value as string;
@@ -2870,7 +2892,7 @@ export class SlackHandler {
       }
     });
 
-    this.app.action('nas_reject_item', async ({ ack, body, respond }) => {
+    this.action('nas_reject_item', async ({ ack, body, respond }) => {
       await ack();
       try {
         const id = (body as any).actions[0].value as string;
@@ -2882,13 +2904,13 @@ export class SlackHandler {
       }
     });
 
-    this.app.action('nas_hold_item', async ({ ack, respond }) => {
+    this.action('nas_hold_item', async ({ ack, respond }) => {
       await ack();
       // DB 무변경 — 큐에 남아 다음 브리핑에 다시 표시 (무기한 대기 + 7일 🔴 정책)
       await respond({ response_type: 'ephemeral', text: '⏸️ 보류 — 다음 브리핑에 다시 표시됩니다.' });
     });
 
-    this.app.action('nas_confirm_all_safe', async ({ ack, body, respond }) => {
+    this.action('nas_confirm_all_safe', async ({ ack, body, respond }) => {
       await ack();
       try {
         const { ids } = JSON.parse((body as any).actions[0].value);
@@ -2900,7 +2922,7 @@ export class SlackHandler {
       }
     });
 
-    this.app.action('nas_reject_all', async ({ ack, body, respond }) => {
+    this.action('nas_reject_all', async ({ ack, body, respond }) => {
       await ack();
       try {
         const { ids } = JSON.parse((body as any).actions[0].value);
@@ -2913,7 +2935,7 @@ export class SlackHandler {
     });
 
     // 분류 변경 드롭다운 — block_id `nas_<idPrefix>`에서 대상 카드 식별
-    this.app.action('nas_retarget_item', async ({ ack, body, respond }) => {
+    this.action('nas_retarget_item', async ({ ack, body, respond }) => {
       await ack();
       try {
         const action = (body as any).actions[0];
@@ -2929,7 +2951,7 @@ export class SlackHandler {
     });
 
     // Permission denial: "Allow All & Resume" — approve all denied tools and resume
-    this.app.action('allow_all_denied_tools', async ({ ack, body, respond }) => {
+    this.action('allow_all_denied_tools', async ({ ack, body, respond }) => {
       await ack();
       try {
         const actionLocale = await this.getUserLocale((body as any).user.id);
@@ -2964,7 +2986,7 @@ export class SlackHandler {
     });
 
     // Permission denial: "Allow <tool>" — one-time approve and resume
-    this.app.action(/^allow_denied_tool_/, async ({ ack, body, respond }) => {
+    this.action(/^allow_denied_tool_/, async ({ ack, body, respond }) => {
       await ack();
       try {
         const actionLocale = await this.getUserLocale((body as any).user.id);
@@ -3013,7 +3035,7 @@ export class SlackHandler {
     });
 
     // Plan execution
-    this.app.action('execute_plan', async ({ ack, body, respond }) => {
+    this.action('execute_plan', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const planId = (body as any).actions[0].value;
@@ -3036,7 +3058,7 @@ export class SlackHandler {
       await this.handleMessage(event, say);
     });
 
-    this.app.action('cancel_plan', async ({ ack, body, respond }) => {
+    this.action('cancel_plan', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const planId = (body as any).actions[0].value;
@@ -3045,7 +3067,7 @@ export class SlackHandler {
     });
 
     // Account status view: "Switch" button
-    this.app.action('account_switch_btn', async ({ ack, body, respond }) => {
+    this.action('account_switch_btn', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const accountId = (body as any).actions[0].value as AccountId;
@@ -3058,7 +3080,7 @@ export class SlackHandler {
     });
 
     // Account status view: "Use" button → switch account
-    this.app.action('account_use_btn', async ({ ack, body, respond }) => {
+    this.action('account_use_btn', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const accountId = (body as any).actions[0].value as AccountId;
@@ -3071,7 +3093,7 @@ export class SlackHandler {
     });
 
     // Account status view: "Set" button → guide user to login with target account
-    this.app.action('account_set_btn', async ({ ack, body, respond }) => {
+    this.action('account_set_btn', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const slot = (body as any).actions[0].value as AccountId;
@@ -3089,7 +3111,7 @@ export class SlackHandler {
     });
 
     // Account status view: "Unset" button → remove credentials backup
-    this.app.action('account_unset_btn', async ({ ack, body, respond }) => {
+    this.action('account_unset_btn', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const accountId = (body as any).actions[0].value as AccountId;
@@ -3099,7 +3121,7 @@ export class SlackHandler {
     });
 
     // Account setup: "Done" button — capture token for the target slot
-    this.app.action('account_setup_next', async ({ ack, body, respond }) => {
+    this.action('account_setup_next', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       try {
@@ -3127,7 +3149,7 @@ export class SlackHandler {
     });
 
     // Account setup: "Cancel" button
-    this.app.action('account_setup_cancel', async ({ ack, body, respond }) => {
+    this.action('account_setup_cancel', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const setupId = (body as any).actions[0].value;
@@ -3142,7 +3164,7 @@ export class SlackHandler {
     });
 
     // Schedule: "Add" button → open modal for time input
-    this.app.action(/^schedule_add_btn_/, async ({ ack, body }) => {
+    this.action(/^schedule_add_btn_/, async ({ ack, body }) => {
       await ack();
       try {
         const actionLocale = await this.getUserLocale((body as any).user.id);
@@ -3227,7 +3249,7 @@ export class SlackHandler {
     });
 
     // Schedule: "Remove" button
-    this.app.action(/^schedule_remove_btn_/, async ({ ack, body, respond }) => {
+    this.action(/^schedule_remove_btn_/, async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const ch = (body as any).channel?.id;
@@ -3240,7 +3262,7 @@ export class SlackHandler {
     });
 
     // Schedule: "Clear all" button
-    this.app.action('schedule_clear_btn', async ({ ack, body, respond }) => {
+    this.action('schedule_clear_btn', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const ch = (body as any).channel?.id;
@@ -3251,7 +3273,7 @@ export class SlackHandler {
     });
 
     // Schedule: "Rotation" toggle button
-    this.app.action('schedule_rotation_btn', async ({ ack, body, respond }) => {
+    this.action('schedule_rotation_btn', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const ch = (body as any).channel?.id;
@@ -3263,7 +3285,7 @@ export class SlackHandler {
     });
 
     // Session picker "Show more" button
-    this.app.action('picker_show_more', async ({ ack, body }) => {
+    this.action('picker_show_more', async ({ ack, body }) => {
       await ack();
       try {
         const actionValue = JSON.parse((body as any).actions[0].value);
@@ -3286,7 +3308,7 @@ export class SlackHandler {
     });
 
     // Session picker buttons
-    this.app.action(/^pick_\d+$/, async ({ ack, body }) => {
+    this.action(/^pick_\d+$/, async ({ ack, body }) => {
       await ack();
       try {
         const actionLocale = await this.getUserLocale((body as any).user?.id);
@@ -3351,7 +3373,7 @@ export class SlackHandler {
 
 
     // Rate limit retry — auto-execute the original prompt at reset time
-    this.app.action('schedule_retry', async ({ ack, body, respond }) => {
+    this.action('schedule_retry', async ({ ack, body, respond }) => {
       await ack();
       try {
         const userId = (body as any).user.id;
@@ -3410,7 +3432,7 @@ export class SlackHandler {
       }
     });
 
-    this.app.action('cancel_retry', async ({ ack, body, respond }) => {
+    this.action('cancel_retry', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const retryId = (body as any).actions[0].value;
@@ -3420,7 +3442,7 @@ export class SlackHandler {
     });
 
     // Switch account on rate limit
-    this.app.action('switch_account_retry', async ({ ack, body, respond }) => {
+    this.action('switch_account_retry', async ({ ack, body, respond }) => {
       await ack();
       try {
         const userId = (body as any).user.id;
@@ -3458,7 +3480,7 @@ export class SlackHandler {
     });
 
     // Continue with API key on rate limit
-    this.app.action('continue_with_apikey', async ({ ack, body }) => {
+    this.action('continue_with_apikey', async ({ ack, body }) => {
       await ack();
       try {
         const userId = (body as any).user.id;
@@ -3539,7 +3561,7 @@ export class SlackHandler {
     });
 
     // Open API key modal (from -apikey command button)
-    this.app.action('open_apikey_modal', async ({ ack, body }) => {
+    this.action('open_apikey_modal', async ({ ack, body }) => {
       await ack();
       try {
         const userId = (body as any).user.id;
@@ -3666,7 +3688,7 @@ export class SlackHandler {
     });
 
     // Calendar notification mute button
-    this.app.action('calendar_mute_event', async ({ ack, body, respond }) => {
+    this.action('calendar_mute_event', async ({ ack, body, respond }) => {
       await ack();
       const baseEventId = (body as any).actions?.[0]?.value;
       if (!baseEventId || !this.assistantScheduler) return;
@@ -3725,19 +3747,19 @@ export class SlackHandler {
     if (this.memoryWatchdog) {
       this.memoryWatchdog.start();
 
-      this.app.action('watchdog_kill', async ({ ack, body }) => {
+      this.action('watchdog_kill', async ({ ack, body }) => {
         await ack();
         const pid = parseInt((body as any).actions[0].value, 10);
         await this.memoryWatchdog?.handleKillAction(pid);
       });
 
-      this.app.action('watchdog_ignore', async ({ ack, body }) => {
+      this.action('watchdog_ignore', async ({ ack, body }) => {
         await ack();
         const pid = parseInt((body as any).actions[0].value, 10);
         await this.memoryWatchdog?.handleIgnoreAction(pid);
       });
 
-      this.app.action('watchdog_exclude', async ({ ack, body }) => {
+      this.action('watchdog_exclude', async ({ ack, body }) => {
         await ack();
         const pid = parseInt((body as any).actions[0].value, 10);
         await this.memoryWatchdog?.handleExcludeAction(pid);
