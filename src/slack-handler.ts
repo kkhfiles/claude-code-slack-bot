@@ -212,6 +212,7 @@ export class SlackHandler {
               managerUserId: config.letter.managerUserId,
               members: config.letter.members,
               logPath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', '1on1.jsonl'),
+              open: config.letter.booking.open,
             }).register(app);
           }
         },

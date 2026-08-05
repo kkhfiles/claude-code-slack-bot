@@ -113,6 +113,10 @@ export const config = {
     // 신청할 수 있는 사람과 칭찬을 받는 사람이 같은 실원 전체다.
     booking: {
       enabled: process.env.LETTER_1ON1_ENABLED !== '0',
+      // **기본은 닫힘 — 실장만 쓸 수 있다.** 만들어 둔 것과 실원에게 연 것은 다른 일이고,
+      // 여는 것은 되돌리기 어렵다(한 번 들어온 신청은 없던 일이 안 된다).
+      // 실원에게 안내할 준비가 되면 `LETTER_1ON1_OPEN=1`.
+      open: process.env.LETTER_1ON1_OPEN === '1',
     },
   },
 };

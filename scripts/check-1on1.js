@@ -19,7 +19,7 @@ const ok = (name, cond) => {
   if (!cond) fail++;
 };
 const make = (extra = {}) => new LetterBooking({
-  managerUserId: 'UBOSS', members: ['UA', 'UB'], logPath: log, ...extra,
+  managerUserId: 'UBOSS', members: ['UA', 'UB'], logPath: log, open: true, ...extra,
 });
 const put = (b, action, id, user, extra = {}) =>
   b.note({ ts: id, action, id, user, user_name: user === 'UA' ? '가' : '나', ...extra });
@@ -33,6 +33,13 @@ const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 15, 10).toISOS
 ok('명단이 비면 꺼진다', make({ members: [] }).enabled === false);
 ok('실장이 없으면 꺼진다', make({ managerUserId: '' }).enabled === false);
 ok('둘 다 있으면 켜진다', make().enabled === true);
+
+// ── 아직 안 열었을 때 — 실장만 쓸 수 있어야 한다 ──────────────────────────
+const shut = make({ open: false });
+ok('안 열었으면 실원은 못 쓴다', shut.allowed('UA') === false);
+ok('안 열었어도 실장은 쓴다', shut.allowed('UBOSS') === true);
+ok('열면 실원도 쓴다', make().allowed('UA') === true);
+ok('열어도 명단 밖은 못 쓴다', make().allowed('U외부') === false);
 
 // ── 신청 ─────────────────────────────────────────────────────────────────
 const b = make();
