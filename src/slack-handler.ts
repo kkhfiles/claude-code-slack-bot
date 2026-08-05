@@ -41,6 +41,30 @@ import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retarg
  */
 const INTERACTIVE_EFFORT = 'low' as const;
 
+/**
+ * 대화 세션에 **자기가 슬랙에 있다는 것**을 알린다.
+ *
+ * 이게 없으면 표면별 규칙이 통째로 죽는다. 프로젝트 `CLAUDE.md` 가 「터미널은
+ * 이렇게, 슬랙은 저렇게」로 갈라놔도 세션은 어느 쪽인지 알 방법이 없어 먼저 적힌
+ * 쪽을 고른다(2026-08-06 실측: 모델·effort 7개 조합 **전부** 터미널용 명령을 골랐다).
+ * 규칙을 적어 둔 것과 규칙이 적용되는 것은 다르다.
+ *
+ * 문법을 여기 박는 이유는 **틀려도 조용하기 때문**이다. 슬랙은 표준 마크다운을
+ * 렌더링하지 않고 기호를 글자 그대로 보여준다 — 오류가 아니라 지저분한 성공이라
+ * 아무도 안 고친다.
+ */
+const SLACK_SURFACE_NOTE = [
+  '이 세션은 **슬랙 DM**에서 열렸다 (터미널이 아니다).',
+  '',
+  '- **슬랙 문법으로 쓴다** — `*굵게*` · `_기울임_` · `<주소|글자>` · 목록은 `•`.',
+  '  표준 마크다운(`##` 제목, `**굵게**`, `[글자](주소)`)은 슬랙이 렌더링하지 않고',
+  '  **기호를 글자 그대로 보여준다.** 표도 깨진다.',
+  '- **짧게** — 답 5줄 안팎. 목록 낭독 금지.',
+  '- **존댓말**로 맺는다.',
+  '- 도구가 슬랙용 출력을 내주면(예: `tasks.py board --slack`) **그대로 붙인다** —',
+  '  다시 쓰지 않는다. 링크가 사라지면 폰에서 눌러 고칠 수 없다.',
+].join('\n');
+
 interface MessageEvent {
   user: string;
   channel: string;
@@ -880,8 +904,9 @@ export class SlackHandler {
       const cliProcess = useSdk
         ? this.sdkHandler.runQuery(finalPrompt, {
             ...runOpts, skills: 'all', effort: INTERACTIVE_EFFORT,
+            appendSystemPrompt: SLACK_SURFACE_NOTE,
           })
-        : this.cliHandler.runQuery(finalPrompt, runOpts);
+        : this.cliHandler.runQuery(finalPrompt, { ...runOpts, appendSystemPrompt: SLACK_SURFACE_NOTE });
 
       this.logger.info('Interactive session started', { via: useSdk ? 'sdk' : 'cli' });
       this.activeProcesses.set(sessionKey, cliProcess);
