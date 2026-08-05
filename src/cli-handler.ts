@@ -328,7 +328,7 @@ export class CliHandler {
     continueLastSession?: boolean;
     model?: string;
 
-    permissionMode?: 'default' | 'safe' | 'trust' | 'plan';
+    permissionMode?: 'default' | 'safe' | 'trust' | 'plan' | 'auto';
     allowedTools?: string[];
     appendSystemPrompt?: string;
     systemPrompt?: string;
@@ -345,6 +345,8 @@ export class CliHandler {
       args.push('--dangerously-skip-permissions');
     } else if (opts.permissionMode === 'plan') {
       args.push('--permission-mode', 'plan');
+    } else if (opts.permissionMode === 'auto') {
+      args.push('--permission-mode', 'auto');
     } else {
       args.push('--permission-mode', 'default');
     }

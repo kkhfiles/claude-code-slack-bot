@@ -153,7 +153,7 @@ export interface SdkRunOptions {
   resumeSessionId?: string;
   continueLastSession?: boolean;
   model?: string;
-  permissionMode?: 'default' | 'safe' | 'trust' | 'plan';
+  permissionMode?: 'default' | 'safe' | 'trust' | 'plan' | 'auto';
   allowedTools?: string[];
   appendSystemPrompt?: string;
   systemPrompt?: string;
@@ -193,6 +193,10 @@ export class SdkHandler {
     const sdkPermissionMode: SdkPermissionMode =
       opts.permissionMode === 'trust' ? 'bypassPermissions' :
       opts.permissionMode === 'plan'  ? 'plan' :
+      // 'auto' = 읽기 전용은 분류기가 통과시키고 나머지는 설정의 허용 목록이
+      // 정한다. 대화형 슬랙 세션의 기본값 — 'dontAsk' 는 허용 목록에 없는
+      // 것을 조용히 거부해서, 업무 등록·수정 같은 정상 작업이 말없이 안 된다.
+      opts.permissionMode === 'auto'  ? 'auto' :
                                          'dontAsk';
 
     const sdkOptions: any = {

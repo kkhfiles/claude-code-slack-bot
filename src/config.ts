@@ -19,7 +19,7 @@ export const config = {
   defaultWorkingDirectory: process.env.DEFAULT_WORKING_DIRECTORY || '',
   // Default model used when channel has no explicit override.
   // Aliases: 'sonnet' | 'opus' | 'haiku' | full Anthropic ID
-  defaultModel: process.env.DEFAULT_MODEL || 'sonnet',
+  defaultModel: process.env.DEFAULT_MODEL || 'opus',
   debug: process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development',
   assistant: {
     dmChannel: process.env.ASSISTANT_DM_CHANNEL || '',

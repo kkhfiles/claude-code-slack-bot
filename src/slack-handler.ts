@@ -72,7 +72,7 @@ export class SlackHandler {
 
   // Per-channel settings
   private channelModels: Map<string, string> = new Map();
-  private channelPermissionModes: Map<string, 'default' | 'safe' | 'trust'> = new Map();
+  private channelPermissionModes: Map<string, 'default' | 'safe' | 'trust' | 'auto'> = new Map();
   private channelAlwaysApproveTools: Map<string, Set<string>> = new Map();
   private lastQueryCosts: Map<string, { cost: number; duration: number; model: string; sessionId: string }> = new Map();
 
@@ -695,7 +695,9 @@ export class SlackHandler {
 
     // Determine permission mode
     const isPlanMode = !!planParsed;
-    const botPermLevel = this.channelPermissionModes.get(channel) || 'default';
+    // 기본이 'auto' — 터미널 세션(~/.claude/settings.json 의 defaultMode)과 같은
+    // 규칙으로 돈다. 'default' 는 Bash 를 아예 안 줘서 업무 등록조차 못 했다.
+    const botPermLevel = this.channelPermissionModes.get(channel) || 'auto';
 
     // Build allowed tools list for CLI --allowedTools
     const allowedTools = this.buildAllowedTools(channel, botPermLevel, sessionKey);
@@ -1103,8 +1105,11 @@ export class SlackHandler {
 
   // --- Build allowed tools list for CLI ---
 
-  private buildAllowedTools(channel: string, permLevel: 'default' | 'safe' | 'trust', sessionKey?: string): string[] {
+  private buildAllowedTools(channel: string, permLevel: 'default' | 'safe' | 'trust' | 'auto', sessionKey?: string): string[] {
     if (permLevel === 'trust') return []; // --dangerously-skip-permissions used instead
+    // auto 는 목록을 넘기지 않는다 — 넘기면 그 목록으로 좁혀져 분류기와
+    // 설정(settingSources)의 허용 규칙이 무력해진다.
+    if (permLevel === 'auto') return [];
 
     // Read-only tools (always allowed)
     const tools = [
