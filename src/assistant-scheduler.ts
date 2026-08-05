@@ -10,7 +10,7 @@ import { isRateLimitText } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
-import { isWorkAssistantEnabled, briefShort, briefNudge, briefRanToday } from './work-assistant';
+import { isWorkAssistantEnabled, briefShort, briefNudge } from './work-assistant';
 
 /**
  * 업무 넛지 시각. 09:00 데일리 미팅 직전이라는 것이 이 값의 전부다 —
@@ -535,8 +535,10 @@ export class AssistantScheduler {
    * **브리핑과 별개 장치다.** 브리핑(08:00)은 내용을 보여주고, 넛지는 세션을 열게 한다.
    * 그래서 목록을 다시 보내지 않고 급한 1~2건만 근거로 싣는다.
    *
-   * 침묵 조건 둘 — ① 오늘 사람이 이미 `tasks.py brief` 를 돌렸다 ② 댈 근거가 없다.
-   * 판정은 둘 다 `tasks.py` 가 한다(봇에 로직을 복제하지 않는다).
+   * 침묵 조건은 **하나뿐이다 — 댈 근거가 없을 때.** 아침 인사를 했는지는 안 본다
+   * (2026-08-05 사용자 확정): 넛지의 목적이 데일리 직전에 한 번 보는 것이라,
+   * 이미 세션을 열었더라도 08:55 의 목록은 따로 값이 있다. 판정은 `tasks.py` 가
+   * 한다(봇에 로직을 복제하지 않는다).
    *
    * **catch-up 은 일부러 없다.** 봇이 09:30 에 뜨면 이 넛지는 이미 의미가 없다 —
    * 데일리가 지난 뒤의 "곧 데일리입니다" 는 소음이다.
@@ -550,8 +552,6 @@ export class AssistantScheduler {
         const nonWorking = this.isNonWorkingDay();
         if (nonWorking.skip) {
           this.logger.info(`Skipping work nudge (${nonWorking.reason})`);
-        } else if (briefRanToday()) {
-          this.logger.info('Skipping work nudge (briefing already run today)');
         } else {
           const text = await briefNudge();
           if (text) {
