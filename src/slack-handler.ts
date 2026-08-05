@@ -34,7 +34,7 @@ import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retarg
  * 슬랙은 오가며 한 줄 던지고 받는 곳이라 **응답 속도 자체가 기능**이고, 여기서
  * 오가는 일은 대부분 판단이 아니라 정해진 명령 실행이다(조회·상태 변경·진행 로그).
  *
- * **고정 토큰 예산이 아니라 `effort` 로 조인다.** Opus 4.6+ 는 적응형 사고 —
+ * **사고를 조절하는 손잡이는 `effort` 하나다.** 지금 모델(Claude 5)은 적응형 사고 —
  * 모델이 턴마다 얼마나 생각할지 스스로 정하고, `effort` 는 그 깊이를 안내한다.
  * `thinking: {budgetTokens}` 는 타입 주석이 "older models" 라고 못박은 경로라
  * 넘기는 순간 적응형이 꺼져, 쉬운 턴에서 알아서 줄이는 성질까지 같이 잃는다.
@@ -1623,12 +1623,13 @@ export class SlackHandler {
     return null;
   }
 
-  // Resolve short alias to canonical model name. Pass-through for full IDs.
+  // 별칭 → 실제 모델 ID. 전체 ID 는 그대로 통과.
+  // 짧은 이름을 SDK 에 넘기면 SDK 기본값으로 풀려 최신이 아닐 수 있다(config.models 주석).
   private static resolveModelAlias(input: string): string {
     const map: Record<string, string> = {
-      o: 'opus', opus: 'opus',
-      s: 'sonnet', sonnet: 'sonnet',
-      h: 'haiku', haiku: 'haiku',
+      o: config.models.opus, opus: config.models.opus,
+      s: config.models.sonnet, sonnet: config.models.sonnet,
+      h: config.models.haiku, haiku: config.models.haiku,
     };
     return map[input.toLowerCase()] ?? input;
   }
@@ -2224,7 +2225,7 @@ export class SlackHandler {
     };
 
     const proc = opts.useSdk
-      ? this.sdkHandler.runQuery(prompt, { ...commonOpts, thinkingBudgetTokens: opts.thinkingBudgetTokens })
+      ? this.sdkHandler.runQuery(prompt, { ...commonOpts, effort: opts.effort })
       : this.cliHandler.runQuery(prompt, commonOpts);
 
     this.logger.info('Assistant session started', { via: opts.useSdk ? 'sdk' : 'cli' });

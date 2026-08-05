@@ -17,6 +17,14 @@ export const config = {
   },
   baseDirectory: process.env.BASE_DIRECTORY || '',
   defaultWorkingDirectory: process.env.DEFAULT_WORKING_DIRECTORY || '',
+  // **모델 ID 정본은 여기 한 곳이다.** 짧은 별칭('opus')을 SDK 에 그대로 넘기면
+  // SDK 쪽에서 자기 기본값으로 푸는데, 그게 최신이라는 보장이 없다 — 실제로
+  // 2026-08-05 까지 opus 가 claude-opus-4-7 로 풀리고 있었다. 별칭은 여기서 ID 로 박는다.
+  models: {
+    opus: process.env.MODEL_OPUS || 'claude-opus-5',
+    sonnet: process.env.MODEL_SONNET || 'claude-sonnet-5',
+    haiku: process.env.MODEL_HAIKU || 'claude-haiku-4-5-20251001',
+  },
   // Default model used when channel has no explicit override.
   // Aliases: 'sonnet' | 'opus' | 'haiku' | full Anthropic ID
   defaultModel: process.env.DEFAULT_MODEL || 'opus',
