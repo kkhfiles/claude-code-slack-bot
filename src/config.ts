@@ -17,13 +17,18 @@ export const config = {
   },
   baseDirectory: process.env.BASE_DIRECTORY || '',
   defaultWorkingDirectory: process.env.DEFAULT_WORKING_DIRECTORY || '',
-  // **모델 ID 정본은 여기 한 곳이다.** 짧은 별칭('opus')을 SDK 에 그대로 넘기면
-  // SDK 쪽에서 자기 기본값으로 푸는데, 그게 최신이라는 보장이 없다 — 실제로
-  // 2026-08-05 까지 opus 가 claude-opus-4-7 로 풀리고 있었다. 별칭은 여기서 ID 로 박는다.
+  // **별칭을 쓴다 — 모델이 새로 나와도 코드를 안 고치기 위해서다.** SDK 가 별칭을
+  // 그 시점의 최신 세대로 푼다(확인 2026-08-06: opus→claude-opus-5,
+  // sonnet→claude-sonnet-5).
+  //
+  // 대신 **SDK 를 낡게 두면 모델도 같이 낡는다.** 0.3.143 에서는 같은 `opus` 가
+  // claude-opus-4-7 로 풀렸고, 그 사실이 아무 데도 안 드러나 한 세대 전을 쓰면서
+  // 최신인 줄 알고 있었다. 세대를 확인하는 자리는 세션마다 찍히는
+  // `Session initialized {model: …}` 로그다 — 별칭이 아니라 **풀린 ID** 가 찍힌다.
   models: {
-    opus: process.env.MODEL_OPUS || 'claude-opus-5',
-    sonnet: process.env.MODEL_SONNET || 'claude-sonnet-5',
-    haiku: process.env.MODEL_HAIKU || 'claude-haiku-4-5-20251001',
+    opus: process.env.MODEL_OPUS || 'opus',
+    sonnet: process.env.MODEL_SONNET || 'sonnet',
+    haiku: process.env.MODEL_HAIKU || 'haiku',
   },
   // Default model used when channel has no explicit override.
   // Aliases: 'sonnet' | 'opus' | 'haiku' | full Anthropic ID
