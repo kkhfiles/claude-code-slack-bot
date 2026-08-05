@@ -52,6 +52,7 @@ export class ReportServer {
           }
         });
         server.listen(port, '127.0.0.1', () => {
+          this.writeBoardUrl(port);
           this.server = server;
           this.actualPort = port;
           this.logger.info(`Listening on http://127.0.0.1:${port}`);
@@ -114,6 +115,13 @@ export class ReportServer {
         this.serveIndex(res);
         return;
       }
+      // 업무 칸반. bin/tasks.py 가 업무를 고칠 때마다 이 파일을 다시 쓰므로
+      // 여기서는 그대로 흘려보내기만 하면 **항상 최신**이다. 아티팩트로 올리는
+      // 것은 세션 턴에서만 되지만, 이 경로는 그 제약을 받지 않는다.
+      if (url.pathname === '/board') {
+        this.serveBoard(res);
+        return;
+      }
       if (url.pathname.startsWith('/report/')) {
         this.serveReport(decodeURIComponent(url.pathname.slice('/report/'.length)), res);
         return;
@@ -157,6 +165,47 @@ export class ReportServer {
       }
     }
     return entries.sort((a, b) => b.mtime - a.mtime);
+  }
+
+  /** 업무 칸반 HTML 을 그대로 내보낸다 (tasks.py 가 갱신하는 파일). */
+  /**
+   * 칸반 주소를 파일로 남긴다.
+   *
+   * 토큰이 부팅마다 새로 생기고 로그에도 안 찍혀서, 남기지 않으면 사람이 주소를
+   * 알 방법이 없다. 서버는 127.0.0.1 에만 묶여 있으므로 이 파일이 새는 것은
+   * 그 PC 를 이미 쓸 수 있는 사람에게만 의미가 있다.
+   */
+  private writeBoardUrl(port: number): void {
+    try {
+      const dir = path.join(
+        process.env.USERPROFILE || process.env.HOME || '', '.claude', 'state');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'work-board-url.txt'),
+        `http://127.0.0.1:${port}/board?t=${this.token}
+`, 'utf-8');
+    } catch {
+      // 주소를 못 남겨도 서버는 떠야 한다.
+    }
+  }
+
+  private serveBoard(res: http.ServerResponse): void {
+    const file = path.join(
+      process.env.USERPROFILE || process.env.HOME || '',
+      '.claude', 'state', 'work-board.html');
+    if (!fs.existsSync(file)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('아직 생성되지 않았습니다 — tasks.py board 를 한 번 실행하세요.');
+      return;
+    }
+    const body = fs.readFileSync(file, 'utf-8');
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      // 파일이 수시로 바뀐다 — 새로고침이 옛 사본을 보면 이 경로의 존재 이유가 없다.
+      'Cache-Control': 'no-store',
+    });
+    res.end('<!doctype html><html lang="ko"><head><meta charset="utf-8">'
+      + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+      + '<title>업무 칸반</title></head><body>' + body + '</body></html>');
   }
 
   private serveIndex(res: http.ServerResponse): void {
