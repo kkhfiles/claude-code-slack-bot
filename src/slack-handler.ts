@@ -459,9 +459,9 @@ export class SlackHandler {
       return;
     }
 
-    // 개인 업무 — 내용이 붙으면 캡처, 없으면 짧은 요약
+    // 개인 업무 — 내용이 붙으면 캡처, 없으면 짧은 요약 (DM 전용)
     if (text && this.isWorkCommand(text)) {
-      await this.handleWorkCommand(text, thread_ts || ts, say);
+      await this.handleWorkCommand(text, channel, thread_ts || ts, say);
       return;
     }
 
@@ -1639,9 +1639,23 @@ export class SlackHandler {
     return /^`?-(?:nas)`?(?:\s|$)/i.test(text.trim());
   }
 
-  /** `-업무` / `-work` / `-task` — 뒤에 내용이 붙으면 캡처, 없으면 요약. */
+  /**
+   * `-업무` / `-work` / `-task` — 뒤에 내용이 붙으면 캡처, 없으면 요약.
+   * 하이픈 없는 `업무` 한 낱말도 요약으로 받는다 — 사람이 자연히 그렇게 친다.
+   *
+   * **맨 낱말은 정확히 일치할 때만.** `업무 자동화 어떻게 하지?` 까지 잡으면
+   * 질문이 업무로 캡처된다. 캡처는 하이픈을 붙여 명시적으로만 받는다.
+   */
   private isWorkCommand(text: string): boolean {
-    return /^`?-(?:업무|work|task)`?(?:\s|$)/i.test(text.trim());
+    const t = text.trim();
+    return /^`?-(?:업무|work|task)`?(?:\s|$)/i.test(t) || /^(?:업무|내 업무)$/.test(t);
+  }
+
+  /** 명령 접두어를 떼고 남은 내용. 맨 낱말 형태면 빈 문자열(=요약). */
+  private workCommandBody(text: string): string {
+    const t = text.trim();
+    if (/^(?:업무|내 업무)$/.test(t)) return '';
+    return t.replace(/^`?-(?:업무|work|task)`?\s*/i, '').trim();
   }
 
   /** NAS 이동 컨펌 큐를 버튼 메시지로 게시 (`-nas` / 브리핑 후처리 공용). */
@@ -1655,12 +1669,18 @@ export class SlackHandler {
    * 내용이 없으면 짧은 요약을 낸다. **목록을 옮겨오지 않는다** — 슬랙에서 다
    * 읽히면 세션을 안 열게 되고, 그러면 판단하는 자리가 사라진다.
    */
-  private async handleWorkCommand(text: string, threadTs: string, say: any): Promise<void> {
+  private async handleWorkCommand(text: string, channel: string, threadTs: string, say: any): Promise<void> {
+    // **DM 전용.** 개인 업무 목록에는 동료 이름·라이선스 정책·평가지표가 들어 있다.
+    // 채널에서 한 줄 잘못 치면 그게 그대로 뿌려진다 — 되돌릴 수 없는 종류의 사고다.
+    if (!channel.startsWith('D')) {
+      await say({ text: '🔒 업무 명령은 DM에서만 됩니다 (개인 업무 목록).', thread_ts: threadTs });
+      return;
+    }
     if (!isWorkAssistantEnabled()) {
       await say({ text: '⚠️ 업무 비서 경로를 찾지 못했습니다 (WORK_ASSISTANT_ROOT).', thread_ts: threadTs });
       return;
     }
-    const body = text.trim().replace(/^`?-(?:업무|work|task)`?\s*/i, '').trim();
+    const body = this.workCommandBody(text);
 
     if (body) {
       const rec = captureToInbox(body, 'slack', threadTs);
