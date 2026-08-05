@@ -273,8 +273,30 @@ export class SlackHandler {
     }
   }
 
+  /**
+   * 이 봇을 쓸 수 있는 사람인가.
+   *
+   * 봇은 운영자 PC 의 Claude Code 세션을 그대로 내준다 — 개인 업무 목록·사내
+   * 지식그래프·파일 접근이 딸려 있다. `app.message`(DM)와 `app_mention`(채널)
+   * 어디에도 원래 검사가 없어, 워크스페이스의 누구든 부를 수 있었다.
+   *
+   * **명단이 비면 아무도 못 쓴다.** 열어두는 쪽이 기본값이면 안 되는 설정이라,
+   * 설정 누락이 곧 개방이 되게 두지 않는다.
+   */
+  private isAllowedUser(user: string | undefined): boolean {
+    return !!user && config.bot.allowUsers.includes(user);
+  }
+
   async handleMessage(event: MessageEvent, say: any) {
     const { user, channel, thread_ts, ts, text, files } = event;
+
+    if (!this.isAllowedUser(user)) {
+      this.logger.warn('Rejected message from unauthorized user', { user, channel });
+      // 봇이 무엇을 할 수 있는지 알리지 않는다 — 짧게 끊는다.
+      await say({ text: '개인용 봇입니다.', thread_ts: thread_ts || ts });
+      return;
+    }
+
     const locale = await this.getUserLocale(user);
 
     // !o / !s / !h prefix — one-time model override for this single message
