@@ -25,9 +25,12 @@ const COMMAND = '/1on1';
 const ASK = 'booking_ask';
 const CANCEL = 'booking_cancel';
 const DONE = 'booking_done';
+const TELL = 'booking_tell';
+const TELL_SEND = 'booking_tell_send';
 
 const BLOCK_WHEN = 'when';
 const BLOCK_NOTE = 'note';
+const BLOCK_FIXED = 'fixed';
 const MAX_TEXT = 500;
 
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토'];
@@ -157,8 +160,56 @@ export class LetterBooking {
       await this.tell(client, this.opts.managerUserId, `1on1 신청 무름 · *${name}*`);
     });
 
-    // 처리함 — 실장이 시간을 잡아 알린 뒤 목록에서 내린다. **신청자에게는 안 알린다**
-    // (이미 실장이 직접 말했으므로, 봇이 또 알리면 같은 말이 두 번 간다).
+    // 시간 알리기 — 실장이 정한 시각을 **봇이 나른다.** 사람이 사람에게 말 거는 구간을
+    // 만들지 않는 것이 이 창구의 설계다(2026-08-03 결정). 실장이 직접 말했으면 아래 DONE 을 쓴다.
+    app.action({ action_id: TELL }, async ({ ack, body, client }) => {
+      await ack();
+      const payload = body as any;
+      if (payload.user?.id !== this.opts.managerUserId) return;
+      const id = payload.actions?.[0]?.value as string;
+      const asked = this.pending().find((entry) => entry.id === id);
+      if (!asked) return;
+      try {
+        await client.views.push({ trigger_id: payload.trigger_id, view: this.tellView(asked) });
+      } catch (error) {
+        this.logger.warn('시간 알림 창을 못 열었습니다', error);
+      }
+    });
+
+    app.view(TELL_SEND, async ({ ack, body, view, client }) => {
+      if (body.user.id !== this.opts.managerUserId) { await ack(); return; }
+      const fixed = (view.state.values[BLOCK_FIXED]?.[BLOCK_FIXED]?.value ?? '').trim();
+      if (!fixed) {
+        await ack({ response_action: 'errors', errors: { [BLOCK_FIXED]: '언제로 잡았는지 적어 주세요.' } });
+        return;
+      }
+      if (fixed.length > MAX_TEXT) {
+        await ack({
+          response_action: 'errors',
+          errors: { [BLOCK_FIXED]: `${MAX_TEXT}자까지만 됩니다 (지금 ${fixed.length}자).` },
+        });
+        return;
+      }
+      await ack({ response_action: 'clear' });
+
+      let who: { id: string; user: string; name: string };
+      try {
+        who = JSON.parse((body.view.private_metadata || '{}') as string);
+      } catch {
+        this.logger.warn('누구 신청인지 못 읽었습니다 — 아무것도 안 보냅니다');
+        return;
+      }
+      if (!who.id || !who.user) return;
+      if (!this.pending().some((entry) => entry.id === who.id)) return;   // 그새 물렀다
+
+      this.note({ ts: new Date().toISOString(), action: 'done', id: who.id, user: who.user, user_name: who.name, when: fixed });
+      this.logger.info(`시간 알림 → ${who.name} (${fixed})`);
+      await this.tell(client, who.user, `1on1 시간이 잡혔습니다 · *${fixed}*\n안 되시면 실장에게 말씀 주세요.`);
+      await this.tell(client, this.opts.managerUserId, `알려드렸습니다 · *${who.name}* · ${fixed}`);
+    });
+
+    // 그냥 내리기 — 실장이 이미 직접 말했을 때. **신청자에게는 아무 말도 안 간다**
+    // (같은 말이 두 번 가지 않게).
     app.action({ action_id: DONE }, async ({ ack, body, client }) => {
       await ack();
       const payload = body as any;
@@ -246,18 +297,55 @@ export class LetterBooking {
               + `${entry.when ? `편한 때: ${entry.when}\n` : '편한 때: 안 적음\n'}`
               + `${entry.note ? `> ${entry.note}` : ''}`,
           },
-          accessory: {
-            type: 'button', action_id: DONE, value: entry.id,
-            text: { type: 'plain_text', text: '처리함' },
-          },
+        });
+        blocks.push({
+          type: 'actions',
+          elements: [
+            {
+              type: 'button', action_id: TELL, value: entry.id, style: 'primary',
+              text: { type: 'plain_text', text: '시간 알리기' },
+            },
+            {
+              type: 'button', action_id: DONE, value: entry.id,
+              text: { type: 'plain_text', text: '그냥 내리기' },
+            },
+          ],
         });
       }
     }
     blocks.push({
       type: 'context',
-      elements: [{ type: 'mrkdwn', text: '시간은 직접 잡아 알려주세요. 여기서 내려도 신청자에게는 아무 말도 안 갑니다.' }],
+      elements: [{ type: 'mrkdwn', text: '*시간 알리기* 는 봇이 대신 알려 드립니다. 이미 직접 말씀하셨으면 *그냥 내리기* 를 쓰세요(그때는 아무 말도 안 갑니다).' }],
     });
     return this.modal(blocks);
+  }
+
+  /** 실장이 정한 시각을 적는 창. 이 칸에 적은 그대로 신청자에게 간다. */
+  private tellView(entry: Entry): any {
+    return {
+      type: 'modal',
+      callback_id: TELL_SEND,
+      private_metadata: JSON.stringify({ id: entry.id, user: entry.user, name: entry.user_name }),
+      title: { type: 'plain_text', text: '시간 알리기' },
+      submit: { type: 'plain_text', text: '보내기' },
+      close: { type: 'plain_text', text: '취소' },
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*${entry.user_name}* 님께 보냅니다.`
+              + `${entry.when ? `\n적어 주신 편한 때: ${entry.when}` : ''}`,
+          },
+        },
+        {
+          type: 'input', block_id: BLOCK_FIXED,
+          label: { type: 'plain_text', text: '언제로 잡으셨나요' },
+          hint: { type: 'plain_text', text: '적으신 그대로 갑니다. 예: 8월 7일(금) 16:00, 회의실은 따로 알려드릴게요' },
+          element: { type: 'plain_text_input', action_id: BLOCK_FIXED },
+        },
+      ],
+    };
   }
 
   private modal(blocks: any[], callback?: string, submit?: string): any {

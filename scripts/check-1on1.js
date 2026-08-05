@@ -64,9 +64,12 @@ put(b, 'ask', second, 'UA');
 ok('다시 넣으면 또 뜬다', make().pending().length === 1);
 
 // ── 실장이 내림 ──────────────────────────────────────────────────────────
-put(b, 'done', second, 'UA');
+// 시간을 알려서 내리든(when 이 붙는다) 그냥 내리든 상태는 같다.
+put(b, 'done', second, 'UA', { when: '8월 7일(금) 16:00' });
 ok('내리면 목록에서 빠진다', make().pending().length === 0);
 ok('내려도 그 달 몫은 쓴 것이다', make().thisMonth('UA') !== null);
+ok('알린 시각이 기록에 남는다',
+  make().history().some((e) => e.action === 'done' && e.when === '8월 7일(금) 16:00'));
 
 // ── 여러 사람 ────────────────────────────────────────────────────────────
 try { fs.unlinkSync(log); } catch {}
