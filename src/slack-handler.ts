@@ -101,7 +101,7 @@ export class SlackHandler {
   private pendingAutoRetries: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
   // Plan mode: store session info for "Execute" button
-  private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string; user: string }> = new Map();
+  private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string | undefined; user: string }> = new Map();
 
   // Session picker
   private sessionScanner: SessionScanner = new SessionScanner();
@@ -735,7 +735,20 @@ export class SlackHandler {
     }
 
     // --- Main query execution ---
-    const sessionKey = this.cliHandler.getSessionKey(user, channel, thread_ts || ts);
+    //
+    // **DM 은 스레드를 만들지 않는다** (2026-08-06). 개인 비서는 오가며 한 줄씩
+    // 던지는 곳이라 답이 댓글로 접히면 매번 펼쳐야 한다. 채널에서는 반대다 —
+    // 다른 사람이 있는 방이라 스레드가 소음을 막는다.
+    //
+    // 이 값 하나가 **답 위치와 대화 단위를 같이 정한다.** 세션 키가
+    // `threadTs || 'direct'` 라(cli-handler), DM 최상위에서 undefined 를 넘기면
+    // `direct` 로 고정돼 DM 전체가 한 대화가 된다. `thread_ts || ts` 를 그대로
+    // 두면 메시지마다 ts 가 달라 매번 새 세션이 되고, 직전에 한 말을 기억 못 한다.
+    // (24 시간 놀면 정리되고, 끊고 싶으면 `-clear`.)
+    const replyTs = isDM ? thread_ts : (thread_ts || ts);
+    const sessionKey = this.cliHandler.getSessionKey(user, channel, replyTs);
+    // 이건 답 위치가 아니라 **사용자 원본 메시지**다 — 반응(이모지)을 다는 대상이라
+    // 언제나 실제 메시지 ts 여야 한다.
     const originalMessageTs = thread_ts || ts;
     this.originalMessages.set(sessionKey, { channel, ts: originalMessageTs });
 
@@ -746,10 +759,10 @@ export class SlackHandler {
       existingProcess.interrupt();
     }
 
-    let session = this.cliHandler.getSession(user, channel, thread_ts || ts);
+    let session = this.cliHandler.getSession(user, channel, replyTs);
     const isNewSession = !session;
     if (!session) {
-      session = this.cliHandler.createSession(user, channel, thread_ts || ts);
+      session = this.cliHandler.createSession(user, channel, replyTs);
     }
 
     // Determine prompt
@@ -794,7 +807,7 @@ export class SlackHandler {
 
       const statusEmoji = isPlanMode ? '📝' : '🤔';
       const statusText = isPlanMode ? t('status.planning', locale) : t('status.thinking', locale);
-      const statusResult = await say({ text: `${statusEmoji} ${statusText}`, thread_ts: thread_ts || ts });
+      const statusResult = await say({ text: `${statusEmoji} ${statusText}`, thread_ts: replyTs });
       statusMessageTs = statusResult.ts;
 
       // Add anchor reaction first to prevent line jumping when progress reactions change
@@ -802,12 +815,12 @@ export class SlackHandler {
       await this.updateMessageReaction(sessionKey, statusEmoji);
 
       // Show command hint on first message in a new thread
-      const threadKey = `${channel}:${thread_ts || ts}`;
+      const threadKey = `${channel}:${replyTs}`;
       if (isNewSession && !this.hintShownThreads.has(threadKey)) {
         this.hintShownThreads.add(threadKey);
         await this.app.client.chat.postMessage({
           channel,
-          thread_ts: thread_ts || ts,
+          thread_ts: replyTs,
           text: t('hint.threadStart', locale),
           blocks: [
             { type: 'context', elements: [{ type: 'mrkdwn', text: t('hint.threadStart', locale) }] },
@@ -963,12 +976,12 @@ export class SlackHandler {
               part.type === 'tool_use' && part.name === 'TodoWrite'
             );
             if (todoTool) {
-              await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, thread_ts || ts, say, locale);
+              await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, replyTs, say, locale);
             }
 
             const toolContent = this.formatToolUse(contentParts, locale);
             if (toolContent) {
-              await say({ text: toolContent, thread_ts: thread_ts || ts });
+              await say({ text: toolContent, thread_ts: replyTs });
             }
           } else {
             const content = this.extractTextFromContent(contentParts);
@@ -986,7 +999,7 @@ export class SlackHandler {
                 }
               }
               await this.updateMessageReaction(sessionKey, '✍️');
-              await say({ text: this.formatMessage(content, false), thread_ts: thread_ts || ts });
+              await say({ text: this.formatMessage(content, false), thread_ts: replyTs });
             }
           }
         } else if (event.type === 'result') {
@@ -1021,7 +1034,7 @@ export class SlackHandler {
               this.apiKeyActive.delete(channel);
               await say({
                 text: `⚠️ ${t('cmd.limit.exceeded', locale, { limit: apiKeyStateForCost.limit.toFixed(2), cost: apiKeyStateForCost.totalCost.toFixed(4) })}`,
-                thread_ts: thread_ts || ts,
+                thread_ts: replyTs,
               });
             }
           }
@@ -1031,7 +1044,7 @@ export class SlackHandler {
           if (!isPlanMode && denials.length > 0 && (resultEvent.session_id || session?.sessionId)) {
             const sid = resultEvent.session_id || session?.sessionId || '';
             await this.showPermissionDenialButtons(
-              channel, thread_ts || ts, user,
+              channel, replyTs, user,
               denials, sid, say, locale
             );
           }
@@ -1050,7 +1063,7 @@ export class SlackHandler {
 
           if (resultEvent.subtype === 'success' && resultEvent.result) {
             if (!currentMessages.includes(resultEvent.result)) {
-              await say({ text: this.formatMessage(resultEvent.result, true), thread_ts: thread_ts || ts });
+              await say({ text: this.formatMessage(resultEvent.result, true), thread_ts: replyTs });
             }
           }
         }
@@ -1093,13 +1106,13 @@ export class SlackHandler {
           sessionId: session.sessionId,
           prompt: basePrompt,
           channel,
-          threadTs: thread_ts || ts,
+          threadTs: replyTs,
           user,
         });
         setTimeout(() => this.pendingPlans.delete(planId), 30 * 60 * 1000);
 
         await say({
-          thread_ts: thread_ts || ts,
+          thread_ts: replyTs,
           text: `📋 ${t('plan.complete', locale)}`,
           blocks: [
             { type: 'section', text: { type: 'mrkdwn', text: `📋 ${t('plan.readyExecute', locale)}` } },
@@ -1231,7 +1244,7 @@ export class SlackHandler {
   // --- Permission denial UI (CLI mode) ---
 
   private async showPermissionDenialButtons(
-    channel: string, threadTs: string, user: string,
+    channel: string, threadTs: string | undefined, user: string,
     denials: Array<{ tool_name: string; tool_use_id: string; tool_input?: any }>,
     sessionId: string, say: any, locale: Locale
   ): Promise<void> {
@@ -1427,7 +1440,7 @@ export class SlackHandler {
 
   // --- Todo handling ---
 
-  private async handleTodoUpdate(input: any, sessionKey: string, sessionId: string | undefined, channel: string, threadTs: string, say: any, locale: Locale = 'en'): Promise<void> {
+  private async handleTodoUpdate(input: any, sessionKey: string, sessionId: string | undefined, channel: string, threadTs: string | undefined, say: any, locale: Locale = 'en'): Promise<void> {
     if (!sessionId || !input.todos) return;
     const newTodos: Todo[] = input.todos;
     const oldTodos = this.todoManager.getTodos(sessionId);
@@ -1455,7 +1468,7 @@ export class SlackHandler {
     }
   }
 
-  private async createNewTodoMessage(todoList: string, channel: string, threadTs: string, sessionKey: string, say: any): Promise<void> {
+  private async createNewTodoMessage(todoList: string, channel: string, threadTs: string | undefined, sessionKey: string, say: any): Promise<void> {
     const result = await say({ text: todoList, thread_ts: threadTs });
     if (result?.ts) {
       this.todoMessages.set(sessionKey, result.ts);
@@ -3010,7 +3023,7 @@ export class SlackHandler {
         const resumePrompt = `The following tools have been approved: ${toolNames}. Please retry the previously denied operation.`;
         const event: MessageEvent = {
           user: denial.user, channel: denial.channel,
-          thread_ts: denial.threadTs, ts: denial.threadTs,
+          thread_ts: denial.threadTs, ts: denial.threadTs ?? '',
           text: `-resume ${denial.sessionId} ${resumePrompt}`,
         };
         const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel: denial.channel, ...msg });
@@ -3056,7 +3069,7 @@ export class SlackHandler {
           const resumePrompt = `The following tools have been approved: ${toolNames}. Please retry the previously denied operation.`;
           const event: MessageEvent = {
             user: denial.user, channel: denial.channel,
-            thread_ts: denial.threadTs, ts: denial.threadTs,
+            thread_ts: denial.threadTs, ts: denial.threadTs ?? '',
             text: `-resume ${denial.sessionId} ${resumePrompt}`,
           };
           const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel: denial.channel, ...msg });
@@ -3085,7 +3098,10 @@ export class SlackHandler {
 
       // Execute by resuming the plan session with acceptEdits mode
       const { channel, threadTs, user, sessionId, prompt } = planInfo;
-      const event: MessageEvent = { user, channel, thread_ts: threadTs, ts: threadTs, text: `-resume ${sessionId} Execute the plan you created.` };
+      // threadTs 가 undefined 면 DM(채널에 바로 게시)이다. `ts` 는 타입상 필수인데
+      // 이 합성 이벤트에서는 스레드 대체값으로만 쓰이고, thread_ts 가 이미 진실을
+      // 담고 있으므로 빈 값이어도 게시 위치가 달라지지 않는다.
+      const event: MessageEvent = { user, channel, thread_ts: threadTs, ts: threadTs ?? '', text: `-resume ${sessionId} Execute the plan you created.` };
       const say = async (msg: any) => {
         return this.app.client.chat.postMessage({ channel, ...msg });
       };
