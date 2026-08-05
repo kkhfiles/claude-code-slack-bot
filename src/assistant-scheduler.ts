@@ -10,6 +10,13 @@ import { isRateLimitText } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
+import { isWorkAssistantEnabled, briefShort, briefNudge, briefRanToday } from './work-assistant';
+
+/**
+ * 업무 넛지 시각. 09:00 데일리 미팅 직전이라는 것이 이 값의 전부다 —
+ * 설정으로 뺄 이유가 생기면 그때 뺀다.
+ */
+const WORK_NUDGE_TIME = '08:55';
 
 export interface AssistantConfig {
   briefing: {
@@ -136,6 +143,7 @@ export class AssistantScheduler {
   private briefingTimer: ReturnType<typeof setTimeout> | null = null;
   private analysisTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
+  private workNudgeTimer: ReturnType<typeof setTimeout> | null = null;
   private daouKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
 
   // File watcher debounce (account-manager.ts:59-62 pattern)
@@ -216,7 +224,8 @@ export class AssistantScheduler {
     const result = await this.executeBriefing();
     this.recordSessionCost('briefing', result);
     return {
-      text: result.text + this.formatErrorReport() + this.formatCostLine(),
+      text: result.text + await this.workBriefBlock() +
+        this.formatErrorReport() + this.formatCostLine(),
       hasReports: this.hasUnreadReports(),
     };
   }
@@ -469,6 +478,11 @@ export class AssistantScheduler {
     // is its re-registration counterpart. Omitting it silently ended the keep-alive chain on
     // the first config write after startup (2026-07-15 → session died 5 days later).
     this.scheduleDaouKeepAlive();
+    // 위 keep-alive 와 같은 이유로 여기 있어야 한다 — clearAllTimers() 가 설정 저장마다
+    // 이 타이머를 지우므로, 재등록 지점이 scheduleAll() 이다.
+    if (isWorkAssistantEnabled()) {
+      this.scheduleWorkNudge();
+    }
 
     if (this.getEnabledAnalysisTypes().length > 0) {
       this.scheduleAnalysis();
@@ -492,6 +506,66 @@ export class AssistantScheduler {
       clearTimeout(this.daouKeepAliveTimer);
       this.daouKeepAliveTimer = null;
     }
+    if (this.workNudgeTimer) {
+      clearTimeout(this.workNudgeTimer);
+      this.workNudgeTimer = null;
+    }
+  }
+
+  // --- 업무 (work-assistant) ---
+
+  /**
+   * 브리핑 꼬리에 붙일 업무 요약. **절대 던지지 않는다** — 업무 조회가 실패했다고
+   * 날씨·일정·보고서까지 사라지면 안 된다.
+   */
+  private async workBriefBlock(): Promise<string> {
+    if (!isWorkAssistantEnabled()) return '';
+    try {
+      const text = await briefShort();
+      return text ? `\n\n${text}` : '';
+    } catch (error) {
+      this.logger.warn('Work brief failed', error);
+      return '\n\n⚠️ 업무 요약을 못 불러왔습니다 — 세션에서 `brief` 로 확인하세요.';
+    }
+  }
+
+  /**
+   * 08:55 업무 넛지 — 09:00 데일리 미팅 직전 1회.
+   *
+   * **브리핑과 별개 장치다.** 브리핑(08:00)은 내용을 보여주고, 넛지는 세션을 열게 한다.
+   * 그래서 목록을 다시 보내지 않고 급한 1~2건만 근거로 싣는다.
+   *
+   * 침묵 조건 둘 — ① 오늘 사람이 이미 `tasks.py brief` 를 돌렸다 ② 댈 근거가 없다.
+   * 판정은 둘 다 `tasks.py` 가 한다(봇에 로직을 복제하지 않는다).
+   *
+   * **catch-up 은 일부러 없다.** 봇이 09:30 에 뜨면 이 넛지는 이미 의미가 없다 —
+   * 데일리가 지난 뒤의 "곧 데일리입니다" 는 소음이다.
+   */
+  private scheduleWorkNudge(): void {
+    const nextFire = this.getNextWorkingDay(WORK_NUDGE_TIME);
+    this.logger.info('Scheduled work nudge', { time: WORK_NUDGE_TIME, nextFire: nextFire.toISOString() });
+
+    this.workNudgeTimer = setTimeout(async () => {
+      try {
+        const nonWorking = this.isNonWorkingDay();
+        if (nonWorking.skip) {
+          this.logger.info(`Skipping work nudge (${nonWorking.reason})`);
+        } else if (briefRanToday()) {
+          this.logger.info('Skipping work nudge (briefing already run today)');
+        } else {
+          const text = await briefNudge();
+          if (text) {
+            await this.sendMessage(text);
+          } else {
+            this.logger.info('Skipping work nudge (nothing urgent)');
+          }
+        }
+      } catch (error) {
+        // 알림 하나 실패로 다음 예약까지 잃지 않는다.
+        this.logger.error('Work nudge failed', error);
+      }
+      this.scheduleWorkNudge();
+    }, nextFire.getTime() - Date.now());
   }
 
   // --- Briefing ---
@@ -525,8 +599,9 @@ export class AssistantScheduler {
           this.logger.warn('Briefing hit rate limit');
           await this.sendMessage('⏳ 브리핑 실행 중 rate limit 도달. 다음 업무일에 재시도합니다.').catch(() => {});
         } else {
-          // Append error report + cost stats line
-          await this.sendMessage(result.text + this.formatErrorReport() + this.formatCostLine());
+          // Append work summary + error report + cost stats line
+          await this.sendMessage(result.text + await this.workBriefBlock() +
+            this.formatErrorReport() + this.formatCostLine());
 
           // If reports exist, add a button to view them
           if (this.hasUnreadReports()) {
@@ -595,7 +670,8 @@ export class AssistantScheduler {
     try {
       const result = await this.executeBriefing();
       this.recordSessionCost('briefing', result);
-      await this.sendMessage(result.text + this.formatErrorReport() + this.formatCostLine());
+      await this.sendMessage(result.text + await this.workBriefBlock() +
+        this.formatErrorReport() + this.formatCostLine());
 
       if (this.hasUnreadReports()) {
         await this.sendMessage('', [{

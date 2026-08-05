@@ -15,6 +15,7 @@
  */
 import { spawn, execSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { config } from './config';
 import { Logger } from './logger';
@@ -152,4 +153,37 @@ export async function briefShort(): Promise<string> {
       (stderr || stdout).trim().split('\n').slice(-3).join('\n'));
   }
   return stdout.trim();
+}
+
+/**
+ * 08:55 넛지 본문. 급한 근거가 없으면 **빈 문자열** — 그러면 보내지 않는다.
+ * 판정은 `tasks.py` 가 한다. 봇은 비었는지만 본다(로직 복제 금지).
+ */
+export async function briefNudge(): Promise<string> {
+  const { code, stdout, stderr } = await runTasks(['brief', '--nudge'], 60_000);
+  if (code !== 0) {
+    throw new Error(`tasks.py brief --nudge 실패 (rc=${code}): ` +
+      (stderr || stdout).trim().split('\n').slice(-3).join('\n'));
+  }
+  return stdout.trim();
+}
+
+/**
+ * 오늘 **사람이** 아침 브리핑을 돌렸는가. 08:55 넛지의 유일한 침묵 조건이다.
+ *
+ * `tasks.py brief`(전체)만 이 표시를 찍는다 — 08:00 슬랙 브리핑이 부르는
+ * `--short` 는 안 찍는다. 봇이 보낸 것을 사람이 본 것으로 세면 넛지가 영영 안 뜬다.
+ *
+ * **못 읽으면 false** — 넛지가 한 번 더 뜨는 쪽이, 필요한 날 조용한 것보다 낫다.
+ */
+export function briefRanToday(): boolean {
+  const mark = path.join(os.homedir(), '.claude', 'state', 'last-brief.txt');
+  try {
+    const today = new Date();
+    const p = (n: number) => String(n).padStart(2, '0');
+    const iso = `${today.getFullYear()}-${p(today.getMonth() + 1)}-${p(today.getDate())}`;
+    return fs.readFileSync(mark, 'utf-8').trim() === iso;
+  } catch {
+    return false;
+  }
 }
