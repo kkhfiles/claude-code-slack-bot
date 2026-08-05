@@ -46,6 +46,12 @@ export interface LetterBookingOptions {
   members: string[];
   /** 신청 기록. `turn.py` 옆 `bots/letter/data/` 를 그대로 쓴다. */
   logPath: string;
+  /**
+   * 실원에게 열렸는가. **기본은 닫힘** — 닫혀 있으면 실장만 쓸 수 있다.
+   * 만들어 둔 것과 실원에게 연 것은 다른 일이다. 여는 쪽이 기본값이면 시험해 보는 동안
+   * 실원 신청이 들어오고, **들어온 신청은 없던 일이 안 된다.**
+   */
+  open: boolean;
 }
 
 interface Entry {
@@ -69,6 +75,12 @@ export class LetterBooking {
     return Boolean(this.opts.managerUserId) && this.opts.members.length > 0;
   }
 
+  /** 지금 이 사람이 신청할 수 있는가. 안 열렸으면 실장뿐이다. */
+  private allowed(user: string): boolean {
+    if (user === this.opts.managerUserId) return true;
+    return this.opts.open && this.opts.members.includes(user);
+  }
+
   /** `ChatHost` 의 `attach` 로 넘긴다 — 소켓을 열기 전에 불린다. */
   register = (app: App): void => {
     if (!this.enabled) {
@@ -79,11 +91,17 @@ export class LetterBooking {
     app.command(COMMAND, async ({ command, ack, respond, client }) => {
       await ack();
       const me = command.user_id;
-      // 슬래시 명령은 앱이 깔린 사람 모두에게 보인다. 명단 밖이면 조용히 무시하지 말고
-      // 본인에게만 알린다 — 아무 반응이 없으면 고장으로 읽힌다.
-      if (me !== this.opts.managerUserId && !this.opts.members.includes(me)) {
-        this.logger.info(`${me} 가 ${COMMAND} 를 불렀지만 명단에 없습니다`);
-        await respond({ response_type: 'ephemeral', text: '이 명령은 Dynamic실 실원만 쓸 수 있습니다.' });
+      // **슬래시 명령은 만든 순간 워크스페이스 전원의 자동완성에 뜬다**(사용자별로 숨기는
+      // 설정이 슬랙에 없다). 그래서 보이는 것은 못 막고, **동작하는 것을 여기서 막는다.**
+      // 아직 안 열었으면 실장만 쓸 수 있다.
+      if (!this.allowed(me)) {
+        this.logger.info(`${me} 가 ${COMMAND} 를 불렀지만 ${this.opts.open ? '명단에 없습니다' : '아직 안 열었습니다'}`);
+        await respond({
+          response_type: 'ephemeral',
+          text: this.opts.open
+            ? '이 명령은 Dynamic실 실원만 쓸 수 있습니다.'
+            : '아직 준비 중인 기능입니다. 준비되면 안내드리겠습니다.',
+        });
         return;
       }
       try {
@@ -120,6 +138,8 @@ export class LetterBooking {
 
     app.view(ASK, async ({ ack, body, view, client }) => {
       const me = body.user.id;
+      // 창을 열어둔 채로 닫히는 수도 있다(재시작 사이에 설정이 바뀌면). 넣기 직전에 다시 본다.
+      if (!this.allowed(me)) { await ack({ response_action: 'clear' }); return; }
       const when = (view.state.values[BLOCK_WHEN]?.[BLOCK_WHEN]?.value ?? '').trim();
       const note = (view.state.values[BLOCK_NOTE]?.[BLOCK_NOTE]?.value ?? '').trim();
 
@@ -247,7 +267,9 @@ export class LetterBooking {
       await this.refresh(client, payload.view?.id, this.managerView(`${asked.user_name} 님 신청을 내렸습니다.`));
     });
 
-    this.logger.info(`${COMMAND}·${LIST_COMMAND} 준비됨 (신청 가능 ${this.opts.members.length}명 · 한 달 한 번)`);
+    this.logger.info(`${COMMAND}·${LIST_COMMAND} 준비됨 — ${this.opts.open
+      ? `실원에게 열림 (신청 가능 ${this.opts.members.length}명 · 한 달 한 번)`
+      : '아직 안 열림 (실장만 · 열려면 LETTER_1ON1_OPEN=1)'}`);
   };
 
   // ── 화면 ──────────────────────────────────────────────────────────────
