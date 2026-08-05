@@ -176,6 +176,11 @@ export interface SdkRunOptions {
    */
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /**
+   * 설정을 **덧씌우는 층**(SDK 의 "flag settings"). 사용자·프로젝트·로컬 설정을
+   * 지우지 않고 그 위에 얹히므로, 여기 몇 개만 넣어도 허용 목록은 그대로 산다.
+   */
+  settings?: Record<string, unknown>;
+  /**
    * Skill catalog injected into the system prompt so the model can invoke the
    * `Skill` tool by name. SDK Options docs say "omitted = no SDK auto-config",
    * which in headless (`-p`) mode means user-level `~/.claude/skills/` are not
@@ -242,6 +247,7 @@ export class SdkHandler {
     if (opts.canUseTool) sdkOptions.canUseTool = opts.canUseTool;
 
     if (opts.effort) sdkOptions.effort = opts.effort;
+    if (opts.settings) sdkOptions.settings = opts.settings;
 
     if (opts.skills !== undefined) sdkOptions.skills = opts.skills;
 

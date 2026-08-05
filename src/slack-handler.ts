@@ -53,6 +53,21 @@ const INTERACTIVE_EFFORT = 'low' as const;
  * 렌더링하지 않고 기호를 글자 그대로 보여준다 — 오류가 아니라 지저분한 성공이라
  * 아무도 안 고친다.
  */
+/**
+ * 컨텍스트를 **40% 에서 압축**시키기 위한 값. 기본값은 96.7% 라 사실상 안 걸린다.
+ *
+ * DM 이 스레드를 안 만들면서 세션 키가 `direct` 로 고정됐다 — 대화가 이어지는
+ * 대신 **컨텍스트가 하루 종일 쌓인다**. 창을 좁혀 일찍 접는다.
+ *
+ * **임계 = 지정한 창 − 33,000**(예약분). 실측으로 확인했다:
+ * 지정 없음 → 967,000 · 400,000 지정 → 367,000. 모델 창이 1,000,000 이므로
+ * 40%(=400,000)에 걸리게 하려면 433,000 을 준다.
+ *
+ * ⚠️ 스키마가 `int [100_000, 1_000_000]` 이고 **범위를 벗어나면 조용히 무시된다**
+ * (`.catch(void 0)`). 값을 바꿀 때 로그로 임계를 확인하지 않으면 안 걸린 줄 모른다.
+ */
+const INTERACTIVE_COMPACT_WINDOW = 433_000;
+
 const SLACK_SURFACE_NOTE = [
   '이 세션은 **슬랙 DM**에서 열렸다 (터미널이 아니다).',
   '',
@@ -905,6 +920,7 @@ export class SlackHandler {
         ? this.sdkHandler.runQuery(finalPrompt, {
             ...runOpts, skills: 'all', effort: INTERACTIVE_EFFORT,
             appendSystemPrompt: SLACK_SURFACE_NOTE,
+            settings: { autoCompactWindow: INTERACTIVE_COMPACT_WINDOW },
           })
         : this.cliHandler.runQuery(finalPrompt, { ...runOpts, appendSystemPrompt: SLACK_SURFACE_NOTE });
 
