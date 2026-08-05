@@ -30,6 +30,14 @@ export const config = {
   workAssistant: {
     root: process.env.WORK_ASSISTANT_ROOT || 'P:/github/work-assistant',
   },
+  // **이 봇을 쓸 수 있는 사람.** 봇은 운영자 PC 에서 도는 Claude Code 세션을
+  // 그대로 내준다 — 개인 업무 목록·사내 지식그래프·파일 접근이 딸려 있다.
+  // 워크스페이스의 누구든 DM 하거나 채널에서 멘션할 수 있으므로 반드시 좁힌다.
+  // **비면 아무도 못 쓴다** — 열어두는 쪽이 기본값이면 안 되는 종류의 설정이다.
+  bot: {
+    allowUsers: (process.env.BOT_ALLOW_USERS || '')
+      .split(',').map((s) => s.trim()).filter(Boolean),
+  },
   reports: {
     localServer: {
       enabled: process.env.REPORTS_SERVER_ENABLED !== '0',
