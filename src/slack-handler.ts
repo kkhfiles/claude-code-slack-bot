@@ -28,6 +28,15 @@ import { LetterBooking } from './letter-booking';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
 
+/**
+ * 슬랙 대화 세션의 사고 예산(토큰).
+ *
+ * 슬랙은 오가며 한 줄 던지고 받는 곳이라 **응답 속도 자체가 기능**이다. 상한이지
+ * 할당량이 아니므로 어려운 질문에서는 이만큼 쓰고 쉬운 질문에서는 덜 쓴다.
+ * 부족하다고 느껴지면 그 한 번만 `!o` 로 올리는 쪽이, 매번 20 초를 무는 것보다 낫다.
+ */
+const INTERACTIVE_THINKING_BUDGET = 2000;
+
 interface MessageEvent {
   user: string;
   channel: string;
@@ -845,8 +854,17 @@ export class SlackHandler {
       // domain skills (notion-publish, mycelium, bbapi, …) by name. SDK headless
       // mode does not auto-configure skills; CLI branch already exposes them
       // through its own defaults.
+      //
+      // **사고 예산을 묶는다.** 안 넘기면 기본값이 걸려 도구를 부르기도 전에 20 초를
+      // 생각하는데(2026-08-05 실측: "업무" 한 마디에 44 초 중 20.5 초), 슬랙에서
+      // 오가는 일은 대부분 판단이 아니라 정해진 명령 실행이다. 모델을 내리는 것보다
+      // 여기를 먼저 조이는 이유는 잃는 것이 다르기 때문이다 — 등록 해석(추정·중요도·
+      // 마감)의 품질은 오래 생각해서가 아니라 모델이 맥락을 아는 데서 나온다.
+      // 어려운 질문은 `!o` 로 그 한 번만 올리면 된다.
       const cliProcess = useSdk
-        ? this.sdkHandler.runQuery(finalPrompt, { ...runOpts, skills: 'all' })
+        ? this.sdkHandler.runQuery(finalPrompt, {
+            ...runOpts, skills: 'all', thinkingBudgetTokens: INTERACTIVE_THINKING_BUDGET,
+          })
         : this.cliHandler.runQuery(finalPrompt, runOpts);
 
       this.logger.info('Interactive session started', { via: useSdk ? 'sdk' : 'cli' });
