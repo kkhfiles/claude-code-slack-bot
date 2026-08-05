@@ -25,6 +25,11 @@ export const config = {
     dmChannel: process.env.ASSISTANT_DM_CHANNEL || '',
     configDir: process.env.ASSISTANT_CONFIG_DIR || '',
   },
+  // 개인 업무 비서(work-assistant). 태스크 정본은 개인 노션이고, 이 레포는
+  // 결정론 조회 계층만 갖는다. 경로가 비면 관련 기능 전체가 조용히 꺼진다.
+  workAssistant: {
+    root: process.env.WORK_ASSISTANT_ROOT || 'P:/github/work-assistant',
+  },
   reports: {
     localServer: {
       enabled: process.env.REPORTS_SERVER_ENABLED !== '0',
