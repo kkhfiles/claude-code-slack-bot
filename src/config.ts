@@ -109,6 +109,11 @@ export const config = {
     // **비면 칭찬 전달이 통째로 꺼진다.** 고를 목록이 없으면 고를 수가 없다.
     members: (process.env.LETTER_MEMBERS || '')
       .split(',').map((s) => s.trim()).filter(Boolean),
+    // 1on1 신청 창구. 받는 사람(실장)과 명단은 위 값을 그대로 쓴다 —
+    // 신청할 수 있는 사람과 칭찬을 받는 사람이 같은 실원 전체다.
+    booking: {
+      enabled: process.env.LETTER_1ON1_ENABLED !== '0',
+    },
   },
 };
 
