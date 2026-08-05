@@ -164,13 +164,15 @@ export interface SdkRunOptions {
   tools?: string[];
   // SDK-specific extensions:
   canUseTool?: CanUseTool;
-  thinkingBudgetTokens?: number;
   /**
-   * 사고 깊이. Opus 4.6+ 는 적응형 사고(모델이 언제·얼마나 생각할지 스스로 정함)가
-   * 기본이고, `effort` 가 그 깊이를 안내하는 손잡이다. 기본값은 `'high'`.
+   * 사고 깊이. **사고를 조절하는 손잡이는 이것 하나다.**
    *
-   * **`thinkingBudgetTokens` 와 같이 쓰지 않는다** — 그쪽은 타입 주석이 "older
-   * models" 라고 못박은 고정 예산 경로라, 넘기는 순간 적응형이 꺼진다.
+   * 지금 모델(Claude 5)은 적응형 사고 — 턴마다 얼마나 생각할지 모델이 스스로
+   * 정하고, `effort` 가 그 깊이를 안내한다. 기본값은 `'high'`.
+   *
+   * SDK 의 `thinking: {type:'enabled', budgetTokens}` 는 쓰지 않는다. 타입 주석이
+   * "older models" 라고 못박은 고정 예산 경로라, 넘기는 순간 적응형이 꺼져
+   * **쉬운 턴에서 알아서 줄이는 성질까지 잃는다**(2026-08-05).
    */
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /**
@@ -239,14 +241,7 @@ export class SdkHandler {
     if (opts.env) sdkOptions.env = { ...process.env, ...opts.env };
     if (opts.canUseTool) sdkOptions.canUseTool = opts.canUseTool;
 
-    // 둘 중 하나만 건다. `effort` 는 적응형 사고를 켜 둔 채 깊이만 안내하고,
-    // `thinkingBudgetTokens` 는 고정 예산(구형 모델용) 경로라 적응형을 끈다.
-    // 같이 넘기면 뒤엣것이 앞엣것을 무력화하므로 effort 를 우선한다.
-    if (opts.effort) {
-      sdkOptions.effort = opts.effort;
-    } else if (opts.thinkingBudgetTokens && opts.thinkingBudgetTokens > 0) {
-      sdkOptions.thinking = { type: 'enabled', budgetTokens: opts.thinkingBudgetTokens };
-    }
+    if (opts.effort) sdkOptions.effort = opts.effort;
 
     if (opts.skills !== undefined) sdkOptions.skills = opts.skills;
 
@@ -315,7 +310,6 @@ export class SdkHandler {
       allowedToolsCount: resolvedAllowedTools?.length,
       cwd: opts.workingDirectory,
       effort: sdkOptions.effort,
-      thinkingBudget: sdkOptions.thinking?.budgetTokens,
     });
 
     const q = query({ prompt, options: sdkOptions });

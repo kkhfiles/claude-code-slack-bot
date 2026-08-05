@@ -78,7 +78,8 @@ export interface SpawnOpts {
   tools?: string[];
   maxDurationMs?: number;
   useSdk?: boolean;
-  thinkingBudgetTokens?: number;
+  /** 사고 깊이 — 유일한 사고 손잡이. 생략하면 SDK 기본값 `'high'`(sdk-handler 주석). */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
 export interface SessionUsage {
@@ -1217,7 +1218,9 @@ export class AssistantScheduler {
         skipMcp: true,
         maxDurationMs: maxDurationMinutes * 60_000,
         useSdk,
-        thinkingBudgetTokens: useSdk ? 5000 : undefined,
+        // 주간 분석은 깊게 읽고 쓰는 자리라 기본값 'high' 를 그대로 쓴다. 앞서
+        // 여기 걸려 있던 `thinkingBudgetTokens: 5000` 은 적응형 사고를 끄는
+        // 구형 경로였다 — 깊게 하려던 설정이 오히려 얕게 묶고 있었다(2026-08-06).
       },
     );
 
