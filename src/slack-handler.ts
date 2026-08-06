@@ -291,8 +291,12 @@ export class SlackHandler {
         appToken: config.letter.appToken,
         python: config.chat.python,
         script: turnScript,
-        mode: 'dm',
+        // **자리는 늘리고 연결은 안 늘린다.** 커피챗 방 ID 가 비어 있으면 DM 만 연다 —
+        // 봇을 방에 초대하고 `LETTER_CHAT_CHANNEL` 을 채우는 두 가지가 다 돼야 열린다.
+        surfaces: config.letter.chatChannel ? ['dm', 'channel'] : ['dm'],
         allowUsers: config.letter.allowUsers,
+        channels: config.letter.chatChannel ? [config.letter.chatChannel] : [],
+        buttIn: config.letter.buttIn.enabled ? config.letter.buttIn : null,
         managerUserId: config.letter.managerUserId,
         // 칭찬 전달과 1on1 예약은 대화가 아니다 — 같은 앱에 슬래시 명령·모달로 따로 붙는다.
         // **앱은 하나뿐이다**(소켓을 두 번 열면 슬랙이 한쪽에만 보내 조용히 실패한다).
@@ -328,7 +332,7 @@ export class SlackHandler {
           appToken: config.lunchBot.appToken,
           python: config.chat.python,
           script: turnScript,
-          mode: 'channel',
+          surfaces: ['channel'],
           channels: [config.lunchBot.chatChannel],
           managerUserId: config.letter.managerUserId,
           buttIn: config.chat.buttIn.enabled ? config.chat.buttIn : null,

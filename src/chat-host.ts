@@ -8,12 +8,13 @@ import { Logger } from './logger';
  * agy 위에 얹은 슬랙 대화 계층. **봇 여러 개가 이 한 클래스를 같이 쓴다.**
  *
  * 각 봇은 자기 슬랙 앱(=자기 정체성과 토큰)을 쓰므로 소켓 연결도 따로 연다.
+ * **한 앱에는 연결 하나뿐이다** — 자리가 늘어도 호스트를 더 만들지 않는다.
  * 말을 만드는 일은 외부 파이썬(`turn.py`)이 하고 여기는 슬랙 쪽만 맡는다 —
  * 그 이음매 덕에 대화는 워크스페이스 없이도 시험할 수 있다.
  *
- * 두 가지 모양을 지원한다.
- *   - `dm`      개인이 봇과 1:1 로 말한다(레터). 대화 열쇠 = 사람
- *   - `channel` 여러 사람이 있는 방에 봇이 상주한다(점심봇). 대화 열쇠 = 방
+ * 자리는 두 가지고, **한 봇이 둘 다 열 수 있다**(`surfaces`).
+ *   - `dm`      개인이 봇과 1:1 로 말한다. 대화 열쇠 = 사람
+ *   - `channel` 여러 사람이 있는 방에 봇이 상주한다. 대화 열쇠 = 방
  *
  * 시간이 걸려서 생기는 문제는 전부 이쪽 몫이다.
  *   - 🤔 를 부른 메시지에 붙였다가 답하면서 뗀다. 성공이든 실패든 반드시 뗀다.
@@ -70,7 +71,14 @@ export interface ChatBotOptions {
   appToken: string;
   python: string;
   script: string;         // turn.py 경로
-  mode: 'dm' | 'channel';
+  /**
+   * 이 봇이 여는 자리. **둘 다여도 연결은 하나다.**
+   *
+   * 자리마다 호스트를 하나씩 두면 같은 앱에 소켓이 두 번 열리고, 슬랙은 들어온 것을
+   * 연결 하나에만 주므로 **부름의 절반이 흔적 없이 사라진다**(2026-08-06에 반나절을
+   * 태운 사고). 그래서 자리는 여기서 늘리고 연결은 안 늘린다.
+   */
+  surfaces: Array<'dm' | 'channel'>;
   allowUsers?: string[];  // dm: 여기 적힌 사람만. **비면 아무도 못 쓴다**
   managerUserId?: string;
   channels?: string[];    // channel: 여기 적힌 방에서만
@@ -125,6 +133,15 @@ export class ChatHost {
     this.logger = new Logger(`Chat:${opts.name}`);
   }
 
+  private get servesDm(): boolean { return this.opts.surfaces.includes('dm'); }
+  private get servesChannel(): boolean { return this.opts.surfaces.includes('channel'); }
+  /**
+   * 이 대화 열쇠가 DM 인가. **열쇠 자체가 안다** — DM 은 사람(`U…`), 채널은 방(`C…`)이라
+   * 호스트 설정을 볼 필요가 없다. 한 봇이 두 자리를 다 받으므로 「이 봇은 DM 봇」 같은
+   * 판단은 이제 틀린 답을 준다.
+   */
+  private isDmKey(key: string): boolean { return key.startsWith('U'); }
+
   async start(): Promise<void> {
     if (this.app) return;
     const app = new App({
@@ -161,7 +178,7 @@ export class ChatHost {
         this.logger.warn('auth.test failed — mentions will not be recognised', error);
       }
       const every = this.opts.buttIn?.sweepMinutes ?? 0;
-      if (this.opts.mode === 'channel' && this.opts.buttIn && every > 0) {
+      if (this.servesChannel && this.opts.buttIn && every > 0) {
         // **비동기라 try/catch 로는 못 잡는다** — 채널을 읽어 오는 사이에 나는 실패는
         // 되돌아온 약속(promise)에 담겨 오므로 거기서 받아야 타이머가 안 죽는다.
         this.sweeper = setInterval(() => {
@@ -170,12 +187,14 @@ export class ChatHost {
         }, every * 60 * 1000);
         this.sweeper.unref?.();
       }
-      this.logger.info(
-        `listening (${this.opts.mode}, ${this.opts.mode === 'dm'
-          ? `${this.opts.allowUsers?.length ?? 0} user(s) allowed`
-          : `${this.opts.channels?.length ?? 0} channel(s), 먼저 말 걸기 ${
-            this.opts.buttIn ? `on · ${every > 0 ? `${every}분마다 훑어봄` : '낱말만'}` : 'off'}`})`,
-      );
+      const where: string[] = [];
+      if (this.servesDm) where.push(`DM ${this.opts.allowUsers?.length ?? 0}명 허용`);
+      if (this.servesChannel) {
+        where.push(`채널 ${this.opts.channels?.length ?? 0}곳, 먼저 말 걸기 ${
+          this.opts.buttIn ? `on · ${every > 0 ? `${every}분마다 훑어봄` : '낱말만'}` : 'off'}`);
+      }
+      // **연결 수를 같이 찍는다** — 자리가 둘인데 연결도 둘이면 그게 사고다.
+      this.logger.info(`listening (연결 1개 · ${where.join(' + ') || '자리 없음'})`);
     } catch (error) {
       this.logger.warn('failed to start', error);
     }
@@ -187,7 +206,7 @@ export class ChatHost {
    * 한쪽만 고쳐 놓고 왜 안 되는지 찾게 된다.
    */
   private loadInterest(): RegExp | null {
-    if (this.opts.mode !== 'channel') return null;
+    if (!this.servesChannel) return null;
     const configPath = path.join(
       path.dirname(this.opts.script), 'bots', this.opts.name, 'config.json');
     try {
@@ -225,11 +244,14 @@ export class ChatHost {
     if (m.subtype || m.bot_id || !channel || !user || !ts || !text) return;
     if (user === this.selfUserId) return;
 
-    if (this.opts.mode === 'dm') {
-      if (m.channel_type !== 'im') return;
+    // **어느 자리인지는 들어온 것이 정한다.** 호스트의 설정으로 가르면 자리가 늘 때마다
+    // 호스트를(그러니까 연결을) 하나 더 열게 된다 — 그게 소켓 이중 연결 사고의 뿌리다.
+    if (m.channel_type === 'im') {
+      if (!this.servesDm) return;
       await this.onDirectMessage(client, user, channel, ts, text);
       return;
     }
+    if (!this.servesChannel) return;
     if (!(this.opts.channels ?? []).includes(channel)) return;
     await this.onChannelMessage(client, user, channel, ts,
       m.thread_ts as string | undefined, text);
@@ -404,7 +426,7 @@ export class ChatHost {
     if (globalRunning >= CONCURRENCY_CAP) {
       const waiting = this.pending.get(key);
       // 방에서는 "기다려 달라"고 하지 않는다. 부르지도 않았는데 시끄럽다.
-      if (forced && this.opts.mode === 'dm' && waiting && !waiting.toldBusy) {
+      if (forced && this.isDmKey(key) && waiting && !waiting.toldBusy) {
         waiting.toldBusy = true;
         void this.say(client, channel, BUSY_TEXT);
       }
@@ -464,7 +486,7 @@ export class ChatHost {
       if (this.active.has(key)) continue;
       const waiting = this.pending.get(key);
       // 채널에서 조용히 쌓이던 것은 자리가 났다고 발화하지 않는다 — 조건은 따로다.
-      if (this.opts.mode === 'channel' && !waiting?.toldBusy && !waiting?.reactTs.length) continue;
+      if (!this.isDmKey(key) && !waiting?.toldBusy && !waiting?.reactTs.length) continue;
       void this.pump(client, key, true);
     }
   }
@@ -493,6 +515,10 @@ export class ChatHost {
       user: key.startsWith('U') ? key : '',
       user_name: name,
       role: key === this.opts.managerUserId ? 'manager' : 'member',
+      // 같은 봇이 DM 과 채널을 다 받으므로 **어느 자리인지 알려준다.** 둘의 태도가
+      // 달라야 하는데(DM 은 조심스럽게, 채널은 앞장서서) 프롬프트가 그걸 모르면
+      // 한쪽에 맞춘 성격이 다른 쪽에서 어긋난다.
+      where: this.isDmKey(key) ? 'dm' : 'channel',
       decide,
       text,
     });
