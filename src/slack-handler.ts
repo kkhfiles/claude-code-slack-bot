@@ -269,8 +269,9 @@ export class SlackHandler {
         config.lunchBot.windowStart,
         config.lunchBot.windowEnd,
       );
-      // Buttons need the lunch app's own Socket Mode connection. Without the
-      // app token the message still works — the 🤖 emoji is the fallback.
+      // Buttons ride on the channel chat host's connection (see below), so this
+      // object holds the handler and does not open anything by itself. Without
+      // the app token the message still works — the 🤖 emoji is the fallback.
       if (config.lunchBot.appToken) {
         this.lunchButtons = new LunchButtons(
           config.lunchBot.python,
@@ -313,10 +314,14 @@ export class SlackHandler {
         },
       }));
     }
-    // 점심봇은 이미 자기 앱과 앱 토큰이 있다(버튼용). 채널 대화도 같은 앱으로 한다.
+    // 점심봇의 채널 대화. **버튼도 여기에 얹는다** — 커피챗과 같은 이유로, 앱 하나에
+    // 소켓을 두 번 열면 슬랙이 이벤트를 한쪽에만 보낸다. 버튼이 자기 연결을 따로 열고
+    // 있던 동안 부름(@멘션)의 절반쯤이 버튼 쪽으로 가서 흔적 없이 사라졌다 — 버튼은
+    // 멀쩡하고 부르면 답이 없어서, 배선 문제가 아니라 봇이 삐친 것처럼 보였다.
     if (turnScript && config.lunchBot.appToken && config.lunchBot.chatChannel) {
       const token = readLunchBotToken(config.lunchBot.script);
       if (token) {
+        const buttons = this.lunchButtons;
         this.chatHosts.push(new ChatHost({
           name: 'lunch',
           botToken: token,
@@ -327,7 +332,10 @@ export class SlackHandler {
           channels: [config.lunchBot.chatChannel],
           managerUserId: config.letter.managerUserId,
           buttIn: config.chat.buttIn.enabled ? config.chat.buttIn : null,
+          attach: buttons ? (app) => buttons.register(app) : undefined,
         }));
+        // 대화 호스트가 버튼을 들고 가므로 자기 연결은 열지 않는다.
+        this.lunchButtons = null;
       }
     }
 

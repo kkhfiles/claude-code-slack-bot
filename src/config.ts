@@ -95,14 +95,24 @@ export const config = {
     // 두 봇이 같은 파이썬·같은 스크립트를 쓴다. 봇 이름만 다르게 넘긴다.
     python: process.env.CHATBOT_PYTHON || process.env.LETTER_PYTHON || 'python',
     turnScript: process.env.CHATBOT_TURN_SCRIPT || process.env.LETTER_TURN_SCRIPT || '',
-    // 점심원정대 채널에서 **먼저 말 걸기**. 화제가 자기 것일 때만(봇 프로필의
-    // `interest`) 모델에게 낄지 물어본다. 아래 둘은 수다스러움을 막는 굴레다 —
-    // 말 많은 봇은 곧 아무도 안 읽는다. 5분으로 잡은 것은 사람처럼 그 자리에서
-    // 대답하되 연달아 떠들지는 않게 하기 위해서다.
+    // 점심원정대 채널에서 **먼저 말 걸기**. 낄 자리인지 판단하는 길이 둘이다 —
+    // 낱말이 걸리면 그 자리에서 바로(`interest`), 안 걸려도 몇 분마다 쌓인 말을
+    // 통째로 보고 한 번 더(`sweepMinutes`). 나머지는 수다스러움을 막는 굴레다 —
+    // 말 많은 봇은 곧 아무도 안 읽는다.
     buttIn: {
       enabled: process.env.LUNCH_CHAT_BUTT_IN !== '0',
-      quietMinutes: parseInt(process.env.LUNCH_CHAT_QUIET_MIN || '5', 10),
-      dailyCap: parseInt(process.env.LUNCH_CHAT_DAILY_CAP || '8', 10),
+      // 점심원정대 방에서는 **더 말해도 된다**(실장 지시). 이 방은 점심 이야기를 하러
+      // 모인 자리라 봇이 그 이야기의 주인이다 — 조용한 것이 예의가 아니라 불친절이다.
+      // 낄 자리를 가리는 일은 굴레가 아니라 판단 지침(turn.py 의 DECIDE_NOTE)이 한다.
+      quietMinutes: parseInt(process.env.LUNCH_CHAT_QUIET_MIN || '3', 10),
+      dailyCap: parseInt(process.env.LUNCH_CHAT_DAILY_CAP || '20', 10),
+      // **낱말로는 못 잡는 자리**를 위한 길. 「애가 됐네」처럼 앞 글을 가리키는 말은
+      // 어떤 낱말 목록으로도 못 잡는데, 정작 그런 자리가 봇이 껴야 할 자리다.
+      //
+      // 1분마다 봐도 모델 호출이 분당 한 번이 되지는 않는다 — 훑을 때 쌓인 말을
+      // **비우고** 가므로, 묻는 횟수는 타이머가 아니라 **사람이 말한 횟수**에 묶인다.
+      // 아무도 말이 없으면 0회다. 0 으로 두면 이 길을 끈다.
+      sweepMinutes: parseInt(process.env.LUNCH_CHAT_SWEEP_MIN || '1', 10),
     },
   },
   // 레터 — 1on1 예약·피드백 전달 창구(개인 DM).

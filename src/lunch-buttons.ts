@@ -47,6 +47,34 @@ export class LunchButtons {
     return token;
   }
 
+  /**
+   * Hang the button handler on an app someone else already owns.
+   *
+   * **One app token means one Socket Mode connection.** Slack hands each event
+   * to exactly one open connection for an app, so a second connection does not
+   * duplicate events — it steals about half of them. While the buttons ran on
+   * their own connection, roughly every other @mention went to the button
+   * listener, which has no message handler, and vanished without a trace: the
+   * chat side logged nothing because the event never arrived there. Buttons
+   * looked fine and mentions looked ignored, which reads like a sulking bot
+   * rather than a wiring fault.
+   */
+  register(app: App): void {
+    app.action('lunch_reco', async ({ ack, body }) => {
+      // Slack drops the interaction if we do not answer within 3 seconds, so
+      // acknowledge first and let the recommendation run on its own time.
+      await ack();
+      const user = (body as { user?: { id?: string } }).user?.id;
+      this.logger.info(`Lunch recommendation requested by ${user ?? 'unknown'}`);
+      // The script tells the clicker what is happening (a private "working on
+      // it" line). Slack shows nothing on a button press, so without that
+      // people assume it is broken and keep clicking.
+      this.run('reco', 5 * 60 * 1000, user ? ['--user', user] : []);
+    });
+    this.logger.info('Lunch buttons attached (sharing the chat connection)');
+  }
+
+  /** Own connection. Only for when the channel chat host is not running. */
   async start(): Promise<void> {
     if (this.app) return;
 
@@ -61,23 +89,12 @@ export class LunchButtons {
       appToken: this.appToken,
       socketMode: true,
     });
-
-    app.action('lunch_reco', async ({ ack, body }) => {
-      // Slack drops the interaction if we do not answer within 3 seconds, so
-      // acknowledge first and let the recommendation run on its own time.
-      await ack();
-      const user = (body as { user?: { id?: string } }).user?.id;
-      this.logger.info(`Lunch recommendation requested by ${user ?? 'unknown'}`);
-      // The script tells the clicker what is happening (a private "working on
-      // it" line). Slack shows nothing on a button press, so without that
-      // people assume it is broken and keep clicking.
-      this.run('reco', 5 * 60 * 1000, user ? ['--user', user] : []);
-    });
+    this.register(app);
 
     try {
       await app.start();
       this.app = app;
-      this.logger.info('Lunch buttons listening (separate Socket Mode connection)');
+      this.logger.info('Lunch buttons listening (own Socket Mode connection)');
     } catch (error) {
       this.logger.warn('Failed to start lunch button listener', error);
     }
