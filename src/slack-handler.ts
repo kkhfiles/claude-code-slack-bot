@@ -27,7 +27,7 @@ import { LetterRelay } from './letter-relay';
 import { LetterBooking } from './letter-booking';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
-import { captureToInbox, checkinNow, checkinOnce, isWorkAssistantEnabled, quickUpdate } from './work-assistant';
+import { captureToInbox, checkinMap, checkinNow, checkinOnce, isWorkAssistantEnabled, quickUpdate } from './work-assistant';
 
 /**
  * 슬랙 대화 세션의 사고 깊이. SDK 기본값은 `'high'` 다.
@@ -1018,9 +1018,16 @@ export class SlackHandler {
       // JSONL 에 직접 붙이므로, 노션이 막혀도 세션이 재시작에 죽어도 원문은 남는다.
       // 세션에 맡겼더니 안 했다(2026-08-06: 캡처 0건) — 그래서 봇이 한다.
       const capture = text?.trim() ? captureToInbox(text, 'slack', thread_ts) : null;
-      const surfaceNote = capture
-        ? SLACK_SURFACE_NOTE + '\n' + captureNote(capture.id)
-        : SLACK_SURFACE_NOTE;
+      // 체크인이 화면에 떠 있는데 답이 짧은 문법에 안 맞아 여기까지 왔다면,
+      // **번호의 뜻을 같이 넘긴다.** 안 넘기면 세션이 추측하고, 업무 ID 와 숫자가
+      // 겹쳐 그럴듯하게 틀린다(2026-08-06: 「3번 논의 완료」가 TSK-10 이 아니라
+      // TSK-3 에 붙었다). 세션이 할 일은 번역 하나로 좁히고 쓰기는 quick 이 한다.
+      const slotMap = isDM ? await checkinMap() : '';
+      const surfaceNote = [
+        SLACK_SURFACE_NOTE,
+        capture ? captureNote(capture.id) : '',
+        slotMap,
+      ].filter(Boolean).join('\n');
 
       // skills: 'all' surfaces ~/.claude/skills/ to the model so it can invoke
       // domain skills (notion-publish, mycelium, bbapi, …) by name. SDK headless
