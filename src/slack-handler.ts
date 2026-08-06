@@ -1028,6 +1028,13 @@ export class SlackHandler {
         capture ? captureNote(capture.id) : '',
         slotMap,
       ].filter(Boolean).join('\n');
+      // **캡처 id 를 세션 환경으로 넘긴다.** 닫는 규칙을 세션에 맡겼더니 안 닫혔다
+      // (2026-08-06: 업무 등록·로그·상호 링크까지 다 해 놓고 닫기만 빠져 두 건이
+      // 큐에 남았다). 이제 tasks.py 의 쓰기 명령이 성공하면 스스로 닫는다 —
+      // 세션이 기억해야 할 일이 하나 줄고, 큐는 「정말 처리 안 된 것」만 남는다.
+      const sessionEnv = capture
+        ? { ...(queryEnv ?? {}), WORK_ASSISTANT_CAPTURE: capture.id }
+        : queryEnv;
 
       // skills: 'all' surfaces ~/.claude/skills/ to the model so it can invoke
       // domain skills (notion-publish, mycelium, bbapi, …) by name. SDK headless
@@ -1041,11 +1048,13 @@ export class SlackHandler {
       // 아는 데서 나오고, 그 해석은 어차피 사용자 컨펌을 거친다.
       const cliProcess = useSdk
         ? this.sdkHandler.runQuery(finalPrompt, {
-            ...runOpts, skills: 'all', effort: INTERACTIVE_EFFORT,
+            ...runOpts, env: sessionEnv, skills: 'all', effort: INTERACTIVE_EFFORT,
             appendSystemPrompt: surfaceNote,
             settings: { autoCompactWindow: INTERACTIVE_COMPACT_WINDOW },
           })
-        : this.cliHandler.runQuery(finalPrompt, { ...runOpts, appendSystemPrompt: surfaceNote });
+        : this.cliHandler.runQuery(finalPrompt, {
+            ...runOpts, env: sessionEnv, appendSystemPrompt: surfaceNote,
+          });
 
       this.logger.info('Interactive session started', { via: useSdk ? 'sdk' : 'cli' });
       this.activeProcesses.set(sessionKey, cliProcess);
@@ -1062,6 +1071,11 @@ export class SlackHandler {
               sessionId: initEvent.session_id,
               model: initEvent.model,
               tools: initEvent.tools?.length || 0,
+              // 이 세션이 칸반 아티팩트를 스스로 다시 올릴 수 있는지. SDK 타입에는
+              // Artifact 도구가 있지만 실제로 붙는지는 세션마다 확인해야 안다 —
+              // 「못 한다」고 문서에 적어 뒀던 것이 근거 없는 단정이었다(2026-08-06).
+              hasArtifact: Array.isArray(initEvent.tools)
+                ? initEvent.tools.includes('Artifact') : null,
             });
           }
           continue;
