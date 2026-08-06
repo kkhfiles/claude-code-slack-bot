@@ -134,6 +134,21 @@ export const config = {
     // **비면 칭찬 전달이 통째로 꺼진다.** 고를 목록이 없으면 고를 수가 없다.
     members: (process.env.LETTER_MEMBERS || '')
       .split(',').map((s) => s.trim()).filter(Boolean),
+    // 커피챗 채널에 상주하기. **비면 채널 자리는 통째로 닫혀 있다** — 봇을 채널에
+    // 초대하고 여기에 방 ID 를 넣는 두 가지가 다 돼야 열린다. 실원이 쓰는 방이라
+    // 기본값은 침묵이어야 하고, 준비해 둔 것과 실제로 들어간 것은 다른 일이다.
+    //
+    // **연결은 늘지 않는다** — DM 과 같은 앱, 같은 소켓 하나가 두 자리를 다 받는다
+    // (`ChatHost.surfaces`). 자리마다 연결을 열면 부름의 절반이 사라진다.
+    chatChannel: process.env.LETTER_CHAT_CHANNEL || '',
+    // 커피챗 방에서는 **앞장서서 이끌어도 된다**(실장 지시). 점심원정대보다 굴레가 느슨하다 —
+    // 이 방은 소통 이야기를 하러 모인 자리고 그 이야기의 진행을 봇이 맡는다.
+    buttIn: {
+      enabled: process.env.LETTER_CHAT_BUTT_IN !== '0',
+      quietMinutes: parseInt(process.env.LETTER_CHAT_QUIET_MIN || '3', 10),
+      dailyCap: parseInt(process.env.LETTER_CHAT_DAILY_CAP || '20', 10),
+      sweepMinutes: parseInt(process.env.LETTER_CHAT_SWEEP_MIN || '1', 10),
+    },
     // 1on1 신청 창구. 받는 사람(실장)과 명단은 위 값을 그대로 쓴다 —
     // 신청할 수 있는 사람과 칭찬을 받는 사람이 같은 실원 전체다.
     booking: {
