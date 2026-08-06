@@ -135,14 +135,21 @@ export class LetterRelay {
       // 남아 있던 앞사람 글이 다음 사람에게 그대로 갈 수도 있다.
       await ack({ response_action: 'clear' });
 
-      let who: { to: string; name: string };
+      // **창은 이미 닫혔다.** 여기서 조용히 돌아서면 보낸 줄 알고 넘어간다 —
+      // 「안 갔다」는 사실은 반드시 손에 쥐여 줘야 한다. 글도 같이 돌려준다.
+      let who: { to: string; name: string } | null = null;
       try {
         who = JSON.parse((body.view.private_metadata || '{}') as string);
       } catch {
+        who = null;
+      }
+      if (!who?.to) {
         this.logger.warn('받는 사람을 못 읽었습니다 — 아무것도 보내지 않습니다');
+        await this.tell(client, body.user.id,
+          '받는 사람을 잃어버려서 *아무것도 보내지 않았습니다.* 아래 글을 그대로 다시 넣어 주세요.\n'
+          + `> ${text.slice(0, 60)}${text.length > 60 ? '…' : ''}`);
         return;
       }
-      if (!who.to) return;
       await this.send(client, body.user.id, who.to, who.name, text);
     });
 

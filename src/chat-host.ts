@@ -39,6 +39,8 @@ const SWEEP_LOOKBACK_MS = 30 * 60 * 1000;
 const BUSY_TEXT = '지금 다른 얘기를 듣고 있어서 조금만 기다려 주세요. 끝나는 대로 바로 답할게요.';
 const FAIL_TEXT = '죄송해요, 지금은 답을 못 만들겠어요. 잠시 뒤에 다시 말 걸어 주시겠어요?';
 const NOT_YET_TEXT = '아직 준비 중이에요. 조금만 기다려 주세요 🙂';
+/** 같은 사람에게 위 한 줄을 다시 보내기까지. 이어 치는 줄에는 안 겹치고, 새로 걸면 답한다. */
+const NOT_YET_AGAIN_MS = 10 * 60 * 1000;
 
 /**
  * 채널에서 **먼저** 말을 걸 조건.
@@ -128,7 +130,7 @@ export class ChatHost {
   private lastSpoke = new Map<string, number>();
   private spokenToday = new Map<string, { day: string; count: number }>();
   /** 한 사람에게 한 번만 알린다 — 지나가던 사람이 같은 말을 반복해 듣지 않게. */
-  private toldNotYet = new Set<string>();
+  private toldNotYet = new Map<string, number>();
   /** 아직 초대 안 된 방 — 같은 말을 1분마다 찍지 않으려고 한 번만 알린다. */
   private toldNotInChannel = new Set<string>();
   /** 이미 인사한 방. 들어왔다 나갔다 해도 한 살림에 한 번만 인사한다. */
@@ -281,8 +283,13 @@ export class ChatHost {
     // 명단이 비면 아무도 아니다. 실제 워크스페이스에 사는 봇이라 기본값은 침묵이어야 한다.
     if (!(this.opts.allowUsers ?? []).includes(user)) {
       this.logger.info(`Ignoring DM from ${user} (not on the allowlist)`);
-      if (!this.toldNotYet.has(user)) {
-        this.toldNotYet.add(user);
+      // **한 번만 알리고 마는 것은 침묵과 같다.** 예전에는 사람마다 딱 한 번만
+      // 답했는데, 그 뒤로 뭘 써도 아무 반응이 없어 먹통으로 보인다 — 방에서 봇을
+      // 본 사람이 말을 걸어 보는 자리라 더 그렇다. 이어 치는 줄에는 안 겹치되,
+      // 시간을 두고 다시 걸면 다시 답한다. 모델을 안 부르는 붙박이 한 줄이라 값도 없다.
+      const last = this.toldNotYet.get(user) ?? 0;
+      if (Date.now() - last > NOT_YET_AGAIN_MS) {
+        this.toldNotYet.set(user, Date.now());
         await this.say(client, channel, NOT_YET_TEXT);
       }
       return;
@@ -550,7 +557,15 @@ export class ChatHost {
           if (forced) await this.say(client, waiting.channel, FAIL_TEXT, waiting.threadTs);
         } else if (result.speak === false || !result.reply) {
           // 먼저 말 걸 자리가 아니라고 스스로 판단했다. 조용히 넘어간다.
-          this.logger.info(`Stayed quiet in ${key}`);
+          //
+          // **부른 자리는 다르다.** 사람이 직접 건 말에 빈 답이 나오면, 오류가 아니라는
+          // 이유로 아무 말도 안 가서 먹통으로 보인다 — 조용히 실패하는 자리를 남기지 않는다.
+          if (forced) {
+            this.logger.warn(`빈 답이 왔습니다 (${key}) — 부른 자리라 그냥 넘어가지 않습니다`);
+            await this.say(client, waiting.channel, FAIL_TEXT, waiting.threadTs);
+          } else {
+            this.logger.info(`Stayed quiet in ${key}`);
+          }
         } else {
           this.logger.info(`Answered ${key} in ${result.elapsed_s ?? '?'}s`);
           await this.say(client, waiting.channel, result.reply, waiting.threadTs);
