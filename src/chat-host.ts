@@ -382,7 +382,11 @@ export class ChatHost {
       // **아직 방에 초대되지 않았다** — 설정에 방을 적어 두고 초대는 나중에 하는 것이
       // 정상 순서다. 그동안 1분마다 실패를 찍으면 로그가 그것으로 덮인다. 한 번만
       // 알리고 조용히 기다린다(초대되면 저절로 풀린다).
-      if (String((error as { data?: { error?: string } })?.data?.error) === 'not_in_channel') {
+      //
+      // **오류 이름이 방 종류에 따라 다르다** — 공개 방이면 `not_in_channel`, 비공개 방이면
+      // 아예 안 보여서 `channel_not_found` 다. 앞엣것만 보고 두었다가 실측에서 걸렸다.
+      const code = String((error as { data?: { error?: string } })?.data?.error);
+      if (code === 'not_in_channel' || code === 'channel_not_found') {
         if (!this.toldNotInChannel.has(channel)) {
           this.toldNotInChannel.add(channel);
           this.logger.info(`${channel} 에 아직 초대되지 않았습니다 — 초대되면 훑기가 시작됩니다`);
