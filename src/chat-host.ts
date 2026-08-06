@@ -83,6 +83,8 @@ export interface ChatBotOptions {
   managerUserId?: string;
   channels?: string[];    // channel: 여기 적힌 방에서만
   buttIn?: ButtInRule | null;   // channel: null 이면 불렀을 때만 답한다
+  /** 방에 들어간 직후 한 번 인사할지. 인사말은 그 자리에서 지어낸다(고정 문구 아님). */
+  greetOnJoin?: boolean;
   /**
    * 같은 슬랙 앱에 **대화가 아닌 기능**을 얹을 자리(레터의 칭찬 전달).
    *
@@ -129,6 +131,8 @@ export class ChatHost {
   private toldNotYet = new Set<string>();
   /** 아직 초대 안 된 방 — 같은 말을 1분마다 찍지 않으려고 한 번만 알린다. */
   private toldNotInChannel = new Set<string>();
+  /** 이미 인사한 방. 들어왔다 나갔다 해도 한 살림에 한 번만 인사한다. */
+  private greeted = new Set<string>();
   private names = new Map<string, string>();
 
   constructor(private readonly opts: ChatBotOptions) {
@@ -395,7 +399,14 @@ export class ChatHost {
       }
       throw error;
     }
-    this.toldNotInChannel.delete(channel);
+    // **방금 초대됐다** — 못 읽던 방이 읽히기 시작한 순간이다. 들어오기 전에 오가던
+    // 이야기는 30분치가 통째로 보이는데, 그걸 보고 첫마디를 떼면 남의 대화에 갑자기
+    // 끼어드는 꼴이 된다. 이번 한 번은 읽기만 하고 넘어간다.
+    if (this.toldNotInChannel.delete(channel)) {
+      this.logger.info(`${channel} 에 들어왔습니다 — 들어오기 전 이야기에는 끼지 않습니다`);
+      if (this.opts.greetOnJoin) void this.greet(client, channel);
+      return;
+    }
     const msgs = ((res.messages ?? []) as Record<string, unknown>[]).slice().reverse();
 
     let after: Record<string, unknown>[] = [];
@@ -452,6 +463,25 @@ export class ChatHost {
     waiting.texts.push(item.text);
     if (item.react !== false) waiting.reactTs.push(item.ts);
     this.pending.set(key, waiting);
+  }
+
+  /**
+   * 방에 들어와서 하는 첫 인사. **한 번만.**
+   *
+   * 인사말을 코드에 박지 않는다 — 인물처럼 굴어야 하는 봇이 붙박이 문장으로 등장하면
+   * 첫 줄에서 다 들킨다. 대신 「지금 막 들어왔다」는 상황만 넘기고 말은 봇이 짓는다.
+   * 이 턴이 그 방 대화의 첫 턴이라 성격·자세·자리가 전부 함께 실린다.
+   */
+  private greet(client: App['client'], channel: string): void {
+    if (this.greeted.has(channel)) return;
+    this.greeted.add(channel);
+    this.enqueue(channel, {
+      channel, ts: `greet:${channel}`, react: false,
+      text: '(너는 방금 이 방에 초대되어 들어왔다. 방에 있는 사람들에게 처음 인사를'
+        + ' 한마디 건네라. 네가 여기서 무엇을 하는 사람인지 짧게 곁들이되, 안내문처럼'
+        + ' 늘어놓지 말고 두세 문장으로.)',
+    });
+    this.kick(client, channel, channel, true);   // 부른 셈 친다 — 낄지 말지를 묻지 않는다
   }
 
   private kick(client: App['client'], key: string, channel: string, forced: boolean): void {

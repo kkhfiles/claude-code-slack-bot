@@ -143,12 +143,18 @@ export const config = {
     chatChannel: process.env.LETTER_CHAT_CHANNEL || '',
     // 커피챗 방에서는 **앞장서서 이끌어도 된다**(실장 지시). 점심원정대보다 굴레가 느슨하다 —
     // 이 방은 소통 이야기를 하러 모인 자리고 그 이야기의 진행을 봇이 맡는다.
+    // 커피챗 방에서는 **바로바로 받는다**(실장 지시). 말한 뒤 뜸을 들이지 않고(0분),
+    // 하루 상한도 100 회로 크게 둔다 — 여기서 봇은 조건에 반응하는 장치가 아니라
+    // 그 방에 사는 인물이고, 사람이 말을 걸었는데 굴레 때문에 조용한 편이 더 나쁘다.
     buttIn: {
       enabled: process.env.LETTER_CHAT_BUTT_IN !== '0',
-      quietMinutes: parseInt(process.env.LETTER_CHAT_QUIET_MIN || '3', 10),
-      dailyCap: parseInt(process.env.LETTER_CHAT_DAILY_CAP || '20', 10),
+      quietMinutes: parseInt(process.env.LETTER_CHAT_QUIET_MIN || '0', 10),
+      dailyCap: parseInt(process.env.LETTER_CHAT_DAILY_CAP || '100', 10),
       sweepMinutes: parseInt(process.env.LETTER_CHAT_SWEEP_MIN || '1', 10),
     },
+    // 방에 들어간 직후 **한 번만** 인사한다. 인사말은 고정 문구가 아니라 그 자리에서
+    // 지어낸다 — 인물처럼 굴어야 하는 봇이 붙박이 문장으로 등장하면 거기서 다 들킨다.
+    greetOnJoin: process.env.LETTER_CHAT_GREET !== '0',
     // 1on1 신청 창구. 받는 사람(실장)과 명단은 위 값을 그대로 쓴다 —
     // 신청할 수 있는 사람과 칭찬을 받는 사람이 같은 실원 전체다.
     booking: {
