@@ -1073,7 +1073,11 @@ export class SlackHandler {
               await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, replyTs, say, locale);
             }
 
-            const toolContent = this.formatToolUse(contentParts, locale);
+            // **DM 에서는 도구 실행을 보여주지 않는다** (2026-08-06). 여기는 클로드
+            // 코드 세션 화면이 아니라 비서와 주고받는 대화창이다 — 무슨 명령을
+            // 돌렸는지는 받는 사람이 할 일이 없는 정보라, 답만 남기는 쪽이 깔끔하다.
+            // 채널은 그대로 둔다: 여럿이 보는 곳에서는 무엇을 만졌는지가 기록이 된다.
+            const toolContent = isDM ? '' : this.formatToolUse(contentParts, locale);
             if (toolContent) {
               await say({ text: toolContent, thread_ts: replyTs });
             }
@@ -1172,7 +1176,9 @@ export class SlackHandler {
       // Completed
       const doneEmoji = cliError ? '❌' : isPlanMode ? '📋' : '✅';
       const doneLabel = cliError ? t('status.errorOccurred', locale) : isPlanMode ? t('status.planReady', locale) : t('status.taskCompleted', locale);
-      const toolSummary = toolUsageCounts.size > 0
+      // 완료 줄의 도구 목록도 DM 에서는 뗀다 — "작업 완료 (Read, Bash ×2)" 의
+      // 괄호는 대화창에서 읽는 사람이 쓸 데가 없다. 완료 표시 자체는 남긴다.
+      const toolSummary = (!isDM && toolUsageCounts.size > 0)
         ? ' (' + Array.from(toolUsageCounts.entries()).map(([name, count]) => count > 1 ? `${name} ×${count}` : name).join(', ') + ')'
         : '';
       const costSuffix = apiKeyCostInfo
