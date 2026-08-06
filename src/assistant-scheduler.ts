@@ -222,10 +222,12 @@ export class AssistantScheduler {
     if (!this.config?.briefing.enabled) {
       return { text: 'Briefing is disabled in config.', hasReports: false };
     }
+    // 업무 조회를 브리핑 세션과 **동시에** 시작한다 (workBriefBlock 주석 참조).
+    const work = this.workBriefBlock();
     const result = await this.executeBriefing();
     this.recordSessionCost('briefing', result);
     return {
-      text: result.text + await this.workBriefBlock() +
+      text: result.text + await work +
         this.formatErrorReport() + this.formatCostLine(),
       hasReports: this.hasUnreadReports(),
     };
@@ -518,6 +520,12 @@ export class AssistantScheduler {
   /**
    * 브리핑 꼬리에 붙일 업무 요약. **절대 던지지 않는다** — 업무 조회가 실패했다고
    * 날씨·일정·보고서까지 사라지면 안 된다.
+   *
+   * **브리핑 세션과 동시에 시작한다**(호출자가 `await` 를 미룬다). 브리핑이 끝난
+   * 뒤에 부르면 노션 왕복이 「세션 종료」와 「메시지 발송」 사이에 끼어 그 창만큼
+   * 브리핑 전체를 잃을 위험이 커진다 — 2026-08-06 에 실제로 브리핑 완료 1 초 뒤
+   * 봇이 재시작해 그 창에 걸렸다. 세션이 수십 초 걸리므로 동시에 돌리면 추가
+   * 지연이 0 이다.
    */
   private async workBriefBlock(): Promise<string> {
     if (!isWorkAssistantEnabled()) return '';
@@ -562,8 +570,14 @@ export class AssistantScheduler {
           }
         }
       } catch (error) {
-        // 알림 하나 실패로 다음 예약까지 잃지 않는다.
+        // **실패는 알린다.** 넛지는 "급한 게 없으면 침묵" 이라, 조회가 깨져서 못 온
+        // 것과 보낼 게 없어서 안 온 것이 받는 쪽에서 똑같아 보인다. 그러면 안전망이
+        // 죽은 날에도 정상으로 읽힌다(2026-08-06: 노션 연결이 사내망에서 끊기는
+        // 것을 확인 — 실패율 50% 이상). 하루 한 번뿐이라 소음이 되지 않는다.
         this.logger.error('Work nudge failed', error);
+        await this.sendMessage(
+          '⏰ 업무 조회가 안 됩니다 — 넛지를 못 만들었습니다. 노션 연결을 확인하세요.',
+        ).catch(() => { });
       }
       this.scheduleWorkNudge();
     }, nextFire.getTime() - Date.now());
@@ -592,6 +606,7 @@ export class AssistantScheduler {
       }
 
       try {
+        const work = this.workBriefBlock();   // 세션과 동시에 시작
         const result = await this.executeBriefing();
         this.recordSessionCost('briefing', result);
 
@@ -601,7 +616,7 @@ export class AssistantScheduler {
           await this.sendMessage('⏳ 브리핑 실행 중 rate limit 도달. 다음 업무일에 재시도합니다.').catch(() => {});
         } else {
           // Append work summary + error report + cost stats line
-          await this.sendMessage(result.text + await this.workBriefBlock() +
+          await this.sendMessage(result.text + await work +
             this.formatErrorReport() + this.formatCostLine());
 
           // If reports exist, add a button to view them
@@ -669,9 +684,10 @@ export class AssistantScheduler {
 
     this.logger.info('Catch-up briefing: missed today, running now');
     try {
+      const work = this.workBriefBlock();   // 세션과 동시에 시작
       const result = await this.executeBriefing();
       this.recordSessionCost('briefing', result);
-      await this.sendMessage(result.text + await this.workBriefBlock() +
+      await this.sendMessage(result.text + await work +
         this.formatErrorReport() + this.formatCostLine());
 
       if (this.hasUnreadReports()) {
