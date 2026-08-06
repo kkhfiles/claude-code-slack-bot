@@ -15,6 +15,7 @@
  */
 import { spawn, execSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { config } from './config';
 import { Logger } from './logger';
@@ -165,4 +166,65 @@ export async function briefNudge(): Promise<string> {
       (stderr || stdout).trim().split('\n').slice(-3).join('\n'));
   }
   return stdout.trim();
+}
+
+// ------------------------------------------------- 체크인 (진행이 들어오는 입구)
+
+/**
+ * 어제 진행 체크인. 물을 게 없거나 슬랙에서 오늘 이미 물었으면 **빈 문자열**.
+ *
+ * 하루 1회 래치는 `tasks.py` 가 든다 — 봇은 비었는지만 본다. 실패해도 조용히
+ * 넘어간다: 매 메시지마다 도는 자리라 여기서 시끄러우면 아무도 안 읽게 된다
+ * (넛지·브리핑 실패는 여전히 시끄럽게 알린다 — 그쪽은 하루 한 번이다).
+ */
+export async function checkinOnce(): Promise<string> {
+  try {
+    const { code, stdout, stderr } = await runTasks(
+      ['checkin', '--once', '--surface', 'slack', '--slack'], 20_000);
+    if (code !== 0) {
+      logger.error(`tasks.py checkin 실패 (rc=${code})`, (stderr || stdout).trim());
+      return '';
+    }
+    return stdout.trim();
+  } catch (err) {
+    logger.error('checkin failed', err);
+    return '';
+  }
+}
+
+export type QuickOutcome =
+  | { kind: 'ok'; output: string }
+  /** 이 문법이 아니다 — 평소대로 세션이 받는다. */
+  | { kind: 'not-quick' }
+  /** 문법은 맞는데 쓰기가 깨졌다 — 조용히 넘기면 갱신이 사라진 줄 모른다. */
+  | { kind: 'failed'; message: string };
+
+/**
+ * 짧은 갱신 문법(「1 완료 · 2 1h」 · 「TSK-5: 진행 내용」)을 세션 없이 처리한다.
+ *
+ * **판정을 봇이 하지 않는다.** 문법을 고칠 자리가 `tasks.py` 한 곳이어야 하고,
+ * 이 레포는 공개라 업무 로직이 나가면 안 되며, 터미널도 같은 단축을 쓴다.
+ * 봇이 보는 것은 종료 코드뿐이다 — rc 2 면 "내 문법 아님", 그 외 비정상이면 실패.
+ *
+ * 원문은 파일로 넘긴다. 따옴표·줄바꿈·한글이 섞인 문자열을 인자로 주면
+ * win32 `shell:true` spawn 에서 깨지거나 주입 위험이 생긴다(캡처와 같은 이유).
+ */
+export async function quickUpdate(text: string): Promise<QuickOutcome> {
+  const root = workAssistantRoot();
+  if (!root) return { kind: 'not-quick' };
+  const file = path.join(os.tmpdir(), `wa-quick-${randomId()}.txt`);
+  try {
+    fs.writeFileSync(file, text, { encoding: 'utf-8' });
+    const { code, stdout, stderr } = await runTasks(['quick', '--file', file], 90_000);
+    if (code === 0) return { kind: 'ok', output: stdout.trim() };
+    if (code === 2) return { kind: 'not-quick' };
+    const tail = (stderr || stdout).trim().split('\n').slice(-3).join('\n');
+    logger.error(`tasks.py quick 실패 (rc=${code})`, tail);
+    return { kind: 'failed', message: tail || `rc=${code}` };
+  } catch (err) {
+    logger.error('quick update failed', err);
+    return { kind: 'failed', message: String(err) };
+  } finally {
+    try { fs.unlinkSync(file); } catch { /* 이미 없다 */ }
+  }
 }
