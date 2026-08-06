@@ -397,6 +397,20 @@ export class ChatHost {
         }
         return;
       }
+      // **권한이 모자라 못 읽는다.** 초대와 달리 기다린다고 풀리지 않는다 — 사람이 앱
+      // 권한을 고쳐 다시 설치해야 한다. 그런데 1분마다 같은 경고를 쌓으면 정작 그
+      // 사실이 자기 로그에 묻힌다(실측: 15시간 809건). 한 번만, **무엇이 필요한지
+      // 이름을 대서** 알린다. 권한이 붙으면 다음 훑기가 성공해 저절로 풀린다.
+      if (code === 'missing_scope') {
+        if (!this.toldNotInChannel.has(channel)) {
+          this.toldNotInChannel.add(channel);
+          const needed = (error as { data?: { needed?: string } })?.data?.needed;
+          this.logger.warn(
+            `${channel} 을 읽을 권한이 없습니다 — 앱에 ${needed ?? '필요한 권한'} 을 더하고 다시 설치해야 합니다`,
+          );
+        }
+        return;
+      }
       throw error;
     }
     // **방금 초대됐다** — 못 읽던 방이 읽히기 시작한 순간이다. 들어오기 전에 오가던
