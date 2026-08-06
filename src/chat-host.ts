@@ -127,6 +127,8 @@ export class ChatHost {
   private spokenToday = new Map<string, { day: string; count: number }>();
   /** 한 사람에게 한 번만 알린다 — 지나가던 사람이 같은 말을 반복해 듣지 않게. */
   private toldNotYet = new Set<string>();
+  /** 아직 초대 안 된 방 — 같은 말을 1분마다 찍지 않으려고 한 번만 알린다. */
+  private toldNotInChannel = new Set<string>();
   private names = new Map<string, string>();
 
   constructor(private readonly opts: ChatBotOptions) {
@@ -141,6 +143,17 @@ export class ChatHost {
    * 판단은 이제 틀린 답을 준다.
    */
   private isDmKey(key: string): boolean { return key.startsWith('U'); }
+
+  /**
+   * 이 열쇠의 답을 이 자리에 내도 되나. **개인 것은 개인 방에만.**
+   *
+   * 사람과의 대화(`U…`)는 개인 대화방(`D…`)으로만 나가고, 방과의 대화(`C…`)는
+   * **바로 그 방으로만** 나간다. 둘이 엇갈리면 답을 버린다 — 늦게 답하는 것과
+   * 엉뚱한 데 떠드는 것은 무게가 다르다.
+   */
+  private canSay(key: string, channel: string): boolean {
+    return this.isDmKey(key) ? channel.startsWith('D') : channel === key;
+  }
 
   async start(): Promise<void> {
     if (this.app) return;
@@ -358,11 +371,27 @@ export class ChatHost {
    * 따로 기억할 것이 없고, 이미 답한 말을 다시 집지도 않는다.
    */
   private async sweepChannel(client: App['client'], channel: string): Promise<void> {
-    const res = await client.conversations.history({
-      channel,
-      oldest: ((Date.now() - SWEEP_LOOKBACK_MS) / 1000).toFixed(6),
-      limit: 60,
-    });
+    let res;
+    try {
+      res = await client.conversations.history({
+        channel,
+        oldest: ((Date.now() - SWEEP_LOOKBACK_MS) / 1000).toFixed(6),
+        limit: 60,
+      });
+    } catch (error) {
+      // **아직 방에 초대되지 않았다** — 설정에 방을 적어 두고 초대는 나중에 하는 것이
+      // 정상 순서다. 그동안 1분마다 실패를 찍으면 로그가 그것으로 덮인다. 한 번만
+      // 알리고 조용히 기다린다(초대되면 저절로 풀린다).
+      if (String((error as { data?: { error?: string } })?.data?.error) === 'not_in_channel') {
+        if (!this.toldNotInChannel.has(channel)) {
+          this.toldNotInChannel.add(channel);
+          this.logger.info(`${channel} 에 아직 초대되지 않았습니다 — 초대되면 훑기가 시작됩니다`);
+        }
+        return;
+      }
+      throw error;
+    }
+    this.toldNotInChannel.delete(channel);
     const msgs = ((res.messages ?? []) as Record<string, unknown>[]).slice().reverse();
 
     let after: Record<string, unknown>[] = [];
@@ -444,6 +473,16 @@ export class ChatHost {
         const waiting = this.pending.get(key);
         if (!waiting || waiting.texts.length === 0) break;
         this.pending.delete(key);
+
+        // **개인에게 갈 말이 방으로 나가는 일은 없어야 한다.** 지금 구조로는 답이 그 말이
+        // 들어온 자리로만 가지만, 한 봇이 DM 과 채널을 같이 받게 된 이상 이건 지켜지길
+        // 바라는 성질이 아니라 **못 어기게 막을 성질**이다. 앞으로 누가 이 언저리를
+        // 고치다 어긋내면 새는 대신 여기서 걸린다.
+        if (!this.canSay(key, waiting.channel)) {
+          this.logger.warn(
+            `자리가 어긋나 답을 버렸습니다 (열쇠 ${key} → ${waiting.channel})`);
+          break;
+        }
 
         const merged = waiting.texts.join('\n');
         let result: TurnResult;
