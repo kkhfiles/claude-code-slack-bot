@@ -68,6 +68,26 @@ const INTERACTIVE_EFFORT = 'low' as const;
  */
 const INTERACTIVE_COMPACT_WINDOW = 433_000;
 
+/**
+ * 처리 중인 대화를 디스크에 적어 둔다 — **재시작에 조용히 사라지지 않게.**
+ *
+ * 봇을 다시 올리면 진행 중이던 세션이 통째로 없어지는데, 오류도 안 나고 답도 안
+ * 와서 받는 쪽에서는 무시당한 것과 구분되지 않는다. 2026-08-06 하루에만 세 번
+ * 발생했다(레포를 두 세션이 같이 만지던 날). 프로세스가 강제 종료돼도 남아야
+ * 하므로 종료 훅이 아니라 **파일**에 적고, 다음 기동 때 읽어 알린다.
+ */
+const INFLIGHT_FILE = path.join(__dirname, '..', '.inflight-sessions.json');
+
+interface InflightRecord { channel: string; threadTs?: string; text: string; startedAt: string; }
+
+function readInflight(): Record<string, InflightRecord> {
+  try { return JSON.parse(fs.readFileSync(INFLIGHT_FILE, 'utf-8')); } catch { return {}; }
+}
+
+function writeInflight(map: Record<string, InflightRecord>): void {
+  try { fs.writeFileSync(INFLIGHT_FILE, JSON.stringify(map), 'utf-8'); } catch { /* 알림용이라 실패해도 본 작업을 막지 않는다 */ }
+}
+
 const SLACK_SURFACE_NOTE = [
   '이 세션은 **슬랙 DM**에서 열렸다 (터미널이 아니다).',
   '',
@@ -926,6 +946,7 @@ export class SlackHandler {
 
       this.logger.info('Interactive session started', { via: useSdk ? 'sdk' : 'cli' });
       this.activeProcesses.set(sessionKey, cliProcess);
+      { const m = readInflight(); m[sessionKey] = { channel, threadTs: replyTs, text: (text || '').slice(0, 160), startedAt: new Date().toISOString() }; writeInflight(m); }
 
       for await (const event of cliProcess) {
         // Session init tracking
@@ -1223,6 +1244,7 @@ export class SlackHandler {
       }
     } finally {
       this.activeProcesses.delete(sessionKey);
+      { const m = readInflight(); delete m[sessionKey]; writeInflight(m); }
 
       if (session?.sessionId) {
         setTimeout(() => {
@@ -2856,6 +2878,24 @@ export class SlackHandler {
 
   // --- Event handlers ---
 
+  /** 지난 기동에서 처리 중이던 대화가 있으면 알리고 기록을 비운다. */
+  private async reportInterruptedSessions(): Promise<void> {
+    const pending = readInflight();
+    const keys = Object.keys(pending);
+    if (keys.length === 0) return;
+    writeInflight({});
+    this.logger.warn('Reporting interrupted sessions', { count: keys.length });
+    for (const key of keys) {
+      const r = pending[key];
+      await this.app.client.chat.postMessage({
+        channel: r.channel,
+        thread_ts: r.threadTs,
+        text: '⚠️ 봇이 다시 시작되면서 처리 중이던 요청이 끊겼습니다 — 답을 못 드렸습니다.\n> '
+          + r.text + '\n다시 보내주세요.',
+      }).catch(() => { });
+    }
+  }
+
   setupEventHandlers() {
     // Handle direct messages
     this.app.message(async ({ message, say }) => {
@@ -3804,6 +3844,9 @@ export class SlackHandler {
         this.logger.error('Failed to respond to mute action', error);
       }
     });
+
+    // 재시작에 끊긴 대화 알리기. 기동 직후는 슬랙 연결이 아직이라 잠깐 미룬다.
+    setTimeout(() => this.reportInterruptedSessions().catch(() => { }), 12_000);
 
     // Cleanup inactive sessions periodically
     setInterval(() => {
