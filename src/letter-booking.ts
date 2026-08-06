@@ -65,6 +65,13 @@ interface Entry {
   note?: string;
 }
 
+/** 살아 있는 신청 하나. `done` 이면 시간까지 잡힌 것이고, `fixed` 가 그 시각이다. */
+interface Alive {
+  entry: Entry;
+  done: boolean;
+  fixed?: string;
+}
+
 export class LetterBooking {
   private logger = new Logger('Letter:1on1');
   private names = new Map<string, string>();
@@ -188,18 +195,28 @@ export class LetterBooking {
       const id = payload.actions?.[0]?.value as string;
       if (!me || !id) return;
 
-      const asked = this.pending().find((entry) => entry.id === id);
+      const asked = this.cancellable(id);
       // 본인 것만 무른다. 실장이 남의 신청을 없애는 것은 '처리함'(DONE) 쪽이다.
-      if (!asked || asked.user !== me) {
+      if (!asked || asked.entry.user !== me) {
         this.logger.info(`${me} 가 남의(또는 없는) 신청을 무르려 했습니다 — 무시`);
         return;
       }
       const name = await this.person(client, me);
       this.note({ ts: new Date().toISOString(), action: 'cancel', id, user: me, user_name: name });
-      this.logger.info(`무름 ← ${name}`);
+      this.logger.info(`무름 ← ${name}${asked.done ? ' (시간이 잡혀 있던 건)' : ''}`);
 
-      await this.refresh(client, payload.view?.id, this.memberView(me, '신청을 물렀습니다. 이번 달에 다시 넣으실 수 있습니다.'));
-      await this.tell(client, this.opts.managerUserId, `1on1 신청 무름 · *${name}*`);
+      const when = asked.fixed ? ` (${asked.fixed})` : '';
+      await this.refresh(client, payload.view?.id, this.memberView(me, asked.done
+        ? '잡혀 있던 1on1 을 물렀습니다. 실장에게 알렸습니다.'
+        : '신청을 물렀습니다. 이번 달에 다시 넣으실 수 있습니다.'));
+      // **무른 사람에게도 한 줄 남긴다.** 넣을 때는 남기고 무를 때는 안 남기면, 창을
+      // 닫은 뒤 정말 물러졌는지 확인할 길이 없다. 무르기가 더 불안한 쪽이다.
+      await this.tell(client, me, asked.done
+        ? `잡혀 있던 1on1 을 물렀습니다${when}. 실장에게 알렸습니다 — 이유는 안 물어봅니다.`
+        : '1on1 신청을 물렀습니다. 이번 달에 다시 넣으실 수 있습니다.');
+      await this.tell(client, this.opts.managerUserId, asked.done
+        ? `1on1 *무름* · *${name}* — 시간까지 잡혔던 건입니다${when}.`
+        : `1on1 신청 무름 · *${name}*`);
     });
 
     // 시간 알리기 — 실장이 정한 시각을 **봇이 나른다.** 사람이 사람에게 말 거는 구간을
@@ -246,7 +263,10 @@ export class LetterBooking {
 
       this.note({ ts: new Date().toISOString(), action: 'done', id: who.id, user: who.user, user_name: who.name, when: fixed });
       this.logger.info(`시간 알림 → ${who.name} (${fixed})`);
-      await this.tell(client, who.user, `1on1 시간이 잡혔습니다 · *${fixed}*\n안 되시면 실장에게 말씀 주세요.`);
+      // **무르는 길도 봇으로 알린다.** 「실장에게 말씀 주세요」로 보내면, 사람에게
+      // 취소를 말하는 부담을 없애려고 만든 창구가 마지막 한 걸음에서 그 부담을 돌려준다.
+      await this.tell(client, who.user,
+        `1on1 시간이 잡혔습니다 · *${fixed}*\n안 되시면 \`${COMMAND}\` 에서 무르시면 됩니다. 이유는 안 물어봅니다.`);
       await this.tell(client, this.opts.managerUserId, `알려드렸습니다 · *${who.name}* · ${fixed}`);
     });
 
@@ -283,17 +303,24 @@ export class LetterBooking {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*넣어 두신 신청*\n${this.day(mine.ts)} 신청`
-            + `${mine.when ? `\n편한 때: ${mine.when}` : ''}`,
+          text: mine.done
+            ? `*잡힌 1on1*\n${mine.fixed || '실장이 따로 알려드렸습니다'}`
+            : `*넣어 두신 신청*\n${this.day(mine.entry.ts)} 신청`
+              + `${mine.entry.when ? `\n편한 때: ${mine.entry.when}` : ''}`,
         },
         accessory: {
-          type: 'button', action_id: CANCEL, value: mine.id,
+          type: 'button', action_id: CANCEL, value: mine.entry.id,
           text: { type: 'plain_text', text: '무르기' },
         },
       });
       blocks.push({
         type: 'context',
-        elements: [{ type: 'mrkdwn', text: '실장이 시간을 잡아 알려드립니다. 무르셔도 이유는 안 물어봅니다.' }],
+        elements: [{
+          type: 'mrkdwn',
+          text: mine.done
+            ? '못 가시게 되면 여기서 무르시면 됩니다. 이유는 안 물어봅니다.'
+            : '실장이 시간을 잡아 알려드립니다. 무르셔도 이유는 안 물어봅니다.',
+        }],
       });
       return this.modal(blocks);
     }
@@ -421,31 +448,50 @@ export class LetterBooking {
    * 아직 실장이 안 내린 신청들. 파일은 붙여 쓰기만 하므로(누가 언제 넣고 물렀는지가
    * 그대로 남는다) 앞에서부터 되짚어 지금 상태를 만든다.
    */
-  private pending(): Entry[] {
-    const alive = new Map<string, Entry>();
+  /**
+   * 살아 있는 신청들. 파일은 붙여 쓰기만 하므로(누가 언제 넣고 물렀는지가 그대로
+   * 남는다) 앞에서부터 되짚어 지금 상태를 만든다.
+   *
+   * **되짚기는 한 곳에만 둔다.** 예전에는 목록·달 제한·무르기가 각자 되짚었고 서로
+   * 다른 답을 냈다 — 화면은 시간이 잡힌 건에도 「무르기」를 그렸는데 누름을 받는 쪽은
+   * 그 건이 이미 내려갔다고 보아 **아무 일도 안 일어났다**(눌린 사람 눈에는 물러진
+   * 것처럼 보인다). 무르기는 사람이 가장 말 꺼내기 어려운 자리라 조용히 실패하면 안 된다.
+   */
+  private alive(): Map<string, Alive> {
+    const alive = new Map<string, Alive>();
     for (const entry of this.history()) {
-      if (entry.action === 'ask') alive.set(entry.id, entry);
-      else alive.delete(entry.id);
+      if (entry.action === 'ask') alive.set(entry.id, { entry, done: false });
+      else if (entry.action === 'cancel') alive.delete(entry.id);
+      else if (entry.action === 'done') {
+        // 시간이 잡힌 것도 **살아 있다** — 실장 목록에서만 내려간다.
+        const cur = alive.get(entry.id);
+        if (cur) alive.set(entry.id, { ...cur, done: true, fixed: entry.when || cur.fixed });
+      }
     }
-    return [...alive.values()].sort((a, b) => a.ts.localeCompare(b.ts));
+    return alive;
+  }
+
+  /** 아직 실장이 안 내린 신청들. */
+  private pending(): Entry[] {
+    return [...this.alive().values()].filter((a) => !a.done).map((a) => a.entry)
+      .sort((a, b) => a.ts.localeCompare(b.ts));
   }
 
   /**
    * 이 사람이 **이번 달에 쓴** 신청. 무른 것은 안 쓴 것으로 친다(그래서 다시 넣을 수 있다).
    * 실장이 처리한 것은 **쓴 것으로 친다** — 그 달 만남이 이미 잡혔다는 뜻이다.
    */
-  private thisMonth(user: string): Entry | null {
+  private thisMonth(user: string): Alive | null {
     const month = new Date().toISOString().slice(0, 7);
-    const alive = new Map<string, Entry>();
-    for (const entry of this.history()) {
-      if (entry.action === 'ask') alive.set(entry.id, entry);
-      else if (entry.action === 'cancel') alive.delete(entry.id);
-      // 'done' 은 지우지 않는다 — 목록에서만 내려가고 그 달 몫은 쓴 것이다.
-    }
-    for (const entry of alive.values()) {
-      if (entry.user === user && entry.ts.slice(0, 7) === month) return entry;
+    for (const a of this.alive().values()) {
+      if (a.entry.user === user && a.entry.ts.slice(0, 7) === month) return a;
     }
     return null;
+  }
+
+  /** 무를 수 있는 건인가. **시간이 잡힌 것도 무를 수 있다** — 그게 가장 어려운 자리다. */
+  private cancellable(id: string): Alive | null {
+    return this.alive().get(id) ?? null;
   }
 
   private history(): Entry[] {
