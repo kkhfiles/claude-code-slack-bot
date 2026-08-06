@@ -297,6 +297,7 @@ export class SlackHandler {
         allowUsers: config.letter.allowUsers,
         channels: config.letter.chatChannel ? [config.letter.chatChannel] : [],
         buttIn: config.letter.buttIn.enabled ? config.letter.buttIn : null,
+        greetOnJoin: config.letter.greetOnJoin && !!config.letter.chatChannel,
         managerUserId: config.letter.managerUserId,
         // 칭찬 전달과 1on1 예약은 대화가 아니다 — 같은 앱에 슬래시 명령·모달로 따로 붙는다.
         // **앱은 하나뿐이다**(소켓을 두 번 열면 슬랙이 한쪽에만 보내 조용히 실패한다).
