@@ -27,6 +27,7 @@ import { LetterRelay } from './letter-relay';
 import { LetterBooking } from './letter-booking';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
+import { captureToInbox } from './work-assistant';
 
 /**
  * 슬랙 대화 세션의 사고 깊이. SDK 기본값은 `'high'` 다.
@@ -99,6 +100,28 @@ const SLACK_SURFACE_NOTE = [
   '- 도구가 슬랙용 출력을 내주면(예: `tasks.py board --slack`) **그대로 붙인다** —',
   '  다시 쓰지 않는다. 링크가 사라지면 폰에서 눌러 고칠 수 없다.',
 ].join('\n');
+
+/**
+ * 원문은 **봇이 이미 저장했다**는 것과, 그래서 세션이 무엇을 해야 하는지.
+ *
+ * 캡처를 세션에 맡겼더니 안 했다(2026-08-06: 업무 서술을 받고도 `inbox` 가 0건).
+ * 규칙은 `CLAUDE.md` 에 있었지만 적용되지 않았다 — 오늘만 세 번째 같은 실패다.
+ * 그래서 저장은 **봇이 결정론적으로** 하고(파이썬·노션을 안 거치므로 노션이 죽어도
+ * 세션이 끊겨도 원문은 남는다), 세션에는 **닫는 일만** 남긴다.
+ *
+ * 안 닫힌 항목이 곧 "받았는데 처리 안 된 메시지" 다 — 재시작으로 죽은 세션도
+ * 여기 걸린다. 그래서 닫는 책임을 분명히 적어 둔다.
+ */
+function captureNote(id: string): string {
+  return [
+    '',
+    `**이 메시지의 원문은 캡처 \`${id}\` 로 이미 저장돼 있다** (봇이 남겼다).`,
+    '처리를 마쳤으면 **반드시 닫는다** — 안 닫으면 아침 브리핑 맨 위 ⛔ 에',
+    '"미처리 캡처" 로 남아 처리된 것과 구분이 안 된다.',
+    `- 업무로 등록했으면: \`tasks.py add … --from-inbox ${id}\` (등록 성공 시 자동으로 닫힌다)`,
+    `- 조회·잡담이었거나 기존 업무에 로그만 남겼으면: \`tasks.py inbox resolve --id ${id} --drop "사유"\``,
+  ].join('\n');
+}
 
 interface MessageEvent {
   user: string;
@@ -926,6 +949,15 @@ export class SlackHandler {
         allowedTools,
         env: queryEnv,
       };
+      // **원문을 먼저 저장한다 — 세션을 띄우기 전에.** 순서가 규칙이다(work-assistant
+      // CLAUDE.md): 저장(결정론) → 해석(세션) → 닫기. 파이썬도 노션도 안 거치고
+      // JSONL 에 직접 붙이므로, 노션이 막혀도 세션이 재시작에 죽어도 원문은 남는다.
+      // 세션에 맡겼더니 안 했다(2026-08-06: 캡처 0건) — 그래서 봇이 한다.
+      const capture = text?.trim() ? captureToInbox(text, 'slack', thread_ts) : null;
+      const surfaceNote = capture
+        ? SLACK_SURFACE_NOTE + '\n' + captureNote(capture.id)
+        : SLACK_SURFACE_NOTE;
+
       // skills: 'all' surfaces ~/.claude/skills/ to the model so it can invoke
       // domain skills (notion-publish, mycelium, bbapi, …) by name. SDK headless
       // mode does not auto-configure skills; CLI branch already exposes them
@@ -939,10 +971,10 @@ export class SlackHandler {
       const cliProcess = useSdk
         ? this.sdkHandler.runQuery(finalPrompt, {
             ...runOpts, skills: 'all', effort: INTERACTIVE_EFFORT,
-            appendSystemPrompt: SLACK_SURFACE_NOTE,
+            appendSystemPrompt: surfaceNote,
             settings: { autoCompactWindow: INTERACTIVE_COMPACT_WINDOW },
           })
-        : this.cliHandler.runQuery(finalPrompt, { ...runOpts, appendSystemPrompt: SLACK_SURFACE_NOTE });
+        : this.cliHandler.runQuery(finalPrompt, { ...runOpts, appendSystemPrompt: surfaceNote });
 
       this.logger.info('Interactive session started', { via: useSdk ? 'sdk' : 'cli' });
       this.activeProcesses.set(sessionKey, cliProcess);
