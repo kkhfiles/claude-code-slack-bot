@@ -29,6 +29,11 @@ const CONCURRENCY_CAP = 3;
 const MAX_MERGED_LINES = 20;
 const TURN_TIMEOUT_MS = 150 * 1000;   // turn.py 가 agy 를 90초에 끊고, 그 위에 여유
 const THINKING = 'thinking_face';
+/**
+ * 훑을 때 채널을 얼마나 거슬러 읽나. 하루 종일 조용하다 한 마디 올라온 자리에서
+ * 어제 얘기까지 끌어오지 않게 잘라 둔다. 봇이 그 사이 말을 했으면 어차피 거기서 끊긴다.
+ */
+const SWEEP_LOOKBACK_MS = 30 * 60 * 1000;
 
 const BUSY_TEXT = '지금 다른 얘기를 듣고 있어서 조금만 기다려 주세요. 끝나는 대로 바로 답할게요.';
 const FAIL_TEXT = '죄송해요, 지금은 답을 못 만들겠어요. 잠시 뒤에 다시 말 걸어 주시겠어요?';
@@ -41,11 +46,22 @@ const NOT_YET_TEXT = '아직 준비 중이에요. 조금만 기다려 주세요 
  * 같은 한 마디짜리 순간을 놓친다 — 그 사이 대화는 이미 지나가 있다. 사람이라면 그 한
  * 마디에 바로 대답하지, 넉 줄이 쌓일 때까지 기다리지 않는다.
  *
- * 대신 **자기 얘기일 때만** 반응한다(`interest`). 나머지 둘은 수다스러움을 막는 굴레다.
+ * 판단하는 길은 둘이다.
+ *
+ *   낱말(`interest`)  걸리면 **그 자리에서** 바로 — 싸고 빠르다
+ *   훑기(`sweepMinutes`)  몇 분마다 **쌓인 말을 통째로** 모델에게 보여 주고 물어본다
+ *
+ * 훑기가 필요한 이유: 「애가 됐네」·「신분이 내시인가요」처럼 **앞 글을 가리키는 말**은
+ * 어떤 낱말 목록으로도 못 잡는데, 정작 그런 자리가 봇이 껴야 할 자리다(실측: 안 부른
+ * 글 11건 중 6건이 그 종류였고 낱말을 늘려도 여전히 안 걸렸다). 한 줄만 보면 못 풀고
+ * 대화를 봐야 풀린다.
+ *
+ * 나머지 둘은 수다스러움을 막는 굴레다.
  */
 export interface ButtInRule {
   quietMinutes: number;   // 마지막으로 입을 연 지 이만큼은 조용히
   dailyCap: number;       // 하루 이만큼까지만
+  sweepMinutes?: number;  // 이만큼마다 쌓인 말을 통째로 보고 낄지 다시 본다 (0=끔)
 }
 
 export interface ChatBotOptions {
@@ -74,6 +90,8 @@ interface Waiting {
   texts: string[];
   reactTs: string[];
   toldBusy: boolean;
+  /** 이미 담은 글의 ts. 훑기가 채널에서 다시 읽어 와도 같은 말을 두 번 안 담게. */
+  seen: Set<string>;
 }
 
 interface TurnResult {
@@ -87,8 +105,10 @@ export class ChatHost {
   private app: App | null = null;
   private logger: Logger;
   private selfUserId = '';
-  /** 이 봇이 관심 있는 화제. 여기 안 걸리면 먼저 말을 걸지 않는다. */
+  /** 이 봇이 관심 있는 화제. 여기 안 걸리면 **그 자리에서는** 말을 걸지 않는다. */
   private interest: RegExp | null = null;
+  /** 쌓인 말을 주기적으로 훑어보는 타이머. */
+  private sweeper: NodeJS.Timeout | null = null;
 
   /** 지금 턴이 도는 열쇠 — 그쪽으로 새로 온 말은 뒤에 줄서지 않고 합쳐진다. */
   private active = new Set<string>();
@@ -140,10 +160,21 @@ export class ChatHost {
       } catch (error) {
         this.logger.warn('auth.test failed — mentions will not be recognised', error);
       }
+      const every = this.opts.buttIn?.sweepMinutes ?? 0;
+      if (this.opts.mode === 'channel' && this.opts.buttIn && every > 0) {
+        // **비동기라 try/catch 로는 못 잡는다** — 채널을 읽어 오는 사이에 나는 실패는
+        // 되돌아온 약속(promise)에 담겨 오므로 거기서 받아야 타이머가 안 죽는다.
+        this.sweeper = setInterval(() => {
+          void this.sweep().catch((error) =>
+            this.logger.warn('훑어보다 넘어졌습니다', error));
+        }, every * 60 * 1000);
+        this.sweeper.unref?.();
+      }
       this.logger.info(
         `listening (${this.opts.mode}, ${this.opts.mode === 'dm'
           ? `${this.opts.allowUsers?.length ?? 0} user(s) allowed`
-          : `${this.opts.channels?.length ?? 0} channel(s), 먼저 말 걸기 ${this.opts.buttIn ? 'on' : 'off'}`})`,
+          : `${this.opts.channels?.length ?? 0} channel(s), 먼저 말 걸기 ${
+            this.opts.buttIn ? `on · ${every > 0 ? `${every}분마다 훑어봄` : '낱말만'}` : 'off'}`})`,
       );
     } catch (error) {
       this.logger.warn('failed to start', error);
@@ -172,6 +203,10 @@ export class ChatHost {
   }
 
   async stop(): Promise<void> {
+    if (this.sweeper) {
+      clearInterval(this.sweeper);
+      this.sweeper = null;
+    }
     if (!this.app) return;
     try {
       await this.app.stop();
@@ -223,22 +258,28 @@ export class ChatHost {
     client: App['client'], user: string, channel: string, ts: string,
     threadTs: string | undefined, text: string,
   ): Promise<void> {
+    const called = text.includes(`<@${this.selfUserId}>`);
+    // **바로 반응할 자리에서만 담는다.** 나머지는 훑기가 채널에서 직접 읽어 온다 —
+    // 여기서 다 쌓아 두면 재시작 한 번에 통째로 사라지고, 소켓이 흘린 말은 애초에
+    // 담기지도 않는다. 둘 다 실제로 겪었다.
+    if (!called && !this.shouldButtIn(channel, text)) return;
+
     const name = await this.displayName(client, user);
     // 방에서는 누가 한 말인지가 곧 맥락이다. 한 줄에 이름을 붙여 넘긴다.
     this.enqueue(channel, {
       channel, threadTs, ts,
       text: `${name || user}: ${text}`,
       // 부른 것이 아니면 🤔 를 붙이지 않는다 — 방 사람들의 모든 말에 이모지가 붙는다.
-      react: text.includes(`<@${this.selfUserId}>`),
+      react: called,
     });
 
-    const called = text.includes(`<@${this.selfUserId}>`);
     if (called) {
       await this.react(client, 'add', channel, ts);
       this.kick(client, channel, channel, true);
       return;
     }
-    if (this.shouldButtIn(channel, text)) this.kick(client, channel, channel, false);
+    // 낱말이 걸린 자리 — 훑기를 기다리지 않고 그 자리에서 묻는다.
+    this.kick(client, channel, channel, false);
   }
 
   /**
@@ -248,15 +289,82 @@ export class ChatHost {
    * 매번 모델에게 물으면 한 번에 10초씩 걸리고 쿼터도 금방 마른다.
    */
   private shouldButtIn(channel: string, text: string): boolean {
+    if (this.interest && !this.interest.test(text)) return false;
+    return this.withinLimits(channel);
+  }
+
+  /** 낱말과 무관한 굴레만. 훑기도 같은 굴레를 쓴다 — 길이 둘이어도 한도는 하나다. */
+  private withinLimits(channel: string): boolean {
     const rule = this.opts.buttIn;
     if (!rule || this.active.has(channel)) return false;
-    if (this.interest && !this.interest.test(text)) return false;
     const since = Date.now() - (this.lastSpoke.get(channel) ?? 0);
     if (since < rule.quietMinutes * 60 * 1000) return false;
     const day = new Date().toISOString().slice(0, 10);
     const seen = this.spokenToday.get(channel);
     const count = seen && seen.day === day ? seen.count : 0;
     return count < rule.dailyCap;
+  }
+
+  /**
+   * 몇 분마다 한 번, **쌓인 말을 통째로 보고** 낄지 모델에게 묻는다.
+   *
+   * 새 말이 없으면 아무것도 하지 않는다 — 조용한 시간에는 모델을 안 부른다.
+   * 모델이 안 끼기로 하면 쌓인 말은 그 턴에서 비워지므로, 같은 대화를 두고
+   * 몇 분마다 되묻지 않는다.
+   */
+  private async sweep(): Promise<void> {
+    const client = this.app?.client;
+    if (!client) return;
+    for (const channel of this.opts.channels ?? []) {
+      if (!this.withinLimits(channel)) continue;
+      try {
+        await this.sweepChannel(client, channel);
+      } catch (error) {
+        this.logger.warn(`훑어보다 넘어졌습니다 (${channel})`, error);
+      }
+    }
+  }
+
+  /**
+   * 방을 **채널에서 직접 읽어** 훑는다. 메모리에 쌓아 둔 것을 보지 않는다.
+   *
+   * 쌓아 두면 **재시작 한 번에 방금 오간 대화를 통째로 잊는다** — 실제로 그렇게
+   * 잊었고, 사람들이 「파업 ㅋㅋ」 하는 동안 봇은 볼 것이 없었다. 소켓이 이벤트를
+   * 흘려도 마찬가지다(그것도 실제로 겪었다). 채널을 읽으면 둘 다 저절로 따라잡힌다.
+   *
+   * 어디부터 보나: **봇이 마지막으로 말한 뒤**의 사람 글만. 기준을 채널이 들고 있으니
+   * 따로 기억할 것이 없고, 이미 답한 말을 다시 집지도 않는다.
+   */
+  private async sweepChannel(client: App['client'], channel: string): Promise<void> {
+    const res = await client.conversations.history({
+      channel,
+      oldest: ((Date.now() - SWEEP_LOOKBACK_MS) / 1000).toFixed(6),
+      limit: 60,
+    });
+    const msgs = ((res.messages ?? []) as Record<string, unknown>[]).slice().reverse();
+
+    let after: Record<string, unknown>[] = [];
+    for (const m of msgs) {
+      // 봇이 입을 연 자리에서 끊는다 — 그 앞은 이미 지나간 이야기다.
+      if (m.bot_id || m.user === this.selfUserId) { after = []; continue; }
+      if (m.subtype || !((m.text as string) ?? '').trim()) continue;
+      after.push(m);
+    }
+    if (after.length === 0) return;
+
+    for (const m of after.slice(-MAX_MERGED_LINES)) {
+      const user = m.user as string;
+      const name = await this.displayName(client, user);
+      this.enqueue(channel, {
+        channel, ts: m.ts as string,
+        text: `${name || user}: ${(m.text as string).trim()}`,
+        react: false,      // 부른 것이 아니다 — 🤔 를 붙이지 않는다
+      });
+    }
+    const waiting = this.pending.get(channel);
+    if (!waiting || waiting.texts.length === 0) return;
+    this.logger.info(`훑어보는 중 (${channel}, ${waiting.texts.length}줄)`);
+    this.kick(client, channel, channel, false);
   }
 
   private noteSpoke(key: string): void {
@@ -278,7 +386,9 @@ export class ChatHost {
     channel: string; text: string; ts: string; threadTs?: string; react?: boolean;
   }): void {
     const waiting = this.pending.get(key)
-      ?? { channel: item.channel, texts: [], reactTs: [], toldBusy: false };
+      ?? { channel: item.channel, texts: [], reactTs: [], toldBusy: false, seen: new Set<string>() };
+    if (waiting.seen.has(item.ts)) return;      // 훑기가 다시 읽어 온 같은 말
+    waiting.seen.add(item.ts);
     waiting.channel = item.channel;
     if (item.threadTs) waiting.threadTs = item.threadTs;
     // 답을 기다리는 동안 말이 계속 쌓일 수 있다. 최근 것만 남긴다 — 끝없이 합치면
