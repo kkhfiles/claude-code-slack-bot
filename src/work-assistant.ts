@@ -210,6 +210,22 @@ export async function checkinNow(): Promise<string> {
   }
 }
 
+/**
+ * 화면에 떠 있는 체크인의 번호 대응표. 없으면 빈 문자열.
+ *
+ * **질문은 봇이 세션 없이 내고 답은 세션이 받는다.** 그 사이에 번호의 뜻을
+ * 넘기지 않으면 세션은 추측하고, 업무 ID 가 `TSK-3`·`TSK-10` 이라 숫자가 겹쳐
+ * 그럴듯하게 틀린다(2026-08-06 실제 사고).
+ */
+export async function checkinMap(): Promise<string> {
+  try {
+    const { code, stdout } = await runTasks(['checkin', '--map'], 20_000);
+    return code === 0 ? stdout.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
 export type QuickOutcome =
   | { kind: 'ok'; output: string }
   /** 이 문법이 아니다 — 평소대로 세션이 받는다. */
