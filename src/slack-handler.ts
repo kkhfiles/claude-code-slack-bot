@@ -27,7 +27,7 @@ import { LetterRelay } from './letter-relay';
 import { LetterBooking } from './letter-booking';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
-import { captureToInbox } from './work-assistant';
+import { captureToInbox, checkinOnce, isWorkAssistantEnabled, quickUpdate } from './work-assistant';
 
 /**
  * 슬랙 대화 세션의 사고 깊이. SDK 기본값은 `'high'` 다.
@@ -832,6 +832,50 @@ export class SlackHandler {
     // 이건 답 위치가 아니라 **사용자 원본 메시지**다 — 반응(이모지)을 다는 대상이라
     // 언제나 실제 메시지 ts 여야 한다.
     const originalMessageTs = thread_ts || ts;
+
+    // --- 빠른 갱신 경로 (DM · 사람이 직접 보낸 것만) ---
+    //
+    // 「1 완료 · 2 1h」 같은 짧은 갱신은 **세션을 띄우지 않는다.** 갱신 한 번이
+    // 세션 한 번(18초·$0.5)이면 아무도 갱신하지 않고, 갱신이 없으면 이 시스템은
+    // 사람이 무슨 일을 했는지 영영 모른다(2026-08-06 실측: 실사용 4일 · 진행중
+    // 1건 · 실제 소요 0건).
+    //
+    // 문법 판정은 tasks.py 가 한다 — 문법이 아니면 rc 2 로 나오고 아래 평소
+    // 경로로 그대로 흘러간다. **틀려도 잃는 것이 없다.**
+    if (isDM && !event.accountId && text?.trim() && isWorkAssistantEnabled()) {
+      const quick = await quickUpdate(text);
+      if (quick.kind === 'ok') {
+        await this.app.client.reactions.add({
+          channel, timestamp: originalMessageTs, name: 'white_check_mark',
+        }).catch(() => { });
+        await say({ text: quick.output, thread_ts: replyTs });
+        return;  // 캡처하지 않는다 — 이미 등록까지 끝났다
+      }
+      if (quick.kind === 'failed') {
+        // 문법은 맞는데 쓰기가 깨졌다. 세션으로 넘기면 같은 갱신을 두 번 쓸 수
+        // 있으므로(앞 항목은 이미 반영됐을 수 있다) 여기서 멈추고 원문만 남긴다.
+        captureToInbox(text, 'slack', thread_ts);
+        await say({
+          text: `⚠️ 갱신이 깨졌습니다 — ${quick.message}\n` +
+            '원문은 캡처해 뒀습니다. 어디까지 반영됐는지 확인이 필요합니다.',
+          thread_ts: replyTs,
+        });
+        return;
+      }
+    }
+
+    // --- 어제 진행 체크인 (하루 한 번 · 첫 접촉이 방아쇠) ---
+    //
+    // **시각이 아니라 첫 접촉에 건다.** 퇴근·출근 시각은 날마다 다르지만 첫
+    // 접촉은 사람이 그 자리에 있다는 확실한 신호다. 예약 발신(브리핑)은
+    // 제외한다 — 사람이 없는 시각에 물어 놓고 물었다고 치면 그날은 못 묻는다.
+    //
+    // 답이 먼저 온 경우(위 빠른 경로)는 여기 도달하지 않는다.
+    if (isDM && !event.accountId && isWorkAssistantEnabled()) {
+      const ci = await checkinOnce();
+      if (ci) await say({ text: ci, thread_ts: replyTs }).catch(() => { });
+    }
+
     this.originalMessages.set(sessionKey, { channel, ts: originalMessageTs });
 
     // Cancel any existing CLI process for this conversation
