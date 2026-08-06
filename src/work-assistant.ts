@@ -192,6 +192,24 @@ export async function checkinOnce(): Promise<string> {
   }
 }
 
+/**
+ * 중간 체크인 — 사람이 부른 것이라 래치도 침묵도 없다. 방금까지를 묻는다.
+ * 노션을 읽지만 0.7초라 진행 표시 없이 바로 답해도 된다(2026-08-06 실측).
+ */
+export async function checkinNow(): Promise<string> {
+  try {
+    const { code, stdout, stderr } = await runTasks(['checkin', '--now', '--slack'], 60_000);
+    if (code !== 0) {
+      logger.error(`tasks.py checkin --now 실패 (rc=${code})`, (stderr || stdout).trim());
+      return '⚠️ 체크인을 못 만들었습니다 — 노션 연결을 확인하세요.';
+    }
+    return stdout.trim();
+  } catch (err) {
+    logger.error('checkin --now failed', err);
+    return '⚠️ 체크인을 못 만들었습니다 — 노션 연결을 확인하세요.';
+  }
+}
+
 export type QuickOutcome =
   | { kind: 'ok'; output: string }
   /** 이 문법이 아니다 — 평소대로 세션이 받는다. */

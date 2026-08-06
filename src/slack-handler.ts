@@ -27,7 +27,7 @@ import { LetterRelay } from './letter-relay';
 import { LetterBooking } from './letter-booking';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
-import { captureToInbox, checkinOnce, isWorkAssistantEnabled, quickUpdate } from './work-assistant';
+import { captureToInbox, checkinNow, checkinOnce, isWorkAssistantEnabled, quickUpdate } from './work-assistant';
 
 /**
  * 슬랙 대화 세션의 사고 깊이. SDK 기본값은 `'high'` 다.
@@ -832,6 +832,18 @@ export class SlackHandler {
     // 이건 답 위치가 아니라 **사용자 원본 메시지**다 — 반응(이모지)을 다는 대상이라
     // 언제나 실제 메시지 ts 여야 한다.
     const originalMessageTs = thread_ts || ts;
+
+    // --- 「체크인」 한 마디 (DM · 사람이 직접 보낸 것만) ---
+    //
+    // 세션을 태우면 스킬을 거쳐 같은 출력이 나오지만 18초·$0.5 다. 판단이 하나도
+    // 없는 요청이라 그 값을 치를 이유가 없다 — tasks.py 가 0.7 초에 끝낸다.
+    // **문구가 딱 이것뿐일 때만** 잡는다. 「체크인 어떻게 하지?」 같은 질문은
+    // 세션이 받아야 한다.
+    if (isDM && !event.accountId && isWorkAssistantEnabled() &&
+      /^(체크인|checkin|check-?in|중간\s*점검)\s*(해줘|해주세요|하자|좀)?[.!]?$/i.test((text || '').trim())) {
+      await say({ text: await checkinNow(), thread_ts: replyTs });
+      return;
+    }
 
     // --- 빠른 갱신 경로 (DM · 사람이 직접 보낸 것만) ---
     //
