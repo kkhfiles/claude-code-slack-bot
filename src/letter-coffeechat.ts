@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import { spawn } from 'child_process';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
+import { coffeechatMessage } from './coffeechat-message';
 
 /**
  * 커피콩의 **커피챗 창구** — 실원이 남긴 이야기를 받아 두었다가, 주에 한 번 실장이
@@ -38,7 +39,6 @@ const PAGE = 12;
 
 const KIND_LABEL: Record<string, string> = { praise: '칭찬·고마움', improve: '개선하고 싶은 것' };
 
-const INTRO = ':coffee: *커피챗으로 들어온 이야기예요.*\n누가 남겼는지는 전해 드리지 않기로 되어 있어요. 편하게 읽어 주세요.';
 
 export interface LetterCoffeechatOptions {
   /** 받는 사람(실장). 비면 기능이 꺼진다. */
@@ -244,12 +244,15 @@ export class LetterCoffeechat {
       const okIds: string[] = [];
       const failed: string[] = [];
       for (const [to, items] of byTo) {
-        const body2 = `${INTRO}\n\n${items.map((e) => `> ${(e.text ?? '').replace(/\n/g, '\n> ')}`).join('\n\n')}`;
         try {
           const im = await client.conversations.open({ users: to });
           const channel = im.channel?.id;
           if (!channel) throw new Error('DM 방을 못 열었습니다');
-          await client.chat.postMessage({ channel, text: body2 });
+          // **모양은 공용 한 곳에서 만든다.** 두 경로가 각자 만들면 서로 다른 말이 나간다 —
+          // 실제로 이쪽만 빼기로 한 안내 문구를 그대로 달고 있었다.
+          await client.chat.postMessage({
+            channel, ...coffeechatMessage(items.map((e) => e.text ?? '')),
+          });
           okIds.push(...items.map((e) => e.id));
           this.logger.info(`전달 완료 → ${items[0].to_name} (${items.length}건)`);
         } catch (error) {
