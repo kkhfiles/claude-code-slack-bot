@@ -133,6 +133,8 @@ export class ChatHost {
   private toldNotYet = new Map<string, number>();
   /** 아직 초대 안 된 방 — 같은 말을 1분마다 찍지 않으려고 한 번만 알린다. */
   private toldNotInChannel = new Set<string>();
+  /** **허락 안 한 방**인데 불려 간 곳. 주인에게 방마다 한 번만 알린다. */
+  private toldStranger = new Set<string>();
   /** 이미 인사한 방. 들어왔다 나갔다 해도 한 살림에 한 번만 인사한다. */
   private greeted = new Set<string>();
   private names = new Map<string, string>();
@@ -271,7 +273,11 @@ export class ChatHost {
       return;
     }
     if (!this.servesChannel) return;
-    if (!(this.opts.channels ?? []).includes(channel)) return;
+    // **허락한 방에서만 움직인다.** 누가 다른 방에 초대해도 여기서 끊긴다 — 부르든 말든.
+    if (!(this.opts.channels ?? []).includes(channel)) {
+      await this.notInvitedHere(client, user, channel, ts, text);
+      return;
+    }
     await this.onChannelMessage(client, user, channel, ts,
       m.thread_ts as string | undefined, text);
   }
@@ -297,6 +303,46 @@ export class ChatHost {
     this.enqueue(user, { channel, text, ts });
     await this.react(client, 'add', channel, ts);
     this.kick(client, user, channel, true);
+  }
+
+  /**
+   * **허락하지 않은 방**에서 말이 들렸다 — 누가 이 봇을 그 방에 초대했다는 뜻이다.
+   *
+   * 막는 것은 위에서 이미 끝났다. 여기서 하는 일은 **두 가지를 안 비워 두는 것**이다.
+   *   - 봇을 부른 사람은 아무 반응이 없으면 고장으로 본다 → **그 사람에게만** 한 줄.
+   *     방에는 아무것도 안 남긴다(허락 안 한 방에 글을 남기는 것 자체가 활동이다).
+   *   - 주인은 초대된 사실을 모른다 → 방마다 한 번 알린다. 「나 모르게」가 없어야 한다.
+   */
+  private async notInvitedHere(
+    client: App['client'], user: string, channel: string, ts: string, text: string,
+  ): Promise<void> {
+    const called = this.selfUserId && text.includes(`<@${this.selfUserId}>`);
+    if (called) {
+      try {
+        await client.chat.postEphemeral({
+          channel, user, thread_ts: ts,
+          text: '저는 이 방에서는 활동하지 않아요. 실장님께 말씀해 주시면 열 수 있습니다 :coffee:',
+        });
+      } catch (error) {
+        this.logger.debug('안 하는 방이라고 알리지 못했습니다', error);
+      }
+    }
+    if (this.toldStranger.has(channel)) return;
+    this.toldStranger.add(channel);
+    this.logger.warn(`허락하지 않은 방에서 불렸습니다 (${channel}) — 아무것도 하지 않았습니다`);
+    if (!this.opts.managerUserId) return;
+    try {
+      const im = await client.conversations.open({ users: this.opts.managerUserId });
+      if (im.channel?.id) {
+        await client.chat.postMessage({
+          channel: im.channel.id,
+          text: `<#${channel}> 방에 제가 들어가 있습니다. **그 방에서는 아무것도 하지 않습니다.**\n`
+            + '거기서도 움직이게 하시려면 설정에 그 방을 넣어 주세요. 그대로 두셔도 되고요.',
+        });
+      }
+    } catch (error) {
+      this.logger.warn('초대된 사실을 알리지 못했습니다', error);
+    }
   }
 
   // ── 채널 ──────────────────────────────────────────────────────────────
