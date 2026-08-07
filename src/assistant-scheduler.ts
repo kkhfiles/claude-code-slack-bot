@@ -10,13 +10,16 @@ import { isRateLimitText } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
-import { isWorkAssistantEnabled, briefShort, briefNudge } from './work-assistant';
+import { isWorkAssistantEnabled, briefShort, briefNudge, quickUpdate } from './work-assistant';
+import { boardQueueEnabled, drain } from './board-queue';
 
 /**
  * 업무 넛지 시각. 09:00 데일리 미팅 직전이라는 것이 이 값의 전부다 —
  * 설정으로 뺄 이유가 생기면 그때 뺀다.
  */
 const WORK_NUDGE_TIME = '08:55';
+/** 진행판 큐를 가져오는 간격. **이 값이 곧 「무르기」 창의 길이다.** */
+const BOARD_QUEUE_POLL_MS = 30_000;
 
 export interface AssistantConfig {
   briefing: {
@@ -146,6 +149,9 @@ export class AssistantScheduler {
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private workNudgeTimer: ReturnType<typeof setTimeout> | null = null;
   private daouKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
+  private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
+  /** 한 판이 끝나기 전에 다음 판이 겹치지 않게. 노션 왕복이 폴링 간격보다 길 수 있다. */
+  private boardQueueBusy = false;
 
   // File watcher debounce (account-manager.ts:59-62 pattern)
   private watchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -485,6 +491,7 @@ export class AssistantScheduler {
     // 이 타이머를 지우므로, 재등록 지점이 scheduleAll() 이다.
     if (isWorkAssistantEnabled()) {
       this.scheduleWorkNudge();
+      this.startBoardQueuePoller();
     }
 
     if (this.getEnabledAnalysisTypes().length > 0) {
@@ -512,6 +519,10 @@ export class AssistantScheduler {
     if (this.workNudgeTimer) {
       clearTimeout(this.workNudgeTimer);
       this.workNudgeTimer = null;
+    }
+    if (this.boardQueueTimer) {
+      clearInterval(this.boardQueueTimer);
+      this.boardQueueTimer = null;
     }
   }
 
@@ -581,6 +592,52 @@ export class AssistantScheduler {
       }
       this.scheduleWorkNudge();
     }, nextFire.getTime() - Date.now());
+  }
+
+  /**
+   * 진행판에서 누른 것을 가져와 반영한다 — 30초마다.
+   *
+   * **폴링 간격이 곧 무르는 창이다.** 가져가기 전이면 화면에서 뺄 수 있고, 가져간
+   * 뒤에는 못 무른다(그때는 이미 노션에 쓰고 있을 수 있다). 확인 대화상자를 안
+   * 두는 이유가 이것이다 — 폰에서 한 번 더 누르게 만들면 안 쓰게 된다.
+   *
+   * **반영한 것은 DM 한 줄로 알린다.** 큐는 눈에 안 보여서, 알리지 않으면 눌렀는데
+   * 됐는지를 진행판이 다시 그려질 때까지 알 수 없다. 알리는 것이라 봇의 수신 관문은
+   * 건드리지 않는다.
+   *
+   * 실패는 여기서 시끄럽게 하지 않는다 — 30초마다 도는 자리라 네트워크가 한 번
+   * 튈 때마다 DM 이 오면 무시하는 습관이 든다. 반영이 밀리는 것은 `brief` 의 ⛔ 가
+   * 잡는다(폴러 밖에 있어야 폴러가 죽어도 보인다).
+   */
+  private startBoardQueuePoller(): void {
+    if (!boardQueueEnabled()) {
+      this.logger.info('Board queue poller off (주소나 열쇠 없음)');
+      return;
+    }
+    this.logger.info('Started board queue poller', { everyMs: BOARD_QUEUE_POLL_MS });
+    this.boardQueueTimer = setInterval(async () => {
+      if (this.boardQueueBusy) return;
+      this.boardQueueBusy = true;
+      try {
+        const r = await drain(quickUpdate);
+        if (r.duplicates) {
+          this.logger.info(`이미 반영한 것 ${r.duplicates}건을 지웠습니다`);
+        }
+        for (const { output } of r.applied) {
+          if (output) await this.sendMessage(output).catch(() => { });
+        }
+        for (const item of r.dropped) {
+          await this.sendMessage(
+            `⚠️ 진행판에서 온 「${item.label || item.text}」을 처리하지 못했습니다 — ` +
+            '문법이 맞지 않아 버렸습니다. 노션에서 직접 고쳐 주세요.',
+          ).catch(() => { });
+        }
+      } catch (error) {
+        this.logger.warn('Board queue drain failed', error);
+      } finally {
+        this.boardQueueBusy = false;
+      }
+    }, BOARD_QUEUE_POLL_MS);
   }
 
   // --- Briefing ---
