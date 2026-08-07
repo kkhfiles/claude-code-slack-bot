@@ -9,7 +9,8 @@
     "build": "tsc",
     "prod": "node dist/index.js",
     "check:1on1": "node scripts/check-1on1.js",
-    "check:rlq": "node scripts/check-rate-limit-queue.mjs"
+    "check:rlq": "node scripts/check-rate-limit-queue.mjs",
+    "check:board": "node scripts/check-board-queue.mjs"
   },
   "keywords": [],
   "author": "",
