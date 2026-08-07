@@ -152,6 +152,7 @@ export class AssistantScheduler {
   private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
   /** 한 판이 끝나기 전에 다음 판이 겹치지 않게. 노션 왕복이 폴링 간격보다 길 수 있다. */
   private boardQueueBusy = false;
+  private boardQueueFailures = 0;
 
   // File watcher debounce (account-manager.ts:59-62 pattern)
   private watchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -620,6 +621,10 @@ export class AssistantScheduler {
       this.boardQueueBusy = true;
       try {
         const r = await drain(quickUpdate);
+        if (this.boardQueueFailures) {
+          this.logger.info(`Board queue recovered (${this.boardQueueFailures}회 실패 뒤)`);
+          this.boardQueueFailures = 0;
+        }
         if (r.duplicates) {
           this.logger.info(`이미 반영한 것 ${r.duplicates}건을 지웠습니다`);
         }
@@ -633,7 +638,18 @@ export class AssistantScheduler {
           ).catch(() => { });
         }
       } catch (error) {
-        this.logger.warn('Board queue drain failed', error);
+        // **이유를 본문에 넣는다.** Error 객체를 그대로 넘기면 로거가
+        // `JSON.stringify` 로 `{}` 를 찍어, 실패는 보이는데 왜인지가 안 남는다 —
+        // 2026-08-07 에 워커를 올리기 전 9분 동안 이유 없는 경고만 쌓였다.
+        //
+        // **매번 찍지 않는다.** 30초마다 도는 자리라 하루 못 고치면 로그가 같은
+        // 줄로 덮인다. 처음과 10분마다만 남긴다.
+        this.boardQueueFailures += 1;
+        if (this.boardQueueFailures === 1 || this.boardQueueFailures % 20 === 0) {
+          const why = error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Board queue drain failed (${this.boardQueueFailures}회째): ${why}`);
+        }
       } finally {
         this.boardQueueBusy = false;
       }
