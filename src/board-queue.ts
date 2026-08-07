@@ -138,7 +138,8 @@ function saveDone(ids: string[]): void {
  */
 export async function drain(apply: Apply, base?: string): Promise<DrainResult> {
   const out: DrainResult = { applied: [], dropped: [], retry: [], duplicates: 0 };
-  const { items } = (await call('pull', undefined, base)) as { items: QueueItem[] };
+  // `pull` 은 「가져간 표시」를 남기므로 읽기가 아니다 — 워커가 POST 만 받는다.
+  const { items } = (await call('pull', {}, base)) as { items: QueueItem[] };
   if (!items.length) return out;
 
   const done = loadDone();
