@@ -632,9 +632,14 @@ export class AssistantScheduler {
           if (output) await this.sendMessage(output).catch(() => { });
         }
         for (const item of r.dropped) {
+          // **원인을 좁혀 말하지 않는다.** rc 2 는 「업무를 못 찾음」과 「형식이
+          // 안 맞음」을 함께 뜻하는데, 봇이 둘을 가르려면 판정을 복제해야 한다.
+          // 대신 **다음에 무엇을 할지**를 준다 — 받는 쪽에 필요한 것은 그것이다.
           await this.sendMessage(
-            `⚠️ 진행판에서 온 「${item.label || item.text}」을 처리하지 못했습니다 — ` +
-            '문법이 맞지 않아 버렸습니다. 노션에서 직접 고쳐 주세요.',
+            `⚠️ 진행판에서 누른 「${item.label || item.text}」을 반영하지 못했습니다 ` +
+            '— 그 업무를 찾지 못했거나 형식이 맞지 않습니다.\n' +
+            '누른 것은 취소됐습니다. 진행판을 새로고침해 다시 누르거나, ' +
+            '업무 제목을 눌러 노션에서 바로 바꾸세요.',
           ).catch(() => { });
         }
       } catch (error) {
