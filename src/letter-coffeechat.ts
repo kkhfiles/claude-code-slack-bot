@@ -61,7 +61,7 @@ export interface LetterCoffeechatOptions {
 
 interface Entry {
   ts: string;
-  action: 'new' | 'sent' | 'later' | 'dropped';
+  action: 'new' | 'sent' | 'later' | 'dropped' | 'done';
   id: string;
   kind?: 'praise' | 'improve';
   from?: string;
@@ -132,7 +132,11 @@ export class LetterCoffeechat {
       const me = body.user.id;
       if (!this.allowed(me)) { await ack({ response_action: 'clear' }); return; }
       const kind = view.state.values[BLOCK_KIND]?.[BLOCK_KIND]?.selected_option?.value ?? '';
-      const to = view.state.values[BLOCK_TO]?.[BLOCK_TO]?.selected_option?.value ?? '';
+      // **개선은 사람을 지목하지 않는다.** 창에서 「비워 두세요」라고 안내만 하고 값은
+      // 그대로 받으면, 골라 두었다가 종류만 바꾼 경우에 그 이름이 기록에도 노션에도
+      // 남는다 — 지목당한 사람이 생긴다. 안내가 아니라 여기서 버린다.
+      const picked = view.state.values[BLOCK_TO]?.[BLOCK_TO]?.selected_option?.value ?? '';
+      const to = kind === 'improve' ? '' : picked;
       const text = (view.state.values[BLOCK_TEXT]?.[BLOCK_TEXT]?.value ?? '').trim();
 
       if (!text) {
@@ -220,8 +224,10 @@ export class LetterCoffeechat {
       const send = picks.filter((p) => p.how === 'send')
         .map((p) => live.get(p.id)!.entry).filter((e) => e.kind === 'praise' && e.to);
       const drop = picks.filter((p) => p.how === 'drop');
+      // 개선을 손에서 내려놓는 자리. **나가는 것이 아니라 목록에서 내리는 것**이다.
+      const done = picks.filter((p) => p.how === 'done');
 
-      if (send.length === 0 && drop.length === 0) {
+      if (send.length === 0 && drop.length === 0 && done.length === 0) {
         // **아무것도 안 골랐다.** 조용히 넘어가면 보낸 줄 알고 넘어간다.
         await this.tell(client, this.opts.managerUserId, '고르신 것이 없어 *아무것도 보내지 않았습니다.* 남은 것은 그대로 있습니다.');
         return;
@@ -251,10 +257,12 @@ export class LetterCoffeechat {
       const stamp = new Date().toISOString();
       for (const id of okIds) this.note({ ts: stamp, action: 'sent', id });
       for (const p of drop) this.note({ ts: stamp, action: 'dropped', id: p.id });
+      for (const p of done) this.note({ ts: stamp, action: 'done', id: p.id });
       // **고르지 않은 것은 건드리지 않는다** — 다음 회차에 그대로 다시 올라온다.
 
       const lines = [
         okIds.length ? `보냈습니다 · ${okIds.length}건 (${byTo.size}명)` : '',
+        done.length ? `마무리했습니다 · ${done.length}건` : '',
         drop.length ? `버렸습니다 · ${drop.length}건` : '',
         failed.length ? `*보내지 못했습니다* · ${failed.join(' · ')} — 그대로 남아 있으니 다시 시도해 주세요.` : '',
       ].filter(Boolean);
@@ -384,8 +392,15 @@ export class LetterCoffeechat {
     const improve = live.filter((v) => v.entry.kind === 'improve');
     const blocks: any[] = [];
 
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: `칭찬 ${praise.length}건 · 개선 ${improve.length}건` }],
+    });
+
+    // ── 칭찬 — 여기서 고른 것만 나간다 ──────────────────────────────────
+    blocks.push({ type: 'header', text: { type: 'plain_text', text: '전할 칭찬', emoji: true } });
     if (praise.length === 0) {
-      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '전할 칭찬이 아직 없습니다.' } });
+      blocks.push(this.note0('아직 없습니다.'));
     }
     for (const v of praise.slice(0, PAGE)) {
       const e = v.entry;
@@ -394,35 +409,36 @@ export class LetterCoffeechat {
         text: {
           type: 'mrkdwn',
           text: `*→ ${e.to_name}*${v.later ? '  _(지난 회차에서 넘어옴)_' : ''}\n`
-            + `> ${(e.text ?? '').replace(/\n/g, '\n> ')}\n`
+            + `> ${this.quote(e.text)}\n`
             + `_남긴 사람: ${e.from_name} · ${this.day(e.ts)}_`,
         },
       });
-      blocks.push({
-        type: 'input', block_id: `pick:${e.id}`, optional: true,
-        label: { type: 'plain_text', text: ' ' },
-        element: {
-          type: 'radio_buttons', action_id: `pick:${e.id}`,
-          // **기본은 「다음에」** — 무심코 제출해도 아무것도 안 나가야 한다.
-          initial_option: opt('다음에', 'keep'),
-          options: [opt('보내기', 'send'), opt('다음에', 'keep'), opt('버리기', 'drop')],
-        },
-      });
+      blocks.push(this.pick(e.id, [opt('보내기', 'send'), opt('다음에', 'keep'), opt('버리기', 'drop')]));
       blocks.push({ type: 'divider' });
     }
-    if (praise.length > PAGE) {
-      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `_${praise.length - PAGE}건은 자리가 모자라 다음에 보여 드립니다._` }] });
+    if (praise.length > PAGE) blocks.push(this.note0(`${praise.length - PAGE}건은 자리가 모자라 다음에 보여 드립니다.`));
+
+    // ── 개선 — **여기서는 안 나간다.** 다만 다 보이고, 여기서 정리도 된다 ──
+    //
+    // 예전에는 첫 줄 80자만 뭉쳐서 보여 줬다. 그러면 무슨 이야기였는지 알려고
+    // 노션을 열어야 한다 — 슬랙에서 다 못 보면 목록을 두 곳에서 보게 된다.
+    blocks.push({ type: 'header', text: { type: 'plain_text', text: '들고 계신 개선', emoji: true } });
+    if (improve.length === 0) {
+      blocks.push(this.note0('아직 없습니다.'));
     }
-    if (improve.length) {
+    for (const v of improve.slice(0, PAGE)) {
+      const e = v.entry;
       blocks.push({
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*들고 계신 개선 ${improve.length}건* — 여기서는 안 나갑니다.\n`
-            + improve.slice(0, 10).map((v) => `• ${(v.entry.text ?? '').split('\n')[0].slice(0, 80)}`).join('\n'),
+          text: `> ${this.quote(e.text)}\n_남긴 사람: ${e.from_name} · ${this.day(e.ts)}_`,
         },
       });
+      blocks.push(this.pick(e.id, [opt('그대로 두기', 'keep'), opt('마무리', 'done'), opt('버리기', 'drop')]));
+      blocks.push({ type: 'divider' });
     }
+    if (improve.length > PAGE) blocks.push(this.note0(`${improve.length - PAGE}건은 자리가 모자라 다음에 보여 드립니다.`));
     return {
       type: 'modal', callback_id: REVIEW,
       title: { type: 'plain_text', text: '이번 주 커피챗' },
@@ -430,6 +446,37 @@ export class LetterCoffeechat {
       close: { type: 'plain_text', text: '닫기' },
       blocks,
     };
+  }
+
+  /** 작은 회색 한 줄. */
+  private note0(text: string): any {
+    return { type: 'context', elements: [{ type: 'mrkdwn', text: `_${text}_` }] };
+  }
+
+  /**
+   * 건마다 고르는 칸. **기본은 늘 「아무 일도 안 함」** — 무심코 제출해도 나가거나
+   * 사라지는 것이 없어야 한다.
+   */
+  private pick(id: string, options: any[]): any {
+    return {
+      type: 'input', block_id: `pick:${id}`, optional: true,
+      label: { type: 'plain_text', text: ' ' },
+      element: {
+        type: 'radio_buttons', action_id: `pick:${id}`,
+        initial_option: options.find((o) => o.value === 'keep'),
+        options,
+      },
+    };
+  }
+
+  /**
+   * 인용줄로 만든다. **줄이 길어도 자르지 않는다** — 무슨 이야기였는지 알려고
+   * 다른 곳을 열게 되면 목록을 둘로 나눠 보는 셈이다. 슬랙 한 칸의 한도만 지킨다.
+   */
+  private quote(text?: string): string {
+    const t = (text ?? '').trim();
+    const cut = t.length > 1200 ? `${t.slice(0, 1200)}…` : t;
+    return cut.replace(/\n/g, '\n> ');
   }
 
   // ── 기록 ──────────────────────────────────────────────────────────────
