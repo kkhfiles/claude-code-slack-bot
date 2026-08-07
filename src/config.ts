@@ -1,3 +1,5 @@
+import * as os from 'os';
+import * as path from 'path';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -157,6 +159,21 @@ export const config = {
     greetOnJoin: process.env.LETTER_CHAT_GREET !== '0',
     // 1on1 신청 창구. 받는 사람(실장)과 명단은 위 값을 그대로 쓴다 —
     // 신청할 수 있는 사람과 칭찬을 받는 사람이 같은 실원 전체다.
+    // 커피챗 창구 — 실원이 남긴 이야기를 받아 두었다가 주에 한 번 실장이 골라서 내보낸다.
+    // **칭찬만 나간다.** 개선은 실장이 목록으로만 본다.
+    coffeechat: {
+      enabled: process.env.LETTER_CC_ENABLED !== '0',
+      // **기본은 닫힘.** 열면 실원이 쓴 글이 쌓이기 시작하고, 들어온 글은 없던 일이 안 된다.
+      open: process.env.LETTER_CC_OPEN === '1',
+      // 금요일 이 시각이 지나면 실장에게 한 번 알린다(토·일에도 열려 있다 — 금요일에
+      // 봇이 꺼져 있었으면 그 주가 통째로 사라진다).
+      digestAt: process.env.LETTER_CC_DIGEST_AT || '17:00',
+      // 노션에 남길 목록. **비면 노션 쪽만 통째로 건너뛴다** — 정본은 로컬 기록이다.
+      notionDb: process.env.LETTER_CC_NOTION_DB || '',
+      notionScript: process.env.NOTION_SCRIPT
+        || path.join(os.homedir(), '.claude', 'skills', 'notion-publish', 'notion.py'),
+      notionPython: process.env.NOTION_PYTHON || process.env.CHATBOT_PYTHON || 'python',
+    },
     booking: {
       enabled: process.env.LETTER_1ON1_ENABLED !== '0',
       // **기본은 닫힘 — 실장만 쓸 수 있다.** 만들어 둔 것과 실원에게 연 것은 다른 일이고,

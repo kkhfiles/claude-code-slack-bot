@@ -26,6 +26,7 @@ import { LunchButtons, readLunchBotToken } from './lunch-buttons';
 import { ChatHost } from './chat-host';
 import { LetterRelay } from './letter-relay';
 import { LetterBooking } from './letter-booking';
+import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
 import { captureToInbox, checkinMap, checkinNow, checkinOnce, isWorkAssistantEnabled, quickUpdate } from './work-assistant';
@@ -311,6 +312,22 @@ export class SlackHandler {
             members: config.letter.members,
             logPath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', 'relay.jsonl'),
           }).register(app);
+          if (config.letter.coffeechat.enabled) {
+            const dataDir = path.join(path.dirname(turnScript), 'bots', 'letter', 'data');
+            new LetterCoffeechat({
+              managerUserId: config.letter.managerUserId,
+              members: config.letter.members,
+              logPath: path.join(dataDir, 'coffeechat.jsonl'),
+              // **주간 알림 기록은 파일을 나눈다** — 주인이 다른 값을 한 파일에 두면
+              // 한쪽의 초기화가 남의 칸을 지운다(2026-08-07 에 그 사고를 겪었다).
+              digestPath: path.join(dataDir, 'coffeechat-digest.json'),
+              open: config.letter.coffeechat.open,
+              digestAt: config.letter.coffeechat.digestAt,
+              notionDb: config.letter.coffeechat.notionDb,
+              notionScript: config.letter.coffeechat.notionScript,
+              notionPython: config.letter.coffeechat.notionPython,
+            }).register(app);
+          }
           if (config.letter.booking.enabled) {
             new LetterBooking({
               managerUserId: config.letter.managerUserId,
