@@ -38,7 +38,8 @@ const SWEEP_LOOKBACK_MS = 30 * 60 * 1000;
 
 const BUSY_TEXT = '지금 다른 얘기를 듣고 있어서 조금만 기다려 주세요. 끝나는 대로 바로 답할게요.';
 const FAIL_TEXT = '죄송해요, 지금은 답을 못 만들겠어요. 잠시 뒤에 다시 말 걸어 주시겠어요?';
-const NOT_YET_TEXT = '아직 준비 중이에요. 조금만 기다려 주세요 🙂';
+/** 명단 밖 사람의 DM 을 주인에게 넘긴 뒤 그 사람에게 남기는 한 줄. */
+const BYPASS_TEXT = '말씀 잘 받았어요. 실장님께 그대로 전해 드릴게요 :coffee:';
 /** 같은 사람에게 위 한 줄을 다시 보내기까지. 이어 치는 줄에는 안 겹치고, 새로 걸면 답한다. */
 const NOT_YET_AGAIN_MS = 10 * 60 * 1000;
 
@@ -288,21 +289,59 @@ export class ChatHost {
   ): Promise<void> {
     // 명단이 비면 아무도 아니다. 실제 워크스페이스에 사는 봇이라 기본값은 침묵이어야 한다.
     if (!(this.opts.allowUsers ?? []).includes(user)) {
-      this.logger.info(`Ignoring DM from ${user} (not on the allowlist)`);
-      // **한 번만 알리고 마는 것은 침묵과 같다.** 예전에는 사람마다 딱 한 번만
-      // 답했는데, 그 뒤로 뭘 써도 아무 반응이 없어 먹통으로 보인다 — 방에서 봇을
-      // 본 사람이 말을 걸어 보는 자리라 더 그렇다. 이어 치는 줄에는 안 겹치되,
-      // 시간을 두고 다시 걸면 다시 답한다. 모델을 안 부르는 붙박이 한 줄이라 값도 없다.
-      const last = this.toldNotYet.get(user) ?? 0;
-      if (Date.now() - last > NOT_YET_AGAIN_MS) {
-        this.toldNotYet.set(user, Date.now());
-        await this.say(client, channel, NOT_YET_TEXT);
-      }
+      await this.bypassToManager(client, user, channel, text);
       return;
     }
     this.enqueue(user, { channel, text, ts });
     await this.react(client, 'add', channel, ts);
     this.kick(client, user, channel, true);
+  }
+
+  /**
+   * 명단에 없는 사람이 봇에게 DM 을 보냈다 — **모델을 거치지 않고 주인에게 그대로 넘긴다.**
+   *
+   * 예전에는 「아직 준비 중이에요」로 돌려보냈다. 그런데 이 봇은 커피챗을 **전해 주는**
+   * 창구라, 받은 사람이 고맙다고 답하면 그 말에 「준비 중」이 돌아간다. 창구에 온 말은
+   * 버릴 말이 아니다.
+   *
+   * **모델을 안 태운다.** 봇에게만 하려던 말이 외부 모델로 나갈 이유가 없고, 그대로
+   * 옮기는 것이 이 봇의 본래 일이다.
+   */
+  private async bypassToManager(
+    client: App['client'], user: string, channel: string, text: string,
+  ): Promise<void> {
+    const manager = this.opts.managerUserId;
+    const name = await this.displayName(client, user);
+    let passed = false;
+    if (manager) {
+      try {
+        const im = await client.conversations.open({ users: manager });
+        if (im.channel?.id) {
+          await client.chat.postMessage({
+            channel: im.channel.id,
+            text: `:speech_balloon: *${name}* 님이 저에게 보낸 말이에요.\n\n`
+              + `> ${text.replace(/\n/g, '\n> ')}\n\n`
+              + `_<@${user}> 에게 바로 답하셔도 되고, 전할 말이 있으면 저에게 맡기셔도 돼요._`,
+          });
+          passed = true;
+        }
+      } catch (error) {
+        this.logger.warn('DM 을 주인에게 넘기지 못했습니다', error);
+      }
+    }
+    this.logger.info(`DM 넘김 ← ${name} (${text.length}자)${passed ? '' : ' — 못 넘김'}`);
+
+    // **못 넘겼으면 그 사실을 말한다.** 넘긴 줄 알고 기다리는 것이 가장 나쁘다.
+    if (!passed) {
+      await this.say(client, channel, FAIL_TEXT);
+      return;
+    }
+    // 넘겼다는 말은 **이어 치는 줄마다 되풀이하지 않는다.** 시간을 두고 다시 걸면 다시 답한다.
+    const last = this.toldNotYet.get(user) ?? 0;
+    if (Date.now() - last > NOT_YET_AGAIN_MS) {
+      this.toldNotYet.set(user, Date.now());
+      await this.say(client, channel, BYPASS_TEXT);
+    }
   }
 
   /**

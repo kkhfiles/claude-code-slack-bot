@@ -32,9 +32,27 @@ const BLOCK_TO = 'to';
 const BLOCK_TEXT = 'body';
 const MAX_LEN = 2500;
 
-/** 받는 사람에게 붙는 고정 안내. 봇 말투가 섞이지 않는다. */
-const INTRO = '동료가 커피챗에 남긴 칭찬을 전해 드립니다. 누가 남겼는지는 알려드리지 않습니다.';
-const OUTRO = '(이 봇은 전달만 합니다. 여기에 답하셔도 작성자에게는 가지 않습니다.)';
+/**
+ * 받는 사람에게 가는 글의 머리. **안내 문구는 두지 않는다**(2026-08-07 결정) —
+ * 「작성자는 밝히지 않습니다」·「답해도 가지 않습니다」는 받는 사람이 할 일이 없는
+ * 말이라 글만 딱딱하게 만들었다. 전해질 것은 사람이 남긴 이야기 하나면 된다.
+ */
+const HEAD = ':coffee: *커피챗이 도착했어요*';
+/** 원두 빛깔. 이 띠가 **봇이 하는 말과 사람이 남긴 말을 가른다.** */
+const BEAN = '#6F4E37';
+
+/**
+ * 폼에서 온 글은 첫 줄에 상황이 `-…-` 꼴로 붙어 온다. 그 줄을 떼어 **제목처럼 세운다** —
+ * 안 떼면 이야기와 한 덩어리로 붙어서 어디부터가 칭찬인지 안 보인다.
+ *
+ * 그 꼴이 아니면 **손대지 않는다.** 형식을 못 알아봤다고 남의 글을 고치면 안 된다.
+ */
+export function splitWhen(text: string): { when: string; body: string } {
+  const lines = text.trim().split('\n');
+  const m = /^-\s*(.+?)\s*-$/.exec((lines[0] ?? '').trim());
+  if (!m) return { when: '', body: text.trim() };
+  return { when: m[1], body: lines.slice(1).join('\n').trim() };
+}
 
 export interface LetterRelayOptions {
   /** 이 사람만 쓴다. 비면 기능 자체가 꺼진다. */
@@ -253,7 +271,20 @@ export class LetterRelay {
       const channel = im.channel?.id;
       if (!channel) throw new Error('DM 방을 못 열었습니다');
 
-      await client.chat.postMessage({ channel, text: `${INTRO}\n\n${text}\n\n${OUTRO}` });
+      const { when, body } = splitWhen(text);
+      await client.chat.postMessage({
+        channel,
+        // 알림 미리보기용 한 줄. 화면에 보이는 것은 아래 머리말과 색 띠 카드다.
+        text: `커피챗이 도착했어요 — ${(when || body).slice(0, 40)}`,
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: HEAD } }],
+        attachments: [{
+          color: BEAN,
+          blocks: [{
+            type: 'section',
+            text: { type: 'mrkdwn', text: when ? `*${when}*\n\n${body}` : body },
+          }],
+        }],
+      });
 
       const record: Sent = {
         ts: new Date().toISOString(),
