@@ -61,7 +61,7 @@ export interface LetterCoffeechatOptions {
 
 interface Entry {
   ts: string;
-  action: 'new' | 'sent' | 'later' | 'dropped' | 'done';
+  action: 'new' | 'sent' | 'later' | 'dropped' | 'done' | 'notion';
   id: string;
   kind?: 'praise' | 'improve';
   from?: string;
@@ -69,12 +69,16 @@ interface Entry {
   to?: string;
   to_name?: string;
   text?: string;
+  /** 노션에 만든 줄 번호. 상태를 바꾸려면 이게 있어야 한다. */
+  row?: string;
 }
 
 /** 아직 실장이 처리하지 않은 한 건. `later` 면 지난 회차에서 넘어온 것이다. */
 interface Live {
   entry: Entry;
   later: boolean;
+  /** 노션 줄 번호(있으면). */
+  row?: string;
 }
 
 export class LetterCoffeechat {
@@ -179,7 +183,7 @@ export class LetterCoffeechat {
           `*커피챗 · 개선하고 싶은 것*\n> ${text.slice(0, 300)}${text.length > 300 ? '…' : ''}\n`
           + `\`${LIST_COMMAND}\` 에서 전체를 보실 수 있습니다.`);
       }
-      void this.toNotion(kind === 'improve' ? 'improve' : 'praise', toName, text, '대기');
+      void this.notionCreate(now, kind === 'improve' ? 'improve' : 'praise', toName, text);
     });
 
     // ── 보기 ────────────────────────────────────────────────────────────
@@ -272,7 +276,10 @@ export class LetterCoffeechat {
       for (const e of send.filter((x) => okIds.includes(x.id))) {
         if (e.from) await this.tell(client, e.from, `남겨 주신 이야기를 ${e.to_name} 님께 전해 드렸습니다. 고맙습니다 :coffee:`);
       }
-      for (const id of okIds) void this.toNotion('praise', live.get(id)?.entry.to_name ?? '', live.get(id)?.entry.text ?? '', '보냄');
+      // **새 줄을 만들지 않는다** — 같은 이야기가 「대기」와 「보냄」 두 줄로 남았다.
+      for (const id of okIds) this.notionStatus(live.get(id)?.row, '보냄');
+      for (const p of done) this.notionStatus(live.get(p.id)?.row, '마무리');
+      for (const p of drop) this.notionStatus(live.get(p.id)?.row, '버림');
     });
 
     // 이름은 **뜨자마자** 받아 둔다 — 처음 창을 여는 사람이 기다리지 않게.
@@ -487,11 +494,18 @@ export class LetterCoffeechat {
   private live(): Map<string, Live> {
     const live = new Map<string, Live>();
     for (const e of this.history()) {
+      // **지우는 것만 골라서 지운다.** 「나머지는 전부 지움」으로 두면, 나중에 다른 뜻의
+      // 줄을 하나 더하는 순간(노션 행 번호 같은) 그 줄이 항목을 통째로 지운다.
       if (e.action === 'new') live.set(e.id, { entry: e, later: false });
       else if (e.action === 'later') {
         const cur = live.get(e.id);
         if (cur) live.set(e.id, { ...cur, later: true });
-      } else live.delete(e.id);        // sent · dropped
+      } else if (e.action === 'notion') {
+        const cur = live.get(e.id);
+        if (cur) live.set(e.id, { ...cur, row: e.row });
+      } else if (e.action === 'sent' || e.action === 'dropped' || e.action === 'done') {
+        live.delete(e.id);
+      }
     }
     return live;
   }
@@ -515,34 +529,65 @@ export class LetterCoffeechat {
   }
 
   /**
-   * 노션에 한 줄. **없어도 본 흐름은 계속 간다** — 목록은 사람이 보는 사본이지 정본이 아니다.
-   * 정본은 위 기록 파일이고, 노션이 막혀도 접수·전달은 그대로 돌아야 한다.
+   * 노션 CLI 를 한 번 부른다. **없어도 본 흐름은 계속 간다** — 목록은 사람이 보는
+   * 사본이지 정본이 아니다. 정본은 기록 파일이고, 노션이 막혀도 접수·전달은 그대로 돈다.
+   */
+  private runNotion(args: string[]): Promise<string | null> {
+    if (!this.opts.notionDb || !this.opts.notionScript) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      try {
+        const proc = spawn(this.opts.notionPython ?? 'python',
+          ['-X', 'utf8', this.opts.notionScript!, '--profile', 'personal', ...args],
+          { windowsHide: true });
+        let out = ''; let err = '';
+        proc.stdout.on('data', (c) => { out += c.toString(); });
+        proc.stderr.on('data', (c) => { err += c.toString(); });
+        proc.on('close', (code) => {
+          if (code !== 0) this.logger.warn(`노션 호출 실패 (rc=${code}) ${err.slice(-200)}`);
+          resolve(code === 0 ? out : null);
+        });
+        proc.on('error', (error) => {
+          this.logger.warn('노션 스크립트를 못 띄웠습니다', error);
+          resolve(null);
+        });
+      } catch (error) {
+        this.logger.warn('노션 호출에 실패했습니다', error);
+        resolve(null);
+      }
+    });
+  }
+
+  /**
+   * 접수한 것을 노션에 한 줄 만들고 **그 줄 번호를 기록에 남긴다.**
+   *
+   * 번호를 안 남기면 나중에 상태를 바꿀 길이 없어서, 보낼 때 **같은 이야기로 새 줄을
+   * 또 만들게 된다**(실제로 그렇게 짜여 있었다 — 한 칭찬이 「대기」와 「보냄」 두 줄로 남는다).
    *
    * **작성자는 안 넣는다** — 처리에 필요 없고, 페이지를 누구와 볼지 모른다.
    */
-  private toNotion(kind: string, to: string, text: string, status: string): void {
-    if (!this.opts.notionDb || !this.opts.notionScript) return;
+  private async notionCreate(id: string, kind: string, to: string, text: string): Promise<void> {
+    const out = await this.runNotion(this.createArgs(kind, to, text));
+    const row = /^id\s*:\s*(\S+)/m.exec(out ?? '')?.[1];
+    if (row) this.note({ ts: new Date().toISOString(), action: 'notion', id, row });
+  }
+
+  /** 이미 있는 줄의 상태만 바꾼다. 줄 번호를 모르면 아무것도 안 한다(새로 만들지 않는다). */
+  private notionStatus(row: string | undefined, status: string): void {
+    if (!row) return;
+    void this.runNotion(['row-update', '--id', row, '--set', `상태=${status}`]);
+  }
+
+  private createArgs(kind: string, to: string, text: string): string[] {
     const args = [
-      '-X', 'utf8', this.opts.notionScript, '--profile', 'personal', 'row-create',
-      '--db', this.opts.notionDb,
+      'row-create', '--db', this.opts.notionDb!,
       '--set', `이름=${text.split('\n')[0].slice(0, 60)}`,
       '--set', `종류=${KIND_LABEL[kind] ?? kind}`,
-      '--set', `상태=${status}`,
+      '--set', '상태=대기',
       '--set', `받은 날=${new Date().toISOString().slice(0, 10)}`,
       '--set', `내용=${text.slice(0, 1800)}`,
     ];
     if (to) args.push('--set', `대상=${to}`);
-    try {
-      const proc = spawn(this.opts.notionPython ?? 'python', args, { windowsHide: true });
-      let err = '';
-      proc.stderr.on('data', (c) => { err += c.toString(); });
-      proc.on('close', (code) => {
-        if (code !== 0) this.logger.warn(`노션에 못 남겼습니다 (rc=${code}) ${err.slice(-200)}`);
-      });
-      proc.on('error', (error) => this.logger.warn('노션 스크립트를 못 띄웠습니다', error));
-    } catch (error) {
-      this.logger.warn('노션에 못 남겼습니다', error);
-    }
+    return args;
   }
 
   // ── 자잘한 것 ─────────────────────────────────────────────────────────
