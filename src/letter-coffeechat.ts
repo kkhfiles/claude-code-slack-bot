@@ -115,6 +115,9 @@ export class LetterCoffeechat {
         return;
       }
       try {
+        // **이름을 먼저 받아 둔다.** 안 그러면 고르는 목록에 이름이 아니라 사용자 ID 가
+        // 뜬다 — 화면을 그리는 곳은 기다릴 수가 없어서 캐시에 있는 것만 쓴다.
+        await this.warmNames(client);
         await client.views.open({ trigger_id: command.trigger_id, view: this.writeView(me) });
       } catch (error) {
         this.logger.warn('쓰는 창을 못 열었습니다', error);
@@ -264,6 +267,9 @@ export class LetterCoffeechat {
       for (const id of okIds) void this.toNotion('praise', live.get(id)?.entry.to_name ?? '', live.get(id)?.entry.text ?? '', '보냄');
     });
 
+    // 이름은 **뜨자마자** 받아 둔다 — 처음 창을 여는 사람이 기다리지 않게.
+    // 실패해도 그냥 넘어간다(창을 열 때 한 번 더 받는다).
+    void this.warmNames(app.client).catch(() => undefined);
     this.startTimer(app);
     this.logger.info(`${COMMAND}·${LIST_COMMAND} 준비됨 — ${this.opts.open
       ? `실원에게 열림 (${this.opts.members.length}명)`
@@ -475,6 +481,7 @@ export class LetterCoffeechat {
       '--set', `이름=${text.split('\n')[0].slice(0, 60)}`,
       '--set', `종류=${KIND_LABEL[kind] ?? kind}`,
       '--set', `상태=${status}`,
+      '--set', `받은 날=${new Date().toISOString().slice(0, 10)}`,
       '--set', `내용=${text.slice(0, 1800)}`,
     ];
     if (to) args.push('--set', `대상=${to}`);
@@ -492,6 +499,17 @@ export class LetterCoffeechat {
   }
 
   // ── 자잘한 것 ─────────────────────────────────────────────────────────
+  /**
+   * 명단 사람들의 이름을 미리 받아 둔다. **화면 그리는 쪽은 기다릴 수 없기 때문이다** —
+   * 그쪽은 캐시에 있는 것만 쓰므로, 비어 있으면 목록에 `U0BL…` 같은 것이 그대로 뜬다.
+   * 한 번 받아 두면 그 뒤로는 즉시 돌아온다.
+   */
+  private async warmNames(client: App['client']): Promise<void> {
+    const missing = this.opts.members.filter((u) => !this.names.has(u));
+    if (missing.length === 0) return;
+    await Promise.all(missing.map((u) => this.person(client, u)));
+  }
+
   private async person(client: App['client'], user: string): Promise<string> {
     const known = this.names.get(user);
     if (known) return known;
