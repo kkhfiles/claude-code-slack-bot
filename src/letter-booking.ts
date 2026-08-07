@@ -227,10 +227,9 @@ export class LetterBooking {
       if (payload.user?.id !== this.opts.managerUserId) return;
       const id = payload.actions?.[0]?.value as string;
       const asked = this.pending().find((entry) => entry.id === id);
-      // **그새 물렀다.** 조용히 넘어가면 버튼이 고장 난 것처럼 보인다.
+      // **목록에서 사라진 건이다.** 조용히 넘어가면 버튼이 고장 난 것처럼 보인다.
       if (!asked) {
-        await this.refresh(client, payload.view?.id,
-          this.managerView('그새 물러서 목록에서 내려갔습니다.'));
+        await this.refresh(client, payload.view?.id, this.managerView(this.goneWhy(id)));
         return;
       }
       try {
@@ -264,13 +263,19 @@ export class LetterBooking {
         return;
       }
       if (!who.id || !who.user) return;
-      // **그새 물렀다.** 창은 이미 닫혔으므로 여기서 아무 말도 안 하면, 시각을 적어
-      // 보낸 쪽은 알린 줄 안다 — 정작 상대에게는 아무것도 안 갔는데. 반드시 알린다.
-      if (!this.pending().some((entry) => entry.id === who.id)) {
-        this.logger.info(`시간을 적는 사이에 물렀습니다 — 아무것도 안 보냅니다 (${who.name})`);
+      // **보낼 수 없는 건이다.** 창은 이미 닫혔으므로 여기서 아무 말도 안 하면, 시각을
+      // 적어 보낸 쪽은 알린 줄 안다 — 정작 상대에게는 아무것도 안 갔는데.
+      //
+      // **왜 못 보내는지를 갈라서 말한다.** 「없음」과 「이미 알림」은 다른 일인데
+      // 뭉뚱그리면 두 번 보냈을 때 「그새 물렀다」는 거짓말을 하게 된다.
+      const still = this.alive().get(who.id);
+      if (!still || still.done) {
+        const why = still
+          ? '이미 시간을 알려드린 건입니다.'
+          : '그새 신청을 물렀습니다.';
+        this.logger.info(`보내지 않았습니다 (${who.name}) — ${why}`);
         await this.tell(client, this.opts.managerUserId,
-          `*${who.name}* 님이 시간을 적으시는 사이에 신청을 물렀습니다.`
-          + ` *아무것도 보내지 않았습니다.*`);
+          `*${who.name}* 님 — ${why} *아무것도 보내지 않았습니다.*`);
         return;
       }
 
@@ -294,8 +299,7 @@ export class LetterBooking {
 
       const asked = this.pending().find((entry) => entry.id === id);
       if (!asked) {
-        await this.refresh(client, payload.view?.id,
-          this.managerView('그새 물러서 목록에서 내려갔습니다.'));
+        await this.refresh(client, payload.view?.id, this.managerView(this.goneWhy(id)));
         return;
       }
       this.note({ ts: new Date().toISOString(), action: 'done', id, user: asked.user, user_name: asked.user_name });
@@ -504,6 +508,16 @@ export class LetterBooking {
       if (a.entry.user === user && a.entry.ts.slice(0, 7) === month) return a;
     }
     return null;
+  }
+
+  /**
+   * 목록에서 사라진 까닭. **「없음」과 「이미 처리됨」은 다른 일이다** —
+   * 뭉뚱그리면 시간 알림을 두 번 보냈을 때 「그새 물렀다」는 거짓말을 하게 된다.
+   */
+  private goneWhy(id: string): string {
+    return this.alive().has(id)
+      ? '이미 시간을 알려드린 건이라 목록에서 내려갔습니다.'
+      : '그새 물러서 목록에서 내려갔습니다.';
   }
 
   /** 무를 수 있는 건인가. **시간이 잡힌 것도 무를 수 있다** — 그게 가장 어려운 자리다. */
