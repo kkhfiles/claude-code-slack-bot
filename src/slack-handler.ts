@@ -19,7 +19,7 @@ import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
-import { enqueue as rlqEnqueue, peek as rlqPeek, takeAll as rlqTakeAll, clear as rlqClear, QueuedRequest } from './rate-limit-queue';
+import { enqueue as rlqEnqueue, peek as rlqPeek, takeAll as rlqTakeAll, clear as rlqClear, remove as rlqRemove, QueuedRequest } from './rate-limit-queue';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 import { LunchPoller } from './lunch-poller';
 import { LunchButtons, readLunchBotToken } from './lunch-buttons';
@@ -1338,7 +1338,7 @@ export class SlackHandler {
           : this.parseRetryAfterSeconds({ message: rateLimitMessageText });
 
         const nextAccount = this.accountManager.getNextAccount();
-        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccount ?? undefined);
+        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccount ?? undefined, ts);
       }
 
       // Clean up temp files
@@ -1365,7 +1365,7 @@ export class SlackHandler {
           : this.parseRetryAfterSeconds(rateLimitSource);
 
         const nextAccountOnError = this.accountManager.getNextAccount();
-        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccountOnError ?? undefined);
+        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccountOnError ?? undefined, ts);
       } else {
         await say({ text: t('error.generic', locale, { message: error.message || t('error.somethingWrong', locale) }), thread_ts: thread_ts || ts });
       }
@@ -1499,7 +1499,7 @@ export class SlackHandler {
   private async handleRateLimitUI(
     channel: string, threadTs: string, user: string,
     prompt: string, retryAfterSec: number, locale: Locale, say: any,
-    nextAccount?: AccountId
+    nextAccount?: AccountId, messageTs?: string
   ): Promise<void> {
     const postAt = Math.floor(Date.now() / 1000) + retryAfterSec;
     const retryTimeStr = formatTime(new Date(postAt * 1000), locale);
@@ -1512,8 +1512,15 @@ export class SlackHandler {
 
     // 두 번째부터는 같은 안내를 올리지 않는다 — 한도가 걸린 동안 보낸 메시지마다
     // 버튼 뭉치가 하나씩 쌓이면 그 자체가 도배다. 회복 시각에 한 번에 보여 준다.
+    //
+    // **대신 ✋ 를 붙인다.** 아무 신호도 안 주면 이미 달린 ❌ 만 남아 실패로 읽히고,
+    // 실패로 읽힌 요청은 사람이 다시 보낸다 — 그러면 큐에 같은 것이 두 벌 쌓인다.
     if (!q.first) {
       this.logger.info('Rate-limited request queued', { size: q.size });
+      if (messageTs) {
+        await this.app.client.reactions.add({ channel, timestamp: messageTs, name: 'raised_hand' })
+          .catch(() => { /* 이미 달렸거나 지워진 메시지 */ });
+      }
       return;
     }
 
@@ -1541,10 +1548,12 @@ export class SlackHandler {
         style: 'primary',
       });
     }
+    // **「자동 재실행」 버튼을 두지 않는다.** 큐가 회복 시각에 이미 묻는데 이 버튼도
+    // 자기 타이머를 걸어서, 누르면 같은 프롬프트가 두 번 돈다. 두 번 도는 것이
+    // 조회면 낭비로 끝나지만 등록·상태 변경이면 노션에 두 벌이 들어간다.
     buttons.push(
       { type: 'button', text: { type: 'plain_text', text: t('rateLimit.continueWithApiKey', locale) }, action_id: 'continue_with_apikey', value: JSON.stringify({ retryId, retryAfter: retryAfterSec }), style: nextAccount ? undefined : 'primary' },
-      { type: 'button', text: { type: 'plain_text', text: t('rateLimit.schedule', locale, { time: retryTimeStr }) }, action_id: 'schedule_retry', value: JSON.stringify({ retryId, postAt, retryTimeStr }) },
-      { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: retryId },
+      { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: JSON.stringify({ retryId, rlqId: q.id }) },
     );
 
     await say({
@@ -3799,9 +3808,18 @@ export class SlackHandler {
     this.action('cancel_retry', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
-      const retryId = (body as any).actions[0].value;
+      const raw = (body as any).actions[0].value;
+      // 예전 형식(문자열 그대로)도 받는다 — 봇을 올리기 전에 뿌려진 버튼이 살아 있다.
+      let retryId = raw;
+      let rlqId: string | undefined;
+      try {
+        const parsed = JSON.parse(raw);
+        retryId = parsed.retryId; rlqId = parsed.rlqId;
+      } catch { /* 예전 형식 */ }
       this.clearRetryTimers(retryId);
       this.pendingRetries.delete(retryId);
+      // **큐에서도 뺀다.** 안 빼면 취소해 놓고도 회복 시각에 다시 올라온다.
+      if (rlqId) rlqRemove(rlqId);
       await respond({ response_type: 'ephemeral', text: t('misc.cancelled', actionLocale) });
     });
 
