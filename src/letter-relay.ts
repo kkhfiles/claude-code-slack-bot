@@ -37,7 +37,10 @@ const MAX_LEN = 2500;
  * 「작성자는 밝히지 않습니다」·「답해도 가지 않습니다」는 받는 사람이 할 일이 없는
  * 말이라 글만 딱딱하게 만들었다. 전해질 것은 사람이 남긴 이야기 하나면 된다.
  */
-const HEAD = ':coffee: *커피챗이 도착했어요*';
+const HEAD = ':tada: *커피챗이 도착했어요* :clap:';
+/** 상황과 이야기에 각각 다른 그림을 단다 — 눈이 글을 읽기 전에 먼저 나눈다. */
+const WHEN_ICON = ':spiral_calendar_pad:';
+const BODY_ICON = ':speech_balloon:';
 /** 원두 빛깔. 이 띠가 **봇이 하는 말과 사람이 남긴 말을 가른다.** */
 const BEAN = '#6F4E37';
 
@@ -281,7 +284,12 @@ export class LetterRelay {
           color: BEAN,
           blocks: [{
             type: 'section',
-            text: { type: 'mrkdwn', text: when ? `*${when}*\n\n${body}` : body },
+            text: {
+              type: 'mrkdwn',
+              text: when
+                ? `${WHEN_ICON}  *${when}*\n\n${BODY_ICON}  ${body}`
+                : `${BODY_ICON}  ${body}`,
+            },
           }],
         }],
       });
