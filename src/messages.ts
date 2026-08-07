@@ -159,9 +159,11 @@ const messages: Record<string, Record<Locale, string>> = {
     en: '_Messages you send from now on are held and shown when the limit lifts._',
     ko: '_이후 보내시는 메시지는 쌓아 두었다가 한도가 풀리면 보여 드립니다._',
   },
+  // 「풀렸다」고 단정하지 않는다 — 확인한 것은 예상 시각이 지났다는 것뿐이고,
+  // 실제로 안 풀렸으면 실행이 그 자리에서 다시 막힌다.
   'rlq.recovered': {
-    en: '✅ *The limit has lifted.* {{count}} message(s) were held.',
-    ko: '✅ *한도가 풀렸습니다.* 밀린 {{count}}건이 있습니다.',
+    en: '⏰ *The expected reset time has passed.* {{count}} message(s) were held.',
+    ko: '⏰ *한도 회복 예정 시각이 지났습니다.* 밀린 {{count}}건이 있습니다.',
   },
   'rlq.runAll': { en: 'Run now', ko: '지금 실행' },
   'rlq.runLast': { en: 'Only the last one', ko: '마지막 것만' },

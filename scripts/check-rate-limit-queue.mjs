@@ -1,0 +1,85 @@
+/**
+ * 한도 큐 자가 검사 — 슬랙도 네트워크도 타지 않는다.
+ *
+ *   npm run build && node scripts/check-rate-limit-queue.mjs
+ *
+ * **여기 케이스는 지어낸 것이 아니라 2026-08-07 검토에서 실제로 잡힌 것들이다.**
+ * 회복 시각을 늘 덮어쓰면 아직 안 풀린 채로 깨우고, 취소를 큐에 반영하지 않으면
+ * 취소해 놓은 것이 몇 시간 뒤 다시 올라온다. 둘 다 조용히 틀린다.
+ */
+import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const FILE = path.join(ROOT, '.rate-limit-queue.json');
+const MOD = path.join(ROOT, 'dist', 'rate-limit-queue.js');
+
+if (!fs.existsSync(MOD)) {
+  console.error('dist 가 없습니다 — 먼저 `npm run build`');
+  process.exit(1);
+}
+
+const fails = [];
+const eq = (label, got, want) => {
+  if (JSON.stringify(got) !== JSON.stringify(want)) {
+    fails.push(`${label}\n    받음 ${JSON.stringify(got)}\n    기대 ${JSON.stringify(want)}`);
+  }
+};
+
+// 실제 큐 파일을 쓰므로 돌리기 전에 비운다 — 밀린 것이 있으면 그것부터 처리할 것.
+const had = fs.existsSync(FILE);
+if (had) {
+  console.error('⚠️ 밀린 요청이 남아 있습니다. 처리하거나 버린 뒤 다시 돌리세요.');
+  process.exit(1);
+}
+
+const q = require(MOD);
+const now = Math.floor(Date.now() / 1000);
+
+eq('파일이 없으면 빈 큐', q.peek(), { resetsAt: null, items: [] });
+
+const a = q.enqueue({ channel: 'D1', threadTs: '1', user: 'U1', text: '주간보고 초안' }, now + 600);
+eq('첫 건은 first', [a.first, a.size], [true, 1]);
+
+const b = q.enqueue({ channel: 'D1', threadTs: '2', user: 'U1', text: '그거 말고 회의 메모로' }, now + 300);
+eq('두 번째부터는 조용히', [b.first, b.size], [false, 2]);
+eq('회복 시각은 늦은 쪽으로만 민다', b.resetsAt, now + 600);
+
+const c = q.enqueue({ channel: 'D1', threadTs: '3', user: 'U1', text: 'TSK-5 완료' }, now + 900);
+eq('더 늦은 값이 오면 갱신', c.resetsAt, now + 900);
+
+eq('순서가 보존된다', q.peek().items.map((x) => x.text),
+   ['주간보고 초안', '그거 말고 회의 메모로', 'TSK-5 완료']);
+
+// 재시작 흉내 — 파일에서 그대로 읽힌다
+delete require.cache[require.resolve(MOD)];
+const q2 = require(MOD);
+eq('재시작해도 남는다', q2.peek().items.length, 3);
+
+eq('꺼내면 다 나온다', q2.takeAll().length, 3);
+eq('꺼내면 비워진다', q2.peek(), { resetsAt: null, items: [] });
+
+// 「취소」는 그 한 건만 뺀다 — 안 빼면 취소해 놓고도 회복 시각에 다시 올라온다
+const x = q2.enqueue({ channel: 'D1', threadTs: '4', user: 'U1', text: '취소할 것' }, now + 60);
+q2.enqueue({ channel: 'D1', threadTs: '5', user: 'U1', text: '남을 것' }, now + 60);
+q2.remove(x.id);
+eq('취소한 건만 빠진다', q2.peek().items.map((i) => i.text), ['남을 것']);
+eq('남은 게 있으면 회복 시각도 남는다', q2.peek().resetsAt, now + 60);
+q2.remove(q2.peek().items[0].id);
+eq('마지막 건을 빼면 회복 시각도 지운다', q2.peek().resetsAt, null);
+
+q2.enqueue({ channel: 'D1', threadTs: '6', user: 'U1', text: '또' }, now + 60);
+q2.clear();
+eq('버리면 비워진다', q2.peek().items.length, 0);
+
+fs.rmSync(FILE, { force: true });
+
+if (fails.length) {
+  console.log(`실패 ${fails.length}건\n`);
+  for (const f of fails) console.log('  ✗ ' + f);
+  process.exit(1);
+}
+console.log('통과 — 한도 큐 (쌓기 · 회복 시각 · 순서 · 재시작 · 꺼내기 · 취소 · 버리기)');

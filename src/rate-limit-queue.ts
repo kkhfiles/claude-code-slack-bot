@@ -64,17 +64,14 @@ function write(state: QueueState): void {
  * @returns 이번이 첫 건인지 — 첫 건에만 안내를 올리고 나머지는 조용히 쌓는다
  */
 export function enqueue(item: Omit<QueuedRequest, 'id' | 'ts'>, resetsAt: number | null):
-    { first: boolean; size: number; resetsAt: number | null } {
+    { id: string; first: boolean; size: number; resetsAt: number | null } {
   const s = read();
   const first = s.items.length === 0;
-  s.items.push({
-    ...item,
-    id: `rlq-${Date.now()}-${s.items.length}`,
-    ts: Math.floor(Date.now() / 1000),
-  });
+  const id = `rlq-${Date.now()}-${s.items.length}`;
+  s.items.push({ ...item, id, ts: Math.floor(Date.now() / 1000) });
   if (resetsAt && (!s.resetsAt || resetsAt > s.resetsAt)) s.resetsAt = resetsAt;
   write(s);
-  return { first, size: s.items.length, resetsAt: s.resetsAt };
+  return { id, first, size: s.items.length, resetsAt: s.resetsAt };
 }
 
 export function peek(): QueueState {
@@ -90,4 +87,12 @@ export function takeAll(): QueuedRequest[] {
 
 export function clear(): void {
   write({ resetsAt: null, items: [] });
+}
+
+/** 한 건만 뺀다 — 한도 안내에서 「취소」를 누른 경우. 안 빼면 회복 때 다시 뜬다. */
+export function remove(id: string): void {
+  const s = read();
+  s.items = s.items.filter((it) => it.id !== id);
+  if (s.items.length === 0) s.resetsAt = null;
+  write(s);
 }
