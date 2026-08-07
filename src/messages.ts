@@ -154,6 +154,22 @@ const messages: Record<string, Record<Locale, string>> = {
   'rateLimit.continueWithApiKey': { en: 'Continue with API key', ko: 'API 키로 계속' },
   'rateLimit.switchAccount': { en: '🔄 Switch to {{account}}', ko: '🔄 {{account}}으로 전환' },
 
+  // 한도에 막혀 밀린 요청 — 회복 시각에 목록을 보여 주고 사람이 고른다
+  'rlq.queued': {
+    en: '_Messages you send from now on are held and shown when the limit lifts._',
+    ko: '_이후 보내시는 메시지는 쌓아 두었다가 한도가 풀리면 보여 드립니다._',
+  },
+  'rlq.recovered': {
+    en: '✅ *The limit has lifted.* {{count}} message(s) were held.',
+    ko: '✅ *한도가 풀렸습니다.* 밀린 {{count}}건이 있습니다.',
+  },
+  'rlq.runAll': { en: 'Run now', ko: '지금 실행' },
+  'rlq.runLast': { en: 'Only the last one', ko: '마지막 것만' },
+  'rlq.drop': { en: 'Discard', ko: '버림' },
+  'rlq.running': { en: '▶️ Running {{count}} held message(s)…', ko: '▶️ 밀린 {{count}}건을 순서대로 처리합니다…' },
+  'rlq.dropped': { en: 'Discarded {{count}} held message(s).', ko: '밀린 {{count}}건을 버렸습니다.' },
+  'rlq.expired': { en: 'Nothing is held anymore.', ko: '밀려 있던 것이 이미 없습니다.' },
+
   // API key
   'apiKey.modalTitle': { en: 'API Key', ko: 'API 키' },
   'apiKey.modalSubmit': { en: 'Save', ko: '저장' },

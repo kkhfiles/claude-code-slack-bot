@@ -19,6 +19,7 @@ import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
+import { enqueue as rlqEnqueue, peek as rlqPeek, takeAll as rlqTakeAll, clear as rlqClear, QueuedRequest } from './rate-limit-queue';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 import { LunchPoller } from './lunch-poller';
 import { LunchButtons, readLunchBotToken } from './lunch-buttons';
@@ -181,6 +182,8 @@ export class SlackHandler {
   private pendingRetries: Map<string, { prompt: string; channel: string; threadTs: string; user: string }> = new Map();
   private pendingRetryCleanup: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private pendingAutoRetries: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  // 한도 회복 시각에 깨어나는 타이머. 큐가 파일이라 재시작해도 다시 걸 수 있다.
+  private rlqTimer?: ReturnType<typeof setTimeout>;
 
   // Plan mode: store session info for "Execute" button
   private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string | undefined; user: string }> = new Map();
@@ -1500,6 +1503,20 @@ export class SlackHandler {
   ): Promise<void> {
     const postAt = Math.floor(Date.now() / 1000) + retryAfterSec;
     const retryTimeStr = formatTime(new Date(postAt * 1000), locale);
+
+    // **막힌 요청은 무조건 파일 큐에 남긴다.** 아래 버튼은 사람이 그 자리에 있을
+    // 때만 쓸모가 있고, 재시도 정보는 10분 뒤 지워진다 — 구독 한도는 보통 몇
+    // 시간 뒤에 풀리므로 그때는 이미 아무것도 남아 있지 않다.
+    const q = rlqEnqueue({ channel, threadTs, user, text: prompt }, postAt);
+    this.armRateLimitRecovery(q.resetsAt);
+
+    // 두 번째부터는 같은 안내를 올리지 않는다 — 한도가 걸린 동안 보낸 메시지마다
+    // 버튼 뭉치가 하나씩 쌓이면 그 자체가 도배다. 회복 시각에 한 번에 보여 준다.
+    if (!q.first) {
+      this.logger.info('Rate-limited request queued', { size: q.size });
+      return;
+    }
+
     const retryId = `retry-${Date.now()}`;
 
     this.pendingRetries.set(retryId, { prompt, channel, threadTs, user });
@@ -1537,9 +1554,96 @@ export class SlackHandler {
         { type: 'section', text: { type: 'mrkdwn', text: `⏳ ${t('rateLimit.reached', locale)}\n${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfterSec / 60) })}` } },
         { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.prompt', locale, { prompt: promptPreview }) }] },
         { type: 'actions', elements: buttons },
-        { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.autoNotify', locale) }] },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: t('rlq.queued', locale) }] },
       ],
     });
+  }
+
+  // --- 한도에 막혀 밀린 요청 ---
+
+  /**
+   * 회복 시각에 깨어나 사람에게 묻도록 예약한다.
+   *
+   * **정각이 아니라 1분 뒤에 깨운다** — 회복 시각에 딱 맞춰 부르면 아직 안 풀린
+   * 채로 또 막혀 한 판을 헛돈다(기존 자동 재실행도 같은 이유로 60초를 더한다).
+   */
+  private armRateLimitRecovery(resetsAt: number | null): void {
+    if (!resetsAt) return;
+    if (this.rlqTimer) clearTimeout(this.rlqTimer);
+    const delay = Math.max(60_000, resetsAt * 1000 + 60_000 - Date.now());
+    this.rlqTimer = setTimeout(() => {
+      this.rlqTimer = undefined;
+      this.postRecoveryPrompt().catch((e) => this.logger.error('Rate-limit recovery prompt failed', e));
+    }, delay);
+    this.logger.info('Rate-limit recovery armed', { resetsAt, inMinutes: Math.round(delay / 60_000) });
+  }
+
+  /** 기동 시 남아 있는 큐를 되살린다. 회복 시각이 이미 지났으면 바로 묻는다. */
+  private restoreRateLimitQueue(): void {
+    const s = rlqPeek();
+    if (s.items.length === 0) return;
+    this.logger.warn('Restoring rate-limit queue', { count: s.items.length, resetsAt: s.resetsAt });
+    if (!s.resetsAt || s.resetsAt * 1000 <= Date.now()) {
+      this.postRecoveryPrompt().catch((e) => this.logger.error('Rate-limit recovery prompt failed', e));
+    } else {
+      this.armRateLimitRecovery(s.resetsAt);
+    }
+  }
+
+  /**
+   * 밀린 것을 목록으로 보여 주고 사람이 고르게 한다.
+   *
+   * **자동으로 다 돌리지 않는 이유** — 몇 시간 전 지시가 그사이 뒤집혔을 수 있다.
+   * 「그거 말고 회의 메모로」가 앞 지시를 취소한 경우, 자동 실행은 둘 다 돌려
+   * 되돌리기 어려운 쓰기를 남긴다.
+   */
+  private async postRecoveryPrompt(): Promise<void> {
+    const s = rlqPeek();
+    if (s.items.length === 0) return;
+    // 여러 채널에 흩어져 있어도 **마지막으로 말을 건 자리 한 곳에만** 올린다 —
+    // 밀린 것을 알리려고 여러 방을 두드리면 그것이 또 소음이다.
+    const last = s.items[s.items.length - 1];
+    const locale = await this.getUserLocale(last.user);
+    const lines = s.items.map((it, i) => {
+      const body = it.text.length > 60 ? `${it.text.slice(0, 60)}…` : it.text;
+      return `${i + 1}. 「${body}」  _${formatTime(new Date(it.ts * 1000), locale)}_`;
+    });
+    const head = t('rlq.recovered', locale, { count: String(s.items.length) });
+    await this.app.client.chat.postMessage({
+      channel: last.channel,
+      thread_ts: last.threadTs,
+      text: head,
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `${head}\n${lines.join('\n')}` } },
+        {
+          type: 'actions', elements: [
+            { type: 'button', text: { type: 'plain_text', text: t('rlq.runAll', locale) }, action_id: 'rlq_run_all', style: 'primary' },
+            { type: 'button', text: { type: 'plain_text', text: t('rlq.runLast', locale) }, action_id: 'rlq_run_last' },
+            { type: 'button', text: { type: 'plain_text', text: t('rlq.drop', locale) }, action_id: 'rlq_drop' },
+          ],
+        },
+      ],
+    }).catch((e) => this.logger.error('Failed to post rate-limit recovery prompt', e));
+  }
+
+  /**
+   * 받은 순서대로 다시 돌린다. **하나씩 기다린다** — 한꺼번에 던지면 그 자리에서
+   * 다시 한도에 걸린다. 도중에 또 막히면 그쪽이 큐에 다시 쌓고 다음 회복 시각을
+   * 잡으므로 여기서 따로 처리하지 않는다.
+   */
+  private async replayQueued(items: QueuedRequest[]): Promise<void> {
+    for (const it of items) {
+      try {
+        const event: MessageEvent = {
+          user: it.user, channel: it.channel,
+          thread_ts: it.threadTs, ts: it.threadTs, text: it.text,
+        };
+        const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel: it.channel, ...msg });
+        await this.handleMessage(event, sayCb);
+      } catch (error) {
+        this.logger.error('Rate-limit queue replay failed', error);
+      }
+    }
   }
 
   // --- Message content helpers ---
@@ -3973,8 +4077,45 @@ export class SlackHandler {
       }
     });
 
+    this.action('rlq_run_all', async ({ ack, body, respond }) => {
+      await ack();
+      const locale = await this.getUserLocale((body as any).user.id);
+      const items = rlqTakeAll();
+      if (items.length === 0) {
+        await respond({ response_type: 'ephemeral', text: t('rlq.expired', locale) });
+        return;
+      }
+      await respond({ replace_original: true, text: t('rlq.running', locale, { count: String(items.length) }) });
+      // 기다리지 않는다 — 버튼 응답은 3초 안에 끝나야 하고, 재실행은 몇 분이 걸린다.
+      void this.replayQueued(items);
+    });
+
+    this.action('rlq_run_last', async ({ ack, body, respond }) => {
+      await ack();
+      const locale = await this.getUserLocale((body as any).user.id);
+      const items = rlqTakeAll();
+      if (items.length === 0) {
+        await respond({ response_type: 'ephemeral', text: t('rlq.expired', locale) });
+        return;
+      }
+      const last = items[items.length - 1];
+      await respond({ replace_original: true, text: t('rlq.running', locale, { count: '1' }) });
+      void this.replayQueued([last]);
+    });
+
+    this.action('rlq_drop', async ({ ack, body, respond }) => {
+      await ack();
+      const locale = await this.getUserLocale((body as any).user.id);
+      const n = rlqPeek().items.length;
+      rlqClear();
+      await respond({ replace_original: true, text: t('rlq.dropped', locale, { count: String(n) }) });
+    });
+
     // 재시작에 끊긴 대화 알리기. 기동 직후는 슬랙 연결이 아직이라 잠깐 미룬다.
     setTimeout(() => this.reportInterruptedSessions().catch(() => { }), 12_000);
+    // 한도에 막혀 밀린 것도 같이 되살린다 — 재시작으로 사라지면 큐를 파일에 둔
+    // 뜻이 없다.
+    setTimeout(() => this.restoreRateLimitQueue(), 13_000);
 
     // Cleanup inactive sessions periodically
     setInterval(() => {
