@@ -306,7 +306,7 @@ export class ProcessMemoryWatchdog {
     try {
       const { stdout } = await execAsync(
         'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).TotalVirtualMemorySize"',
-        { timeout: 10_000 },
+        { timeout: 10_000, windowsHide: true },
       );
       const kb = parseInt(stdout.trim(), 10);
       if (isNaN(kb)) return null;
@@ -322,7 +322,7 @@ export class ProcessMemoryWatchdog {
       // Use Get-CimInstance (faster than Get-Counter, no admin needed)
       const { stdout } = await execAsync(
         'powershell -NoProfile -Command "$os = Get-CimInstance Win32_OperatingSystem; $os.TotalVirtualMemorySize - $os.FreeVirtualMemory"',
-        { timeout: 10_000 },
+        { timeout: 10_000, windowsHide: true },
       );
       const kb = parseInt(stdout.trim(), 10);
       if (isNaN(kb)) return null;
@@ -337,7 +337,7 @@ export class ProcessMemoryWatchdog {
     try {
       const { stdout } = await execAsync(
         `powershell -NoProfile -Command "Get-Process | Where-Object { $_.PM -gt 100MB } | Sort-Object PM -Descending | Select-Object -First ${count} Id,Name,PM | ConvertTo-Csv -NoTypeInformation"`,
-        { timeout: 15_000 },
+        { timeout: 15_000, windowsHide: true },
       );
       const lines = stdout.trim().split('\n');
       if (lines.length < 2) return []; // header only or empty
