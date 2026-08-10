@@ -6,6 +6,12 @@ node_modules/
 .env
 .env.local
 .env.*.local
+# .env 을 고치기 전에 떠 두는 백업. **이름만 다를 뿐 토큰이 그대로 들어 있다** —
+# 이 저장소는 공개라 `.env` 하나만 막아 두면 백업이 그대로 올라간다.
+.env.bak*
+.env.backup*
+.env.save*
+.env.orig
 
 # Bot local state (per-installation, not sensitive)
 .working-dirs.json
