@@ -127,6 +127,18 @@ export class ChatHost {
   private active = new Set<string>();
   /** 말했지만 아직 답하지 않은 것, 열쇠별로. */
   private pending = new Map<string, Waiting>();
+  /**
+   * 방마다 **훑어서 이미 물어본 마지막 글의 시각.**
+   *
+   * 훑기의 경계는 「봇이 마지막으로 입을 연 자리」인데, 안 끼기로 하면 봇은 아무 말도
+   * 안 하므로 **경계가 그대로 있다.** 그래서 같은 글을 1분 뒤에 또 묻고, 되돌아보는
+   * 30분 창에서 빠질 때까지 **한 글당 서른 번쯤** 묻게 된다(실측 2026-08-10: 8자짜리
+   * 한 줄을 26번 물었고 26번 다 「말 안 함」이었다. 그날 34턴 중 봇이 말한 것은
+   * 사람이 직접 부른 2턴뿐).
+   *
+   * 「봤고 안 끼기로 했다」를 남길 자리가 없던 것이 원인이라, 여기에 남긴다.
+   */
+  private sweptUpTo = new Map<string, number>();
   /** 채널에서 우리가 마지막으로 입을 연 시각·횟수. */
   private lastSpoke = new Map<string, number>();
   private spokenToday = new Map<string, { day: string; count: number }>();
@@ -524,6 +536,16 @@ export class ChatHost {
     }
     if (after.length === 0) return;
 
+    // **새로 온 말이 없으면 묻지 않는다.** 위 경계는 봇이 입을 열어야만 앞으로 가므로,
+    // 안 끼기로 한 자리에서는 같은 글이 계속 남는다. 그 글을 다시 물어도 답은 같고,
+    // 물을 때마다 대화가 커져서 **답이 엉뚱한 이유로 흔들린다**(하루 한 대화가
+    // 31,143 → 312,217 토큰까지 자란 것을 봤다).
+    //
+    // 잃는 것이 없다 — 아무도 말을 안 한 자리에서 봇이 먼저 입을 떼는 기능은 원래
+    // 없다(바로 위 `after.length === 0` 에서 나간다). 새 말이 오면 그 즉시 다시 묻는다.
+    const newest = Math.max(...after.map((m) => Number(m.ts) || 0));
+    if (newest <= (this.sweptUpTo.get(channel) ?? 0)) return;
+
     for (const m of after.slice(-MAX_MERGED_LINES)) {
       const user = m.user as string;
       const name = await this.displayName(client, user);
@@ -534,9 +556,15 @@ export class ChatHost {
       });
     }
     const waiting = this.pending.get(channel);
-    if (!waiting || waiting.texts.length === 0) return;
+    // 줄이 하나도 안 남았다 = 방금 읽은 것이 **이미 도는 턴에 들어가 있다.** 그쪽이
+    // 답하므로 여기서는 물어본 것으로 친다.
+    if (!waiting || waiting.texts.length === 0) { this.sweptUpTo.set(channel, newest); return; }
     this.logger.info(`훑어보는 중 (${channel}, ${waiting.texts.length}줄)`);
     this.kick(client, channel, channel, false);
+    // **정말 집어 갔을 때만 물어본 것으로 친다.** 동시에 도는 턴이 한도에 차 있으면
+    // `kick` 은 그냥 돌아가고 줄은 그대로 남는데, 그걸 물어봤다고 표시해 버리면
+    // **아무도 안 집은 채로 영영 묻히기 때문이다**(훑기가 재시도 노릇도 겸한다).
+    if (!this.pending.has(channel)) this.sweptUpTo.set(channel, newest);
   }
 
   private noteSpoke(key: string): void {
