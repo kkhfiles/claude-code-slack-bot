@@ -28,7 +28,14 @@ let globalRunning = 0;
 const CONCURRENCY_CAP = 3;
 
 const MAX_MERGED_LINES = 20;
-const TURN_TIMEOUT_MS = 150 * 1000;   // turn.py 가 agy 를 90초에 끊고, 그 위에 여유
+/**
+ * 한 턴을 기다려 주는 한계. turn.py 가 agy 를 90초에 끊으니 보통은 그 위 여유면 된다.
+ *
+ * **다만 대화가 길어지면 한 턴에 agy 를 두 번 부른다** — 앞 대화를 요약해서 끊고(최대
+ * 120초, turn.py 의 `_maybe_compact`) 새 대화로 본 턴을 돈다. 150초로 두면 그 턴만
+ * 골라서 죽는다. 드물게 오는 턴이라 눈에 안 띄고, 하필 **가장 긴 대화에서만** 난다.
+ */
+const TURN_TIMEOUT_MS = 240 * 1000;
 const THINKING = 'thinking_face';
 /**
  * 훑을 때 채널을 얼마나 거슬러 읽나. 하루 종일 조용하다 한 마디 올라온 자리에서
