@@ -10,7 +10,8 @@ import { isRateLimitText } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
-import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate } from './work-assistant';
+import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
+  refreshBoardIfChanged } from './work-assistant';
 import { boardQueueEnabled, drain } from './board-queue';
 
 /**
@@ -31,6 +32,12 @@ const WORK_NUDGE_TIME = '08:55';
 const CHECKIN_PM_TIME = '17:00';
 /** 진행판 큐를 가져오는 간격. **이 값이 곧 「무르기」 창의 길이다.** */
 const BOARD_QUEUE_POLL_MS = 30_000;
+/**
+ * 노션이 직접 고쳐졌는지 보는 간격. **이 값이 곧 화면이 낡아 있을 수 있는
+ * 최대 시간이다.** 안 바뀌었으면 1행 질의(0.5초)로 끝나므로 짧게 잡아도
+ * 싸다 — 3분이면 하루 160회, 노션 한도(초당 3회 평균) 근처에도 못 간다.
+ */
+const NOTION_WATCH_MS = 180_000;
 
 export interface AssistantConfig {
   briefing: {
@@ -160,6 +167,9 @@ export class AssistantScheduler {
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private workNudgeTimer: ReturnType<typeof setTimeout> | null = null;
   private checkinPmTimer: ReturnType<typeof setTimeout> | null = null;
+  private notionWatchTimer: ReturnType<typeof setInterval> | null = null;
+  private notionWatchBusy = false;
+  private notionWatchFailures = 0;
   private daouKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
   private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
   /** 한 판이 끝나기 전에 다음 판이 겹치지 않게. 노션 왕복이 폴링 간격보다 길 수 있다. */
@@ -506,6 +516,7 @@ export class AssistantScheduler {
       this.scheduleWorkNudge();
       this.scheduleCheckinPm();
       this.startBoardQueuePoller();
+      this.startNotionWatch();
     }
 
     if (this.getEnabledAnalysisTypes().length > 0) {
@@ -537,6 +548,10 @@ export class AssistantScheduler {
     if (this.checkinPmTimer) {
       clearTimeout(this.checkinPmTimer);
       this.checkinPmTimer = null;
+    }
+    if (this.notionWatchTimer) {
+      clearInterval(this.notionWatchTimer);
+      this.notionWatchTimer = null;
     }
     if (this.boardQueueTimer) {
       clearInterval(this.boardQueueTimer);
@@ -650,6 +665,48 @@ export class AssistantScheduler {
       }
       this.scheduleCheckinPm();
     }, nextFire.getTime() - Date.now());
+  }
+
+  /**
+   * 노션에서 **직접** 고친 것을 따라잡는다 — 3분마다.
+   *
+   * 수정은 진행판과 스탠리에서 한다는 것이 규율이지만 노션은 막을 수 없다.
+   * 막는 대신 따라잡는다: 안 따라잡으면 화면이 최대 8시간 낡고, **낡은 화면은
+   * 조용히 틀린다**(사람은 최신인 줄 알고 본다).
+   *
+   * 바뀐 게 없으면 `tasks.py` 가 1행 질의만 하고 끝낸다 — 그래서 3분이 싸다.
+   * 판정·갱신·배포 순서는 전부 파이썬에 있다(봇에 복제하지 않는다).
+   *
+   * **「조용히」와 무관하다.** 화면을 최신으로 두는 것은 미는 알림이 아니라서,
+   * 출장 중에도 열어 보면 최신이어야 한다.
+   */
+  private startNotionWatch(): void {
+    this.logger.info('Started Notion watch', { everyMs: NOTION_WATCH_MS });
+    this.notionWatchTimer = setInterval(async () => {
+      // 앞판이 아직 도는 중이면 건너뛴다 — 다시 그리는 데 몇 초 걸린다.
+      if (this.notionWatchBusy) return;
+      this.notionWatchBusy = true;
+      try {
+        const redrew = await refreshBoardIfChanged();
+        if (redrew) {
+          this.logger.info('Notion changed outside the board — 진행판을 다시 올렸습니다');
+        }
+        if (this.notionWatchFailures) {
+          this.logger.info(`Notion watch recovered (${this.notionWatchFailures}회 실패 뒤)`);
+          this.notionWatchFailures = 0;
+        }
+      } catch (error) {
+        // **이유를 메시지에 넣는다.** 로거가 Error 를 `{}` 로 찍어서, 따로 넣지
+        // 않으면 이유 없는 경고만 쌓인다(2026-08-07 에 그렇게 9분을 날렸다).
+        this.notionWatchFailures += 1;
+        if (this.notionWatchFailures === 1 || this.notionWatchFailures % 20 === 0) {
+          const why = error instanceof Error ? error.message : String(error);
+          this.logger.warn(`Notion watch failed (${this.notionWatchFailures}회째): ${why}`);
+        }
+      } finally {
+        this.notionWatchBusy = false;
+      }
+    }, NOTION_WATCH_MS);
   }
 
   /**
