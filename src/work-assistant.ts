@@ -168,6 +168,28 @@ export async function briefNudge(): Promise<string> {
   return stdout.trim();
 }
 
+/**
+ * **노션에서 직접 고친 것을 따라잡는다.**
+ *
+ * 수정은 진행판과 스탠리에서 한다는 것이 규율이지만, 노션은 막을 수 없다
+ * (자기 워크스페이스다). 막는 대신 따라잡는다 — 안 따라잡으면 화면이 최대
+ * 8시간 낡고, **낡은 화면은 조용히 틀린다.**
+ *
+ * 싸다: 바뀐 게 없으면 `tasks.py` 가 1행 질의(실측 0.5초)만 하고 끝낸다.
+ * 바뀐 때만 전체를 읽어 다시 그리고 올린다. 판정도 갱신도 전부 파이썬이 한다.
+ *
+ * **「조용히」와 무관하다** — 화면을 최신으로 두는 것은 미는 알림이 아니다.
+ * 출장 중에도 열어 보면 최신이어야 한다.
+ */
+export async function refreshBoardIfChanged(): Promise<boolean> {
+  const { code, stdout, stderr } = await runTasks(['board', '--if-changed'], 120_000);
+  if (code !== 0) {
+    throw new Error(`tasks.py board --if-changed 실패 (rc=${code}): ` +
+      (stderr || stdout).trim().split('\n').slice(-3).join('\n'));
+  }
+  return stdout.trim().length > 0;   // 출력이 있으면 다시 그렸다는 뜻
+}
+
 // ------------------------------------------------- 체크인 (진행이 들어오는 입구)
 
 /**
