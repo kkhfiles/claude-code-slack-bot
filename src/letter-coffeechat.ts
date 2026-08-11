@@ -47,7 +47,12 @@ const KIND_LABEL: Record<string, string> = { praise: '칭찬·고마움', improv
  * **엉뚱한 사람을 지목하거나 아예 안 쓰거나** 둘 중 하나가 된다.
  */
 const COMMON = 'common';
-const COMMON_LABEL = '공통';
+/**
+ * **대괄호로 감싸고 목록 맨 위에 둔다.** 사람 이름만 늘어선 가운데 섞여 있으면 사람
+ * 하나로 읽힌다 — 고를 때 먼저 갈리는 것이 「사람이냐 아니냐」라, 그 갈림이 눈에
+ * 보여야 한다. 적히는 자리(실장 알림·목록·노션)에도 이 모양 그대로 간다.
+ */
+const COMMON_LABEL = '[공통]';
 
 
 export interface LetterCoffeechatOptions {
@@ -172,7 +177,7 @@ export class LetterCoffeechat {
       if (kind === 'praise' && to === COMMON) {
         await ack({
           response_action: 'errors',
-          errors: { [BLOCK_TO]: '칭찬은 받으실 분을 골라 주세요. 「공통」은 기타 피드백에만 씁니다.' },
+          errors: { [BLOCK_TO]: `칭찬은 받으실 분을 골라 주세요. ${COMMON_LABEL} 은 기타 피드백에만 씁니다.` },
         });
         return;
       }
@@ -387,11 +392,11 @@ export class LetterCoffeechat {
         {
           type: 'input', block_id: BLOCK_TO,
           label: { type: 'plain_text', text: '누구에 대한 이야기인가요' },
-          hint: { type: 'plain_text', text: '사람을 짚기 어려운 이야기면 「공통」을 고르세요. 칭찬에는 「공통」을 못 씁니다.' },
+          hint: { type: 'plain_text', text: `사람을 짚기 어려운 이야기면 맨 위 ${COMMON_LABEL} 을 고르세요. 칭찬에는 못 씁니다.` },
           element: {
             type: 'static_select', action_id: BLOCK_TO,
             placeholder: { type: 'plain_text', text: '고르기' },
-            options: [...others.map((u) => opt(this.names.get(u) ?? u, u)), opt(COMMON_LABEL, COMMON)],
+            options: [opt(COMMON_LABEL, COMMON), ...others.map((u) => opt(this.names.get(u) ?? u, u))],
           },
         },
         {
