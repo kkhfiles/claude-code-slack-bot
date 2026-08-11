@@ -15,7 +15,7 @@ import { coffeechatMessage } from './coffeechat-message';
  *      전하지 않습니다」** 여야 한다 — 없는 익명을 약속하면 그 말을 믿은 사람이 다친다.
  *   2. **봇이 스스로 내보내지 않는다.** 금요일에 하는 일은 실장에게 알리는 것까지고,
  *      내보내는 것은 매번 사람이 고른다. 나간 말은 되돌릴 수 없다.
- *   3. **칭찬만 나간다.** 개선·불만은 여기서 내보내는 길이 아예 없다. 실장이 따로 들고
+ *   3. **칭찬만 나간다.** 기타 피드백은 여기서 내보내는 길이 아예 없다. 실장이 따로 들고
  *      가는 것이고, 목록에서만 본다.
  *   4. **원문은 밖으로 나가지 않는다.** 대화(모델 경유)와 이 저장소는 완전히 다른 길이다 —
  *      봇 설정의 `context_files` 에 이 파일을 넣지 않는다.
@@ -37,7 +37,17 @@ const MAX_LEN = 1500;
 /** 한 화면에 올리는 건수. 슬랙 창은 블록 100개까지라 넉넉히 잡아도 이 언저리가 한계다. */
 const PAGE = 12;
 
-const KIND_LABEL: Record<string, string> = { praise: '칭찬·고마움', improve: '개선하고 싶은 것' };
+const KIND_LABEL: Record<string, string> = { praise: '칭찬·고마움', improve: '기타 피드백' };
+
+/**
+ * 「사람 하나를 짚는 것이 아닌」 대상. 사람 ID 자리에 들어가므로 **슬랙 ID 와 안 겹치는
+ * 모양**이어야 한다(슬랙 ID 는 `U`/`W` 로 시작하는 대문자·숫자다).
+ *
+ * 왜 두나 — 대상을 필수로 하면서 고를 것이 사람뿐이면, 사람을 짚기 싫은 이야기는
+ * **엉뚱한 사람을 지목하거나 아예 안 쓰거나** 둘 중 하나가 된다.
+ */
+const COMMON = 'common';
+const COMMON_LABEL = '공통';
 
 
 export interface LetterCoffeechatOptions {
@@ -136,11 +146,10 @@ export class LetterCoffeechat {
       const me = body.user.id;
       if (!this.allowed(me)) { await ack({ response_action: 'clear' }); return; }
       const kind = view.state.values[BLOCK_KIND]?.[BLOCK_KIND]?.selected_option?.value ?? '';
-      // **개선은 사람을 지목하지 않는다.** 창에서 「비워 두세요」라고 안내만 하고 값은
-      // 그대로 받으면, 골라 두었다가 종류만 바꾼 경우에 그 이름이 기록에도 노션에도
-      // 남는다 — 지목당한 사람이 생긴다. 안내가 아니라 여기서 버린다.
-      const picked = view.state.values[BLOCK_TO]?.[BLOCK_TO]?.selected_option?.value ?? '';
-      const to = kind === 'improve' ? '' : picked;
+      // **대상은 두 종류 모두 고른다.** 기타 피드백도 무엇에 대한 이야기인지 알아야
+      // 쓸모가 있어서다. 사람을 지목하기 싫은 이야기를 위해 「공통」을 둔다 — 고를 것이
+      // 사람뿐이면 지목하거나 안 쓰거나 둘 중 하나가 된다.
+      const to = view.state.values[BLOCK_TO]?.[BLOCK_TO]?.selected_option?.value ?? '';
       const text = (view.state.values[BLOCK_TEXT]?.[BLOCK_TEXT]?.value ?? '').trim();
 
       if (!text) {
@@ -154,16 +163,24 @@ export class LetterCoffeechat {
         });
         return;
       }
-      // **칭찬은 받을 사람이 있어야 한다.** 개선은 받을 사람이 없다(실장이 들고 간다).
-      if (kind === 'praise' && !to) {
-        await ack({ response_action: 'errors', errors: { [BLOCK_TO]: '누구에게 전할 이야기인지 골라 주세요.' } });
+      if (!to) {
+        await ack({ response_action: 'errors', errors: { [BLOCK_TO]: '누구에 대한 이야기인지 골라 주세요.' } });
+        return;
+      }
+      // **칭찬은 받을 사람이 있어야 한다.** 「공통」은 전할 곳이 없으므로 칭찬에는 못 쓴다 —
+      // 받아 두기만 하고 아무에게도 안 가면 쓴 사람은 전해진 줄 안다.
+      if (kind === 'praise' && to === COMMON) {
+        await ack({
+          response_action: 'errors',
+          errors: { [BLOCK_TO]: '칭찬은 받으실 분을 골라 주세요. 「공통」은 기타 피드백에만 씁니다.' },
+        });
         return;
       }
 
       await ack({ response_action: 'clear' });
       const now = new Date().toISOString();
       const name = await this.person(client, me);
-      const toName = to ? await this.person(client, to) : '';
+      const toName = to === COMMON ? COMMON_LABEL : await this.person(client, to);
       this.note({
         ts: now, action: 'new', id: now,
         kind: kind === 'improve' ? 'improve' : 'praise',
@@ -171,16 +188,16 @@ export class LetterCoffeechat {
         to: to || undefined, to_name: toName || undefined,
         text,
       });
-      this.logger.info(`접수 ← ${name} (${kind === 'improve' ? '개선' : `칭찬 → ${toName}`}, ${text.length}자)`);
+      this.logger.info(`접수 ← ${name} (${kind === 'improve' ? `기타 피드백 → ${toName}` : `칭찬 → ${toName}`}, ${text.length}자)`);
 
       await this.tell(client, me, kind === 'improve'
         ? '남겨 주신 이야기 잘 받았습니다. 실장에게 전해 두겠습니다 — 이 방에서 다시 꺼내지 않습니다.'
         : `${toName} 님께 전할 이야기로 받아 두었습니다.\n주에 한 번 모아서 전해지고, **누가 썼는지는 전하지 않습니다.**`);
 
-      // 개선은 실장이 바로 알아야 할 수 있다 — 주간 묶음에 안 들어가므로 여기서 한 번 알린다.
+      // 기타 피드백은 실장이 바로 알아야 할 수 있다 — 주간 묶음에 안 들어가므로 여기서 한 번 알린다.
       if (kind === 'improve') {
         await this.tell(client, this.opts.managerUserId,
-          `*커피챗 · 개선하고 싶은 것*\n> ${text.slice(0, 300)}${text.length > 300 ? '…' : ''}\n`
+          `*커피챗 · 기타 피드백* · 대상 *${toName}*\n> ${text.slice(0, 300)}${text.length > 300 ? '…' : ''}\n`
           + `\`${LIST_COMMAND}\` 에서 전체를 보실 수 있습니다.`);
       }
       void this.notionCreate(now, kind === 'improve' ? 'improve' : 'praise', toName, text);
@@ -228,7 +245,7 @@ export class LetterCoffeechat {
       const send = picks.filter((p) => p.how === 'send')
         .map((p) => live.get(p.id)!.entry).filter((e) => e.kind === 'praise' && e.to);
       const drop = picks.filter((p) => p.how === 'drop');
-      // 개선을 손에서 내려놓는 자리. **나가는 것이 아니라 목록에서 내리는 것**이다.
+      // 기타 피드백을 손에서 내려놓는 자리. **나가는 것이 아니라 목록에서 내리는 것**이다.
       const done = picks.filter((p) => p.how === 'done');
 
       if (send.length === 0 && drop.length === 0 && done.length === 0) {
@@ -332,7 +349,7 @@ export class LetterCoffeechat {
 
     try {
       await this.tell(app.client, this.opts.managerUserId,
-        `:coffee: *이번 주 커피챗* — 전할 칭찬 ${praise.length}건${improve.length ? ` · 들고 계신 개선 ${improve.length}건` : ''}\n`
+        `:coffee: *이번 주 커피챗* — 전할 칭찬 ${praise.length}건${improve.length ? ` · 들고 계신 기타 피드백 ${improve.length}건` : ''}\n`
         + '아래에서 하나씩 보시고 고르시면 됩니다. *고르시기 전에는 아무것도 안 나갑니다.*',
         [{
           type: 'actions',
@@ -342,7 +359,7 @@ export class LetterCoffeechat {
           }],
         }]);
       fs.writeFileSync(this.opts.digestPath, JSON.stringify({ week }), 'utf-8');
-      this.logger.info(`주간 알림 보냄 (칭찬 ${praise.length} · 개선 ${improve.length})`);
+      this.logger.info(`주간 알림 보냄 (칭찬 ${praise.length} · 기타 피드백 ${improve.length})`);
     } catch (error) {
       // **기록을 남기지 않는다** — 다음 주기가 다시 시도한다.
       this.logger.warn('주간 알림을 못 보냈습니다 — 다음 주기에 다시 합니다', error);
@@ -364,17 +381,17 @@ export class LetterCoffeechat {
           element: {
             type: 'static_select', action_id: BLOCK_KIND,
             initial_option: opt('칭찬·고마움', 'praise'),
-            options: [opt('칭찬·고마움', 'praise'), opt('개선하고 싶은 것', 'improve')],
+            options: [opt('칭찬·고마움', 'praise'), opt('기타 피드백', 'improve')],
           },
         },
         {
-          type: 'input', block_id: BLOCK_TO, optional: true,
-          label: { type: 'plain_text', text: '누구에게 (칭찬일 때만)' },
-          hint: { type: 'plain_text', text: '개선하고 싶은 것이면 비워 두세요. 실장이 따로 봅니다.' },
+          type: 'input', block_id: BLOCK_TO,
+          label: { type: 'plain_text', text: '누구에 대한 이야기인가요' },
+          hint: { type: 'plain_text', text: '사람을 짚기 어려운 이야기면 「공통」을 고르세요. 칭찬에는 「공통」을 못 씁니다.' },
           element: {
             type: 'static_select', action_id: BLOCK_TO,
             placeholder: { type: 'plain_text', text: '고르기' },
-            options: others.map((u) => opt(this.names.get(u) ?? u, u)),
+            options: [...others.map((u) => opt(this.names.get(u) ?? u, u)), opt(COMMON_LABEL, COMMON)],
           },
         },
         {
@@ -389,7 +406,7 @@ export class LetterCoffeechat {
             // **없는 익명을 약속하지 않는다.** 다만 「실장은 볼 수 있다」까지 적지는 않는다 —
             // 이 봇을 만든 사람이 실장이라는 것을 다 아는 사람들이라 그건 군말이다.
             text: '받는 분께는 *누가 썼는지 전하지 않습니다.*\n'
-              + '칭찬은 주에 한 번 모아서 전해지고, 개선하고 싶은 것은 전해지지 않고 실장이 따로 봅니다.',
+              + '칭찬은 주에 한 번 모아서 전해지고, 기타 피드백은 전해지지 않고 실장이 따로 봅니다.',
           }],
         },
       ],
@@ -404,7 +421,7 @@ export class LetterCoffeechat {
 
     blocks.push({
       type: 'context',
-      elements: [{ type: 'mrkdwn', text: `칭찬 ${praise.length}건 · 개선 ${improve.length}건` }],
+      elements: [{ type: 'mrkdwn', text: `칭찬 ${praise.length}건 · 기타 피드백 ${improve.length}건` }],
     });
 
     // ── 칭찬 — 여기서 고른 것만 나간다 ──────────────────────────────────
@@ -428,11 +445,11 @@ export class LetterCoffeechat {
     }
     if (praise.length > PAGE) blocks.push(this.note0(`${praise.length - PAGE}건은 자리가 모자라 다음에 보여 드립니다.`));
 
-    // ── 개선 — **여기서는 안 나간다.** 다만 다 보이고, 여기서 정리도 된다 ──
+    // ── 기타 피드백 — **여기서는 안 나간다.** 다만 다 보이고, 여기서 정리도 된다 ──
     //
     // 예전에는 첫 줄 80자만 뭉쳐서 보여 줬다. 그러면 무슨 이야기였는지 알려고
     // 노션을 열어야 한다 — 슬랙에서 다 못 보면 목록을 두 곳에서 보게 된다.
-    blocks.push({ type: 'header', text: { type: 'plain_text', text: '들고 계신 개선', emoji: true } });
+    blocks.push({ type: 'header', text: { type: 'plain_text', text: '들고 계신 기타 피드백', emoji: true } });
     if (improve.length === 0) {
       blocks.push(this.note0('아직 없습니다.'));
     }
