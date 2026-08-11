@@ -31,6 +31,17 @@ const CANCEL = 'booking_cancel';
 const DONE = 'booking_done';
 const TELL = 'booking_tell';
 const TELL_SEND = 'booking_tell_send';
+const NUDGE_OPEN = 'booking_nudge_open';
+
+/**
+ * 기다린 지 이만큼 지나면 실장에게 **다시** 알린다.
+ *
+ * 넣은 그 자리에서 재촉하지 않는다 — 신청이 들어오면 그 즉시 한 번 알리므로 몇 시간
+ * 만에 또 부르면 알림이 둘로 늘 뿐이다. 하루가 지나도 그대로면 그때는 잊힌 쪽에 가깝다.
+ */
+const NUDGE_AFTER_MS = 24 * 60 * 60 * 1000;
+/** 이 시각 이후에만 부른다. 이른 아침·밤에 오는 재촉은 재촉이 아니라 방해다. */
+const NUDGE_AT = '10:00';
 
 const BLOCK_WHEN = 'when';
 const BLOCK_NOTE = 'note';
@@ -46,6 +57,11 @@ export interface LetterBookingOptions {
   members: string[];
   /** 신청 기록. `turn.py` 옆 `bots/letter/data/` 를 그대로 쓴다. */
   logPath: string;
+  /**
+   * 「아직 기다립니다」를 오늘 이미 알렸는지. **신청 기록과 파일을 나눈다** — 주인이
+   * 다른 값을 한 파일에 두면 한쪽의 초기화가 남의 칸을 지운다(2026-08-07 에 겪었다).
+   */
+  nudgePath: string;
   /**
    * 실원에게 열렸는가. **기본은 닫힘** — 닫혀 있으면 실장만 쓸 수 있다.
    * 만들어 둔 것과 실원에게 연 것은 다른 일이다. 여는 쪽이 기본값이면 시험해 보는 동안
@@ -75,6 +91,7 @@ interface Alive {
 export class LetterBooking {
   private logger = new Logger('Letter:1on1');
   private names = new Map<string, string>();
+  private nudgeTimer?: NodeJS.Timeout;
 
   constructor(private readonly opts: LetterBookingOptions) {}
 
@@ -178,7 +195,7 @@ export class LetterBooking {
 
       await this.tell(client, me,
         '1on1 신청이 들어갔습니다. 실장이 시간을 잡아 다시 알려드립니다.\n'
-        + `무르시려면 \`${COMMAND}\` 를 다시 부르세요. 이유는 안 물어봅니다.`);
+        + `취소하시려면 \`${COMMAND}\` 를 다시 부르세요. 이유는 안 물어봅니다.`);
       await this.tell(client, this.opts.managerUserId,
         `*1on1 신청 · ${name}*\n`
         + `${when ? `편한 때: ${when}\n` : '편한 때: 안 적음\n'}`
@@ -186,7 +203,7 @@ export class LetterBooking {
         + `\`${LIST_COMMAND}\` 에서 시간을 알려주시면 됩니다.`);
     });
 
-    // 무르기 — 되돌릴 수 있는 일이라 확인 단계를 두지 않는다. 한 단계를 더 붙이면
+    // 취소 — 되돌릴 수 있는 일이라 확인 단계를 두지 않는다. 한 단계를 더 붙이면
     // "취소도 봇으로" 를 만든 이유가 없어진다.
     app.action({ action_id: CANCEL }, async ({ ack, body, client }) => {
       await ack();
@@ -198,7 +215,7 @@ export class LetterBooking {
       const asked = this.cancellable(id);
       // 본인 것만 무른다. 실장이 남의 신청을 없애는 것은 '처리함'(DONE) 쪽이다.
       if (!asked || asked.entry.user !== me) {
-        this.logger.info(`${me} 가 남의(또는 없는) 신청을 무르려 했습니다 — 무시`);
+        this.logger.info(`${me} 가 남의(또는 없는) 신청을 취소하려 했습니다 — 무시`);
         return;
       }
       const name = await this.person(client, me);
@@ -207,13 +224,13 @@ export class LetterBooking {
 
       const when = asked.fixed ? ` (${asked.fixed})` : '';
       await this.refresh(client, payload.view?.id, this.memberView(me, asked.done
-        ? '잡혀 있던 1on1 을 물렀습니다. 실장에게 알렸습니다.'
-        : '신청을 물렀습니다. 이번 달에 다시 넣으실 수 있습니다.'));
+        ? '잡혀 있던 1on1 을 취소했습니다. 실장에게 알렸습니다.'
+        : '신청을 취소했습니다. 이번 달에 다시 넣으실 수 있습니다.'));
       // **무른 사람에게도 한 줄 남긴다.** 넣을 때는 남기고 무를 때는 안 남기면, 창을
-      // 닫은 뒤 정말 물러졌는지 확인할 길이 없다. 무르기가 더 불안한 쪽이다.
+      // 닫은 뒤 정말 취소됐는지 확인할 길이 없다. 취소가 더 불안한 쪽이다.
       await this.tell(client, me, asked.done
-        ? `잡혀 있던 1on1 을 물렀습니다${when}. 실장에게 알렸습니다 — 이유는 안 물어봅니다.`
-        : '1on1 신청을 물렀습니다. 이번 달에 다시 넣으실 수 있습니다.');
+        ? `잡혀 있던 1on1 을 취소했습니다${when}. 실장에게 알렸습니다 — 이유는 안 물어봅니다.`
+        : '1on1 신청을 취소했습니다. 이번 달에 다시 넣으실 수 있습니다.');
       await this.tell(client, this.opts.managerUserId, asked.done
         ? `1on1 *무름* · *${name}* — 시간까지 잡혔던 건입니다${when}.`
         : `1on1 신청 무름 · *${name}*`);
@@ -267,12 +284,12 @@ export class LetterBooking {
       // 적어 보낸 쪽은 알린 줄 안다 — 정작 상대에게는 아무것도 안 갔는데.
       //
       // **왜 못 보내는지를 갈라서 말한다.** 「없음」과 「이미 알림」은 다른 일인데
-      // 뭉뚱그리면 두 번 보냈을 때 「그새 물렀다」는 거짓말을 하게 된다.
+      // 뭉뚱그리면 두 번 보냈을 때 「그새 취소했다」는 거짓말을 하게 된다.
       const still = this.alive().get(who.id);
       if (!still || still.done) {
         const why = still
           ? '이미 시간을 알려드린 건입니다.'
-          : '그새 신청을 물렀습니다.';
+          : '그새 신청을 취소했습니다.';
         this.logger.info(`보내지 않았습니다 (${who.name}) — ${why}`);
         await this.tell(client, this.opts.managerUserId,
           `*${who.name}* 님 — ${why} *아무것도 보내지 않았습니다.*`);
@@ -281,10 +298,10 @@ export class LetterBooking {
 
       this.note({ ts: new Date().toISOString(), action: 'done', id: who.id, user: who.user, user_name: who.name, when: fixed });
       this.logger.info(`시간 알림 → ${who.name} (${fixed})`);
-      // **무르는 길도 봇으로 알린다.** 「실장에게 말씀 주세요」로 보내면, 사람에게
+      // **취소하는 길도 봇으로 알린다.** 「실장에게 말씀 주세요」로 보내면, 사람에게
       // 취소를 말하는 부담을 없애려고 만든 창구가 마지막 한 걸음에서 그 부담을 돌려준다.
       await this.tell(client, who.user,
-        `1on1 시간이 잡혔습니다 · *${fixed}*\n안 되시면 \`${COMMAND}\` 에서 무르시면 됩니다. 이유는 안 물어봅니다.`);
+        `1on1 시간이 잡혔습니다 · *${fixed}*\n안 되시면 \`${COMMAND}\` 에서 취소하시면 됩니다. 이유는 안 물어봅니다.`);
       await this.tell(client, this.opts.managerUserId, `알려드렸습니다 · *${who.name}* · ${fixed}`);
     });
 
@@ -308,10 +325,86 @@ export class LetterBooking {
       await this.refresh(client, payload.view?.id, this.managerView(`${asked.user_name} 님 신청을 내렸습니다.`));
     });
 
+    // 「아직 기다립니다」에 딸린 버튼. 목록 창을 그 자리에서 연다 — 명령을 다시 치게 하면
+    // 그 한 걸음에서 또 미룬다.
+    app.action({ action_id: NUDGE_OPEN }, async ({ ack, body, client }) => {
+      await ack();
+      const payload = body as any;
+      if (payload.user?.id !== this.opts.managerUserId) return;
+      try {
+        await client.views.open({ trigger_id: payload.trigger_id, view: this.managerView() });
+      } catch (error) {
+        this.logger.warn('목록 창을 못 열었습니다', error);
+        await this.tell(client, this.opts.managerUserId,
+          `목록 창을 열지 못했습니다. \`${LIST_COMMAND}\` 로 열어 주세요.\n\`${String(error).slice(0, 200)}\``);
+      }
+    });
+
+    this.startNudge(app);
+
     this.logger.info(`${COMMAND}·${LIST_COMMAND} 준비됨 — ${this.opts.open
       ? `실원에게 열림 (신청 가능 ${this.opts.members.length}명 · 한 달 한 번)`
-      : '아직 안 열림 (실장만 · 열려면 LETTER_1ON1_OPEN=1)'}`);
+      : '아직 안 열림 (실장만 · 열려면 LETTER_1ON1_OPEN=1)'} · 하루 지나면 ${NUDGE_AT} 알림`);
   };
+
+  // ── 아직 기다리는 신청 ─────────────────────────────────────────────────
+  /**
+   * **신청이 들어왔는데 아무 일도 안 일어나는 자리를 남기지 않는다.**
+   *
+   * 넣은 사람은 넣고 나면 할 수 있는 것이 없다 — 재촉하지 않아도 되게 만든 창구라서,
+   * 실장이 잊으면 그대로 묻힌다. 그러면 「말 안 해도 되는 창구」가 「말해도 안 되는
+   * 창구」가 되고, 그건 창구가 없느니만 못하다.
+   */
+  private startNudge(app: App): void {
+    if (this.nudgeTimer) return;
+    this.nudgeTimer = setInterval(() => {
+      void this.maybeNudge(app).catch((error) => this.logger.warn('알림에서 넘어졌습니다', error));
+    }, 60 * 1000);
+    this.nudgeTimer.unref?.();
+  }
+
+  /** `now` 를 밖에서 받는다 — 안 그러면 검사가 몇 시에 돌렸는지에 따라 결과가 달라진다. */
+  private async maybeNudge(app: App, now: Date = new Date()): Promise<void> {
+    const day = now.getDay();
+    if (day === 0 || day === 6) return;      // 주말에 알려도 할 수 있는 것이 없다
+    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    if (hhmm < NUDGE_AT) return;
+
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    let seen: { day?: string } = {};
+    try { seen = JSON.parse(fs.readFileSync(this.opts.nudgePath, 'utf-8')); } catch { seen = {}; }
+    if (seen.day === today) return;
+
+    const waited = this.pending()
+      .filter((entry) => now.getTime() - new Date(entry.ts).getTime() >= NUDGE_AFTER_MS)
+      .sort((a, b) => a.ts.localeCompare(b.ts));
+    // **없으면 도장을 안 찍는다.** 찍어 두면 오늘 낮에 하루를 넘기는 건이 생겨도 내일로
+    // 밀린다 — 조용히 넘어가는 것과 하루를 통째로 건너뛰는 것은 다르다.
+    if (waited.length === 0) return;
+
+    const oldest = waited[0];
+    const days = Math.max(1, Math.floor((now.getTime() - new Date(oldest.ts).getTime()) / (24 * 60 * 60 * 1000)));
+    const who = waited.length === 1
+      ? `*${oldest.user_name}* 님이 ${days}일째 기다리고 계십니다.`
+      : `*${oldest.user_name}* 님 외 ${waited.length - 1}분이 기다리고 계십니다 (가장 오래된 것은 ${days}일째).`;
+    try {
+      await this.tell(app.client, this.opts.managerUserId,
+        `:hourglass_flowing_sand: *1on1 신청 ${waited.length}건이 그대로 있습니다*\n${who}\n`
+        + '시간을 잡으셨으면 *시간 알리기*, 이미 직접 말씀하셨으면 *그냥 내리기* 를 눌러 주세요.',
+        [{
+          type: 'actions',
+          elements: [{
+            type: 'button', action_id: NUDGE_OPEN, style: 'primary',
+            text: { type: 'plain_text', text: '보기' },
+          }],
+        }]);
+      fs.writeFileSync(this.opts.nudgePath, JSON.stringify({ day: today }), 'utf-8');
+      this.logger.info(`기다리는 신청 ${waited.length}건을 알렸습니다 (가장 오래된 것 ${days}일째)`);
+    } catch (error) {
+      // **기록을 남기지 않는다** — 다음 주기가 다시 시도한다.
+      this.logger.warn('알림을 못 보냈습니다 — 다음 주기에 다시 합니다', error);
+    }
+  }
 
   // ── 화면 ──────────────────────────────────────────────────────────────
   private memberView(user: string, flash?: string): any {
@@ -331,7 +424,7 @@ export class LetterBooking {
         },
         accessory: {
           type: 'button', action_id: CANCEL, value: mine.entry.id,
-          text: { type: 'plain_text', text: '무르기' },
+          text: { type: 'plain_text', text: '취소' },
         },
       });
       blocks.push({
@@ -339,8 +432,8 @@ export class LetterBooking {
         elements: [{
           type: 'mrkdwn',
           text: mine.done
-            ? '못 가시게 되면 여기서 무르시면 됩니다. 이유는 안 물어봅니다.'
-            : '실장이 시간을 잡아 알려드립니다. 무르셔도 이유는 안 물어봅니다.',
+            ? '못 가시게 되면 여기서 취소하시면 됩니다. 이유는 안 물어봅니다.'
+            : '실장이 시간을 잡아 알려드립니다. 취소하셔도 이유는 안 물어봅니다.',
         }],
       });
       return this.modal(blocks);
@@ -349,7 +442,7 @@ export class LetterBooking {
     blocks.push(
       {
         type: 'section',
-        text: { type: 'mrkdwn', text: '실장과 1on1 시간을 잡습니다. *용건은 없어도 됩니다.*' },
+        text: { type: 'mrkdwn', text: '실장과 1on1 시간을 잡습니다.' },
       },
       {
         type: 'input', block_id: BLOCK_WHEN, optional: true,
@@ -365,7 +458,7 @@ export class LetterBooking {
       },
       {
         type: 'context',
-        elements: [{ type: 'mrkdwn', text: '한 달에 한 번 넣으실 수 있습니다. 무르면 그 달에 다시 넣으실 수 있습니다.' }],
+        elements: [{ type: 'mrkdwn', text: '한 달에 한 번 넣으실 수 있습니다. 취소하면 그 달에 다시 넣으실 수 있습니다.' }],
       },
     );
     return this.modal(blocks, ASK, '신청');
@@ -466,17 +559,17 @@ export class LetterBooking {
 
   // ── 기록 ──────────────────────────────────────────────────────────────
   /**
-   * 아직 실장이 안 내린 신청들. 파일은 붙여 쓰기만 하므로(누가 언제 넣고 물렀는지가
+   * 아직 실장이 안 내린 신청들. 파일은 붙여 쓰기만 하므로(누가 언제 넣고 취소했는지가
    * 그대로 남는다) 앞에서부터 되짚어 지금 상태를 만든다.
    */
   /**
-   * 살아 있는 신청들. 파일은 붙여 쓰기만 하므로(누가 언제 넣고 물렀는지가 그대로
+   * 살아 있는 신청들. 파일은 붙여 쓰기만 하므로(누가 언제 넣고 취소했는지가 그대로
    * 남는다) 앞에서부터 되짚어 지금 상태를 만든다.
    *
-   * **되짚기는 한 곳에만 둔다.** 예전에는 목록·달 제한·무르기가 각자 되짚었고 서로
-   * 다른 답을 냈다 — 화면은 시간이 잡힌 건에도 「무르기」를 그렸는데 누름을 받는 쪽은
-   * 그 건이 이미 내려갔다고 보아 **아무 일도 안 일어났다**(눌린 사람 눈에는 물러진
-   * 것처럼 보인다). 무르기는 사람이 가장 말 꺼내기 어려운 자리라 조용히 실패하면 안 된다.
+   * **되짚기는 한 곳에만 둔다.** 예전에는 목록·달 제한·취소가 각자 되짚었고 서로
+   * 다른 답을 냈다 — 화면은 시간이 잡힌 건에도 「취소」를 그렸는데 누름을 받는 쪽은
+   * 그 건이 이미 내려갔다고 보아 **아무 일도 안 일어났다**(눌린 사람 눈에는 취소된
+   * 것처럼 보인다). 취소는 사람이 가장 말 꺼내기 어려운 자리라 조용히 실패하면 안 된다.
    */
   private alive(): Map<string, Alive> {
     const alive = new Map<string, Alive>();
@@ -499,7 +592,7 @@ export class LetterBooking {
   }
 
   /**
-   * 이 사람이 **이번 달에 쓴** 신청. 무른 것은 안 쓴 것으로 친다(그래서 다시 넣을 수 있다).
+   * 이 사람이 **이번 달에 쓴** 신청. 취소한 것은 안 쓴 것으로 친다(그래서 다시 넣을 수 있다).
    * 실장이 처리한 것은 **쓴 것으로 친다** — 그 달 만남이 이미 잡혔다는 뜻이다.
    */
   private thisMonth(user: string): Alive | null {
@@ -512,12 +605,12 @@ export class LetterBooking {
 
   /**
    * 목록에서 사라진 까닭. **「없음」과 「이미 처리됨」은 다른 일이다** —
-   * 뭉뚱그리면 시간 알림을 두 번 보냈을 때 「그새 물렀다」는 거짓말을 하게 된다.
+   * 뭉뚱그리면 시간 알림을 두 번 보냈을 때 「그새 취소했다」는 거짓말을 하게 된다.
    */
   private goneWhy(id: string): string {
     return this.alive().has(id)
       ? '이미 시간을 알려드린 건이라 목록에서 내려갔습니다.'
-      : '그새 물러서 목록에서 내려갔습니다.';
+      : '그새 취소되어 목록에서 내려갔습니다.';
   }
 
   /** 무를 수 있는 건인가. **시간이 잡힌 것도 무를 수 있다** — 그게 가장 어려운 자리다. */
@@ -550,10 +643,15 @@ export class LetterBooking {
   }
 
   // ── 사람 ──────────────────────────────────────────────────────────────
-  private async tell(client: App['client'], user: string, text: string): Promise<void> {
+  private async tell(client: App['client'], user: string, text: string, blocks?: any[]): Promise<void> {
     try {
       const im = await client.conversations.open({ users: user });
-      if (im.channel?.id) await client.chat.postMessage({ channel: im.channel.id, text });
+      if (!im.channel?.id) return;
+      await client.chat.postMessage({
+        channel: im.channel.id, text,
+        // 버튼을 붙일 때도 `text` 를 같이 보낸다 — 알림 미리보기와 접근성 읽기가 그걸 쓴다.
+        ...(blocks ? { blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }, ...blocks] } : {}),
+      });
     } catch (error) {
       this.logger.warn('알림을 못 보냈습니다', error);
     }

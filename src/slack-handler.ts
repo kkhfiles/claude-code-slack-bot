@@ -333,6 +333,9 @@ export class SlackHandler {
               managerUserId: config.letter.managerUserId,
               members: config.letter.members,
               logPath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', '1on1.jsonl'),
+              // 커피챗 주간 알림과 같은 이유로 파일을 나눈다 — 한쪽의 날짜 초기화가
+              // 남의 칸을 지우면 안 된다.
+              nudgePath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', '1on1-nudge.json'),
               open: config.letter.booking.open,
             }).register(app);
           }
