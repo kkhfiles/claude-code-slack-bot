@@ -392,17 +392,44 @@ export class LetterCoffeechat {
         {
           type: 'input', block_id: BLOCK_TO,
           label: { type: 'plain_text', text: '누구에 대한 이야기인가요' },
-          hint: { type: 'plain_text', text: `사람을 짚기 어려운 이야기면 맨 위 ${COMMON_LABEL} 을 고르세요. 칭찬에는 못 씁니다.` },
+          // 예전 구글폼은 「월요일 데일리 스크럼」처럼 **사람이 아닌 대상**도 적을 수 있었다.
+          // 여기는 고르는 칸이라 그게 안 되므로, 그 자리를 「공통」이 맡고 무엇에 대한
+          // 것인지는 본문 첫 줄에 적게 안내한다.
+          hint: {
+            type: 'plain_text',
+            text: `사람이 아닌 대상(회의·팀 전체 등)이면 ${COMMON_LABEL} 을 고르고, 무엇에 대한 것인지 아래 첫 줄에 적어 주세요. 칭찬에는 ${COMMON_LABEL} 을 못 씁니다.`,
+          },
           element: {
             type: 'static_select', action_id: BLOCK_TO,
             placeholder: { type: 'plain_text', text: '고르기' },
             options: [opt(COMMON_LABEL, COMMON), ...others.map((u) => opt(this.names.get(u) ?? u, u))],
           },
         },
+        // **쓰는 법을 창 안에 둔다.** 예전 구글폼에는 항목마다 안내와 예시가 붙어 있었는데
+        // 슬랙으로 옮기면서 그게 통째로 빠졌다. 칸을 늘리지 않고(그러면 다시 무거워진다)
+        // 안내만 되살린다.
+        {
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: '*칭찬* — 언제 어떤 상황이었는지 → 어떤 행동이 좋았는지 → 나에게 어떤 도움이 됐는지\n'
+              + '*기타 피드백* — 언제 어떤 상황이었는지 → *어떻게 하면 좋을지.* 문제 제기에서 멈추지 말고 구체적인 방법까지\n'
+              + '_예) 어제 데일리에서 우선순위 변경 설명이 짧았는데, 바뀐 게 있으면 슬랙으로 미리 한 줄 남겨 주시면 좋겠습니다._',
+          }],
+        },
         {
           type: 'input', block_id: BLOCK_TEXT,
           label: { type: 'plain_text', text: '남기실 이야기' },
-          element: { type: 'plain_text_input', action_id: BLOCK_TEXT, multiline: true },
+          hint: { type: 'plain_text', text: '상황이 구체적일수록 받는 분이 무엇을 이어가면 될지 압니다. 사람이 아니라 그때의 행동을 적어 주세요.' },
+          element: {
+            type: 'plain_text_input', action_id: BLOCK_TEXT, multiline: true,
+            // **150자를 넘으면 슬랙이 창을 통째로 거부한다** — 예시 둘을 넣었다가 154자로
+            // 걸렸다. 긴 예시는 위 안내 블록에 두고 여기는 한 줄만.
+            placeholder: {
+              type: 'plain_text',
+              text: '예) 지난주 기능 리뷰 회의에서 제 의견에 먼저 공감해 주시고, 추가 질문으로 아이디어를 발전시켜 주셔서 편하게 의견을 낼 수 있었습니다.',
+            },
+          },
         },
         {
           type: 'context',
