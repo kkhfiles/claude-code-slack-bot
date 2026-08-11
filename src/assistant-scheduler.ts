@@ -10,7 +10,7 @@ import { isRateLimitText } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
-import { isWorkAssistantEnabled, briefShort, briefNudge, quickUpdate } from './work-assistant';
+import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate } from './work-assistant';
 import { boardQueueEnabled, drain } from './board-queue';
 
 /**
@@ -18,6 +18,17 @@ import { boardQueueEnabled, drain } from './board-queue';
  * 설정으로 뺄 이유가 생기면 그때 뺀다.
  */
 const WORK_NUDGE_TIME = '08:55';
+/**
+ * 오후 체크인 넛지 시각. **진행이 들어오는 유일한 입구가 체크인인데**, 그것이
+ * 「그날 첫 접촉」에만 걸려 있어 슬랙을 안 여는 날은 아무것도 안 들어왔다.
+ *
+ * 아침(08:55)은 어제 것을, 오후는 오늘 것을 묻는다 — **같은 질문을 두 번 밀지
+ * 않는다.** 재촉은 무시를 부르고, 무시되기 시작한 장치는 죽는다.
+ *
+ * 17:00 인 이유: 하루가 끝나기 전이되 아직 자리에 있을 시각. 무시되기 시작하면
+ * 시각을 옮기지 말고 **오후 것부터 끈다**(그게 이 값의 유일한 조정 방향이다).
+ */
+const CHECKIN_PM_TIME = '17:00';
 /** 진행판 큐를 가져오는 간격. **이 값이 곧 「무르기」 창의 길이다.** */
 const BOARD_QUEUE_POLL_MS = 30_000;
 
@@ -148,6 +159,7 @@ export class AssistantScheduler {
   private analysisTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private workNudgeTimer: ReturnType<typeof setTimeout> | null = null;
+  private checkinPmTimer: ReturnType<typeof setTimeout> | null = null;
   private daouKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
   private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
   /** 한 판이 끝나기 전에 다음 판이 겹치지 않게. 노션 왕복이 폴링 간격보다 길 수 있다. */
@@ -492,6 +504,7 @@ export class AssistantScheduler {
     // 이 타이머를 지우므로, 재등록 지점이 scheduleAll() 이다.
     if (isWorkAssistantEnabled()) {
       this.scheduleWorkNudge();
+      this.scheduleCheckinPm();
       this.startBoardQueuePoller();
     }
 
@@ -520,6 +533,10 @@ export class AssistantScheduler {
     if (this.workNudgeTimer) {
       clearTimeout(this.workNudgeTimer);
       this.workNudgeTimer = null;
+    }
+    if (this.checkinPmTimer) {
+      clearTimeout(this.checkinPmTimer);
+      this.checkinPmTimer = null;
     }
     if (this.boardQueueTimer) {
       clearInterval(this.boardQueueTimer);
@@ -580,6 +597,10 @@ export class AssistantScheduler {
           } else {
             this.logger.info('Skipping work nudge (nothing urgent)');
           }
+          // **진행을 걷어들이는 자리는 체크인 하나뿐이다.** 급한 것 넛지와 같은
+          // 시각에 붙여 슬롯을 늘리지 않는다 — 물을 게 없으면 알아서 빈다.
+          const ask = await checkinNudge(false);
+          if (ask) await this.sendMessage(ask);
         }
       } catch (error) {
         // **실패는 알린다.** 넛지는 "급한 게 없으면 침묵" 이라, 조회가 깨져서 못 온
@@ -592,6 +613,42 @@ export class AssistantScheduler {
         ).catch(() => { });
       }
       this.scheduleWorkNudge();
+    }, nextFire.getTime() - Date.now());
+  }
+
+  /**
+   * 오후 체크인 넛지 — 오늘까지의 진행을 걷는다.
+   *
+   * **아침 것과 묻는 대상이 다르다**(어제 vs 오늘). 오늘 이미 답을 받았거나
+   * 물을 게 없거나 「조용히」 기간이면 `tasks.py` 가 빈 출력을 주고, 그러면
+   * 아무것도 보내지 않는다 — 판정을 봇에 복제하지 않는다.
+   *
+   * **catch-up 은 없다.** 봇이 밤에 뜨면 "지금까지 뭐 됐나요"는 이미 늦다.
+   */
+  private scheduleCheckinPm(): void {
+    const nextFire = this.getNextWorkingDay(CHECKIN_PM_TIME);
+    this.logger.info('Scheduled afternoon check-in', {
+      time: CHECKIN_PM_TIME, nextFire: nextFire.toISOString(),
+    });
+
+    this.checkinPmTimer = setTimeout(async () => {
+      try {
+        const nonWorking = this.isNonWorkingDay();
+        if (nonWorking.skip) {
+          this.logger.info(`Skipping afternoon check-in (${nonWorking.reason})`);
+        } else {
+          const ask = await checkinNudge(true);
+          if (ask) {
+            await this.sendMessage(ask);
+          } else {
+            this.logger.info('Skipping afternoon check-in (nothing to ask)');
+          }
+        }
+      } catch (error) {
+        // 조용히 넘긴다 — 08:55 넛지가 같은 조회 실패를 이미 시끄럽게 알린다.
+        this.logger.error('Afternoon check-in failed', error);
+      }
+      this.scheduleCheckinPm();
     }, nextFire.getTime() - Date.now());
   }
 
