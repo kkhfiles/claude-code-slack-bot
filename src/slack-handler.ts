@@ -472,23 +472,33 @@ export class SlackHandler {
 
     // 무엇에 대한 답인지 보이게 먼저 남긴다 — 이 줄이 없으면 답만 덩그러니 뜬다.
     // 봇이 쓴 것이라 메시지 핸들러가 되받지 않는다(`user` 가 없는 이벤트가 된다).
+    //
+    // **이 줄이 원문 사본이기도 하다.** 아래 `handleMessage` 는 오류를 안에서
+    // 삼키고 채널에 알리므로, 세션이 넘어져도 폴러는 성공으로 안다 — 그때 사람에게
+    // 남는 것은 이 줄뿐이라, 그대로 다시 보내면 복구가 된다.
     const posted = await this.app.client.chat.postMessage({
       channel,
       text: `🗂 진행판에서\n${text}`,
     });
 
-    const say = async (msg: any) => {
-      await this.app.client.chat.postMessage(
-        typeof msg === 'string' ? { channel, text: msg } : { channel, ...msg },
-      );
-    };
+    // ⚠️ **응답을 되돌려줘야 한다.** 슬랙이 주는 `say` 는 API 응답을 돌려주고,
+    // 아래 흐름은 그 `ts` 로 상태 메시지를 나중에 고쳐 쓴다. 안 돌려주면
+    // `statusResult.ts` 에서 터진다 — 2026-08-12 에 첫 실사용이 그렇게 죽었다.
+    const say = async (msg: any) => this.app.client.chat.postMessage(
+      typeof msg === 'string' ? { channel, text: msg } : { channel, ...msg },
+    );
     await this.handleMessage(
       { type: 'message', channel, user, text, ts: String(posted.ts) } as MessageEvent,
       say,
     );
   }
 
-  async handleMessage(event: MessageEvent, say: any) {
+  /**
+   * `say` 는 **응답을 돌려줘야 한다** — 아래에서 상태 메시지의 `ts` 를 받아 나중에
+   * 고쳐 쓴다. `any` 로 두었더니 응답을 안 돌려주는 가짜 `say` 가 컴파일을 통과해
+   * 실행 시점에 죽었다(2026-08-12). 계약을 타입에 박아 컴파일러가 잡게 한다.
+   */
+  async handleMessage(event: MessageEvent, say: (msg: any) => Promise<{ ts?: string }>) {
     const { user, channel, thread_ts, ts, text, files } = event;
 
     if (!this.isAllowedUser(user)) {
