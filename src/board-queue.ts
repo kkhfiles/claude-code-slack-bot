@@ -41,6 +41,8 @@ const UA = 'work-assistant-board-poller/1';
 export interface QueueItem {
   id: string;
   text: string;
+  /** 어디로 갈지. 없으면 짧은 문법이다 — 이 표시가 생기기 전에 담긴 것도 있다. */
+  kind?: 'quick' | 'ask';
   label?: string;
   ts: number;
   taken?: number;
@@ -50,6 +52,12 @@ export interface QueueItem {
 export type Apply = (text: string) =>
   Promise<{ kind: 'ok'; output: string } | { kind: 'not-quick' } | { kind: 'failed'; message: string }>;
 
+/**
+ * 사람 말을 비서에게 넘기는 쪽. **답도 되묻기도 비서가 자기 자리에서 한다** —
+ * 여기서는 넘겼는지만 안다.
+ */
+export type Ask = (text: string) => Promise<void>;
+
 export interface DrainResult {
   /** 반영에 성공해 지운 것 */
   applied: { item: QueueItem; output: string }[];
@@ -57,6 +65,8 @@ export interface DrainResult {
   dropped: QueueItem[];
   /** 일시 실패라 큐에 남겨 둔 것 */
   retry: QueueItem[];
+  /** 한 번만 시도하는 것이 실패했다 — 다시 못 부르므로 원문을 사람에게 돌려준다 */
+  lost: QueueItem[];
   /** 이미 반영해 둔 것을 다시 만난 횟수(중복 방지가 실제로 일한 증거) */
   duplicates: number;
 }
@@ -136,8 +146,8 @@ function saveDone(ids: string[]): void {
  *
  * `base` 는 검사에서 로컬 dev 서버를 가리키려고 있다.
  */
-export async function drain(apply: Apply, base?: string): Promise<DrainResult> {
-  const out: DrainResult = { applied: [], dropped: [], retry: [], duplicates: 0 };
+export async function drain(apply: Apply, ask: Ask | null, base?: string): Promise<DrainResult> {
+  const out: DrainResult = { applied: [], dropped: [], retry: [], lost: [], duplicates: 0 };
   // `pull` 은 「가져간 표시」를 남기므로 읽기가 아니다 — 워커가 POST 만 받는다.
   const { items } = (await call('pull', {}, base)) as { items: QueueItem[] };
   if (!items.length) return out;
@@ -153,6 +163,27 @@ export async function drain(apply: Apply, base?: string): Promise<DrainResult> {
       ack.push(item.id);
       continue;
     }
+    if (item.kind === 'ask') {
+      // 받을 곳이 없으면 아무것도 안 하고 큐에 남긴다 — 사람 말은 다시 만들 수 없다.
+      if (!ask) { out.retry.push(item); continue; }
+      // **한 번만 시도한다.** 짧은 문법과 달리 이쪽은 노션에 쓰고 슬랙에 답하는
+      // 부작용이 있어, 되풀이하면 그 일이 두 번 일어난다. 그래서 부르기 **전에**
+      // 처리한 것으로 적는다 — 도중에 죽어도 다시 나오지 않는다. 잃는 쪽을 택한
+      // 대가로, 실패하면 원문을 사람에게 돌려준다.
+      done.push(item.id);
+      seen.add(item.id);
+      saveDone(done);
+      ack.push(item.id);
+      try {
+        await ask(item.text);
+        out.applied.push({ item, output: '' });
+      } catch (err) {
+        logger.error('진행판에서 온 말을 비서에게 못 넘겼습니다', err);
+        out.lost.push(item);
+      }
+      continue;
+    }
+
     const r = await apply(item.text);
     if (r.kind === 'ok') {
       // **지우기 전에 적는다.** 순서가 바뀌면 그 사이에 죽었을 때 두 번 쓴다.

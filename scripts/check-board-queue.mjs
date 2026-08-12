@@ -61,23 +61,31 @@ const apply = async (text) => {
   return { kind: 'ok', output: `✅ ${text}` };
 };
 
+/** 사람 말을 받는 쪽. 「askfail…」이면 넘기다 넘어진 것으로 친다. */
+const asked = [];
+const ask = async (text) => {
+  asked.push(text);
+  if (text.startsWith('askfail')) throw new Error('비서가 안 받았습니다');
+};
+
 async function clear() {
   const items = await pending();
   if (items.length) await post('ack', { ids: items.map((i) => i.id) });
   fs.rmSync(DONE, { force: true });
   applied.length = 0;
+  asked.length = 0;
 }
 
 // 1. 빈 큐
 await clear();
-eq('빈 큐면 아무 일도 없다', await q.drain(apply, BASE),
-   { applied: [], dropped: [], retry: [], duplicates: 0 });
+eq('빈 큐면 아무 일도 없다', await q.drain(apply, ask, BASE),
+   { applied: [], dropped: [], retry: [], lost: [], duplicates: 0 });
 eq('빈 큐면 부르지도 않는다', applied.length, 0);
 
 // 2. 반영하고 지운다
 await clear();
 await post('act', { text: 'ok TSK-5 완료', label: '백서' });
-let r = await q.drain(apply, BASE);
+let r = await q.drain(apply, ask, BASE);
 eq('반영한다', [r.applied.length, r.applied[0]?.output], [1, '✅ ok TSK-5 완료']);
 eq('반영한 것은 큐에서 사라진다', (await pending()).length, 0);
 
@@ -85,21 +93,21 @@ eq('반영한 것은 큐에서 사라진다', (await pending()).length, 0);
 await clear();
 const dup = await post('act', { text: 'ok TSK-6 완료' });
 fs.writeFileSync(DONE, JSON.stringify([dup.id]), 'utf-8');
-r = await q.drain(apply, BASE);
+r = await q.drain(apply, ask, BASE);
 eq('**두 번 반영하지 않는다**', [r.duplicates, r.applied.length, applied.length], [1, 0, 0]);
 eq('그래도 큐에서는 지운다', (await pending()).length, 0);
 
 // 4. 문법이 아니면 버린다 — 안 버리면 30초마다 영원히 돌아온다
 await clear();
 await post('act', { text: 'nq 이건 문법이 아니다', label: '이상한 것' });
-r = await q.drain(apply, BASE);
+r = await q.drain(apply, ask, BASE);
 eq('문법이 아니면 버린다', [r.dropped.length, r.applied.length], [1, 0]);
 eq('버린 것은 큐에서 사라진다', (await pending()).length, 0);
 
 // 5. 일시 실패는 **남겨 둔다** — 노션이 돌아오면 저절로 반영된다
 await clear();
 await post('act', { text: 'fail TSK-7 완료' });
-r = await q.drain(apply, BASE);
+r = await q.drain(apply, ask, BASE);
 eq('일시 실패는 다시 시도한다', [r.retry.length, r.applied.length, r.dropped.length], [1, 0, 0]);
 eq('**일시 실패는 큐에 남는다**', (await pending()).length, 1);
 
@@ -108,13 +116,37 @@ await clear();
 await post('act', { text: 'ok TSK-8 완료' });
 await post('act', { text: 'fail TSK-9 완료' });
 await post('act', { text: 'ok TSK-10 완료' });
-r = await q.drain(apply, BASE);
+r = await q.drain(apply, ask, BASE);
 eq('성공 둘 · 남길 것 하나', [r.applied.length, r.retry.length], [2, 1]);
 eq('남은 것은 실패한 그것뿐', (await pending()).map((i) => i.text), ['fail TSK-9 완료']);
 
 // 7. 남은 것이 다음 판에 성공하면 그때 지운다
-r = await q.drain(async () => ({ kind: 'ok', output: '✅ 나중에 됐다' }), BASE);
+r = await q.drain(async () => ({ kind: 'ok', output: '✅ 나중에 됐다' }), ask, BASE);
 eq('복구되면 저절로 반영된다', [r.applied.length, (await pending()).length], [1, 0]);
+
+// 8. 사람 말은 짧은 문법 쪽으로 가지 않는다 — 가면 문법이 아니라고 버려진다
+await clear();
+await post('act', { text: '[진행판] TSK-5 「백서」\n오늘 초안 넘김', kind: 'ask', label: '백서' });
+r = await q.drain(apply, ask, BASE);
+eq('사람 말은 비서가 받는다', [asked.length, applied.length], [1, 0]);
+eq('받은 것은 큐에서 사라진다', (await pending()).length, 0);
+
+// 9. **넘기다 넘어져도 다시 부르지 않는다.** 비서는 노션에 쓰고 슬랙에 답하는
+//    부작용이 있어, 되풀이하면 그 일이 두 번 일어난다. 대신 원문을 돌려준다.
+await clear();
+await post('act', { text: 'askfail 넘기다 넘어질 것', kind: 'ask' });
+r = await q.drain(apply, ask, BASE);
+eq('실패해도 원문은 돌아온다', [r.lost.length, r.retry.length], [1, 0]);
+eq('**다시 부르지 않는다** — 큐에서 지워진다', (await pending()).length, 0);
+r = await q.drain(apply, ask, BASE);
+eq('다음 판에도 안 돌아온다', [r.lost.length, asked.length], [0, 1]);
+
+// 10. 받을 곳이 없으면 **버리지 않고 남긴다** — 사람 말은 다시 만들 수 없다
+await clear();
+await post('act', { text: '받을 곳이 없을 때', kind: 'ask' });
+r = await q.drain(apply, null, BASE);
+eq('받을 곳이 없으면 남긴다', [r.retry.length, r.lost.length, r.dropped.length], [1, 0, 0]);
+eq('큐에 그대로 있다', (await pending()).length, 1);
 
 await clear();
 fs.rmSync(DONE, { force: true });
@@ -125,4 +157,4 @@ if (fails.length) {
   process.exit(1);
 }
 console.log('통과 — 진행판 폴러 (빈 큐 · 반영 · 중복 방지 · 문법 아님 버리기 · '
-  + '일시 실패 남기기 · 섞인 판 · 복구 후 반영)');
+  + '일시 실패 남기기 · 섞인 판 · 복구 후 반영 · 사람 말 넘기기 · 한 번만 시도 · 받을 곳 없음)');
