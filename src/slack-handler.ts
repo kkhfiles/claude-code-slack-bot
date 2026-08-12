@@ -255,6 +255,7 @@ export class SlackHandler {
         },
         async (prompt, opts) => this.runAssistantSession(prompt, opts),
         config.assistant.configDir,
+        async (text) => this.askFromBoard(text),
       );
 
       // Loopback trigger endpoint for manual analysis (Phase 1.7 / 1.8 / 1.9).
@@ -451,6 +452,40 @@ export class SlackHandler {
       }
       await fn(args);
     });
+  }
+
+  /**
+   * 진행판에서 온 **사람 말**을 이 방의 대화로 들여보낸다.
+   *
+   * **해석을 여기서 하지 않는다.** 규칙(임의 등록 금지 · 제안 후 컨펌 · 원문 캡처)이
+   * 이미 아래 경로에 붙어 있어서, 같은 입구로 넣으면 그것들이 그대로 걸린다.
+   * 따로 세션을 띄우는 길도 있었지만 **되묻기가 끊긴다** — 답을 보고 사람이 이 방에
+   * 대꾸하면 그 말은 다른 대화로 가기 때문이다.
+   *
+   * **스레드를 만들지 않는다.** 세션 키가 `thread_ts || 'direct'` 라, 스레드에 넣으면
+   * 이 방에서 이어 가던 대화와 갈라진다.
+   */
+  private async askFromBoard(text: string): Promise<void> {
+    const channel = config.assistant.dmChannel;
+    const user = config.bot.allowUsers[0];
+    if (!channel || !user) throw new Error('비서 방 또는 사용자가 설정되지 않았습니다');
+
+    // 무엇에 대한 답인지 보이게 먼저 남긴다 — 이 줄이 없으면 답만 덩그러니 뜬다.
+    // 봇이 쓴 것이라 메시지 핸들러가 되받지 않는다(`user` 가 없는 이벤트가 된다).
+    const posted = await this.app.client.chat.postMessage({
+      channel,
+      text: `🗂 진행판에서\n${text}`,
+    });
+
+    const say = async (msg: any) => {
+      await this.app.client.chat.postMessage(
+        typeof msg === 'string' ? { channel, text: msg } : { channel, ...msg },
+      );
+    };
+    await this.handleMessage(
+      { type: 'message', channel, user, text, ts: String(posted.ts) } as MessageEvent,
+      say,
+    );
   }
 
   async handleMessage(event: MessageEvent, say: any) {

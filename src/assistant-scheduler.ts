@@ -192,6 +192,11 @@ export class AssistantScheduler {
     private sendMessage: (text: string, blocks?: unknown[]) => Promise<void>,
     private spawnSession: (prompt: string, opts: SpawnOpts) => Promise<SessionResult>,
     configDir: string,
+    /**
+     * 진행판에서 온 **사람 말**을 이 방의 대화로 들여보내는 길. 없으면 그런 항목은
+     * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
+     */
+    private askFromBoard?: (text: string) => Promise<void>,
   ) {
     this.configPath = path.join(configDir, 'config.json');
     this.promptsDir = path.join(configDir, 'prompts');
@@ -734,7 +739,7 @@ export class AssistantScheduler {
       if (this.boardQueueBusy) return;
       this.boardQueueBusy = true;
       try {
-        const r = await drain(quickUpdate);
+        const r = await drain(quickUpdate, this.askFromBoard ?? null);
         if (this.boardQueueFailures) {
           this.logger.info(`Board queue recovered (${this.boardQueueFailures}회 실패 뒤)`);
           this.boardQueueFailures = 0;
@@ -754,6 +759,14 @@ export class AssistantScheduler {
             '— 그 업무를 찾지 못했거나 형식이 맞지 않습니다.\n' +
             '누른 것은 취소됐습니다. 진행판을 새로고침해 다시 누르거나, ' +
             '업무 제목을 눌러 노션에서 바로 바꾸세요.',
+          ).catch(() => { });
+        }
+        for (const item of r.lost) {
+          // **원문을 그대로 돌려준다.** 한 번만 시도하는 대가라, 여기서 안 돌려주면
+          // 사람이 쓴 글이 조용히 사라진다. 붙여넣기만 하면 다시 갈 수 있게 둔다.
+          await this.sendMessage(
+            '⚠️ 진행판에서 보낸 말을 넘기지 못했습니다. 원문은 아래 그대로입니다 ' +
+            '— 다시 보내시려면 이 방에 붙여넣으세요.\n\n' + item.text,
           ).catch(() => { });
         }
       } catch (error) {
