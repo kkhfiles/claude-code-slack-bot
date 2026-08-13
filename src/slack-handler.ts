@@ -41,6 +41,12 @@ import { captureToInbox, checkinMap, checkinNow, checkinOnce, isWorkAssistantEna
  * 모델이 턴마다 얼마나 생각할지 스스로 정하고, `effort` 는 그 깊이를 안내한다.
  * `thinking: {budgetTokens}` 는 타입 주석이 "older models" 라고 못박은 경로라
  * 넘기는 순간 적응형이 꺼져, 쉬운 턴에서 알아서 줄이는 성질까지 같이 잃는다.
+ *
+ * **2026-08-13 에 모델까지 같이 쟀다** — 모델 3 × 깊이 3 × 사례 6 = 54회를 실제
+ * 세션 조건으로 돌렸다(`scripts/model-bench.mjs`). `opus` + 이 값이 정확도 6/6 ·
+ * 중간값 21초 · 건당 $0.60 으로 가장 좋았다. **깊이를 올려도 정확해지지 않고**
+ * (opus low 6/6 > high 5/6), 작은 모델은 헤매느라 **더 느리면서 틀린다**(haiku
+ * 2~3/6 에 20~26초). 표와 해석은 work-assistant `docs/design.md`.
  */
 const INTERACTIVE_EFFORT = 'low' as const;
 
