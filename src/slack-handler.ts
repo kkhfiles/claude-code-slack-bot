@@ -330,6 +330,7 @@ export class SlackHandler {
               digestPath: path.join(dataDir, 'coffeechat-digest.json'),
               open: config.letter.coffeechat.open,
               digestAt: config.letter.coffeechat.digestAt,
+              sendAt: config.letter.coffeechat.sendAt,
               notionDb: config.letter.coffeechat.notionDb,
               notionScript: config.letter.coffeechat.notionScript,
               notionPython: config.letter.coffeechat.notionPython,
