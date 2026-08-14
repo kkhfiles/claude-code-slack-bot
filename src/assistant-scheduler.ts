@@ -11,7 +11,7 @@ import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
-  refreshBoardIfChanged } from './work-assistant';
+  refreshBoardIfChanged, isQuietPeriod, workAssistantRoot } from './work-assistant';
 import { boardQueueEnabled, drain } from './board-queue';
 
 /**
@@ -49,6 +49,28 @@ const BOARD_QUEUE_POLL_MS = 5_000;
  * 싸다 — 3분이면 하루 160회, 노션 한도(초당 3회 평균) 근처에도 못 간다.
  */
 const NOTION_WATCH_MS = 180_000;
+/**
+ * 진행판 맨 위 한 줄을 갱신하는 창. 업무일 **07·09·11·13·15·17·19시** 일곱 번.
+ *
+ * **여기만 돈이 든다.** 앞의 폴러들은 파일·HTTP 한 번이지만 이쪽은 세션 하나다
+ * — 봇이 남긴 기록 기준 아침 브리핑 $0.145/회, 작은 판단 $0.039/회. 실제로 얼마
+ * 나갔는지는 `.assistant-costs.json` 의 `focus` 항목으로 센다. **추정하지 말고
+ * 거기서 본다.**
+ *
+ * **두 시간 간격인 이유는 시간이 흐르면 답이 바뀌기 때문이다.** 업무가 그대로여도
+ * 오전 9시의 「오늘 안에 되는 것」과 오후 5시의 그것이 다르다. 매시간까지는 필요
+ * 없다고 봤다 — 한 시간 만에 뒤집히는 판단이면 그건 판단이 아니라 소음이다.
+ */
+const FOCUS_FROM_HOUR = 7;
+const FOCUS_TO_HOUR = 19;
+const FOCUS_EVERY_HOURS = 2;
+/**
+ * 짧은 판단이지만 **틀리면 하루의 첫 결정이 틀어진다.** 모델 실험(2026-08-13)에서
+ * 이 방의 판단은 `opus` + `low` 가 정확도·시간 모두 앞섰고, 같은 성격이라 그대로
+ * 쓴다 — 「깊게 생각할 것은 적고 무엇을 고를지는 정확해야 하는」 자리다.
+ */
+const FOCUS_MODEL = 'opus';
+const FOCUS_EFFORT = 'low' as const;
 
 export interface AssistantConfig {
   briefing: {
@@ -182,6 +204,8 @@ export class AssistantScheduler {
   private notionWatchBusy = false;
   private notionWatchFailures = 0;
   private daouKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
+  private focusTimer: ReturnType<typeof setTimeout> | null = null;
+  private focusBusy = false;
   private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
   /** 한 판이 끝나기 전에 다음 판이 겹치지 않게. 노션 왕복이 폴링 간격보다 길 수 있다. */
   private boardQueueBusy = false;
@@ -533,6 +557,7 @@ export class AssistantScheduler {
       this.scheduleCheckinPm();
       this.startBoardQueuePoller();
       this.startNotionWatch();
+      this.scheduleFocus();
     }
 
     if (this.getEnabledAnalysisTypes().length > 0) {
@@ -572,6 +597,10 @@ export class AssistantScheduler {
     if (this.boardQueueTimer) {
       clearInterval(this.boardQueueTimer);
       this.boardQueueTimer = null;
+    }
+    if (this.focusTimer) {
+      clearTimeout(this.focusTimer);
+      this.focusTimer = null;
     }
   }
 
@@ -740,6 +769,84 @@ export class AssistantScheduler {
    * 튈 때마다 DM 이 오면 무시하는 습관이 든다. 반영이 밀리는 것은 `brief` 의 ⛔ 가
    * 잡는다(폴러 밖에 있어야 폴러가 죽어도 보인다).
    */
+  /**
+   * 진행판 맨 위 한 줄 — 업무일 07~19시 **정각마다**.
+   *
+   * **돈이 드는 유일한 폴러다.** 그래서 안 돌아도 되는 경우를 전부 앞에서 끊는다:
+   * 창 밖 · 주말·공휴일 · 「조용히」 기간 · 앞판이 아직 도는 중. 판단이 안 서면
+   * (`isQuietPeriod` 가 못 읽으면) **도는 쪽**으로 답한다 — 조용해지는 쪽으로
+   * 틀리면 무언가 깨졌을 때 그게 정상으로 보인다.
+   *
+   * 실패는 조용히 넘긴다. 판에 안 뜨는 것이 곧 신호이고(낡으면 흐려진다),
+   * 시각마다 오는 실패 쪽지는 곧 무시된다.
+   */
+  private scheduleFocus(): void {
+    const next = new Date();
+    next.setHours(next.getHours() + 1, 0, 5, 0);   // 정각 + 5초
+    const waitMs = next.getTime() - Date.now();
+    this.logger.info('Scheduled board focus', { nextFire: next.toISOString() });
+
+    this.focusTimer = setTimeout(async () => {
+      const hour = new Date().getHours();
+      const nonWorking = this.isNonWorkingDay();
+      try {
+        if (this.focusBusy) {
+          this.logger.info('Skipping board focus (앞판이 아직 돕니다)');
+        } else if (hour < FOCUS_FROM_HOUR || hour > FOCUS_TO_HOUR
+                   || (hour - FOCUS_FROM_HOUR) % FOCUS_EVERY_HOURS !== 0) {
+          // 로그도 안 남긴다 — 하루 열일곱 번 「이 시각 아님」이 쌓이면 로그만 흐려진다
+        } else if (nonWorking.skip) {
+          this.logger.info(`Skipping board focus (${nonWorking.reason})`);
+        } else if (await isQuietPeriod()) {
+          this.logger.info('Skipping board focus (조용히 기간)');
+        } else {
+          this.focusBusy = true;
+          await this.runFocus();
+        }
+      } catch (error) {
+        this.logger.warn('Board focus failed', {
+          why: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        this.focusBusy = false;
+        this.scheduleFocus();
+      }
+    }, waitMs);
+  }
+
+  private async runFocus(): Promise<void> {
+    const promptPath = path.join(this.promptsDir, 'focus.md');
+    if (!fs.existsSync(promptPath)) {
+      this.logger.warn(`Focus prompt not found: ${promptPath}`);
+      return;
+    }
+    // ⚠️ **업무 비서 쪽에서 돈다.** 스케줄러의 기본 작업 디렉터리는 프롬프트가
+    // 사는 곳이라, 그대로 두면 `bin/tasks.py` 가 없어 매시간 조용히 실패한다.
+    const root = workAssistantRoot();
+    if (!root) return;
+    const result = await this.spawnSession(fs.readFileSync(promptPath, 'utf-8'), {
+      workingDirectory: root,
+      model: FOCUS_MODEL,
+      effort: FOCUS_EFFORT,
+      permissionMode: 'default',
+      // 이 세션이 하는 일은 **읽고 한 줄 쓰기**뿐이다. 도구를 넓히면 매시간 도는
+      // 자리에서 무엇이든 할 수 있게 된다.
+      allowedTools: ['Bash', 'Read'],
+      appendSystemPrompt:
+        'tasks.py 의 json·focus 두 서브커맨드만 쓴다. 그 외 쓰기·발신 금지.',
+      env: { ASSISTANT_MODE: 'focus', CLAUDE_SCHEDULED: '1' },
+      skipMcp: true,
+      noSessionPersistence: true,
+      maxDurationMs: 3 * 60_000,
+      useSdk: true,
+    });
+    this.recordSessionCost('focus', result);
+    this.logger.info('Board focus updated', {
+      costUsd: result.costUsd?.toFixed(4),
+      text: result.text?.substring(0, 200),
+    });
+  }
+
   private startBoardQueuePoller(): void {
     if (!boardQueueEnabled()) {
       this.logger.info('Board queue poller off (주소나 열쇠 없음)');
