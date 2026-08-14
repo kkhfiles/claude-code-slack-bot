@@ -2609,6 +2609,8 @@ export class SlackHandler {
       skipMcp: opts.skipMcp,
       noSessionPersistence: opts.noSessionPersistence,
       tools: opts.tools,
+      settings: opts.settings,
+      settingSources: opts.settingSources,
       env,
     };
 
