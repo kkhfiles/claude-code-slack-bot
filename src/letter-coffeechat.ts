@@ -14,7 +14,9 @@ import { coffeechatMessage } from './coffeechat-message';
  *      본다). 그래서 창에 적는 말도 「익명입니다」가 아니라 **「받는 분께는 누가 썼는지
  *      전하지 않습니다」** 여야 한다 — 없는 익명을 약속하면 그 말을 믿은 사람이 다친다.
  *   2. **봇이 스스로 내보내지 않는다.** 금요일에 하는 일은 실장에게 알리는 것까지고,
- *      내보내는 것은 매번 사람이 고른다. 나간 말은 되돌릴 수 없다.
+ *      내보내는 것은 매번 사람이 고른다. 나간 말은 되돌릴 수 없다. 고를 때 **문구도
+ *      고칠 수 있다** — 칸에 원문이 들어 있고 거기 있는 글이 그대로 나간다. 고친 것은
+ *      기록에도 고친 대로 남긴다(받은 사람이 본 글과 우리 기록이 어긋나면 안 된다).
  *   3. **칭찬만 나간다.** 기타 피드백은 여기서 내보내는 길이 아예 없다. 실장이 따로 들고
  *      가는 것이고, 목록에서만 본다.
  *   4. **원문은 밖으로 나가지 않는다.** 대화(모델 경유)와 이 저장소는 완전히 다른 길이다 —
@@ -247,13 +249,25 @@ export class LetterCoffeechat {
         const chosen = view.state.values[`pick:${id}`]?.[`pick:${id}`]?.selected_option?.value;
         if (chosen) picks.push({ id, how: chosen });
       }
-      const send = picks.filter((p) => p.how === 'send')
-        .map((p) => live.get(p.id)!.entry).filter((e) => e.kind === 'praise' && e.to);
+      // 고친 문구가 있으면 **그것이 나간다.** 안 건드렸으면 원문 그대로다.
+      const send: Entry[] = [];
+      const edited = new Map<string, string>();
+      const emptied: string[] = [];
+      for (const p of picks) {
+        if (p.how !== 'send') continue;
+        const e = live.get(p.id)!.entry;
+        if (e.kind !== 'praise' || !e.to) continue;
+        const typed = (view.state.values[`text:${p.id}`]?.[`text:${p.id}`]?.value ?? '').trim();
+        if (!typed) { emptied.push(e.to_name ?? p.id); continue; }
+        if (typed === (e.text ?? '').trim()) { send.push(e); continue; }
+        edited.set(p.id, typed);
+        send.push({ ...e, text: typed });
+      }
       const drop = picks.filter((p) => p.how === 'drop');
       // 기타 피드백을 손에서 내려놓는 자리. **나가는 것이 아니라 목록에서 내리는 것**이다.
       const done = picks.filter((p) => p.how === 'done');
 
-      if (send.length === 0 && drop.length === 0 && done.length === 0) {
+      if (send.length === 0 && drop.length === 0 && done.length === 0 && emptied.length === 0) {
         // **아무것도 안 골랐다.** 조용히 넘어가면 보낸 줄 알고 넘어간다.
         await this.tell(client, this.opts.managerUserId, '고르신 것이 없어 *아무것도 보내지 않았습니다.* 남은 것은 그대로 있습니다.');
         return;
@@ -284,7 +298,12 @@ export class LetterCoffeechat {
       }
 
       const stamp = new Date().toISOString();
-      for (const id of okIds) this.note({ ts: stamp, action: 'sent', id });
+      // 고쳐서 보낸 것은 **나간 글을 기록에 남긴다** — 안 남기면 받은 사람이 본 글과
+      // 우리 기록이 서로 다른 채로 굳는다.
+      for (const id of okIds) {
+        const t = edited.get(id);
+        this.note(t ? { ts: stamp, action: 'sent', id, text: t } : { ts: stamp, action: 'sent', id });
+      }
       for (const p of drop) this.note({ ts: stamp, action: 'dropped', id: p.id });
       for (const p of done) this.note({ ts: stamp, action: 'done', id: p.id });
       // **고르지 않은 것은 건드리지 않는다** — 다음 회차에 그대로 다시 올라온다.
@@ -293,6 +312,8 @@ export class LetterCoffeechat {
         okIds.length ? `보냈습니다 · ${okIds.length}건 (${byTo.size}명)` : '',
         done.length ? `마무리했습니다 · ${done.length}건` : '',
         drop.length ? `버렸습니다 · ${drop.length}건` : '',
+        edited.size ? `_그중 ${edited.size}건은 고치신 문구로 나갔습니다._` : '',
+        emptied.length ? `*문구가 비어 있어 안 보냈습니다* · ${emptied.join(' · ')} — 그대로 남아 있습니다.` : '',
         failed.length ? `*보내지 못했습니다* · ${failed.join(' · ')} — 그대로 남아 있으니 다시 시도해 주세요.` : '',
       ].filter(Boolean);
       await this.tell(client, this.opts.managerUserId, lines.join('\n'));
@@ -468,10 +489,10 @@ export class LetterCoffeechat {
         text: {
           type: 'mrkdwn',
           text: `*→ ${e.to_name}*${v.later ? '  _(지난 회차에서 넘어옴)_' : ''}\n`
-            + `> ${this.quote(e.text)}\n`
             + `_남긴 사람: ${e.from_name} · ${this.day(e.ts)}_`,
         },
       });
+      blocks.push(this.edit(e.id, e.text ?? ''));
       blocks.push(this.pick(e.id, [opt('보내기', 'send'), opt('다음에', 'keep'), opt('버리기', 'drop')]));
       blocks.push({ type: 'divider' });
     }
@@ -510,6 +531,26 @@ export class LetterCoffeechat {
   /** 작은 회색 한 줄. */
   private note0(text: string): any {
     return { type: 'context', elements: [{ type: 'mrkdwn', text: `_${text}_` }] };
+  }
+
+  /**
+   * 보내기 전에 문구를 고치는 칸. **원문이 들어 있고, 여기 있는 글이 그대로 나간다.**
+   *
+   * 인용줄 대신 이 칸에 글을 둔다 — 같은 글을 위아래로 두 번 보여 주면 어느 쪽이 나가는
+   * 글인지 모르게 된다. 대상·남긴 사람은 위 칸에 그대로 남는다.
+   *
+   * **비우고 제출하면 안 보낸다.** 원문으로 되돌리면 실장이 지운 뜻이 사라지고, 빈 글을
+   * 보내면 받는 사람에게 빈 카드가 간다. 둘 다 안 하고 그대로 남겨 둔 뒤 알린다.
+   */
+  private edit(id: string, text: string): any {
+    return {
+      type: 'input', block_id: `text:${id}`, optional: true,
+      label: { type: 'plain_text', text: '보낼 문구 — 고치면 고친 대로 나갑니다' },
+      element: {
+        type: 'plain_text_input', action_id: `text:${id}`, multiline: true,
+        initial_value: text.slice(0, MAX_LEN), max_length: MAX_LEN,
+      },
+    };
   }
 
   /**
