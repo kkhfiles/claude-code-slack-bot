@@ -11,7 +11,8 @@ import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
-  refreshBoardIfChanged, isQuietPeriod, workAssistantRoot } from './work-assistant';
+  refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin,
+  workAssistantRoot } from './work-assistant';
 import { boardQueueEnabled, drain } from './board-queue';
 
 /**
@@ -52,10 +53,11 @@ const NOTION_WATCH_MS = 180_000;
 /**
  * 진행판 맨 위 한 줄을 갱신하는 창. 업무일 **07·09·11·13·15·17·19시** 일곱 번.
  *
- * **여기만 돈이 든다.** 앞의 폴러들은 파일·HTTP 한 번이지만 이쪽은 세션 하나다
- * — 봇이 남긴 기록 기준 아침 브리핑 $0.145/회, 작은 판단 $0.039/회. 실제로 얼마
- * 나갔는지는 `.assistant-costs.json` 의 `focus` 항목으로 센다. **추정하지 말고
- * 거기서 본다.**
+ * **여기만 돈이 든다.** 앞의 폴러들은 파일·HTTP 한 번이지만 이쪽은 세션 하나다.
+ * 실제로 얼마 나갔는지는 `.assistant-costs.json` 의 `focus` 항목으로 센다.
+ * **추정하지 말고 거기서 본다** — 첫 두 회 실측 **$0.93/회**로 추정($0.10~0.15)의
+ * 여섯 배였다. 한 줄 쓰는 데 든 것이 아니라 **들고 시작한 문맥**이 컸다(캐시 쓰기
+ * 7.7만 토큰). 그래서 이 세션은 보이는 도구를 두 개로 줄인다.
  *
  * **두 시간 간격인 이유는 시간이 흐르면 답이 바뀌기 때문이다.** 업무가 그대로여도
  * 오전 9시의 「오늘 안에 되는 것」과 오후 5시의 그것이 다르다. 매시간까지는 필요
@@ -799,6 +801,10 @@ export class AssistantScheduler {
           this.logger.info(`Skipping board focus (${nonWorking.reason})`);
         } else if (await isQuietPeriod()) {
           this.logger.info('Skipping board focus (조용히 기간)');
+        } else if (await sessionFocusWithin(FOCUS_EVERY_HOURS)) {
+          // 아침 브리핑에서 사람과 같이 정한 줄이 아직 이 차례 안에 있다. 데이터만
+          // 보는 이쪽이 그것을 덮으면 대화에서 정한 순서가 사라진다.
+          this.logger.info('Skipping board focus (사람이 적은 줄이 아직 이 차례 안)');
         } else {
           this.focusBusy = true;
           await this.runFocus();
@@ -831,6 +837,11 @@ export class AssistantScheduler {
       permissionMode: 'default',
       // 이 세션이 하는 일은 **읽고 한 줄 쓰기**뿐이다. 도구를 넓히면 매시간 도는
       // 자리에서 무엇이든 할 수 있게 된다.
+      //
+      // `tools` 와 `allowedTools` 는 다른 것이다 — 앞은 **모델에게 보이는 목록**,
+      // 뒤는 물어보지 않고 허용하는 목록. 뒤만 좁히면 나머지 도구의 설명이 그대로
+      // 문맥에 실려 매번 돈이 된다(첫 실측 $0.93/회 · 캐시 쓰기 7.7만 토큰).
+      tools: ['Bash', 'Read'],
       allowedTools: ['Bash', 'Read'],
       appendSystemPrompt:
         'tasks.py 의 json·focus 두 서브커맨드만 쓴다. 그 외 쓰기·발신 금지.',
