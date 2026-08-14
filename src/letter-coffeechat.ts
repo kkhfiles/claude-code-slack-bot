@@ -13,10 +13,13 @@ import { coffeechatMessage } from './coffeechat-message';
  *   1. **받는 사람에게 작성자를 전하지 않는다.** 기록에는 남긴다(누가 냈는지 실장은
  *      본다). 그래서 창에 적는 말도 「익명입니다」가 아니라 **「받는 분께는 누가 썼는지
  *      전하지 않습니다」** 여야 한다 — 없는 익명을 약속하면 그 말을 믿은 사람이 다친다.
- *   2. **봇이 스스로 내보내지 않는다.** 금요일에 하는 일은 실장에게 알리는 것까지고,
- *      내보내는 것은 매번 사람이 고른다. 나간 말은 되돌릴 수 없다. 고를 때 **문구도
- *      고칠 수 있다** — 칸에 원문이 들어 있고 거기 있는 글이 그대로 나간다. 고친 것은
- *      기록에도 고친 대로 남긴다(받은 사람이 본 글과 우리 기록이 어긋나면 안 된다).
+ *   2. **봇이 고르지 않는다.** 금요일에 하는 일은 실장에게 알리는 것까지고, 무엇이
+ *      나갈지는 매번 사람이 고른다. 나간 말은 되돌릴 수 없다. 고를 때 **문구도 고칠
+ *      수 있다** — 칸에 원문이 들어 있고 거기 있는 글이 그대로 나간다. 고친 것은 기록에도
+ *      고친 대로 남긴다(받은 사람이 본 글과 우리 기록이 어긋나면 안 된다).
+ *
+ *      **나가는 시각만 봇이 잡는다.** 사람이 고른 뒤 기본은 그날 저녁 예약이고, 그때
+ *      봇이 사람 없이 내보낸다. 무엇이 나갈지는 그 전에 이미 정해져 있다.
  *   3. **칭찬만 나간다.** 기타 피드백은 여기서 내보내는 길이 아예 없다. 실장이 따로 들고
  *      가는 것이고, 목록에서만 본다.
  *   4. **원문은 밖으로 나가지 않는다.** 대화(모델 경유)와 이 저장소는 완전히 다른 길이다 —
@@ -70,6 +73,8 @@ export interface LetterCoffeechatOptions {
   open: boolean;
   /** 금요일 몇 시에 알릴까 (HH:MM). */
   digestAt: string;
+  /** 예약해 두면 몇 시에 나갈까 (HH:MM). 하루 일 끝 무렵에 닿게 하려고 둔 값이다. */
+  sendAt: string;
   /** 노션에 목록을 남길 데이터베이스 id. 비면 노션 쪽은 통째로 건너뛴다. */
   notionDb?: string;
   notionScript?: string;
@@ -78,8 +83,10 @@ export interface LetterCoffeechatOptions {
 
 interface Entry {
   ts: string;
-  action: 'new' | 'sent' | 'later' | 'dropped' | 'done' | 'notion';
+  action: 'new' | 'sent' | 'later' | 'dropped' | 'done' | 'notion' | 'queued';
   id: string;
+  /** `queued` 일 때 나갈 시각(ISO). 이 줄 하나로 재시작 뒤에도 예약이 살아 있다. */
+  at?: string;
   kind?: 'praise' | 'improve';
   from?: string;
   from_name?: string;
@@ -102,6 +109,8 @@ export class LetterCoffeechat {
   private logger = new Logger('Letter:커피챗');
   private names = new Map<string, string>();
   private timer: NodeJS.Timeout | null = null;
+  /** 예약 발송이 실패했다고 이미 알린 사람. 같은 DM 이 1분마다 오는 것을 막는다. */
+  private warned = new Set<string>();
 
   constructor(private readonly opts: LetterCoffeechatOptions) {}
 
@@ -207,7 +216,7 @@ export class LetterCoffeechat {
           `*커피챗 · 기타 피드백* · 대상 *${toName}*\n> ${text.slice(0, 300)}${text.length > 300 ? '…' : ''}\n`
           + `\`${LIST_COMMAND}\` 에서 전체를 보실 수 있습니다.`);
       }
-      void this.notionCreate(now, kind === 'improve' ? 'improve' : 'praise', toName, text);
+      void this.notionCreate(now, kind === 'improve' ? 'improve' : 'praise', toName, text, name);
     });
 
     // ── 보기 ────────────────────────────────────────────────────────────
@@ -273,55 +282,52 @@ export class LetterCoffeechat {
         return;
       }
 
-      // 한 사람에게 여러 건이면 **묶어서 한 번**에. DM 이 세 번 오는 것보다 낫다.
-      const byTo = new Map<string, Entry[]>();
-      for (const e of send) byTo.set(e.to!, [...(byTo.get(e.to!) ?? []), e]);
+      // **지금 보낼지 예약할지.** 기본은 예약이다 — 일하는 중에 받는 것보다 하루 끝
+      // 무렵에 닿는 편이 낫다는 실장 판단(2026-08-14).
+      const nowGo = view.state.values.when?.when?.selected_option?.value === 'now';
+      const at = nowGo ? null : this.nextSendAt(new Date());
 
-      const okIds: string[] = [];
-      const failed: string[] = [];
-      for (const [to, items] of byTo) {
-        try {
-          const im = await client.conversations.open({ users: to });
-          const channel = im.channel?.id;
-          if (!channel) throw new Error('DM 방을 못 열었습니다');
-          // **모양은 공용 한 곳에서 만든다.** 두 경로가 각자 만들면 서로 다른 말이 나간다 —
-          // 실제로 이쪽만 빼기로 한 안내 문구를 그대로 달고 있었다.
-          await client.chat.postMessage({
-            channel, ...coffeechatMessage(items.map((e) => e.text ?? '')),
-          });
-          okIds.push(...items.map((e) => e.id));
-          this.logger.info(`전달 완료 → ${items[0].to_name} (${items.length}건)`);
-        } catch (error) {
-          this.logger.warn(`전달 실패 → ${items[0].to_name}`, error);
-          failed.push(`${items[0].to_name} (${items.length}건)`);
+      const stamp = new Date().toISOString();
+      let okIds: string[] = [];
+      let failed: string[] = [];
+      let groups = 0;
+
+      if (at) {
+        // 나갈 것을 **줄 하나에 다 적어 둔다.** 시각·글·받는 사람·노션 줄까지 여기 있어야
+        // 봇이 꺼졌다 켜져도 그대로 나간다(기억에만 두면 재시작에 사라진다).
+        for (const e of send) {
+          this.note({ ...e, ts: stamp, action: 'queued', at: at.toISOString(),
+                      row: live.get(e.id)?.row });
+          this.notionStatus(live.get(e.id)?.row, '예약');
+        }
+        if (send.length) this.logger.info(`예약 ${send.length}건 → ${this.hhmm(at)}`);
+      } else {
+        const out = await this.deliver(client, send);
+        okIds = out.okIds; failed = out.failed; groups = out.groups;
+        // 고쳐서 보낸 것은 **나간 글을 기록에 남긴다** — 안 남기면 받은 사람이 본 글과
+        // 우리 기록이 서로 다른 채로 굳는다.
+        for (const id of okIds) {
+          const t = edited.get(id);
+          this.note(t ? { ts: stamp, action: 'sent', id, text: t } : { ts: stamp, action: 'sent', id });
         }
       }
 
-      const stamp = new Date().toISOString();
-      // 고쳐서 보낸 것은 **나간 글을 기록에 남긴다** — 안 남기면 받은 사람이 본 글과
-      // 우리 기록이 서로 다른 채로 굳는다.
-      for (const id of okIds) {
-        const t = edited.get(id);
-        this.note(t ? { ts: stamp, action: 'sent', id, text: t } : { ts: stamp, action: 'sent', id });
-      }
       for (const p of drop) this.note({ ts: stamp, action: 'dropped', id: p.id });
       for (const p of done) this.note({ ts: stamp, action: 'done', id: p.id });
       // **고르지 않은 것은 건드리지 않는다** — 다음 회차에 그대로 다시 올라온다.
 
       const lines = [
-        okIds.length ? `보냈습니다 · ${okIds.length}건 (${byTo.size}명)` : '',
+        at && send.length ? `:alarm_clock: *${this.day(at.toISOString())} ${this.hhmm(at)}에 나갑니다* · ${send.length}건` : '',
+        okIds.length ? `보냈습니다 · ${okIds.length}건 (${groups}명)` : '',
         done.length ? `마무리했습니다 · ${done.length}건` : '',
         drop.length ? `버렸습니다 · ${drop.length}건` : '',
-        edited.size ? `_그중 ${edited.size}건은 고치신 문구로 나갔습니다._` : '',
+        edited.size ? `_그중 ${edited.size}건은 고치신 문구로 나갑니다._` : '',
         emptied.length ? `*문구가 비어 있어 안 보냈습니다* · ${emptied.join(' · ')} — 그대로 남아 있습니다.` : '',
         failed.length ? `*보내지 못했습니다* · ${failed.join(' · ')} — 그대로 남아 있으니 다시 시도해 주세요.` : '',
       ].filter(Boolean);
       await this.tell(client, this.opts.managerUserId, lines.join('\n'));
 
-      // 남긴 사람에게 닿았다고 알린다 — 허공에 던진 것이 아니라는 것이 다음 한 줄을 부른다.
-      for (const e of send.filter((x) => okIds.includes(x.id))) {
-        if (e.from) await this.tell(client, e.from, `남겨 주신 이야기를 ${e.to_name} 님께 전해 드렸습니다. 고맙습니다 :coffee:`);
-      }
+      await this.thank(client, send, okIds);
       // **새 줄을 만들지 않는다** — 같은 이야기가 「대기」와 「보냄」 두 줄로 남았다.
       for (const id of okIds) this.notionStatus(live.get(id)?.row, '보냄');
       for (const p of done) this.notionStatus(live.get(p.id)?.row, '마무리');
@@ -334,8 +340,112 @@ export class LetterCoffeechat {
     this.startTimer(app);
     this.logger.info(`${COMMAND}·${LIST_COMMAND} 준비됨 — ${this.opts.open
       ? `실원에게 열림 (${this.opts.members.length}명)`
-      : '아직 안 열림 (실장만 · 열려면 LETTER_CC_OPEN=1)'} · 금요일 ${this.opts.digestAt} 알림`);
+      : '아직 안 열림 (실장만 · 열려면 LETTER_CC_OPEN=1)'} · 금요일 ${this.opts.digestAt} 알림`
+      + ` · 예약하면 ${this.opts.sendAt} 발송 (기다리는 것 ${this.pending().length}건)`);
   };
+
+  // ── 내보내기 ──────────────────────────────────────────────────────────
+  /**
+   * 실제로 DM 을 보내는 유일한 자리. **즉시 발송과 예약 발송이 같은 길을 쓴다** —
+   * 두 곳이 각자 보내면 한쪽만 고쳐지고 나머지 하나가 옛 모양으로 남는다.
+   */
+  private async deliver(client: any, entries: Entry[]):
+    Promise<{ okIds: string[]; failed: string[]; groups: number }> {
+    // 한 사람에게 여러 건이면 **묶어서 한 번**에. DM 이 세 번 오는 것보다 낫다.
+    const byTo = new Map<string, Entry[]>();
+    for (const e of entries) byTo.set(e.to!, [...(byTo.get(e.to!) ?? []), e]);
+    const okIds: string[] = [];
+    const failed: string[] = [];
+    for (const [to, items] of byTo) {
+      try {
+        const im = await client.conversations.open({ users: to });
+        const channel = im.channel?.id;
+        if (!channel) throw new Error('DM 방을 못 열었습니다');
+        // **모양은 공용 한 곳에서 만든다.** 두 경로가 각자 만들면 서로 다른 말이 나간다 —
+        // 실제로 이쪽만 빼기로 한 안내 문구를 그대로 달고 있었다.
+        await client.chat.postMessage({
+          channel, ...coffeechatMessage(items.map((e) => e.text ?? '')),
+        });
+        okIds.push(...items.map((e) => e.id));
+        this.logger.info(`전달 완료 → ${items[0].to_name} (${items.length}건)`);
+      } catch (error) {
+        this.logger.warn(`전달 실패 → ${items[0].to_name}`, error);
+        failed.push(`${items[0].to_name} (${items.length}건)`);
+      }
+    }
+    return { okIds, failed, groups: byTo.size };
+  }
+
+  /** 남긴 사람에게 닿았다고 알린다 — 허공에 던진 것이 아니라는 것이 다음 한 줄을 부른다. */
+  private async thank(client: any, entries: Entry[], okIds: string[]): Promise<void> {
+    for (const e of entries) {
+      if (!e.from || !okIds.includes(e.id)) continue;
+      await this.tell(client, e.from, `남겨 주신 이야기를 ${e.to_name} 님께 전해 드렸습니다. 고맙습니다 :coffee:`);
+    }
+  }
+
+  // ── 예약 발송 ─────────────────────────────────────────────────────────
+  /**
+   * 예약하면 나갈 시각. **오늘 그 시각이 안 지났으면 오늘, 지났으면 내일**이다.
+   *
+   * 지난 시각을 골랐을 때 「지금 바로」로 바꿔 버리지 않는다 — 예약을 고른 사람은
+   * 나중에 나가기를 바란 것이고, 17시 59분과 18시 1분에 동작이 뒤집히면 못 믿는다.
+   */
+  private nextSendAt(now: Date): Date {
+    const [h, m] = this.opts.sendAt.split(':').map((x) => parseInt(x, 10));
+    const at = new Date(now);
+    at.setHours(h, m, 0, 0);
+    if (at.getTime() <= now.getTime()) at.setDate(at.getDate() + 1);
+    return at;
+  }
+
+  private hhmm(d: Date): string {
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+
+  private sameDay(a: Date, b: Date): boolean {
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth()
+      && a.getDate() === b.getDate();
+  }
+
+  /** 예약해 뒀고 아직 안 나간 것. 나갈 것이 줄에 다 적혀 있어 재시작을 넘긴다. */
+  private pending(): Entry[] {
+    const out = new Map<string, Entry>();
+    for (const e of this.history()) {
+      if (e.action === 'queued') out.set(e.id, e);
+      else if (e.action === 'sent' || e.action === 'dropped') out.delete(e.id);
+    }
+    return [...out.values()];
+  }
+
+  /**
+   * 시각이 된 예약을 내보낸다. 60초 타이머가 부른다.
+   *
+   * 봇이 꺼져 있던 사이에 시각이 지났으면 **다시 켜질 때 바로 나간다** — 늦게 닿은
+   * 칭찬이 안 닿은 것보다 낫다.
+   *
+   * **실패한 것은 다음 주기에 다시 해 본다.** 다만 실장에게 알리는 것은 건마다 한 번만
+   * 한다 — 안 그러면 못 닿는 사람 하나 때문에 1분마다 같은 DM 이 온다.
+   */
+  private async maybeSendQueued(app: App): Promise<void> {
+    const now = Date.now();
+    const due = this.pending().filter((e) => e.at && Date.parse(e.at) <= now);
+    if (due.length === 0) return;
+
+    const { okIds, failed, groups } = await this.deliver(app.client, due);
+    const stamp = new Date().toISOString();
+    for (const id of okIds) this.note({ ts: stamp, action: 'sent', id });
+    for (const e of due) if (okIds.includes(e.id)) this.notionStatus(e.row, '보냄');
+    await this.thank(app.client, due, okIds);
+
+    const fresh = failed.filter((f) => !this.warned.has(f));
+    for (const f of fresh) this.warned.add(f);
+    const lines = [
+      okIds.length ? `:coffee: 예약해 두신 커피챗을 보냈습니다 · ${okIds.length}건 (${groups}명)` : '',
+      fresh.length ? `*예약한 것을 못 보냈습니다* · ${fresh.join(' · ')} — 계속 다시 해 봅니다.` : '',
+    ].filter(Boolean);
+    if (lines.length) await this.tell(app.client, this.opts.managerUserId, lines.join('\n'));
+  }
 
   // ── 주간 알림 ──────────────────────────────────────────────────────────
   /**
@@ -349,6 +459,7 @@ export class LetterCoffeechat {
     if (this.timer) return;
     this.timer = setInterval(() => {
       void this.maybeDigest(app).catch((error) => this.logger.warn('주간 알림에서 넘어졌습니다', error));
+      void this.maybeSendQueued(app).catch((error) => this.logger.warn('예약 발송에서 넘어졌습니다', error));
     }, 60 * 1000);
     this.timer.unref?.();
   }
@@ -477,6 +588,29 @@ export class LetterCoffeechat {
       elements: [{ type: 'mrkdwn', text: `칭찬 ${praise.length}건 · 기타 피드백 ${improve.length}건` }],
     });
 
+    // 예약해 둔 것은 목록에서 내려가 있다. **한 줄이라도 보여 준다** — 안 보이면
+    // 어디로 갔는지 알 길이 없고, 6시까지 나갔는지 안 나갔는지 모른다.
+    const waiting = this.pending();
+    if (waiting.length) {
+      const next = waiting.map((e) => e.at ?? '').sort()[0];
+      blocks.push(this.note0(`:alarm_clock: 나갈 차례로 두신 것 ${waiting.length}건 — ${this.day(next)} ${this.hhmm(new Date(next))}`));
+    }
+
+    // **지금 보낼지 나중에 보낼지.** 기본은 예약이다.
+    if (praise.length) {
+      const at = this.nextSendAt(new Date());
+      const label = `${this.sameDay(at, new Date()) ? '오늘' : '내일'} ${this.hhmm(at)}`;
+      blocks.push({
+        type: 'input', block_id: 'when', optional: true,
+        label: { type: 'plain_text', text: '보내는 때' },
+        element: {
+          type: 'radio_buttons', action_id: 'when',
+          initial_option: opt(label, 'sched'),
+          options: [opt(label, 'sched'), opt('지금 바로', 'now')],
+        },
+      });
+    }
+
     // ── 칭찬 — 여기서 고른 것만 나간다 ──────────────────────────────────
     blocks.push({ type: 'header', text: { type: 'plain_text', text: '전할 칭찬', emoji: true } });
     if (praise.length === 0) {
@@ -541,14 +675,18 @@ export class LetterCoffeechat {
    *
    * **비우고 제출하면 안 보낸다.** 원문으로 되돌리면 실장이 지운 뜻이 사라지고, 빈 글을
    * 보내면 받는 사람에게 빈 카드가 간다. 둘 다 안 하고 그대로 남겨 둔 뒤 알린다.
+   *
+   * ⚠️ **빈 글에는 `initial_value` 를 아예 안 붙인다.** 슬랙은 빈 문자열을 인자 오류로
+   * 돌려보내는데, 그러면 그 한 건 때문에 **창 전체가 안 열려서 목록을 못 본다.**
    */
   private edit(id: string, text: string): any {
+    const initial = text.slice(0, MAX_LEN);
     return {
       type: 'input', block_id: `text:${id}`, optional: true,
       label: { type: 'plain_text', text: '보낼 문구 — 고치면 고친 대로 나갑니다' },
       element: {
         type: 'plain_text_input', action_id: `text:${id}`, multiline: true,
-        initial_value: text.slice(0, MAX_LEN), max_length: MAX_LEN,
+        max_length: MAX_LEN, ...(initial ? { initial_value: initial } : {}),
       },
     };
   }
@@ -596,7 +734,10 @@ export class LetterCoffeechat {
       } else if (e.action === 'notion') {
         const cur = live.get(e.id);
         if (cur) live.set(e.id, { ...cur, row: e.row });
-      } else if (e.action === 'sent' || e.action === 'dropped' || e.action === 'done') {
+      } else if (e.action === 'sent' || e.action === 'dropped' || e.action === 'done'
+                 || e.action === 'queued') {
+        // **예약한 것도 목록에서 내린다.** 남겨 두면 6시를 기다리는 사이에 한 번 더
+        // 골라서 같은 이야기가 두 번 간다.
         live.delete(e.id);
       }
     }
@@ -656,10 +797,13 @@ export class LetterCoffeechat {
    * 번호를 안 남기면 나중에 상태를 바꿀 길이 없어서, 보낼 때 **같은 이야기로 새 줄을
    * 또 만들게 된다**(실제로 그렇게 짜여 있었다 — 한 칭찬이 「대기」와 「보냄」 두 줄로 남는다).
    *
-   * **작성자는 안 넣는다** — 처리에 필요 없고, 페이지를 누구와 볼지 모른다.
+   * **작성자도 넣는다** — 실장 개인 노션이고 거기서 다 되짚을 수 있어야 한다는 판단
+   * (2026-08-14). 예전에는 「페이지를 누구와 볼지 모른다」는 이유로 뺐었다. 그러니
+   * **이 데이터베이스를 남과 공유하는 순간 작성자가 함께 나간다** — 공유는 사람이 정한다.
    */
-  private async notionCreate(id: string, kind: string, to: string, text: string): Promise<void> {
-    const out = await this.runNotion(this.createArgs(kind, to, text));
+  private async notionCreate(id: string, kind: string, to: string, text: string,
+                             from: string): Promise<void> {
+    const out = await this.runNotion(this.createArgs(kind, to, text, from));
     const row = /^id\s*:\s*(\S+)/m.exec(out ?? '')?.[1];
     if (row) this.note({ ts: new Date().toISOString(), action: 'notion', id, row });
   }
@@ -670,7 +814,7 @@ export class LetterCoffeechat {
     void this.runNotion(['row-update', '--id', row, '--set', `상태=${status}`]);
   }
 
-  private createArgs(kind: string, to: string, text: string): string[] {
+  private createArgs(kind: string, to: string, text: string, from = ''): string[] {
     const args = [
       'row-create', '--db', this.opts.notionDb!,
       '--set', `이름=${text.split('\n')[0].slice(0, 60)}`,
@@ -680,6 +824,7 @@ export class LetterCoffeechat {
       '--set', `내용=${text.slice(0, 1800)}`,
     ];
     if (to) args.push('--set', `대상=${to}`);
+    if (from) args.push('--set', `작성자=${from}`);
     return args;
   }
 

@@ -168,6 +168,9 @@ export const config = {
       // 금요일 이 시각이 지나면 실장에게 한 번 알린다(토·일에도 열려 있다 — 금요일에
       // 봇이 꺼져 있었으면 그 주가 통째로 사라진다).
       digestAt: process.env.LETTER_CC_DIGEST_AT || '17:00',
+      // 예약해 두면 나가는 시각. **하루 일이 끝날 무렵**에 닿게 하려고 둔 값이다 —
+      // 일하는 중에 받으면 흐름이 끊기고, 이 시각이면 그날을 기분 좋게 닫는다.
+      sendAt: process.env.LETTER_CC_SEND_AT || '18:00',
       // 노션에 남길 목록. **비면 노션 쪽만 통째로 건너뛴다** — 정본은 로컬 기록이다.
       notionDb: process.env.LETTER_CC_NOTION_DB || '',
       notionScript: process.env.NOTION_SCRIPT
