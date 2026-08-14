@@ -132,6 +132,8 @@ export interface SpawnOpts {
   skipMcp?: boolean;
   noSessionPersistence?: boolean;
   tools?: string[];
+  settings?: Record<string, unknown>;
+  settingSources?: ('user' | 'project' | 'local')[];
   maxDurationMs?: number;
   useSdk?: boolean;
   /** 사고 깊이 — 유일한 사고 손잡이. 생략하면 SDK 기본값 `'high'`(sdk-handler 주석). */
@@ -843,6 +845,12 @@ export class AssistantScheduler {
       // 문맥에 실려 매번 돈이 된다(첫 실측 $0.93/회 · 캐시 쓰기 7.7만 토큰).
       tools: ['Bash', 'Read'],
       allowedTools: ['Bash', 'Read'],
+      // **규칙 파일을 안 읽는다.** 이 세션은 프롬프트 하나로 끝나고 그 프롬프트가
+      // 곧 규칙인데, 설정을 읽는 순간 두 CLAUDE.md(6.8만 자)가 따라 들어온다 —
+      // 첫 실측 $0.93/회의 대부분이 그것이었다. 대신 허용 규칙이 없어지므로
+      // 파이썬 호출만 여기서 직접 열어 준다(그 밖은 조용히 거부된다).
+      settingSources: [],
+      settings: { permissions: { allow: ['Bash(python:*)', 'Read'] } },
       appendSystemPrompt:
         'tasks.py 의 json·focus 두 서브커맨드만 쓴다. 그 외 쓰기·발신 금지.',
       env: { ASSISTANT_MODE: 'focus', CLAUDE_SCHEDULED: '1' },

@@ -181,6 +181,13 @@ export interface SdkRunOptions {
    */
   settings?: Record<string, unknown>;
   /**
+   * 설정을 **어디서 읽나**. 생략하면 `['user','project','local']` 셋 다 — 대화형
+   * 세션의 기본값이다. `[]` 로 비우면 규칙 파일(CLAUDE.md)까지 안 읽으므로,
+   * 프롬프트 하나로 끝나는 자동 세션은 여기서 들고 시작하는 값을 크게 줄인다.
+   * **허용 규칙도 같이 사라진다** — `settings` 로 필요한 것만 직접 준다.
+   */
+  settingSources?: ('user' | 'project' | 'local')[];
+  /**
    * Skill catalog injected into the system prompt so the model can invoke the
    * `Skill` tool by name. SDK Options docs say "omitted = no SDK auto-config",
    * which in headless (`-p`) mode means user-level `~/.claude/skills/` are not
@@ -248,6 +255,11 @@ export class SdkHandler {
 
     if (opts.effort) sdkOptions.effort = opts.effort;
     if (opts.settings) sdkOptions.settings = opts.settings;
+    // 설정을 어디서 읽나. **이 목록이 곧 CLAUDE.md 를 읽느냐다** — 규칙 파일은
+    // 설정과 같은 출처를 따라오므로, 두 CLAUDE.md 가 6.8만 자(한글이라 토큰은 그
+    // 이상)인 이 PC 에서는 세션 하나가 들고 시작하는 값이 여기서 갈린다. 대신
+    // 허용 규칙도 같이 사라지니 `settings` 로 필요한 만큼만 직접 준다.
+    if (opts.settingSources) sdkOptions.settingSources = opts.settingSources;
 
     if (opts.skills !== undefined) sdkOptions.skills = opts.skills;
 
