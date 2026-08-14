@@ -153,6 +153,10 @@ export interface SessionResult {
   sessionId: string;
   subtype: string;  // 'success' | 'error_max_budget_usd' | ...
   usage?: SessionUsage;
+  /** 몇 번 말했나 · 도구를 몇 번 불렀나. **폭주는 값이 아니라 횟수로 보인다** —
+   *  회당 $45 회차의 원인(같은 명령 900회)을 원장만으로는 볼 수 없었다. */
+  turns?: number;
+  toolCalls?: number;
 }
 
 // Google Calendar MCP tools via local @cocal/google-calendar-mcp server
@@ -187,6 +191,10 @@ interface CostEntry {
   cacheCreateTokens?: number;
   cacheReadTokens?: number;
   via?: 'cli' | 'sdk';
+  /** **폭주는 값이 아니라 횟수로 보인다.** 회당 $45 회차가 같은 명령을 900번
+   *  되불러서였는데, 원장에 값만 있어 그것을 세는 길이 금지된 자료뿐이었다. */
+  turns?: number;
+  toolCalls?: number;
 }
 
 const COST_FILE = path.join(__dirname, '..', '.assistant-costs.json');
@@ -475,6 +483,8 @@ export class AssistantScheduler {
     this.recordCost(type, result.costUsd, result.sessionId, {
       usage: result.usage,
       via: result.usage ? 'sdk' : 'cli',
+      turns: result.turns,
+      toolCalls: result.toolCalls,
     });
   }
 
@@ -482,7 +492,7 @@ export class AssistantScheduler {
     type: string,
     costUsd: number,
     sessionId: string,
-    extras?: { usage?: SessionUsage; via?: 'cli' | 'sdk' },
+    extras?: { usage?: SessionUsage; via?: 'cli' | 'sdk'; turns?: number; toolCalls?: number },
   ): void {
     if (costUsd <= 0) return;
     const entry: CostEntry = {
@@ -498,6 +508,8 @@ export class AssistantScheduler {
       entry.cacheReadTokens = extras.usage.cacheReadTokens;
     }
     if (extras?.via) entry.via = extras.via;
+    if (extras?.turns) entry.turns = extras.turns;
+    if (extras?.toolCalls) entry.toolCalls = extras.toolCalls;
     this.costEntries.push(entry);
     this.saveCosts();
     this.logger.info('Recorded cost', {
@@ -506,6 +518,8 @@ export class AssistantScheduler {
       sessionId,
       via: extras?.via,
       cacheRead: extras?.usage?.cacheReadTokens,
+      turns: extras?.turns,
+      toolCalls: extras?.toolCalls,
     });
   }
 

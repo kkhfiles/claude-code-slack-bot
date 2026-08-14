@@ -2641,6 +2641,11 @@ export class SlackHandler {
     let subtype = 'success';
     let usage: SessionUsage | undefined;
     let resultReceived = false;
+    // **원장에 값만 남으면 폭주를 볼 수가 없다.** 2026-08-14 에 회당 $45 짜리
+    // 회차의 원인(같은 명령 900회 되부르기)을 세는 데 금지된 자료(트랜스크립트)
+    // 말고는 길이 없었다. 세는 값은 여기서 같이 남긴다.
+    let turns = 0;
+    let toolCalls = 0;
 
     for await (const event of proc) {
       if (event.type === 'system' && (event as any).subtype === 'init') {
@@ -2649,6 +2654,10 @@ export class SlackHandler {
       if (event.type === 'assistant') {
         const assistantEvent = event as CliAssistantEvent;
         const content = assistantEvent.message.content || [];
+        turns += 1;
+        for (const part of content) {
+          if ((part as any)?.type === 'tool_use') toolCalls += 1;
+        }
         const extracted = this.extractTextFromContent(content);
         if (extracted) text = extracted;  // Keep only last assistant turn (drop intermediate explanations)
       }
@@ -2684,10 +2693,10 @@ export class SlackHandler {
 
     // result를 받은 뒤의 abort(grace/wall-clock)는 timeout이 아니라 정상 완료.
     if (timedOut && !resultReceived) {
-      return { text, costUsd, sessionId, subtype: 'error_timeout', usage };
+      return { text, costUsd, sessionId, subtype: 'error_timeout', usage, turns, toolCalls };
     }
 
-    return { text, costUsd, sessionId, subtype, usage };
+    return { text, costUsd, sessionId, subtype, usage, turns, toolCalls };
   }
 
   /**
