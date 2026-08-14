@@ -208,6 +208,30 @@ export async function isQuietPeriod(): Promise<boolean> {
   }
 }
 
+/**
+ * 사람과 이야기하고 적은 「지금 집중할 것」이 아직 이 차례 안에 있는가.
+ *
+ * **아침에 같이 정한 순서를 두 시간 뒤 자동 실행이 모른 채 덮는다** — 그쪽은
+ * 데이터만 보므로 대화에서 정한 것을 알 길이 없다. 그 한 차례는 건너뛴다.
+ * 다음 차례부터는 평소대로 돈다(사람이 적은 줄도 그만큼 낡는다).
+ *
+ * **모르면 「없음」으로 답한다** — 판단이 안 서는 것을 「사람이 적었다」로 읽으면
+ * 자동 갱신이 통째로 멈추고 그게 정상으로 보인다.
+ */
+export async function sessionFocusWithin(hours: number): Promise<boolean> {
+  try {
+    const { code, stdout } = await runTasks(['focus'], 20_000);
+    const body = stdout.trim();
+    if (code !== 0 || !body.startsWith('{')) return false;
+    const f = JSON.parse(body);
+    if (f?.by !== 'session' || typeof f?.at !== 'string') return false;
+    const age = Date.now() - new Date(f.at).getTime();
+    return age >= 0 && age < hours * 3600_000;
+  } catch {
+    return false;
+  }
+}
+
 // ------------------------------------------------- 체크인 (진행이 들어오는 입구)
 
 /**
