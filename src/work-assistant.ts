@@ -190,6 +190,24 @@ export async function refreshBoardIfChanged(): Promise<boolean> {
   return stdout.trim().length > 0;   // 출력이 있으면 다시 그렸다는 뜻
 }
 
+/**
+ * 「조용히」 기간인가. **판정은 `tasks.py` 한 곳이 든다** — 봇은 물어보기만 한다.
+ *
+ * 문구가 아니라 **기호**로 가른다(🔕 / 🔔). 문구는 다듬다 바뀌지만 이 둘은
+ * 뜻 자체라, 여기서 문장을 견주면 그쪽을 고칠 때 조용히 어긋난다.
+ *
+ * **모르면 「조용히 아님」으로 답한다.** 판단이 안 서는 것을 조용히로 읽으면
+ * 무언가 깨졌을 때 자동으로 도는 것이 통째로 멈추고, 그게 정상으로 보인다.
+ */
+export async function isQuietPeriod(): Promise<boolean> {
+  try {
+    const { code, stdout } = await runTasks(['quiet'], 20_000);
+    return code === 0 && stdout.includes('🔕');
+  } catch {
+    return false;
+  }
+}
+
 // ------------------------------------------------- 체크인 (진행이 들어오는 입구)
 
 /**
