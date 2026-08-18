@@ -177,6 +177,29 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string): Promi
   const done = loadDone();
   const seen = new Set(done);
   const ack: string[] = [];
+  /** 짧은 문법은 모았다 한 번에 보낸다 — 아래 「한 번에 묶는 이유」 참조. */
+  const quicks: QueueItem[] = [];
+
+  /** 반영됐다고 적고 지운다. **적는 것이 먼저다** — 순서가 바뀌면 그 사이에 죽었을 때 두 번 쓴다. */
+  const settle = (item: QueueItem, output: string) => {
+    done.push(item.id);
+    seen.add(item.id);
+    saveDone(done);
+    ack.push(item.id);
+    logger.info(`반영 — ${item.id} ${item.text}`);
+    out.applied.push({ item, output });
+  };
+
+  const drop = (item: QueueItem, why?: string) => {
+    done.push(item.id);
+    seen.add(item.id);
+    saveDone(done);
+    ack.push(item.id);
+    // **버린 이유를 남긴다.** 사람에게 가는 DM 은 원인을 안 좁히지만(규율 그대로),
+    // 로그까지 비워 두면 다음에 또 「왜 안 됐나」에서 막힌다.
+    logger.warn(`버림 — ${item.id} ${item.text} · ${why || '이유 없음'}`);
+    out.dropped.push(item);
+  };
 
   for (const item of items) {
     if (seen.has(item.id)) {
@@ -207,30 +230,51 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string): Promi
       continue;
     }
 
-    const r = await apply(item.text);
-    if (r.kind === 'ok') {
-      // **지우기 전에 적는다.** 순서가 바뀌면 그 사이에 죽었을 때 두 번 쓴다.
-      done.push(item.id);
-      seen.add(item.id);
-      saveDone(done);
-      ack.push(item.id);
-      logger.info(`반영 — ${item.id} ${item.text}`);
-      out.applied.push({ item, output: r.output });
-    } else if (r.kind === 'not-quick') {
-      done.push(item.id);
-      seen.add(item.id);
-      saveDone(done);
-      ack.push(item.id);
-      // **버린 이유를 남긴다.** 사람에게 가는 DM 은 원인을 안 좁히지만(규율 그대로),
-      // 로그까지 비워 두면 다음에 또 「왜 안 됐나」에서 막힌다.
-      logger.warn(`버림 — ${item.id} ${item.text} · ${r.detail || '이유 없음'}`);
-      out.dropped.push(item);
-    } else {
-      logger.warn(`반영 실패 — 큐에 남겨 둡니다: ${item.text}`, r.message);
-      out.retry.push(item);
-    }
+    quicks.push(item);
   }
+
+  await applyQuicks();
 
   if (ack.length) await call('ack', { ids: ack }, base);
   return out;
+
+  /**
+   * **한 번에 묶는 이유.** 건마다 `quick` 을 부르면 건마다 볼트 쓰기·다시 그리기·
+   * 올리기가 돌고, 열려 있는 화면은 **올라온 판 수만큼 통째로 다시 읽는다** —
+   * 두 건이면 2초 간격으로 두 번 깜빡였다(2026-08-18 실측 · 올리기 로그
+   * 18:15:07 과 18:15:09). `quick` 은 원래 여러 조각을 한 줄로 받으므로
+   * (「TSK-5 완료 · TSK-18 2h」) 이어 붙이면 쓰기도 올리기도 한 번이다.
+   *
+   * ⚠️ **묶으면 전부 아니면 전무다** — 한 조각이 문법에 안 맞으면 덩어리 전체가
+   * rc 2 라 성한 것까지 버려진다. 그래서 **묶음이 rc 2 면 건별로 다시 시도한다**.
+   * 그때만 느려지고, 버려지는 것은 진짜 틀린 하나뿐이다.
+   */
+  async function applyQuicks(): Promise<void> {
+    if (!quicks.length) return;
+    if (quicks.length === 1) { await applyEach(quicks); return; }
+    const r = await apply(quicks.map((i) => i.text).join(' · '));
+    if (r.kind === 'ok') {
+      // **답은 한 번만 낸다** — 건마다 같은 글을 DM 으로 보내면 소음이다.
+      quicks.forEach((item, i) => settle(item, i === 0 ? r.output : ''));
+    } else if (r.kind === 'failed') {
+      logger.warn(`묶음 반영 실패 — 큐에 남겨 둡니다 (${quicks.length}건)`, r.message);
+      out.retry.push(...quicks);
+    } else {
+      logger.warn(`묶음이 문법에 안 맞아 건별로 다시 시도합니다 (${quicks.length}건) · ` +
+        (r.detail || '이유 없음'));
+      await applyEach(quicks);
+    }
+  }
+
+  async function applyEach(list: QueueItem[]): Promise<void> {
+    for (const item of list) {
+      const r = await apply(item.text);
+      if (r.kind === 'ok') settle(item, r.output);
+      else if (r.kind === 'not-quick') drop(item, r.detail);
+      else {
+        logger.warn(`반영 실패 — 큐에 남겨 둡니다: ${item.text}`, r.message);
+        out.retry.push(item);
+      }
+    }
+  }
 }

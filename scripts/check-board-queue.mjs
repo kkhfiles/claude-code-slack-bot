@@ -52,12 +52,22 @@ const post = (op, body) => fetch(`${BASE}/api/${op}`, {
 }).then((r) => r.json());
 const pending = () => fetch(`${BASE}/api/pending`).then((r) => r.json()).then((j) => j.items);
 
-/** 문자열로 결과를 정한다 — 「ok…」 성공 · 「nq…」 문법 아님 · 「fail…」 일시 실패. */
+/**
+ * 문자열로 결과를 정한다 — 「ok…」 성공 · 「nq…」 문법 아님 · 「fail…」 일시 실패.
+ *
+ * **여러 건을 한 줄로 받는다** — 진짜 `quick` 이 「A · B · C」 를 한 번에
+ * 처리하고 **한 조각이라도 틀리면 덩어리 전체가 rc 2** 라, 가짜도 조각을
+ * 나눠 보고 같은 규칙으로 답해야 한다. 건별로 판정하는 가짜를 두면
+ * 묶음 경로가 실제와 다른 답을 받아 검사가 거짓말을 한다.
+ */
 const applied = [];
 const apply = async (text) => {
   applied.push(text);
-  if (text.startsWith('nq')) return { kind: 'not-quick' };
-  if (text.startsWith('fail')) return { kind: 'failed', message: '노션이 안 열립니다' };
+  const parts = text.split(' · ').map((x) => x.trim()).filter(Boolean);
+  if (parts.some((x) => x.startsWith('fail'))) {
+    return { kind: 'failed', message: '노션이 안 열립니다' };
+  }
+  if (parts.some((x) => x.startsWith('nq'))) return { kind: 'not-quick' };
   return { kind: 'ok', output: `✅ ${text}` };
 };
 
@@ -111,18 +121,41 @@ r = await q.drain(apply, ask, BASE);
 eq('일시 실패는 다시 시도한다', [r.retry.length, r.applied.length, r.dropped.length], [1, 0, 0]);
 eq('**일시 실패는 큐에 남는다**', (await pending()).length, 1);
 
-// 6. 섞여 들어와도 성공한 것만 지운다
+// 6. **여러 건은 한 번에 묶어 보낸다.** 건마다 부르면 건마다 볼트 쓰기·다시
+//    그리기·올리기가 돌고, 열려 있는 화면은 **올라온 판 수만큼 다시 읽는다**
+//    — 두 건이면 2초 간격으로 두 번 깜빡였다(2026-08-18 실측).
+await clear();
+await post('act', { text: 'ok TSK-8 완료' });
+await post('act', { text: 'ok TSK-10 완료' });
+await post('act', { text: 'ok TSK-11 완료' });
+r = await q.drain(apply, ask, BASE);
+eq('세 건이 한 번에 반영된다', [r.applied.length, r.retry.length], [3, 0]);
+eq('**quick 을 한 번만 부른다**', applied.length, 1);
+eq('조각을 이어 붙인다', applied[0], 'ok TSK-8 완료 · ok TSK-10 완료 · ok TSK-11 완료');
+eq('답은 한 번만 낸다', r.applied.filter((x) => x.output).length, 1);
+
+// 6-b. **묶음이 문법에 안 맞으면 건별로 다시 시도한다.** 묶으면 전부 아니면
+//    전무라, 그것만으로 끝내면 성한 것까지 버려진다.
+await clear();
+await post('act', { text: 'ok TSK-8 완료' });
+await post('act', { text: 'nq 문법 밖' });
+await post('act', { text: 'ok TSK-10 완료' });
+r = await q.drain(apply, ask, BASE);
+eq('성한 둘은 살고 틀린 하나만 버린다',
+  [r.applied.length, r.dropped.length, r.retry.length], [2, 1, 0]);
+eq('묶음 한 번 + 건별 셋 = 네 번', applied.length, 4);
+eq('큰 것도 작은 것도 남지 않는다', (await pending()).length, 0);
+
+// 7. **일시 실패는 묶음 통짜로 다시 시도한다.** 진짜 `quick` 은 한 번의 프로세스라
+//    그 실패는 덩어리 전체의 실패다 — 쉽다 살아남는 조각이 없다.
 await clear();
 await post('act', { text: 'ok TSK-8 완료' });
 await post('act', { text: 'fail TSK-9 완료' });
-await post('act', { text: 'ok TSK-10 완료' });
 r = await q.drain(apply, ask, BASE);
-eq('성공 둘 · 남길 것 하나', [r.applied.length, r.retry.length], [2, 1]);
-eq('남은 것은 실패한 그것뿐', (await pending()).map((i) => i.text), ['fail TSK-9 완료']);
-
-// 7. 남은 것이 다음 판에 성공하면 그때 지운다
+eq('한 조각이 안 되면 둘 다 남는다', [r.applied.length, r.retry.length], [0, 2]);
+eq('둘 다 큐에 남는다', (await pending()).length, 2);
 r = await q.drain(async () => ({ kind: 'ok', output: '✅ 나중에 됐다' }), ask, BASE);
-eq('복구되면 저절로 반영된다', [r.applied.length, (await pending()).length], [1, 0]);
+eq('복구되면 저절로 반영된다', [r.applied.length, (await pending()).length], [2, 0]);
 
 // 8. 사람 말은 짧은 문법 쪽으로 가지 않는다 — 가면 문법이 아니라고 버려진다
 await clear();
