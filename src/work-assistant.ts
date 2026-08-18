@@ -284,18 +284,20 @@ export interface MailThread {
  * **워터마크는 여기서 안 옮긴다** — 넘긴 뒤에 `mailMark` 로 따로 찍는다.
  */
 export async function mailCandidates(days = 1): Promise<{
-  ok: boolean; threads: MailThread[]; newest: string; text: string; detail: string;
+  ok: boolean; threads: MailThread[]; newest: string; text: string; lead: string; detail: string;
 }> {
-  const none = { ok: false, threads: [] as MailThread[], newest: '', text: '' };
+  const none = { ok: false, threads: [] as MailThread[], newest: '', text: '', lead: '' };
   try {
     const { code, stdout, stderr } = await runTasks(
       ['candidates', '--days', String(days), '--push', '--json'], 90_000, 'bin/mail.py');
     if (code !== 0) return { ...none, detail: (stderr || stdout).trim() };
     const r = JSON.parse(stdout);
     // `text` 는 파이썬이 그린 것을 그대로 나른다 — 여기서 다시 그리지 않는다.
+    // `lead` 는 **사람이 읽을 한 줄**이고 `text` 는 세션이 읽을 본문이다. 파이썬이
+    // 둘 다 그려 주므로 여기서 다시 그리지 않는다 — 두 번째 렌더러를 두면 한쪽이 낡는다.
     return {
       ok: true, threads: r.threads ?? [], newest: r.newest ?? '',
-      text: r.text ?? '', detail: '',
+      text: r.text ?? '', lead: r.lead ?? '', detail: '',
     };
   } catch (err) {
     return { ...none, detail: String(err) };

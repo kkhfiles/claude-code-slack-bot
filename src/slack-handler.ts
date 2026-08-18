@@ -262,7 +262,7 @@ export class SlackHandler {
         },
         async (prompt, opts) => this.runAssistantSession(prompt, opts),
         config.assistant.configDir,
-        async (text, lead) => this.askFromBoard(text, lead),
+        async (text, lead, shown) => this.askFromBoard(text, lead, shown),
       );
 
       // Loopback trigger endpoint for manual analysis (Phase 1.7 / 1.8 / 1.9).
@@ -299,6 +299,8 @@ export class SlackHandler {
     // 몰라도 되게 — 실원 방을 건드려 가며 말투를 시험하지 않으려고 두는 자리다.
     const testRoom = config.chat.testChannel;
     const rooms = (main: string) => [main, testRoom].filter(Boolean);
+    // 봇끼리 말 섞기는 **두 봇에 같이 건다** — 한쪽만 들으면 한쪽이 혼잣말을 한다.
+    const botTalk = config.chat.botTalk.enabled ? config.chat.botTalk : null;
     if (turnScript && config.letter.enabled
         && config.letter.botToken && config.letter.appToken) {
       this.chatHosts.push(new ChatHost({
@@ -312,6 +314,7 @@ export class SlackHandler {
         surfaces: rooms(config.letter.chatChannel).length ? ['dm', 'channel'] : ['dm'],
         allowUsers: config.letter.allowUsers,
         channels: rooms(config.letter.chatChannel),
+        botTalk,
         buttIn: config.letter.buttIn.enabled ? config.letter.buttIn : null,
         greetOnJoin: config.letter.greetOnJoin && !!config.letter.chatChannel,
         managerUserId: config.letter.managerUserId,
@@ -373,6 +376,7 @@ export class SlackHandler {
           channels: rooms(config.lunchBot.chatChannel),
           knownRooms: [readLunchAnnounceChannel(config.lunchBot.script)].filter(Boolean),
           managerUserId: config.letter.managerUserId,
+          botTalk,
           buttIn: config.chat.buttIn.enabled ? config.chat.buttIn : null,
           attach: buttons ? (app) => buttons.register(app) : undefined,
         }));
@@ -478,7 +482,7 @@ export class SlackHandler {
    * **스레드를 만들지 않는다.** 세션 키가 `thread_ts || 'direct'` 라, 스레드에 넣으면
    * 이 방에서 이어 가던 대화와 갈라진다.
    */
-  private async askFromBoard(text: string, lead?: string): Promise<void> {
+  private async askFromBoard(text: string, lead?: string, shown?: string): Promise<void> {
     const channel = config.assistant.dmChannel;
     const user = config.bot.allowUsers[0];
     if (!channel || !user) throw new Error('비서 방 또는 사용자가 설정되지 않았습니다');
@@ -489,9 +493,17 @@ export class SlackHandler {
     // **이 줄이 원문 사본이기도 하다.** 아래 `handleMessage` 는 오류를 안에서
     // 삼키고 채널에 알리므로, 세션이 넘어져도 폴러는 성공으로 안다 — 그때 사람에게
     // 남는 것은 이 줄뿐이라, 그대로 다시 보내면 복구가 된다.
+    //
+    // **`shown` 이 빈 문자열이면 머리 줄만 남긴다.** 판이 보내는 「메모」는 사람이
+    // 쓴 글이라 그대로 보이는 것이 영수증이지만, 메일 후보처럼 **기계가 지은
+    // 본문**은 세션이 읽을 것이라 통계·머리표·지시가 섞여 있다 — 그것을 채널에
+    // 붙이면 같은 내용이 두 번 뜬다(2026-08-19 사용자 지적). 그때는 머리 줄이
+    // 원문 사본 노릇을 대신하고, 메일은 어차피 메일함에 그대로 있다.
+    const head = lead ?? `🗂 ${boardLabel()} 에서`;
+    const body = shown ?? text;
     const posted = await this.app.client.chat.postMessage({
       channel,
-      text: `${lead ?? `🗂 ${boardLabel()} 에서`}\n${text}`,
+      text: body ? `${head}\n${body}` : head,
     });
 
     // ⚠️ **응답을 되돌려줘야 한다.** 슬랙이 주는 `say` 는 API 응답을 돌려주고,

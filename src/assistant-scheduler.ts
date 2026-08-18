@@ -267,7 +267,7 @@ export class AssistantScheduler {
      * Work Board에서 온 **사람 말**을 이 방의 대화로 들여보내는 길. 없으면 그런 항목은
      * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
      */
-    private askFromBoard?: (text: string, lead?: string) => Promise<void>,
+    private askFromBoard?: (text: string, lead?: string, shown?: string) => Promise<void>,
   ) {
     this.configPath = path.join(configDir, 'config.json');
     this.promptsDir = path.join(configDir, 'prompts');
@@ -842,8 +842,12 @@ export class AssistantScheduler {
       }
       // `[메일]` 은 판이 쓰는 `[진행판]` 과 같은 자리의 표식이다 — 비서 쪽 트리거
       // 표가 이 글자를 보고 무슨 절차를 밟을지 고른다. 이름이 아니라 행선지다.
+      // **사람에게는 한 줄만 보인다.** 본문은 세션이 읽을 것이라 통계·머리표·지시가
+      // 들어 있고, 그것을 그대로 채널에 붙이면 같은 내용이 두 번 뜬다(2026-08-19
+      // 사용자 지적). 세 번째 인자가 빈 문자열이면 머리 줄만 남는다.
       await this.askFromBoard(
-        `[메일] 후보 ${r.threads.length}건\n${r.text}`, '📬 메일에서 온 업무 후보');
+        `[메일] 후보 ${r.threads.length}건\n${r.text}`,
+        r.lead || `📬 메일 후보 ${r.threads.length}건`, '');
       // **표시가 안 찍히면 큰 소리로 남긴다.** 결과를 버리면 넘기기는 되는데
       // 표시만 안 되는 상태가 조용히 이어져 **같은 후보가 10분마다 다시 나간다**
       // (2026-08-18 실측: 같은 스레드 셋 · 다음 날 아침 둘 · 세션 다섯 번).
