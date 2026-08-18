@@ -224,7 +224,8 @@ export async function currentStore(): Promise<string> {
 }
 
 /**
- * 볼트를 원격으로 내보낸다 — **백업 전용**. 매일 20:00 + 봇이 뜰 때 한 번.
+ * PC 밖으로 사본을 내보낸다 — **백업 전용**. 매일 20:00 + 봇이 뜰 때 한 번.
+ * 대상은 업무 볼트와 이 비서 레포 둘이고, **목록의 정본은 파이썬 쪽 `config.json`** 이다.
  *
  * **말을 걸지 않는다.** 성공은 조용하고, 실패해도 여기서 DM 을 보내지 않는다 —
  * 밀렸다는 사실은 `brief` 맨 위 ⛔ 가 말하고 **그 판정은 봇 밖에 있다**(봇이
@@ -232,10 +233,12 @@ export async function currentStore(): Promise<string> {
  *
  * 나갈 것이 없으면 원격에 닿지도 않고 끝난다 — 그래서 뜰 때마다 불러도 싸다.
  */
-export async function vaultPush(): Promise<{ ok: boolean; detail: string }> {
+export async function offsitePush(): Promise<{ ok: boolean; detail: string }> {
   try {
-    const { code, stdout, stderr } = await runTasks([], 120_000, 'bin/vault_push.py');
-    const detail = ((stdout || stderr).trim().split('\n').pop() || '').trim();
+    const { code, stdout, stderr } = await runTasks([], 120_000, 'bin/offsite_push.py');
+    // 저장소마다 한 줄이 나온다 — 마지막 줄만 집으면 앞엣것이 조용히 사라진다.
+    const detail = (stdout || stderr).trim().split('\n')
+      .map((l) => l.trim()).filter(Boolean).join(' · ');
     return { ok: code === 0, detail };
   } catch (err) {
     return { ok: false, detail: String(err) };
