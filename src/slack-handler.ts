@@ -295,6 +295,10 @@ export class SlackHandler {
 
     // 대화 봇들 — 토큰과 turn.py 경로가 다 있을 때만 켠다. 하나라도 없으면 꺼진 채로 둔다.
     const turnScript = config.chat.turnScript;
+    // 시험용 방은 **모든 대화 봇의 방 목록에 같이 들어간다.** 초대해 둔 봇이 어느 것인지
+    // 몰라도 되게 — 실원 방을 건드려 가며 말투를 시험하지 않으려고 두는 자리다.
+    const testRoom = config.chat.testChannel;
+    const rooms = (main: string) => [main, testRoom].filter(Boolean);
     if (turnScript && config.letter.enabled
         && config.letter.botToken && config.letter.appToken) {
       this.chatHosts.push(new ChatHost({
@@ -305,9 +309,9 @@ export class SlackHandler {
         script: turnScript,
         // **자리는 늘리고 연결은 안 늘린다.** 커피챗 방 ID 가 비어 있으면 DM 만 연다 —
         // 봇을 방에 초대하고 `LETTER_CHAT_CHANNEL` 을 채우는 두 가지가 다 돼야 열린다.
-        surfaces: config.letter.chatChannel ? ['dm', 'channel'] : ['dm'],
+        surfaces: rooms(config.letter.chatChannel).length ? ['dm', 'channel'] : ['dm'],
         allowUsers: config.letter.allowUsers,
-        channels: config.letter.chatChannel ? [config.letter.chatChannel] : [],
+        channels: rooms(config.letter.chatChannel),
         buttIn: config.letter.buttIn.enabled ? config.letter.buttIn : null,
         greetOnJoin: config.letter.greetOnJoin && !!config.letter.chatChannel,
         managerUserId: config.letter.managerUserId,
@@ -366,7 +370,7 @@ export class SlackHandler {
           python: config.chat.python,
           script: turnScript,
           surfaces: ['channel'],
-          channels: [config.lunchBot.chatChannel],
+          channels: rooms(config.lunchBot.chatChannel),
           knownRooms: [readLunchAnnounceChannel(config.lunchBot.script)].filter(Boolean),
           managerUserId: config.letter.managerUserId,
           buttIn: config.chat.buttIn.enabled ? config.chat.buttIn : null,

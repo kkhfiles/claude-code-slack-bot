@@ -97,6 +97,10 @@ export const config = {
     // 두 봇이 같은 파이썬·같은 스크립트를 쓴다. 봇 이름만 다르게 넘긴다.
     python: process.env.CHATBOT_PYTHON || process.env.LETTER_PYTHON || 'python',
     turnScript: process.env.CHATBOT_TURN_SCRIPT || process.env.LETTER_TURN_SCRIPT || '',
+    // 시험용 방. **대화 봇 전부가 여기서는 답한다** — 실원이 있는 방을 건드리지 않고
+    // 말투·성격을 바꿔 보려면, 아무 데서나 답하지 않는 규칙에 문을 하나 내야 한다.
+    // 비워 두면 문은 닫힌 채다(기본값이 침묵인 것은 그대로).
+    testChannel: process.env.BOT_TEST_CHANNEL || '',
     // 점심원정대 채널에서 **먼저 말 걸기**. 낄 자리인지 판단하는 길이 둘이다 —
     // 낱말이 걸리면 그 자리에서 바로(`interest`), 안 걸려도 몇 분마다 쌓인 말을
     // 통째로 보고 한 번 더(`sweepMinutes`). 나머지는 수다스러움을 막는 굴레다 —
