@@ -50,7 +50,11 @@ export interface QueueItem {
 
 /** `quick` 을 부르는 쪽. 봇은 실제 구현을, 검사는 가짜를 넘긴다. */
 export type Apply = (text: string) =>
-  Promise<{ kind: 'ok'; output: string } | { kind: 'not-quick' } | { kind: 'failed'; message: string }>;
+  Promise<{ kind: 'ok'; output: string }
+    // `detail` 은 왜 문법이 아닌지 — 로그에만 쓴다(사람에게 가는 DM 은 원인을
+    // 안 좁힌다). 검사가 가짜를 넘길 수 있게 여기 모양을 따로 적어 둔다.
+    | { kind: 'not-quick'; detail?: string }
+    | { kind: 'failed'; message: string }>;
 
 /**
  * 사람 말을 비서에게 넘기는 쪽. **답도 되묻기도 비서가 자기 자리에서 한다** —
@@ -164,6 +168,11 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string): Promi
   // `pull` 은 「가져간 표시」를 남기므로 읽기가 아니다 — 워커가 POST 만 받는다.
   const { items } = (await call('pull', {}, base)) as { items: QueueItem[] };
   if (!items.length) return out;
+  // **가져갔다는 사실을 남긴다.** 이게 없으면 「누른 것이 큐에 안 들어갔다」와
+  // 「들어갔는데 여기서 사라졌다」를 나중에 못 가른다 — 2026-08-18 에 그래서
+  // 원인을 못 짚었다. 성공은 DM 으로만 알렸고 로그는 비어 있었다.
+  logger.info(`큐에서 ${items.length}건 가져옴: ` +
+    items.map((i) => `${i.id}(${i.kind || 'quick'}) ${i.text}`).join(' | '));
 
   const done = loadDone();
   const seen = new Set(done);
@@ -189,6 +198,7 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string): Promi
       ack.push(item.id);
       try {
         await ask(item.text);
+        logger.info(`비서에게 넘김 — ${item.id} ${item.text.slice(0, 80)}`);
         out.applied.push({ item, output: '' });
       } catch (err) {
         logger.error('Work Board에서 온 말을 비서에게 못 넘겼습니다', err);
@@ -204,12 +214,16 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string): Promi
       seen.add(item.id);
       saveDone(done);
       ack.push(item.id);
+      logger.info(`반영 — ${item.id} ${item.text}`);
       out.applied.push({ item, output: r.output });
     } else if (r.kind === 'not-quick') {
       done.push(item.id);
       seen.add(item.id);
       saveDone(done);
       ack.push(item.id);
+      // **버린 이유를 남긴다.** 사람에게 가는 DM 은 원인을 안 좁히지만(규율 그대로),
+      // 로그까지 비워 두면 다음에 또 「왜 안 됐나」에서 막힌다.
+      logger.warn(`버림 — ${item.id} ${item.text} · ${r.detail || '이유 없음'}`);
       out.dropped.push(item);
     } else {
       logger.warn(`반영 실패 — 큐에 남겨 둡니다: ${item.text}`, r.message);

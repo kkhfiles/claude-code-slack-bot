@@ -366,8 +366,14 @@ export async function checkinMap(): Promise<string> {
 
 export type QuickOutcome =
   | { kind: 'ok'; output: string }
-  /** 이 문법이 아니다 — 평소대로 세션이 받는다. */
-  | { kind: 'not-quick' }
+  /**
+   * 이 문법이 아니다 — 평소대로 세션이 받는다.
+   *
+   * `detail` 은 **왜 아닌지**다. 사람에게 보낼 말이 아니라(원인을 좁혀 말하지
+   * 않는다는 규율은 그대로) **로그에 남길 것**이다 — 판에서 누른 것이 버려졌을 때
+   * 이유가 어디에도 안 남아 다음에 또 못 짚는다(2026-08-18).
+   */
+  | { kind: 'not-quick'; detail?: string }
   /** 문법은 맞는데 쓰기가 깨졌다 — 조용히 넘기면 갱신이 사라진 줄 모른다. */
   | { kind: 'failed'; message: string };
 
@@ -389,7 +395,9 @@ export async function quickUpdate(text: string): Promise<QuickOutcome> {
     fs.writeFileSync(file, text, { encoding: 'utf-8' });
     const { code, stdout, stderr } = await runTasks(['quick', '--file', file], 90_000);
     if (code === 0) return { kind: 'ok', output: stdout.trim() };
-    if (code === 2) return { kind: 'not-quick' };
+    if (code === 2) {
+      return { kind: 'not-quick', detail: (stderr || stdout).trim().split('\n').slice(-2).join(' / ') };
+    }
     const tail = (stderr || stdout).trim().split('\n').slice(-3).join('\n');
     logger.error(`tasks.py quick 실패 (rc=${code})`, tail);
     return { kind: 'failed', message: tail || `rc=${code}` };
