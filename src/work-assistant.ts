@@ -245,6 +245,58 @@ export async function offsitePush(): Promise<{ ok: boolean; detail: string }> {
   }
 }
 
+/** `bin/mail.py` 가 내는 스레드 하나. 뜻은 파이썬만 알고 여기서는 나르기만 한다. */
+export interface MailThread {
+  subject: string;
+  count: number;
+  last: string;
+  people: string[];
+  folders: string[];
+  exec: boolean;
+  ask: string[];
+  dates: string[];
+  tasks: { id: string; title: string; score: number }[];
+}
+
+/**
+ * 메일에서 뽑은 업무 후보. **판단은 여기서 하지 않는다** — 무엇을 등록할지·어느
+ * 업무에 붙일지는 비서 세션이 정하고 사람이 컨펌한다.
+ *
+ * `--push` 는 「조용히」 기간이면 빈손으로 돌아온다(판정은 파이썬이 한다).
+ * **워터마크는 여기서 안 옮긴다** — 넘긴 뒤에 `mailMark` 로 따로 찍는다.
+ */
+export async function mailCandidates(days = 1): Promise<{
+  ok: boolean; threads: MailThread[]; newest: string; text: string; detail: string;
+}> {
+  const none = { ok: false, threads: [] as MailThread[], newest: '', text: '' };
+  try {
+    const { code, stdout, stderr } = await runTasks(
+      ['candidates', '--days', String(days), '--push', '--json'], 90_000, 'bin/mail.py');
+    if (code !== 0) return { ...none, detail: (stderr || stdout).trim() };
+    const r = JSON.parse(stdout);
+    // `text` 는 파이썬이 그린 것을 그대로 나른다 — 여기서 다시 그리지 않는다.
+    return {
+      ok: true, threads: r.threads ?? [], newest: r.newest ?? '',
+      text: r.text ?? '', detail: '',
+    };
+  } catch (err) {
+    return { ...none, detail: String(err) };
+  }
+}
+
+/**
+ * 여기까지 봤다고 표시. **Outlook 을 다시 안 읽는다** — 다시 읽으면 그 사이
+ * 도착한 메일까지 본 것으로 찍혀 조용히 건너뛴다.
+ */
+export async function mailMark(ts: string): Promise<boolean> {
+  try {
+    const { code } = await runTasks(['mark', '--ts', ts], 20_000, 'bin/mail.py');
+    return code === 0;
+  } catch {
+    return false;
+  }
+}
+
 export async function isQuietPeriod(): Promise<boolean> {
   try {
     const { code, stdout } = await runTasks(['quiet'], 20_000);
