@@ -199,6 +199,26 @@ export async function refreshBoardIfChanged(): Promise<boolean> {
  * **모르면 「조용히 아님」으로 답한다.** 판단이 안 서는 것을 조용히로 읽으면
  * 무언가 깨졌을 때 자동으로 도는 것이 통째로 멈추고, 그게 정상으로 보인다.
  */
+/**
+ * 업무 정본이 어디인가 — `notion` 또는 `vault`.
+ *
+ * **노션을 버린 뒤에는 「밖에서 고친 것 따라잡기」가 할 일이 없다.** 쓰는 주체가
+ * `tasks.py` 하나뿐이라 감시할 대상 자체가 사라진다. 판정은 파이썬 한 곳이고
+ * 봇은 물어보기만 한다(조용히 여부와 같은 규율).
+ *
+ * **모르면 `notion` 으로 답한다** — 감시자를 괜히 켜 두는 쪽이, 정말 필요한데
+ * 꺼 두는 쪽보다 낫다(후자는 화면이 조용히 낡는다).
+ */
+export async function currentStore(): Promise<string> {
+  try {
+    const { code, stdout } = await runTasks(['store'], 20_000);
+    const v = (stdout || '').trim();
+    return code === 0 && v ? v : 'notion';
+  } catch {
+    return 'notion';
+  }
+}
+
 export async function isQuietPeriod(): Promise<boolean> {
   try {
     const { code, stdout } = await runTasks(['quiet'], 20_000);
