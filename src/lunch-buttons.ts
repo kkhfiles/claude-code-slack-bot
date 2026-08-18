@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
+import { tagApp, tagToken } from './activity-log';
 
 /**
  * Listens for button clicks on the lunch bot's recruitment message.
@@ -27,6 +28,20 @@ export function readLunchBotToken(scriptPath: string): string | null {
     return typeof token === 'string' && token ? token : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * 점심봇이 **공지를 올리라고 넣어 둔 방.** 봇 설정에 이미 있으므로 여기서 읽는다 —
+ * 같은 사실을 `.env` 에 또 적으면 한쪽만 고쳐진다.
+ */
+export function readLunchAnnounceChannel(scriptPath: string): string {
+  const configPath = path.join(path.dirname(scriptPath), 'config.json');
+  try {
+    const room = JSON.parse(fs.readFileSync(configPath, 'utf-8'))?.announce_channel_id;
+    return typeof room === 'string' ? room : '';
+  } catch {
+    return '';
   }
 }
 
@@ -89,6 +104,8 @@ export class LunchButtons {
       appToken: this.appToken,
       socketMode: true,
     });
+    tagApp(app, 'lunch');
+    tagToken(botToken, 'lunch');
     this.register(app);
 
     try {
