@@ -12,7 +12,7 @@ import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
-  vaultPush, workAssistantRoot } from './work-assistant';
+  offsitePush, workAssistantRoot } from './work-assistant';
 import { boardQueueEnabled, drain } from './board-queue';
 
 /**
@@ -21,13 +21,13 @@ import { boardQueueEnabled, drain } from './board-queue';
  */
 const WORK_NUDGE_TIME = '08:55';
 /**
- * 업무 볼트를 PC 밖으로 내보내는 시각. **그날 일이 끝난 뒤 한 번**이라 20:00 이다
+ * PC 밖으로 사본을 내보내는 시각. **그날 일이 끝난 뒤 한 번**이라 20:00 이다
  * (자정·정오는 이 PC 의 데이터 동기화 일정이지 백업에 맞는 시각이 아니다).
  *
  * **쉬는 날도 돈다** — 주말에도 진행판을 누르므로 일하는 날만 하면 그 사이가
  * 통째로 밖에 없다.
  */
-const VAULT_PUSH_TIME = '20:00';
+const OFFSITE_PUSH_TIME = '20:00';
 /**
  * 오후 체크인 넛지 시각. **진행이 들어오는 유일한 입구가 체크인인데**, 그것이
  * 「그날 첫 접촉」에만 걸려 있어 슬랙을 안 여는 날은 아무것도 안 들어왔다.
@@ -220,7 +220,7 @@ export class AssistantScheduler {
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private workNudgeTimer: ReturnType<typeof setTimeout> | null = null;
   private checkinPmTimer: ReturnType<typeof setTimeout> | null = null;
-  private vaultPushTimer: ReturnType<typeof setTimeout> | null = null;
+  private offsitePushTimer: ReturnType<typeof setTimeout> | null = null;
   private notionWatchTimer: ReturnType<typeof setInterval> | null = null;
   private notionWatchBusy = false;
   private notionWatchFailures = 0;
@@ -291,12 +291,12 @@ export class AssistantScheduler {
     setTimeout(() => this.runDaouKeepAlive().catch(e =>
       this.logger.error('Daou keep-alive (startup) failed', e)), 25_000);
 
-    // 볼트가 밖에 나갔는지 뜰 때 한 번 본다. **OS 예약에서 잃은 성질을 메우는
+    // 사본이 밖에 나갔는지 뜰 때 한 번 본다. **OS 예약에서 잃은 성질을 메우는
     // 자리다** — 20:00 에 봇이 꺼져 있었으면 그 회차는 통째로 없어지므로, 다시
     // 켤 때 따라잡는다. 나갈 것이 없으면 원격에 닿지도 않고 끝난다.
     // (매일 도는 타이머 자체는 위 scheduleAll() 이 건다)
     if (isWorkAssistantEnabled()) {
-      setTimeout(() => void this.runVaultPush('startup'), 30_000);
+      setTimeout(() => void this.runOffsitePush('startup'), 30_000);
     }
   }
 
@@ -593,7 +593,7 @@ export class AssistantScheduler {
       this.startBoardQueuePoller();
       void this.startNotionWatch();
       this.scheduleFocus();
-      this.scheduleVaultPush();
+      this.scheduleOffsitePush();
     }
 
     if (this.getEnabledAnalysisTypes().length > 0) {
@@ -638,9 +638,9 @@ export class AssistantScheduler {
       clearTimeout(this.focusTimer);
       this.focusTimer = null;
     }
-    if (this.vaultPushTimer) {
-      clearTimeout(this.vaultPushTimer);
-      this.vaultPushTimer = null;
+    if (this.offsitePushTimer) {
+      clearTimeout(this.offsitePushTimer);
+      this.offsitePushTimer = null;
     }
   }
 
@@ -739,7 +739,8 @@ export class AssistantScheduler {
   }
 
   /**
-   * 볼트를 PC 밖으로 — 매일 20:00.
+   * PC 밖으로 사본을 — 매일 20:00. 대상은 업무 볼트와 비서 레포 둘이고,
+   * **목록은 파이썬 쪽 `config.json` 이 정본**이다(봇에 복제하지 않는다).
    *
    * **작업 스케줄러가 아니라 여기 있는 이유**(2026-08-18 사용자 결정): 예약을
    * OS 쪽에 두면 관리할 자리가 하나 더 는다. 봇이 죽으면 백업도 멈추지만,
@@ -751,29 +752,29 @@ export class AssistantScheduler {
    *
    * **말을 걸지 않는다.** 성공도 실패도 로그까지다.
    */
-  private scheduleVaultPush(): void {
-    const nextFire = this.getNextEveryDay(VAULT_PUSH_TIME);
+  private scheduleOffsitePush(): void {
+    const nextFire = this.getNextEveryDay(OFFSITE_PUSH_TIME);
     this.logger.info('Scheduled vault push', {
-      time: VAULT_PUSH_TIME, nextFire: nextFire.toISOString(),
+      time: OFFSITE_PUSH_TIME, nextFire: nextFire.toISOString(),
     });
 
-    this.vaultPushTimer = setTimeout(async () => {
-      await this.runVaultPush('daily');
-      this.scheduleVaultPush();
+    this.offsitePushTimer = setTimeout(async () => {
+      await this.runOffsitePush('daily');
+      this.scheduleOffsitePush();
     }, nextFire.getTime() - Date.now());
   }
 
   /** 한 번 내보낸다. **절대 던지지 않는다** — 여기서 터지면 재예약이 끊긴다. */
-  private async runVaultPush(why: string): Promise<void> {
+  private async runOffsitePush(why: string): Promise<void> {
     try {
-      const r = await vaultPush();
+      const r = await offsitePush();
       if (r.ok) {
-        this.logger.info(`Vault push (${why}) — ${r.detail || '나갈 것 없음'}`);
+        this.logger.info(`Offsite push (${why}) — ${r.detail || '나갈 것 없음'}`);
       } else {
-        this.logger.warn(`Vault push (${why}) failed — ${r.detail}`);
+        this.logger.warn(`Offsite push (${why}) failed — ${r.detail}`);
       }
     } catch (error) {
-      this.logger.error(`Vault push (${why}) threw`, error);
+      this.logger.error(`Offsite push (${why}) threw`, error);
     }
   }
 
