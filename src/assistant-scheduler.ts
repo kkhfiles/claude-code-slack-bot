@@ -11,7 +11,7 @@ import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
-  refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin,
+  refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   workAssistantRoot } from './work-assistant';
 import { boardQueueEnabled, drain } from './board-queue';
 
@@ -574,7 +574,7 @@ export class AssistantScheduler {
       this.scheduleWorkNudge();
       this.scheduleCheckinPm();
       this.startBoardQueuePoller();
-      this.startNotionWatch();
+      void this.startNotionWatch();
       this.scheduleFocus();
     }
 
@@ -743,7 +743,14 @@ export class AssistantScheduler {
    * **「조용히」와 무관하다.** 화면을 최신으로 두는 것은 미는 알림이 아니라서,
    * 출장 중에도 열어 보면 최신이어야 한다.
    */
-  private startNotionWatch(): void {
+  private async startNotionWatch(): Promise<void> {
+    // **정본이 볼트면 감시할 것이 없다.** 이 장치는 「노션은 막을 수 없다」 하나
+    // 때문에 있었고, 쓰는 주체가 하나가 된 뒤로는 하루 480회를 헛돈다.
+    const store = await currentStore();
+    if (store === 'vault') {
+      this.logger.info('Notion watch skipped — 정본이 볼트라 밖에서 고칠 곳이 없다');
+      return;
+    }
     this.logger.info('Started Notion watch', { everyMs: NOTION_WATCH_MS });
     this.notionWatchTimer = setInterval(async () => {
       // 앞판이 아직 도는 중이면 건너뛴다 — 다시 그리는 데 몇 초 걸린다.
