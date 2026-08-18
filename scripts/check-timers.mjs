@@ -27,6 +27,7 @@ const REGISTRAR = {
   daouKeepAliveTimer: 'scheduleDaouKeepAlive',
   focusTimer: 'scheduleFocus',
   offsitePushTimer: 'scheduleOffsitePush',
+  mailPollTimer: 'startMailPoller',
 };
 
 /** 소스에서 그 함수의 본문만 떼어 온다. 못 찾으면 멈춘다 — 조용히 빈 문자열을

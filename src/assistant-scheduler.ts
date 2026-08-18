@@ -12,7 +12,7 @@ import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
-  offsitePush, workAssistantRoot } from './work-assistant';
+  offsitePush, workAssistantRoot, mailCandidates, mailMark } from './work-assistant';
 import { boardLabel, boardQueueEnabled, drain } from './board-queue';
 
 /**
@@ -52,6 +52,19 @@ const CHECKIN_PM_TIME = '17:00';
  * 6배로 자주 물어도 하루 17,280회(한도 10만) · 실행 시간 기준 무료분의 1% 안쪽이다.
  */
 const BOARD_QUEUE_POLL_MS = 5_000;
+/**
+ * 메일을 얼마마다 보나 · 몇 시부터 몇 시까지 (2026-08-18 사용자 결정).
+ *
+ * **한 번 보는 데 1.3초**라 이 간격이 싼 것은 아니다 — Outlook 을 그냥 읽고
+ * 망을 안 탄다. 비싼 것은 **후보가 나왔을 때 띄우는 세션**이고, 그것은
+ * 하루 여섯 번쯤이다(거르개 통과가 하루 대여섯 통).
+ *
+ * 창 밖에는 숨만 돌고 아무것도 안 한다. 쉬는 날을 가리지 않는 이유는
+ * **임원 메일이 주말에도 오기 때문**이다. 「조용히」 기간은 파이썬이 막는다.
+ */
+const MAIL_POLL_MS = 600_000;
+const MAIL_POLL_FROM_HOUR = 7;
+const MAIL_POLL_TO_HOUR = 20;
 /**
  * 노션이 직접 고쳐졌는지 보는 간격. **이 값이 곧 화면이 낡아 있을 수 있는
  * 최대 시간이다.** 안 바뀌었으면 1행 질의(0.5초)로 끝나므로 짧게 잡아도
@@ -228,6 +241,8 @@ export class AssistantScheduler {
   private focusTimer: ReturnType<typeof setTimeout> | null = null;
   private focusBusy = false;
   private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
+  private mailPollTimer: ReturnType<typeof setInterval> | null = null;
+  private mailPollBusy = false;
   /** 한 판이 끝나기 전에 다음 판이 겹치지 않게. 노션 왕복이 폴링 간격보다 길 수 있다. */
   private boardQueueBusy = false;
   private boardQueueFailures = 0;
@@ -252,7 +267,7 @@ export class AssistantScheduler {
      * Work Board에서 온 **사람 말**을 이 방의 대화로 들여보내는 길. 없으면 그런 항목은
      * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
      */
-    private askFromBoard?: (text: string) => Promise<void>,
+    private askFromBoard?: (text: string, lead?: string) => Promise<void>,
   ) {
     this.configPath = path.join(configDir, 'config.json');
     this.promptsDir = path.join(configDir, 'prompts');
@@ -594,6 +609,7 @@ export class AssistantScheduler {
       void this.startNotionWatch();
       this.scheduleFocus();
       this.scheduleOffsitePush();
+      this.startMailPoller();
     }
 
     if (this.getEnabledAnalysisTypes().length > 0) {
@@ -633,6 +649,10 @@ export class AssistantScheduler {
     if (this.boardQueueTimer) {
       clearInterval(this.boardQueueTimer);
       this.boardQueueTimer = null;
+    }
+    if (this.mailPollTimer) {
+      clearInterval(this.mailPollTimer);
+      this.mailPollTimer = null;
     }
     if (this.focusTimer) {
       clearTimeout(this.focusTimer);
@@ -775,6 +795,61 @@ export class AssistantScheduler {
       }
     } catch (error) {
       this.logger.error(`Offsite push (${why}) threw`, error);
+    }
+  }
+
+  /**
+   * 메일에서 업무 후보를 뽑아 **비서에게 넘긴다** (2026-08-18 사용자 결정).
+   *
+   * **여기서 판단하지 않는다.** 등록할지·어느 업무에 붙일지·버릴지는 비서 세션이
+   * 정하고 사람이 슬랙에서 컨펌한다 — 판이 보내는 「말하기」와 같은 입구로 넣어
+   * 규칙(임의 등록 금지 · 원문 캡처 · 되묻기)이 그대로 걸리게 한다.
+   *
+   * **넘긴 뒤에 표시한다.** 넘기기 전에 찍으면 세션이 넘어졌을 때 후보가 사라진다
+   * — 넘기기가 실패하면 표시를 안 찍어 다음 차례에 다시 나온다.
+   *
+   * ⚠️ **표시는 Outlook 을 다시 읽지 않고 찍는다**(`mailMark`). 다시 읽으면 그
+   * 사이 도착한 메일까지 본 것으로 찍혀 조용히 건너뛴다.
+   */
+  private startMailPoller(): void {
+    this.logger.info('Started mail poller', {
+      everyMs: MAIL_POLL_MS, window: `${MAIL_POLL_FROM_HOUR}~${MAIL_POLL_TO_HOUR}시`,
+    });
+    this.mailPollTimer = setInterval(() => {
+      void this.runMailPoll();
+    }, MAIL_POLL_MS);
+  }
+
+  /** 한 판 돈다. **절대 던지지 않는다** — 여기서 터지면 로그가 빈 채로 조용해진다. */
+  private async runMailPoll(): Promise<void> {
+    const h = new Date().getHours();
+    if (h < MAIL_POLL_FROM_HOUR || h >= MAIL_POLL_TO_HOUR) return;
+    if (this.mailPollBusy) return;
+    this.mailPollBusy = true;
+    try {
+      const r = await mailCandidates(1);
+      if (!r.ok) {
+        // **실패를 삼키지 않는다.** 후보가 없어서 조용한 것과 못 읽어서 조용한
+        // 것이 받는 쪽에서 똑같아 보인다 — 사람에게는 안 알리되(10분마다라
+        // 소음이 된다) 로그에는 남긴다.
+        this.logger.warn(`Mail poll failed — ${r.detail}`);
+        return;
+      }
+      if (!r.threads.length) return;
+      if (!this.askFromBoard) {
+        this.logger.warn('Mail poll: 비서에게 넘길 길이 없습니다 — 표시를 안 찍고 둡니다');
+        return;
+      }
+      // `[메일]` 은 판이 쓰는 `[진행판]` 과 같은 자리의 표식이다 — 비서 쪽 트리거
+      // 표가 이 글자를 보고 무슨 절차를 밟을지 고른다. 이름이 아니라 행선지다.
+      await this.askFromBoard(
+        `[메일] 후보 ${r.threads.length}건\n${r.text}`, '📬 메일에서 온 업무 후보');
+      if (r.newest) await mailMark(r.newest);
+      this.logger.info(`Mail poll — ${r.threads.length}건 비서에게 넘김`);
+    } catch (error) {
+      this.logger.error('Mail poll threw', error);
+    } finally {
+      this.mailPollBusy = false;
     }
   }
 

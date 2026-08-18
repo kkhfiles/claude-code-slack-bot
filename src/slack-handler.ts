@@ -262,7 +262,7 @@ export class SlackHandler {
         },
         async (prompt, opts) => this.runAssistantSession(prompt, opts),
         config.assistant.configDir,
-        async (text) => this.askFromBoard(text),
+        async (text, lead) => this.askFromBoard(text, lead),
       );
 
       // Loopback trigger endpoint for manual analysis (Phase 1.7 / 1.8 / 1.9).
@@ -474,7 +474,7 @@ export class SlackHandler {
    * **스레드를 만들지 않는다.** 세션 키가 `thread_ts || 'direct'` 라, 스레드에 넣으면
    * 이 방에서 이어 가던 대화와 갈라진다.
    */
-  private async askFromBoard(text: string): Promise<void> {
+  private async askFromBoard(text: string, lead?: string): Promise<void> {
     const channel = config.assistant.dmChannel;
     const user = config.bot.allowUsers[0];
     if (!channel || !user) throw new Error('비서 방 또는 사용자가 설정되지 않았습니다');
@@ -487,7 +487,7 @@ export class SlackHandler {
     // 남는 것은 이 줄뿐이라, 그대로 다시 보내면 복구가 된다.
     const posted = await this.app.client.chat.postMessage({
       channel,
-      text: `🗂 ${boardLabel()} 에서\n${text}`,
+      text: `${lead ?? `🗂 ${boardLabel()} 에서`}\n${text}`,
     });
 
     // ⚠️ **응답을 되돌려줘야 한다.** 슬랙이 주는 `say` 는 API 응답을 돌려주고,
