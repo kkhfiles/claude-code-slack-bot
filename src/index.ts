@@ -5,6 +5,7 @@ import { CliHandler } from './cli-handler';
 import { SlackHandler } from './slack-handler';
 import { McpManager } from './mcp-manager';
 import { Logger } from './logger';
+import { installActivityLog, tagApp, tagToken } from './activity-log';
 import { getVersionInfo, checkForUpdates } from './version';
 import { ReportServer } from './report-server';
 
@@ -26,6 +27,9 @@ async function start() {
       useVertex: config.claude.useVertex,
     });
 
+    // 봇이 한 일을 로컬에 남긴다. **슬랙에 붙기 전에** 길목을 감싸야 첫 말부터 잡힌다.
+    installActivityLog();
+
     // Initialize Slack app
     const app = new App({
       token: config.slack.botToken,
@@ -33,6 +37,8 @@ async function start() {
       socketMode: true,
       appToken: config.slack.appToken,
     });
+    tagApp(app, 'assistant');
+    tagToken(config.slack.botToken, 'assistant');
 
     // Initialize MCP manager
     const mcpManager = new McpManager();

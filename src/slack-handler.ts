@@ -22,7 +22,7 @@ import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimit
 import { enqueue as rlqEnqueue, peek as rlqPeek, takeAll as rlqTakeAll, clear as rlqClear, remove as rlqRemove, QueuedRequest } from './rate-limit-queue';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 import { LunchPoller } from './lunch-poller';
-import { LunchButtons, readLunchBotToken } from './lunch-buttons';
+import { LunchButtons, readLunchBotToken, readLunchAnnounceChannel } from './lunch-buttons';
 import { ChatHost } from './chat-host';
 import { LetterRelay } from './letter-relay';
 import { LetterBooking } from './letter-booking';
@@ -366,6 +366,7 @@ export class SlackHandler {
           script: turnScript,
           surfaces: ['channel'],
           channels: [config.lunchBot.chatChannel],
+          knownRooms: [readLunchAnnounceChannel(config.lunchBot.script)].filter(Boolean),
           managerUserId: config.letter.managerUserId,
           buttIn: config.chat.buttIn.enabled ? config.chat.buttIn : null,
           attach: buttons ? (app) => buttons.register(app) : undefined,

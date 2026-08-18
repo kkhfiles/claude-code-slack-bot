@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
+import { tagApp, tagToken, note } from './activity-log';
 
 /**
  * agy 위에 얹은 슬랙 대화 계층. **봇 여러 개가 이 한 클래스를 같이 쓴다.**
@@ -92,6 +93,13 @@ export interface ChatBotOptions {
   allowUsers?: string[];  // dm: 여기 적힌 사람만. **비면 아무도 못 쓴다**
   managerUserId?: string;
   channels?: string[];    // channel: 여기 적힌 방에서만
+  /**
+   * **아는 방인데 대화는 안 하는 방.** 공지를 올리라고 일부러 넣어 둔 방 같은 것.
+   *
+   * 여기 적어 두면 「낯선 방에 불렸다」 경고를 안 낸다. 안 적으면 재시작할 때마다
+   * 헛경고가 뜨고, 그러면 **진짜 낯선 방에 불렸을 때 그 줄을 안 보게 된다.**
+   */
+  knownRooms?: string[];
   buttIn?: ButtInRule | null;   // channel: null 이면 불렀을 때만 답한다
   /** 방에 들어간 직후 한 번 인사할지. 인사말은 그 자리에서 지어낸다(고정 문구 아님). */
   greetOnJoin?: boolean;
@@ -188,6 +196,8 @@ export class ChatHost {
     const app = new App({
       token: this.opts.botToken, appToken: this.opts.appToken, socketMode: true,
     });
+    tagApp(app, this.opts.name);
+    tagToken(this.opts.botToken, this.opts.name);
 
     this.interest = this.loadInterest();
 
@@ -385,6 +395,15 @@ export class ChatHost {
         this.logger.debug('안 하는 방이라고 알리지 못했습니다', error);
       }
     }
+    // 물러선 것은 슬랙에 아무 흔적이 안 남는다 — 길목으로는 안 잡히니 여기서 적는다.
+    // **매번 적는다.** 아래 경고는 방마다 한 번뿐이라 그것만으로는 몇 번인지 모른다.
+    const known = (this.opts.knownRooms ?? []).includes(channel);
+    note(this.opts.name, '물러섬', {
+      어디: channel, 누가: user, 말: text,
+      왜: known ? '대화는 안 하는 아는 방' : '허락하지 않은 방',
+    });
+    if (known) return;
+
     if (this.toldStranger.has(channel)) return;
     this.toldStranger.add(channel);
     this.logger.warn(`허락하지 않은 방에서 불렸습니다 (${channel}) — 아무것도 하지 않았습니다`);
