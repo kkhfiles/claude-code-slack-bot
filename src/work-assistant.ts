@@ -112,18 +112,36 @@ export function openCaptureCount(): number {
 
 // ---------------------------------------------------------------- 요약 (출력)
 
+/**
+ * **`shell: true` 는 인자를 공백에서 쪼갠다.** 윈도우에서 셸을 끼우면 node 가
+ * argv 를 따옴표 없이 한 줄로 이어 붙여 cmd.exe 에 넘기므로, 값 안의 공백이
+ * 인자 경계가 된다 — `--ts 2026-08-19 06:55` 가 `--ts 2026-08-19` + 떠도는
+ * `06:55` 로 도착해 argparse 가 rc 2 로 죽는다. **하루 동안 조용히 그랬다**
+ * (2026-08-18: 메일 워터마크가 한 번도 안 찍혀 같은 후보가 다섯 번 나갔다).
+ *
+ * 그래서 공백이 든 인자만 따옴표로 감싼다. 셸을 걷어내는 쪽이 더 깨끗하지만
+ * 모든 호출자가 걸리는 변경이라, 지금 틀린 것만 고친다.
+ */
+export function quoteForShell(arg: string): string {
+  if (!/[\s"]/.test(arg)) return arg;
+  if (arg.includes('"')) throw new Error(`셸에 못 넘기는 인자입니다(따옴표 포함): ${arg}`);
+  return `"${arg}"`;
+}
+
 function runTasks(
   args: string[],
   timeoutMs = 60_000,
   script = 'bin/tasks.py',
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const root = workAssistantRoot();
+  const useShell = process.platform === 'win32';
+  const argv = useShell ? args.map(quoteForShell) : args;
   return new Promise((resolve, reject) => {
     if (!root) { reject(new Error('work-assistant root not found')); return; }
-    const proc = spawn('python', ['-X', 'utf8', script, ...args], {
+    const proc = spawn('python', ['-X', 'utf8', script, ...argv], {
       cwd: root,
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: process.platform === 'win32',
+      shell: useShell,
       env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
       windowsHide: true,
     });

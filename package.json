@@ -11,7 +11,8 @@
     "check:1on1": "node scripts/check-1on1.js",
     "check:rlq": "node scripts/check-rate-limit-queue.mjs",
     "check:board": "node scripts/check-board-queue.mjs",
-    "check:timers": "node scripts/check-timers.mjs"
+    "check:timers": "node scripts/check-timers.mjs",
+    "check:args": "node scripts/check-run-args.mjs"
   },
   "keywords": [],
   "author": "",

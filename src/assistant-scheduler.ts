@@ -844,7 +844,13 @@ export class AssistantScheduler {
       // 표가 이 글자를 보고 무슨 절차를 밟을지 고른다. 이름이 아니라 행선지다.
       await this.askFromBoard(
         `[메일] 후보 ${r.threads.length}건\n${r.text}`, '📬 메일에서 온 업무 후보');
-      if (r.newest) await mailMark(r.newest);
+      // **표시가 안 찍히면 큰 소리로 남긴다.** 결과를 버리면 넘기기는 되는데
+      // 표시만 안 되는 상태가 조용히 이어져 **같은 후보가 10분마다 다시 나간다**
+      // (2026-08-18 실측: 같은 스레드 셋 · 다음 날 아침 둘 · 세션 다섯 번).
+      // 사람에게는 안 알린다 — 10분마다라 알림 자체가 소음이 된다.
+      if (r.newest && !(await mailMark(r.newest))) {
+        this.logger.warn(`Mail poll: 표시를 못 찍었습니다 — 같은 후보가 또 나옵니다 (${r.newest})`);
+      }
       this.logger.info(`Mail poll — ${r.threads.length}건 비서에게 넘김`);
     } catch (error) {
       this.logger.error('Mail poll threw', error);
