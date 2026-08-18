@@ -12,7 +12,7 @@ import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
-  workAssistantRoot } from './work-assistant';
+  vaultPush, workAssistantRoot } from './work-assistant';
 import { boardQueueEnabled, drain } from './board-queue';
 
 /**
@@ -20,6 +20,14 @@ import { boardQueueEnabled, drain } from './board-queue';
  * 설정으로 뺄 이유가 생기면 그때 뺀다.
  */
 const WORK_NUDGE_TIME = '08:55';
+/**
+ * 업무 볼트를 PC 밖으로 내보내는 시각. **그날 일이 끝난 뒤 한 번**이라 20:00 이다
+ * (자정·정오는 이 PC 의 데이터 동기화 일정이지 백업에 맞는 시각이 아니다).
+ *
+ * **쉬는 날도 돈다** — 주말에도 진행판을 누르므로 일하는 날만 하면 그 사이가
+ * 통째로 밖에 없다.
+ */
+const VAULT_PUSH_TIME = '20:00';
 /**
  * 오후 체크인 넛지 시각. **진행이 들어오는 유일한 입구가 체크인인데**, 그것이
  * 「그날 첫 접촉」에만 걸려 있어 슬랙을 안 여는 날은 아무것도 안 들어왔다.
@@ -212,6 +220,7 @@ export class AssistantScheduler {
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private workNudgeTimer: ReturnType<typeof setTimeout> | null = null;
   private checkinPmTimer: ReturnType<typeof setTimeout> | null = null;
+  private vaultPushTimer: ReturnType<typeof setTimeout> | null = null;
   private notionWatchTimer: ReturnType<typeof setInterval> | null = null;
   private notionWatchBusy = false;
   private notionWatchFailures = 0;
@@ -281,6 +290,14 @@ export class AssistantScheduler {
     // (the recurring daily timer itself is registered by scheduleAll() above)
     setTimeout(() => this.runDaouKeepAlive().catch(e =>
       this.logger.error('Daou keep-alive (startup) failed', e)), 25_000);
+
+    // 볼트가 밖에 나갔는지 뜰 때 한 번 본다. **OS 예약에서 잃은 성질을 메우는
+    // 자리다** — 20:00 에 봇이 꺼져 있었으면 그 회차는 통째로 없어지므로, 다시
+    // 켤 때 따라잡는다. 나갈 것이 없으면 원격에 닿지도 않고 끝난다.
+    // (매일 도는 타이머 자체는 위 scheduleAll() 이 건다)
+    if (isWorkAssistantEnabled()) {
+      setTimeout(() => void this.runVaultPush('startup'), 30_000);
+    }
   }
 
   stop(): void {
@@ -576,6 +593,7 @@ export class AssistantScheduler {
       this.startBoardQueuePoller();
       void this.startNotionWatch();
       this.scheduleFocus();
+      this.scheduleVaultPush();
     }
 
     if (this.getEnabledAnalysisTypes().length > 0) {
@@ -619,6 +637,10 @@ export class AssistantScheduler {
     if (this.focusTimer) {
       clearTimeout(this.focusTimer);
       this.focusTimer = null;
+    }
+    if (this.vaultPushTimer) {
+      clearTimeout(this.vaultPushTimer);
+      this.vaultPushTimer = null;
     }
   }
 
@@ -703,6 +725,58 @@ export class AssistantScheduler {
    *
    * **catch-up 은 없다.** 봇이 밤에 뜨면 "지금까지 뭐 됐나요"는 이미 늦다.
    */
+  /**
+   * 매일 그 시각. **쉬는 날을 안 건너뛴다** — `getNextWorkingDay` 와 그것이
+   * 다르다. 알림은 일하는 날에만 밀지만 백업은 달력을 안 가린다.
+   */
+  private getNextEveryDay(time: string): Date {
+    const [h, m] = time.split(':').map(Number);
+    const now = new Date();
+    const next = new Date(now);
+    next.setHours(h, m, 0, 0);
+    if (next <= now) next.setDate(next.getDate() + 1);
+    return next;
+  }
+
+  /**
+   * 볼트를 PC 밖으로 — 매일 20:00.
+   *
+   * **작업 스케줄러가 아니라 여기 있는 이유**(2026-08-18 사용자 결정): 예약을
+   * OS 쪽에 두면 관리할 자리가 하나 더 는다. 봇이 죽으면 백업도 멈추지만,
+   * **봇이 죽으면 어차피 여러 가지가 같이 멈추므로 조용한 실패가 아니다.**
+   * 그리고 밀렸다는 판정(`brief` 맨 위 ⛔)은 봇 밖에 있어 봇이 죽어도 살아 있다.
+   *
+   * 대신 **놓친 회차를 다음에 켤 때 미는 성질**을 OS 예약에서 잃었다 — 봇이
+   * 뜰 때 한 번 부르는 것(`start()`)이 그 자리를 메운다.
+   *
+   * **말을 걸지 않는다.** 성공도 실패도 로그까지다.
+   */
+  private scheduleVaultPush(): void {
+    const nextFire = this.getNextEveryDay(VAULT_PUSH_TIME);
+    this.logger.info('Scheduled vault push', {
+      time: VAULT_PUSH_TIME, nextFire: nextFire.toISOString(),
+    });
+
+    this.vaultPushTimer = setTimeout(async () => {
+      await this.runVaultPush('daily');
+      this.scheduleVaultPush();
+    }, nextFire.getTime() - Date.now());
+  }
+
+  /** 한 번 내보낸다. **절대 던지지 않는다** — 여기서 터지면 재예약이 끊긴다. */
+  private async runVaultPush(why: string): Promise<void> {
+    try {
+      const r = await vaultPush();
+      if (r.ok) {
+        this.logger.info(`Vault push (${why}) — ${r.detail || '나갈 것 없음'}`);
+      } else {
+        this.logger.warn(`Vault push (${why}) failed — ${r.detail}`);
+      }
+    } catch (error) {
+      this.logger.error(`Vault push (${why}) threw`, error);
+    }
+  }
+
   private scheduleCheckinPm(): void {
     const nextFire = this.getNextWorkingDay(CHECKIN_PM_TIME);
     this.logger.info('Scheduled afternoon check-in', {

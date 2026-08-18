@@ -112,11 +112,15 @@ export function openCaptureCount(): number {
 
 // ---------------------------------------------------------------- 요약 (출력)
 
-function runTasks(args: string[], timeoutMs = 60_000): Promise<{ code: number; stdout: string; stderr: string }> {
+function runTasks(
+  args: string[],
+  timeoutMs = 60_000,
+  script = 'bin/tasks.py',
+): Promise<{ code: number; stdout: string; stderr: string }> {
   const root = workAssistantRoot();
   return new Promise((resolve, reject) => {
     if (!root) { reject(new Error('work-assistant root not found')); return; }
-    const proc = spawn('python', ['-X', 'utf8', 'bin/tasks.py', ...args], {
+    const proc = spawn('python', ['-X', 'utf8', script, ...args], {
       cwd: root,
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
@@ -216,6 +220,25 @@ export async function currentStore(): Promise<string> {
     return code === 0 && v ? v : 'notion';
   } catch {
     return 'notion';
+  }
+}
+
+/**
+ * 볼트를 원격으로 내보낸다 — **백업 전용**. 매일 20:00 + 봇이 뜰 때 한 번.
+ *
+ * **말을 걸지 않는다.** 성공은 조용하고, 실패해도 여기서 DM 을 보내지 않는다 —
+ * 밀렸다는 사실은 `brief` 맨 위 ⛔ 가 말하고 **그 판정은 봇 밖에 있다**(봇이
+ * 죽으면 이 타이머도 같이 죽으므로, 죽음을 알리는 쪽은 봇에 두지 않는다).
+ *
+ * 나갈 것이 없으면 원격에 닿지도 않고 끝난다 — 그래서 뜰 때마다 불러도 싸다.
+ */
+export async function vaultPush(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const { code, stdout, stderr } = await runTasks([], 120_000, 'bin/vault_push.py');
+    const detail = ((stdout || stderr).trim().split('\n').pop() || '').trim();
+    return { ok: code === 0, detail };
+  } catch (err) {
+    return { ok: false, detail: String(err) };
   }
 }
 
