@@ -13,7 +13,7 @@ import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, workAssistantRoot } from './work-assistant';
-import { boardQueueEnabled, drain } from './board-queue';
+import { boardLabel, boardQueueEnabled, drain } from './board-queue';
 
 /**
  * 업무 넛지 시각. 09:00 데일리 미팅 직전이라는 것이 이 값의 전부다 —
@@ -24,7 +24,7 @@ const WORK_NUDGE_TIME = '08:55';
  * PC 밖으로 사본을 내보내는 시각. **그날 일이 끝난 뒤 한 번**이라 20:00 이다
  * (자정·정오는 이 PC 의 데이터 동기화 일정이지 백업에 맞는 시각이 아니다).
  *
- * **쉬는 날도 돈다** — 주말에도 진행판을 누르므로 일하는 날만 하면 그 사이가
+ * **쉬는 날도 돈다** — 주말에도 Work Board를 누르므로 일하는 날만 하면 그 사이가
  * 통째로 밖에 없다.
  */
 const OFFSITE_PUSH_TIME = '20:00';
@@ -40,7 +40,7 @@ const OFFSITE_PUSH_TIME = '20:00';
  */
 const CHECKIN_PM_TIME = '17:00';
 /**
- * 진행판 큐를 가져오는 간격. **이 값이 곧 「무르기」 창의 길이다** — 빠르게 만드는
+ * Work Board 큐를 가져오는 간격. **이 값이 곧 「무르기」 창의 길이다** — 빠르게 만드는
  * 것과 무를 수 있는 것은 같은 손잡이의 양끝이라, 30초에서 5초로 내리며 무르기를
  * 내주었다(2026-08-13).
  *
@@ -59,7 +59,7 @@ const BOARD_QUEUE_POLL_MS = 5_000;
  */
 const NOTION_WATCH_MS = 180_000;
 /**
- * 진행판 맨 위 한 줄을 갱신하는 창. 업무일 **07·09·11·13·15·17·19시** 일곱 번.
+ * Work Board 맨 위 한 줄을 갱신하는 창. 업무일 **07·09·11·13·15·17·19시** 일곱 번.
  *
  * **여기만 돈이 든다.** 앞의 폴러들은 파일·HTTP 한 번이지만 이쪽은 세션 하나다.
  * 실제로 얼마 나갔는지는 `.assistant-costs.json` 의 `focus` 항목으로 센다.
@@ -249,7 +249,7 @@ export class AssistantScheduler {
     private spawnSession: (prompt: string, opts: SpawnOpts) => Promise<SessionResult>,
     configDir: string,
     /**
-     * 진행판에서 온 **사람 말**을 이 방의 대화로 들여보내는 길. 없으면 그런 항목은
+     * Work Board에서 온 **사람 말**을 이 방의 대화로 들여보내는 길. 없으면 그런 항목은
      * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
      */
     private askFromBoard?: (text: string) => Promise<void>,
@@ -808,7 +808,7 @@ export class AssistantScheduler {
   /**
    * 노션에서 **직접** 고친 것을 따라잡는다 — 3분마다.
    *
-   * 수정은 진행판과 스탠리에서 한다는 것이 규율이지만 노션은 막을 수 없다.
+   * 수정은 Work Board와 스탠리에서 한다는 것이 규율이지만 노션은 막을 수 없다.
    * 막는 대신 따라잡는다: 안 따라잡으면 화면이 최대 8시간 낡고, **낡은 화면은
    * 조용히 틀린다**(사람은 최신인 줄 알고 본다).
    *
@@ -834,7 +834,7 @@ export class AssistantScheduler {
       try {
         const redrew = await refreshBoardIfChanged();
         if (redrew) {
-          this.logger.info('Notion changed outside the board — 진행판을 다시 올렸습니다');
+          this.logger.info('Notion changed outside the board — Work Board를 다시 올렸습니다');
         }
         if (this.notionWatchFailures) {
           this.logger.info(`Notion watch recovered (${this.notionWatchFailures}회 실패 뒤)`);
@@ -855,14 +855,14 @@ export class AssistantScheduler {
   }
 
   /**
-   * 진행판에서 누른 것을 가져와 반영한다 — `BOARD_QUEUE_POLL_MS` 마다.
+   * Work Board에서 누른 것을 가져와 반영한다 — `BOARD_QUEUE_POLL_MS` 마다.
    *
    * **폴링 간격이 곧 무르는 창이다.** 가져가기 전이면 화면에서 뺄 수 있고, 가져간
    * 뒤에는 못 무른다(그때는 이미 노션에 쓰고 있을 수 있다). 확인 대화상자를 안
    * 두는 이유가 이것이다 — 폰에서 한 번 더 누르게 만들면 안 쓰게 된다.
    *
    * **반영한 것은 DM 한 줄로 알린다.** 큐는 눈에 안 보여서, 알리지 않으면 눌렀는데
-   * 됐는지를 진행판이 다시 그려질 때까지 알 수 없다. 알리는 것이라 봇의 수신 관문은
+   * 됐는지를 Work Board가 다시 그려질 때까지 알 수 없다. 알리는 것이라 봇의 수신 관문은
    * 건드리지 않는다.
    *
    * 실패는 여기서 시끄럽게 하지 않는다 — 30초마다 도는 자리라 네트워크가 한 번
@@ -870,7 +870,7 @@ export class AssistantScheduler {
    * 잡는다(폴러 밖에 있어야 폴러가 죽어도 보인다).
    */
   /**
-   * 진행판 맨 위 한 줄 — 업무일 07~19시 **정각마다**.
+   * Work Board 맨 위 한 줄 — 업무일 07~19시 **정각마다**.
    *
    * **돈이 드는 유일한 폴러다.** 그래서 안 돌아도 되는 경우를 전부 앞에서 끊는다:
    * 창 밖 · 주말·공휴일 · 「조용히」 기간 · 앞판이 아직 도는 중. 판단이 안 서면
@@ -988,17 +988,17 @@ export class AssistantScheduler {
           // 안 맞음」을 함께 뜻하는데, 봇이 둘을 가르려면 판정을 복제해야 한다.
           // 대신 **다음에 무엇을 할지**를 준다 — 받는 쪽에 필요한 것은 그것이다.
           await this.sendMessage(
-            `⚠️ 진행판에서 누른 「${item.label || item.text}」을 반영하지 못했습니다 ` +
+            `⚠️ ${boardLabel()} 에서 누른 「${item.label || item.text}」을 반영하지 못했습니다 ` +
             '— 그 업무를 찾지 못했거나 형식이 맞지 않습니다.\n' +
-            '누른 것은 취소됐습니다. 진행판을 새로고침해 다시 누르거나, ' +
-            '업무 제목을 눌러 노션에서 바로 바꾸세요.',
+            `누른 것은 취소됐습니다. ${boardLabel()} 을 새로고침해 다시 누르거나, ` +
+            '카드를 눌러 편집창에서 바꾸세요.',
           ).catch(() => { });
         }
         for (const item of r.lost) {
           // **원문을 그대로 돌려준다.** 한 번만 시도하는 대가라, 여기서 안 돌려주면
           // 사람이 쓴 글이 조용히 사라진다. 붙여넣기만 하면 다시 갈 수 있게 둔다.
           await this.sendMessage(
-            '⚠️ 진행판에서 보낸 말을 넘기지 못했습니다. 원문은 아래 그대로입니다 ' +
+            `⚠️ ${boardLabel()} 에서 보낸 말을 넘기지 못했습니다. 원문은 아래 그대로입니다 ` +
             '— 다시 보내시려면 이 방에 붙여넣으세요.\n\n' + item.text,
           ).catch(() => { });
         }
