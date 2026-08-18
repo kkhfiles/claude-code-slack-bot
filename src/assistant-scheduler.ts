@@ -1489,6 +1489,36 @@ export class AssistantScheduler {
       .map(([type]) => type);
   }
 
+  /**
+   * 분석 그룹의 «시도 기록» 을 파일로 남긴다 — 「오늘 나왔어야 할 목록」의 신호원.
+   *
+   * cadence(weekly/biweekly/monthly)를 계산하는 곳은 여기뿐이라, 이 기록이 없으면
+   * 소비자는 「보고서가 안 나왔다」와 「원래 오늘 안 도는 타입이다」를 구분할 수 없다.
+   * 비용 원장은 대안이 못 된다 — agy 백엔드로 도는 타입은 Claude 세션 비용이 0이라
+   * 원장에 흔적이 아예 없다(2026-08-18 실측: competitors는 단 한 번도 없음).
+   *
+   * plan 1줄 + 타입별 outcome 1줄 append. 그룹 도중 죽어도 「계획 N vs 기록 M」으로
+   * 중단이 드러난다 — rate limit이 그룹 전체를 break하는 경로가 정확히 그 모양이라,
+   * 그때 뒤쪽 타입은 completed도 skipped도 아닌 무기록으로 사라진다.
+   *
+   * best-effort — 절대 throw하지 않는다(감시 장치가 감시 대상을 죽이면 안 된다).
+   */
+  private appendAnalysisJournal(schedule: string, record: Record<string, unknown>): void {
+    try {
+      const dir = path.join(this.workingDir, 'reports', 'pipeline-runs');
+      fs.mkdirSync(dir, { recursive: true });
+      const slug = schedule.replace(/[^A-Za-z0-9]+/g, '-');
+      const todayKST = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+      const file = path.join(dir, `${todayKST}-analysis-${slug}.jsonl`);
+      const line = JSON.stringify({ ...record, ts: new Date().toISOString() });
+      fs.appendFileSync(file, line + '\n', 'utf-8');
+    } catch (error) {
+      this.logger.warn('analysis journal append 실패(무시)', {
+        error: (error as Error).message,
+      });
+    }
+  }
+
   private async runAnalysisGroup(schedule: string, types: string[]): Promise<void> {
     if (!this.config) return;
 
@@ -1517,6 +1547,15 @@ export class AssistantScheduler {
       });
     }
 
+    // 계획을 먼저 박는다 — 그룹 도중 죽어도 「몇 종 하려 했나」가 남아야
+    // 「스케줄러가 안 돌았다」와 「돌다 끊겼다」를 구분할 수 있다.
+    this.appendAnalysisJournal(schedule, {
+      kind: 'plan',
+      schedule,
+      planned: runnableTypes,
+      skipped: skippedTypes,
+    });
+
     for (const type of runnableTypes) {
       const typeConfig = this.config.analysis.types[type];
       const maxRetries = (typeConfig?.maxRetries as number | undefined)
@@ -1535,6 +1574,7 @@ export class AssistantScheduler {
             this.logger.error(`Analysis ${type} timed out after ${attempt + 1} attempts`);
             errorCollector.add('AssistantScheduler', `분석 타임아웃 (${type}): ${maxRetries}회 재시도 후 포기`);
             timedOutTypes.push(type);
+            this.appendAnalysisJournal(schedule, { kind: 'outcome', type, outcome: 'timeout' });
             break;
           }
 
@@ -1548,16 +1588,24 @@ export class AssistantScheduler {
             if (shouldRetry && result.sessionId) {
               failedRetryTypes.push({ type, sessionId: result.sessionId });
             }
+            this.appendAnalysisJournal(schedule, {
+              kind: 'outcome', type, outcome: 'rate_limited',
+              sessionId: result.sessionId, willRetry: shouldRetry,
+            });
             break; // Stop remaining types in this group (rate limit affects all)
           }
 
           succeeded = true;
           completedTypes.push(type);
+          this.appendAnalysisJournal(schedule, { kind: 'outcome', type, outcome: 'completed' });
           break;
         } catch (error) {
           const msg = (error as Error).message || '';
           if (isRateLimitText(msg)) {
             this.logger.warn(`Analysis ${type} hit rate limit, stopping group`);
+            this.appendAnalysisJournal(schedule, {
+              kind: 'outcome', type, outcome: 'rate_limited', viaThrow: true,
+            });
             break;
           }
           if (attempt < maxRetries) {
@@ -1566,6 +1614,9 @@ export class AssistantScheduler {
           }
           errorCollector.add('AssistantScheduler', `분석 실행 실패 (${type}): ${msg}`);
           this.logger.error(`Analysis failed for type: ${type}`, error);
+          this.appendAnalysisJournal(schedule, {
+            kind: 'outcome', type, outcome: 'error', error: msg.slice(0, 300),
+          });
           break;
         }
       }
