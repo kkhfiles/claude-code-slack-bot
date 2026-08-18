@@ -1,5 +1,5 @@
 /**
- * 진행판에서 누른 것을 가져와 반영한다.
+ * Work Board에서 누른 것을 가져와 반영한다.
  *
  * **여기에는 업무 로직이 없다.** 큐에 담긴 것은 `tasks.py quick` 이 읽는 문자열
  * 하나뿐이고, 그것을 노션에 어떻게 쓸지는 파이썬만 안다. 이 모듈은 나르고,
@@ -79,7 +79,20 @@ function readJson<T>(file: string, fallback: T): T {
   }
 }
 
-/** 진행판 주소는 `work-assistant` 의 `config.json` 한 곳에만 있다. */
+/**
+ * 판의 이름. **주소와 같은 곳에서 읽는다** — `work-assistant` 의 `config.json`
+ * 한 줄이 정본이라, 여기 글자로 박아 두면 이름을 바꿀 때 봇만 옛 이름을 말한다.
+ *
+ * 못 읽으면 「업무 판」으로 답한다 — 사람에게 가는 문장이라 비워 둘 수 없다.
+ */
+export function boardLabel(): string {
+  const root = config.workAssistant.root;
+  if (!root) return '업무 판';
+  return readJson<{ board_label?: string }>(path.join(root, 'config.json'), {})
+    .board_label || '업무 판';
+}
+
+/** 판 주소는 `work-assistant` 의 `config.json` 한 곳에만 있다. */
 export function boardOrigin(): string | null {
   const root = config.workAssistant.root;
   if (!root) return null;
@@ -103,7 +116,7 @@ export function boardQueueEnabled(): boolean {
 
 async function call(op: string, body?: unknown, base?: string): Promise<any> {
   const origin = base ?? boardOrigin();
-  if (!origin) throw new Error('진행판 주소가 없습니다');
+  if (!origin) throw new Error('Work Board 주소가 없습니다');
   const t = token();
   const headers: Record<string, string> = { 'user-agent': UA };
   // 열쇠는 Access 뒤에 있을 때만 필요하다. 없으면 안 붙이고 그대로 간다 —
@@ -178,7 +191,7 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string): Promi
         await ask(item.text);
         out.applied.push({ item, output: '' });
       } catch (err) {
-        logger.error('진행판에서 온 말을 비서에게 못 넘겼습니다', err);
+        logger.error('Work Board에서 온 말을 비서에게 못 넘겼습니다', err);
         out.lost.push(item);
       }
       continue;

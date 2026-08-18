@@ -1,5 +1,5 @@
 /**
- * 진행판 폴러 자가 검사 — 슬랙도 노션도 타지 않는다.
+ * Work Board 폴러 자가 검사 — 슬랙도 노션도 타지 않는다.
  *
  *   터미널 A:  cd P:/github/artifact-host  &&  npm run dev
  *   터미널 B:  npm run build
@@ -27,7 +27,7 @@ if (!fs.existsSync(MOD)) {
 try {
   await fetch(`${BASE}/api/pending`);
 } catch {
-  console.error(`진행판 dev 서버가 없습니다 (${BASE}) — artifact-host 에서 \`npm run dev\``);
+  console.error(`Work Board dev 서버가 없습니다 (${BASE}) — artifact-host 에서 \`npm run dev\``);
   process.exit(1);
 }
 
@@ -156,5 +156,5 @@ if (fails.length) {
   for (const f of fails) console.log('  ✗ ' + f);
   process.exit(1);
 }
-console.log('통과 — 진행판 폴러 (빈 큐 · 반영 · 중복 방지 · 문법 아님 버리기 · '
+console.log('통과 — Work Board 폴러 (빈 큐 · 반영 · 중복 방지 · 문법 아님 버리기 · '
   + '일시 실패 남기기 · 섞인 판 · 복구 후 반영 · 사람 말 넘기기 · 한 번만 시도 · 받을 곳 없음)');

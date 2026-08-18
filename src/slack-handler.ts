@@ -30,6 +30,7 @@ import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
 import { captureToInbox, checkinMap, checkinNow, checkinOnce, isWorkAssistantEnabled, quickUpdate } from './work-assistant';
+import { boardLabel } from './board-queue';
 
 /**
  * 슬랙 대화 세션의 사고 깊이. SDK 기본값은 `'high'` 다.
@@ -463,7 +464,7 @@ export class SlackHandler {
   }
 
   /**
-   * 진행판에서 온 **사람 말**을 이 방의 대화로 들여보낸다.
+   * Work Board에서 온 **사람 말**을 이 방의 대화로 들여보낸다.
    *
    * **해석을 여기서 하지 않는다.** 규칙(임의 등록 금지 · 제안 후 컨펌 · 원문 캡처)이
    * 이미 아래 경로에 붙어 있어서, 같은 입구로 넣으면 그것들이 그대로 걸린다.
@@ -486,7 +487,7 @@ export class SlackHandler {
     // 남는 것은 이 줄뿐이라, 그대로 다시 보내면 복구가 된다.
     const posted = await this.app.client.chat.postMessage({
       channel,
-      text: `🗂 진행판에서\n${text}`,
+      text: `🗂 ${boardLabel()} 에서\n${text}`,
     });
 
     // ⚠️ **응답을 되돌려줘야 한다.** 슬랙이 주는 `say` 는 API 응답을 돌려주고,
