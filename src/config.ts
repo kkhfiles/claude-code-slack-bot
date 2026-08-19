@@ -101,6 +101,15 @@ export const config = {
     // 말투·성격을 바꿔 보려면, 아무 데서나 답하지 않는 규칙에 문을 하나 내야 한다.
     // 비워 두면 문은 닫힌 채다(기본값이 침묵인 것은 그대로).
     testChannel: process.env.BOT_TEST_CHANNEL || '',
+    // 봇끼리 말 섞기. 꺼 두면 봇이 한 말은 전부 안 들린다(기본값이 침묵).
+    // 굴레가 없으면 부름(멘션)이 조용한 시간·하루 한도를 건너뛰므로 둘이 최고 속도로
+    // 주고받는다 — 그래서 두 문턱이 이 기능의 일부다. 열 번에서 스스로 맺으라 이르고,
+    // 스무 번을 넘기면 사람이 말할 때까지 끊는다.
+    botTalk: {
+      enabled: process.env.BOT_TALK === '1',
+      softTurns: parseInt(process.env.BOT_TALK_SOFT || '10', 10),
+      hardTurns: parseInt(process.env.BOT_TALK_HARD || '20', 10),
+    },
     // 점심원정대 채널에서 **먼저 말 걸기**. 낄 자리인지 판단하는 길이 둘이다 —
     // 낱말이 걸리면 그 자리에서 바로(`interest`), 안 걸려도 몇 분마다 쌓인 말을
     // 통째로 보고 한 번 더(`sweepMinutes`). 나머지는 수다스러움을 막는 굴레다 —
