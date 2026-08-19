@@ -136,6 +136,41 @@ const marks = (log, op) => log.filter((r) => r[0] === op).map((r) => r[2]);
     { 붙임: marks(log, 'add'), 뗌: marks(log, 'remove') });
 }
 
+// --- 「방의 말을 실시간으로 듣고 있나」를 세는 자리 ---------------------------------
+// 표시와 같은 물음의 다른 각도다 — 표시는 「지금 답을 만드나」를 보여 주고, 이 값은
+// **애초에 말이 닿기는 하나**를 센다. 여기가 틀리면 감시가 자기가 못 보는 것을 봤다고
+// 하게 된다: 구독은 자리마다 따로 켜므로 `message.im` 만 있고 `message.channels` 가
+// 빠진 조합이 성립하는데, 1:1 한 마디에 값이 켜지면 **잡으려던 그 상태에서 경고가
+// 영영 안 뜬다.**
+{
+  const { host, client } = make('live', 'cow');
+  host['selfUserId'] = 'B_SELF';
+  host['onDirectMessage'] = async () => {};
+  host['onChannelMessage'] = async () => {};
+
+  await host['onEvent'](client, {
+    channel: 'D_ROOM', channel_type: 'im', user: 'U1', ts: '1.1', text: '안녕',
+  });
+  check('1:1 한 마디는 「방의 말이 온다」의 증거가 아니다',
+    host['sawLive'] === false, host['sawLive']);
+
+  await host['onEvent'](client, {
+    channel: ROOM, user: 'U1', ts: '2.2', text: '점심 뭐 먹지',
+  });
+  check('방의 말이 오면 그때 센다', host['sawLive'] === true, host['sawLive']);
+}
+{
+  // **허락 안 한 방의 말도 증거다** — 구독이 살아 있다는 사실 자체는 방을 안 가린다.
+  const { host, client } = make('live2', 'cow');
+  host['selfUserId'] = 'B_SELF';
+  host['onChannelMessage'] = async () => {};
+  await host['onEvent'](client, {
+    channel: 'C_OTHER', user: 'U1', ts: '3.3', text: '안녕',
+  });
+  check('낯선 방의 말도 구독이 살아 있다는 증거로 센다',
+    host['sawLive'] === true, host['sawLive']);
+}
+
 // --- 인사는 붙일 자리가 없다 --------------------------------------------------------
 // `greet:` 는 지어낸 열쇠라 슬랙에 그런 글이 없다. 붙이려 들면 매번 실패만 찍는다.
 {

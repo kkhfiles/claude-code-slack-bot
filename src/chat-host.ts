@@ -378,8 +378,6 @@ export class ChatHost {
     }
     if (m.subtype || !channel || !user || !ts || !text) return;
     if (user === this.selfUserId) return;
-    this.sawLive = true;   // 이벤트 구독이 살아 있다는 유일한 증거
-
     // **어느 자리인지는 들어온 것이 정한다.** 호스트의 설정으로 가르면 자리가 늘 때마다
     // 호스트를(그러니까 연결을) 하나 더 열게 된다 — 그게 소켓 이중 연결 사고의 뿌리다.
     if (m.channel_type === 'im') {
@@ -390,6 +388,11 @@ export class ChatHost {
       await this.onDirectMessage(client, user, channel, ts, text);
       return;
     }
+    // **방의 말만 증거로 센다 — 1:1 은 안 센다.** 구독은 자리마다 따로 켜므로
+    // `message.im` 만 있고 `message.channels` 가 빠진 조합이 그대로 성립한다(DM 만
+    // 하던 봇을 방에 넣을 때 흔하다). 1:1 한 마디에 이 값이 켜지면, 정작 **잡으려던
+    // 그 상태에서 경고가 영영 안 뜬다** — 감시가 자기가 못 보는 것을 봤다고 하는 꼴이다.
+    this.sawLive = true;
     if (!this.servesChannel) return;
     // **허락한 방에서만 움직인다.** 누가 다른 방에 초대해도 여기서 끊긴다 — 부르든 말든.
     if (!(this.opts.channels ?? []).includes(channel)) {
