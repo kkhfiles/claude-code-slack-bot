@@ -39,20 +39,22 @@ const make = (rule) => new ChatHost({
 check('안 켜면 봇이 한 말은 한 번도 안 받는다',
   make(null)['botTalkTurn'](ROOM, '안녕') === null);
 
-// --- 열 번째부터 마무리하라고 이른다 --------------------------------------------
+// --- 오간 말을 통째로 센다 -------------------------------------------------------
+// **각자는 상대 말만 받는다.** 그것만 세면 스무 번을 셌을 때 방에는 마흔 마디가
+// 지나간 뒤다 — 실제 길이의 절반만 보고 끊는 셈이라, 상대 말 하나를 둘로 센다.
 const h = make({ softTurns: 10, hardTurns: 20 });
 const said = [];
-for (let i = 1; i <= 25; i++) said.push(h['botTalkTurn'](ROOM, `말${i}`));
+for (let i = 1; i <= 15; i++) said.push(h['botTalkTurn'](ROOM, `말${i}`));
 
-check('아홉 번째까지는 그냥 넘긴다 (한마디 안 붙는다)',
-  said.slice(0, 9).every((s) => s && !s.includes('마무리')), said.slice(0, 9));
-check('열 번째부터 마무리하라고 이른다',
-  said[9]?.includes('마무리하세요'), said[9]);
-check('열 번째부터 스무 번째까지 계속 이른다',
-  said.slice(9, 20).every((s) => s && s.includes('마무리하세요')));
-check('스물한 번째부터 끊는다 (스무 번은 살아 있다)',
-  said[19] !== null && said[20] === null && said[24] === null,
-  { 스무: said[19] && '있음', 스물하나: said[20], 스물다섯: said[24] });
+check('넉 번째까지는 그냥 넘긴다 — 여덟 마디 (한마디 안 붙는다)',
+  said.slice(0, 4).every((s) => s && !s.includes('마무리')), said.slice(0, 4));
+check('다섯 번째에 열 마디가 되어 마무리하라고 이른다',
+  said[4]?.includes('마무리하세요'), said[4]);
+check('그 뒤로도 계속 이른다',
+  said.slice(4, 10).every((s) => s && s.includes('마무리하세요')));
+check('열한 번째부터 끊는다 — 스무 마디는 살아 있고 스물둘부터 끊긴다',
+  said[9] !== null && said[10] === null && said[14] === null,
+  { 스무마디: said[9] && '있음', 스물둘: said[10], 그뒤: said[14] });
 
 // --- 사람이 한 마디 하면 처음으로 돌아간다 --------------------------------------
 h['humanSpoke'](ROOM, '둘이 뭐 하니');
@@ -61,8 +63,9 @@ check('사람이 말하면 셈이 처음으로 돌아간다',
   after === '다시', after);
 
 // --- 방마다 따로 센다 ------------------------------------------------------------
-const h2 = make({ softTurns: 2, hardTurns: 3 });
-for (let i = 0; i < 4; i++) h2['botTalkTurn']('C_A', 'a');
+// 이르는 문턱은 안 걸리게 높이 둔다 — 여기서 보려는 것은 **방이 서로 안 섞이는가**다.
+const h2 = make({ softTurns: 100, hardTurns: 4 });
+for (let i = 0; i < 3; i++) h2['botTalkTurn']('C_A', 'a');
 check('한 방이 끊겨도 다른 방은 멀쩡하다',
   h2['botTalkTurn']('C_A', 'a') === null && h2['botTalkTurn']('C_B', 'b') === 'b');
 
