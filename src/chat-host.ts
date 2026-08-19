@@ -351,6 +351,9 @@ export class ChatHost {
     // 호스트를(그러니까 연결을) 하나 더 열게 된다 — 그게 소켓 이중 연결 사고의 뿌리다.
     if (m.channel_type === 'im') {
       if (!this.servesDm) return;
+      // **봇끼리는 방에서만 말을 섞는다.** 1:1 에는 세는 자리가 없어서, 여기로 새면
+      // 굴레 없는 주고받기가 된다 — 막으려고 만든 바로 그 모양이다.
+      if (fromSibling) return;
       await this.onDirectMessage(client, user, channel, ts, text);
       return;
     }
@@ -380,7 +383,10 @@ export class ChatHost {
     const rule = this.opts.botTalk;
     if (!rule) return null;                       // 안 켰으면 봇이 한 말은 안 듣는다
     if (this.hushed.has(channel)) return null;    // 사람이 그만하라고 했다
-    const n = (this.botTurns.get(channel) ?? 0) + 1;
+    // **오간 말을 통째로 센다 — 받은 것만 세면 실제 길이의 절반만 보인다.**
+    // 봇 둘이 번갈아 말하므로 각자는 상대 말만 받는다. 그것만 세면 스무 번을 셌을 때
+    // 방에는 마흔 마디가 지나간 뒤다. 상대 말 하나에 내 답 하나가 붙으니 둘로 센다.
+    const n = (this.botTurns.get(channel) ?? 0) + 2;
     this.botTurns.set(channel, n);
     if (n > rule.hardTurns) {
       // **넘긴 첫 번에만 적는다.** 매번 적으면 끊긴 뒤에도 기록만 계속 쌓인다.
