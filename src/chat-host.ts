@@ -414,7 +414,7 @@ export class ChatHost {
     if (say === null) return;
 
     await this.onChannelMessage(client, user, channel, ts,
-      m.thread_ts as string | undefined, say);
+      m.thread_ts as string | undefined, say, fromSibling);
   }
 
   /**
@@ -571,9 +571,20 @@ export class ChatHost {
   // ── 채널 ──────────────────────────────────────────────────────────────
   private async onChannelMessage(
     client: App['client'], user: string, channel: string, ts: string,
-    threadTs: string | undefined, text: string,
+    threadTs: string | undefined, text: string, fromSibling = false,
   ): Promise<void> {
-    const called = text.includes(`<@${this.selfUserId}>`);
+    // **형제 봇의 말은 부른 것으로 친다.** 그 말에는 **두 번째 기회가 없기 때문**이다 —
+    // 사람 말은 낱말 관문이나 「지금 도는 중」에 걸려 빠져도 1분 뒤 훑기가 다시 집어
+    // 오지만, 훑기는 봇 말을 「이야기가 지나간 자리」로 삼아 지운다. 여기서 한 번
+    // 빠지면 그 말은 영영 없던 것이 된다.
+    //
+    // 실측(2026-08-19 15:44) — 커피콩이 자기 턴을 도는 16초 사이에 소인이 말을 걸었고,
+    // 「도는 중」이라는 이유로 **담기지도 않고 버려졌다.** 도는 중이면 버릴 것이 아니라
+    // 합쳐야 하는데(그러라고 대기열이 있다), 낄지 말지를 재는 자리가 그 둘을 안 갈랐다.
+    //
+    // 굴레가 헐거워지는 것은 아니다 — 봇끼리 주고받는 횟수는 `botTalkTurn` 이 따로
+    // 세서 10마디에 맺으라 이르고 20마디에 끊는다. 사람이 한 마디 하면 처음으로 돌아간다.
+    const called = fromSibling || text.includes(`<@${this.selfUserId}>`);
     // **바로 반응할 자리에서만 담는다.** 나머지는 훑기가 채널에서 직접 읽어 온다 —
     // 여기서 다 쌓아 두면 재시작 한 번에 통째로 사라지고, 소켓이 흘린 말은 애초에
     // 담기지도 않는다. 둘 다 실제로 겪었다.

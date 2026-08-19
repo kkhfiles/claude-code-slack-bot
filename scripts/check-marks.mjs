@@ -171,6 +171,37 @@ const marks = (log, op) => log.filter((r) => r[0] === op).map((r) => r[2]);
     host['sawLive'] === true, host['sawLive']);
 }
 
+// --- 형제 봇의 말은 도는 중에도 안 버린다 -------------------------------------------
+// **봇 말에는 두 번째 기회가 없다.** 사람 말은 낱말 관문이나 「지금 도는 중」에 걸려도
+// 훑기가 다시 집어 오지만, 훑기는 봇 말을 지운다. 여기서 빠지면 영영 없던 말이 된다.
+// 실측(2026-08-19 15:44): 턴이 도는 16초 사이에 온 형제의 말이 담기지도 않고 사라졌다.
+{
+  const { host, client } = make('busy', 'cow');
+  host['selfUserId'] = 'B_SELF';
+  const taken = [];
+  host['kick'] = (_c, key) => { taken.push(key); };
+
+  // 턴이 도는 중으로 만들어 둔다 — 사라졌던 그 조건 그대로.
+  host['active'].add(ROOM);
+  await host['onChannelMessage'](client, 'B_OTHER', ROOM, '9.9', undefined,
+    '소인: 콩이님, 무슨 분부이신지', true);
+  const waiting = host['pending'].get(ROOM);
+  check('도는 중에 온 형제의 말도 대기열에 담긴다',
+    !!waiting && waiting.texts.length === 1, waiting && waiting.texts);
+  check('그 말은 부른 것으로 쳐서 표시 자리를 잡는다',
+    !!waiting && waiting.reactTs.length === 1, waiting && waiting.reactTs);
+
+  // 같은 조건에서 **사람 말**은 낱말·한도에 걸려 빠지는 것이 맞다(훑기가 다시 집어 온다).
+  const plain = make('busy2', 'cow');
+  plain.host['selfUserId'] = 'B_SELF';
+  plain.host['kick'] = () => {};
+  plain.host['active'].add(ROOM);
+  await plain.host['onChannelMessage'](plain.client, 'U1', ROOM, '8.8', undefined,
+    '규황: 점심 뭐 먹지', false);
+  check('사람 말은 그대로 굴레를 받는다 (형제만 예외다)',
+    plain.host['pending'].get(ROOM) === undefined, plain.host['pending'].get(ROOM));
+}
+
 // --- 인사는 붙일 자리가 없다 --------------------------------------------------------
 // `greet:` 는 지어낸 열쇠라 슬랙에 그런 글이 없다. 붙이려 들면 매번 실패만 찍는다.
 {
