@@ -1065,8 +1065,15 @@ export class AssistantScheduler {
         if (r.duplicates) {
           this.logger.info(`이미 반영한 것 ${r.duplicates}건을 지웠습니다`);
         }
-        for (const { output } of r.applied) {
-          if (output) await this.sendMessage(output).catch(() => { });
+        // **버튼으로 누른 것은 조용히 반영한다** (2026-08-19 사용자 결정).
+        // 판에서 누른 사람은 판을 보고 있고 그 화면이 몇 초 뒤에 바뀐다 — 같은
+        // 사실을 슬랙에 한 번 더 적으면 알림만 늘고 새로 아는 것이 없다. 버튼이
+        // 만든 문자열은 화면이 지은 것이라 **해석이 끼어들 자리도 없다.**
+        //
+        // ⚠️ **말은 실패할 때만 한다** — 아래 `dropped`·`lost` 알림은 그대로다.
+        // 조용한 것이 「됐다」는 뜻이 되려면 안 된 것은 반드시 말해야 한다.
+        if (r.applied.length) {
+          this.logger.info(`판에서 누른 것 ${r.applied.length}건 반영 — 알리지 않음`);
         }
         for (const item of r.dropped) {
           // **원인을 좁혀 말하지 않는다.** rc 2 는 「업무를 못 찾음」과 「형식이
