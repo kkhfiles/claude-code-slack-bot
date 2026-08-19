@@ -37,6 +37,13 @@ const MAX_MERGED_LINES = 20;
  * 골라서 죽는다. 드물게 오는 턴이라 눈에 안 띄고, 하필 **가장 긴 대화에서만** 난다.
  */
 const TURN_TIMEOUT_MS = 240 * 1000;
+/**
+ * 답을 만드는 동안 그 말에 붙였다 떼는 표시. **봇마다 다른 것을 쓴다.**
+ *
+ * 한 방에 봇이 둘 있으면 같은 표시로는 **누가 생각 중인지 못 가린다** — 답이 오기까지
+ * 10~20초가 걸리는데 그동안 아무 단서가 없으면 안 듣는 것과 구분되지 않는다.
+ * 실제 이름은 봇 프로필(`bots/<이름>/config.json`)의 `reaction` 이 정하고, 여기는 기본값이다.
+ */
 const THINKING = 'thinking_face';
 /**
  * 훑을 때 채널을 얼마나 거슬러 읽나. 하루 종일 조용하다 한 마디 올라온 자리에서
@@ -151,6 +158,11 @@ interface Waiting {
   texts: string[];
   reactTs: string[];
   toldBusy: boolean;
+  /**
+   * 이 묶음에서 **가장 새 글의 ts.** 아무 데도 표시를 안 붙이기로 한 자리(먼저 말 걸기)
+   * 에서도 「지금 이 말에 답을 만들고 있다」를 하나는 보여 주려고 들고 있는다.
+   */
+  lastTs?: string;
   /** 이미 담은 글의 ts. 훑기가 채널에서 다시 읽어 와도 같은 말을 두 번 안 담게. */
   seen: Set<string>;
 }
@@ -168,6 +180,10 @@ export class ChatHost {
   private selfUserId = '';
   /** 이 봇이 관심 있는 화제. 여기 안 걸리면 **그 자리에서는** 말을 걸지 않는다. */
   private interest: RegExp | null = null;
+  /** 생각 중임을 알리는 표시. 봇 프로필이 정하고, 없으면 기본값. */
+  private mark = THINKING;
+  /** 그 표시가 이 워크스페이스에 없더라 — 한 번만 알린다(장식이라 답은 그대로 나간다). */
+  private toldBadMark = false;
   /** 쌓인 말을 주기적으로 훑어보는 타이머. */
   private sweeper: NodeJS.Timeout | null = null;
 
@@ -206,6 +222,16 @@ export class ChatHost {
   private greeted = new Set<string>();
   private names = new Map<string, string>();
 
+  /**
+   * **살아 있는 말이 한 번이라도 들어왔나.** 앱에 `message` 이벤트 구독이 빠져 있으면
+   * 여기가 영영 거짓으로 남는다 — 권한(`channels:history`)과 이벤트 구독은 따로라
+   * **훑기는 멀쩡히 도는데 부름만 안 들리는** 모양이 된다(2026-08-19 커피콩 실측).
+   * 그 상태는 에러가 안 나서, 세지 않으면 알아낼 길이 없다.
+   */
+  private sawLive = false;
+  private toldNoEvents = false;
+  private readonly startedAt = Date.now();
+
   constructor(private readonly opts: ChatBotOptions) {
     this.logger = new Logger(`Chat:${opts.name}`);
   }
@@ -238,7 +264,7 @@ export class ChatHost {
     tagApp(app, this.opts.name);
     tagToken(this.opts.botToken, this.opts.name);
 
-    this.interest = this.loadInterest();
+    this.loadProfile();
 
     // 대화 말고 다른 것을 얹을 것이 있으면 **소켓을 열기 전에** 붙인다.
     if (this.opts.attach) {
@@ -293,24 +319,30 @@ export class ChatHost {
   }
 
   /**
-   * 봇 프로필(`bots/<이름>/config.json`)의 `interest` 를 읽어 하나의 패턴으로 만든다.
+   * 봇 프로필(`bots/<이름>/config.json`)에서 **관심 낱말과 생각 중 표시**를 읽는다.
    * 파이썬 쪽과 **같은 파일**을 본다 — 봇의 성격을 정하는 것이 두 군데로 갈리면
    * 한쪽만 고쳐 놓고 왜 안 되는지 찾게 된다.
    */
-  private loadInterest(): RegExp | null {
-    if (!this.servesChannel) return null;
+  private loadProfile(): void {
     const configPath = path.join(
       path.dirname(this.opts.script), 'bots', this.opts.name, 'config.json');
+    let profile: { interest?: unknown; reaction?: unknown };
     try {
-      const words = JSON.parse(fs.readFileSync(configPath, 'utf-8'))?.interest;
-      if (!Array.isArray(words) || words.length === 0) return null;
-      const escaped = words.map((w: string) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-      this.logger.info(`관심 낱말 ${escaped.length}개를 읽었습니다`);
-      return new RegExp(escaped.join('|'));
+      profile = JSON.parse(fs.readFileSync(configPath, 'utf-8')) ?? {};
     } catch (error) {
-      this.logger.warn(`관심 낱말을 못 읽었습니다 (${configPath}) — 먼저 말 걸기는 화제를 안 가립니다`, error);
-      return null;
+      this.logger.warn(`봇 프로필을 못 읽었습니다 (${configPath}) — 관심 낱말과 표시는 기본값으로 갑니다`, error);
+      return;
     }
+
+    const wanted = typeof profile.reaction === 'string' ? profile.reaction.replace(/:/g, '').trim() : '';
+    if (wanted) this.mark = wanted;
+
+    if (!this.servesChannel) return;
+    const words = profile.interest;
+    if (!Array.isArray(words) || words.length === 0) return;
+    const escaped = words.map((w: string) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    this.logger.info(`관심 낱말 ${escaped.length}개를 읽었습니다 (생각 중 표시 :${this.mark}:)`);
+    this.interest = new RegExp(escaped.join('|'));
   }
 
   async stop(): Promise<void> {
@@ -346,6 +378,7 @@ export class ChatHost {
     }
     if (m.subtype || !channel || !user || !ts || !text) return;
     if (user === this.selfUserId) return;
+    this.sawLive = true;   // 이벤트 구독이 살아 있다는 유일한 증거
 
     // **어느 자리인지는 들어온 것이 정한다.** 호스트의 설정으로 가르면 자리가 늘 때마다
     // 호스트를(그러니까 연결을) 하나 더 열게 된다 — 그게 소켓 이중 연결 사고의 뿌리다.
@@ -423,7 +456,8 @@ export class ChatHost {
       return;
     }
     this.enqueue(user, { channel, text, ts });
-    await this.react(client, 'add', channel, ts);
+    // 표시는 **턴이 시작할 때** 붙는다(`pump`) — 붙이는 곳과 떼는 곳이 갈려 있으면
+    // 한쪽 길이 늘어날 때마다 안 떼지는 자리가 하나씩 생긴다.
     this.kick(client, user, channel, true);
   }
 
@@ -539,12 +573,13 @@ export class ChatHost {
     this.enqueue(channel, {
       channel, threadTs, ts,
       text: `${name || user}: ${text}`,
-      // 부른 것이 아니면 🤔 를 붙이지 않는다 — 방 사람들의 모든 말에 이모지가 붙는다.
+      // 부른 것이 아니면 **줄마다** 붙이지는 않는다 — 방 사람들의 모든 말에 표시가 달린다.
+      // 그래도 답을 만드는 동안 아무 표시가 없으면 안 듣는 것과 구분이 안 되므로,
+      // 그런 자리에서는 `pump` 가 **가장 새 글 하나에만** 붙인다.
       react: called,
     });
 
     if (called) {
-      await this.react(client, 'add', channel, ts);
       this.kick(client, channel, channel, true);
       return;
     }
@@ -586,7 +621,8 @@ export class ChatHost {
     const client = this.app?.client;
     if (!client) return;
     for (const channel of this.opts.channels ?? []) {
-      if (!this.withinLimits(channel)) continue;
+      // **한도는 여기서 안 본다** — 읽는 것은 모델을 안 부르니 싸고, 부름(멘션)은 한도와
+      // 무관하게 답해야 한다. 방을 읽어 본 뒤 `sweepChannel` 안에서 가른다.
       try {
         await this.sweepChannel(client, channel);
       } catch (error) {
@@ -673,21 +709,46 @@ export class ChatHost {
     const newest = Math.max(...after.map((m) => Number(m.ts) || 0));
     if (newest <= (this.sweptUpTo.get(channel) ?? 0)) return;
 
+    // **훑기도 부름을 알아본다.** 앱에 `message` 이벤트 구독이 빠져 있으면 여기가
+    // 유일한 길인데, 예전에는 훑기로 들어온 말이 전부 「먼저 말 걸까?」로만 처리돼서
+    // **@로 불러도 모델이 「낄 자리 아님」 하면 조용히 넘어갔다**(2026-08-19 커피콩).
+    // 부르는 것은 굴레를 건너뛴다는 규칙이 살아 있는 길과 훑는 길에서 달랐던 셈이다.
+    const mine = (m: Record<string, unknown>) =>
+      !!this.selfUserId && ((m.text as string) ?? '').includes(`<@${this.selfUserId}>`);
+    const called = after.some(mine);
+
+    // **부른 자리가 아니면 여기서 굴레를 본다.** 조용한 시간·하루 한도는 먼저 말 거는
+    // 것에만 걸리는 굴레지, 사람이 직접 부른 말을 막으라고 둔 것이 아니다.
+    if (!called && !this.withinLimits(channel)) return;
+
+    // 살아 있는 이벤트가 한 번도 안 왔는데 **뜬 뒤에 올라온 글**이 훑기로 잡혔다 =
+    // 그 사이 이벤트가 왔어야 하는데 안 왔다는 뜻이다. 뜨기 전 글은 원래 안 오므로
+    // 그것만 골라 보면 헛경고가 안 난다.
+    if (!this.sawLive && !this.toldNoEvents
+        && newest * 1000 > this.startedAt + 60 * 1000) {
+      this.toldNoEvents = true;
+      this.logger.warn(
+        '방의 말이 훑기로만 들어옵니다 — 슬랙 앱에 message 이벤트 구독이 빠졌을 수 있습니다'
+        + ' (Event Subscriptions → Subscribe to bot events 에 message.channels·message.im).'
+        + ' 권한(channels:history)과 이벤트 구독은 따로라, 읽기는 되는데 부름만 안 들립니다');
+    }
+
     for (const m of after.slice(-MAX_MERGED_LINES)) {
       const user = m.user as string;
       const name = await this.displayName(client, user);
       this.enqueue(channel, {
         channel, ts: m.ts as string,
         text: `${name || user}: ${(m.text as string).trim()}`,
-        react: false,      // 부른 것이 아니다 — 🤔 를 붙이지 않는다
+        react: mine(m),    // 부른 글에만 표시를 단다. 나머지는 `pump` 가 하나만 붙인다
       });
     }
     const waiting = this.pending.get(channel);
     // 줄이 하나도 안 남았다 = 방금 읽은 것이 **이미 도는 턴에 들어가 있다.** 그쪽이
     // 답하므로 여기서는 물어본 것으로 친다.
     if (!waiting || waiting.texts.length === 0) { this.sweptUpTo.set(channel, newest); return; }
-    this.logger.info(`훑어보는 중 (${channel}, ${waiting.texts.length}줄)`);
-    this.kick(client, channel, channel, false);
+    this.logger.info(
+      `훑어보는 중 (${channel}, ${waiting.texts.length}줄${called ? ' · 부름 있음' : ''})`);
+    this.kick(client, channel, channel, called);
     // **정말 집어 갔을 때만 물어본 것으로 친다.** 동시에 도는 턴이 한도에 차 있으면
     // `kick` 은 그냥 돌아가고 줄은 그대로 남는데, 그걸 물어봤다고 표시해 버리면
     // **아무도 안 집은 채로 영영 묻히기 때문이다**(훑기가 재시도 노릇도 겸한다).
@@ -717,6 +778,8 @@ export class ChatHost {
     if (waiting.seen.has(item.ts)) return;      // 훑기가 다시 읽어 온 같은 말
     waiting.seen.add(item.ts);
     waiting.channel = item.channel;
+    // 인사처럼 **슬랙에 없는 글**은 표시를 붙일 자리가 없다(`greet:` 는 지어낸 열쇠다).
+    if (!item.ts.startsWith('greet:')) waiting.lastTs = item.ts;
     if (item.threadTs) waiting.threadTs = item.threadTs;
     // 답을 기다리는 동안 말이 계속 쌓일 수 있다. 최근 것만 남긴다 — 끝없이 합치면
     // agy 를 띄우는 명령줄 길이 한도에 걸려 답하는 대신 실패한다.
@@ -780,6 +843,15 @@ export class ChatHost {
         }
 
         const merged = waiting.texts.join('\n');
+        // **여기서 붙이고 아래 `finally` 에서 뗀다.** 붙이는 곳이 한 군데뿐이라
+        // 「붙었는데 안 떼진」 자리가 구조적으로 안 생긴다.
+        //
+        // 부르지 않은 자리는 줄마다 붙이지 않지만 **하나는 붙인다** — 답을 만드는 데
+        // 10~20초가 걸리는데 그동안 아무것도 안 보이면 못 들은 것과 구분이 안 된다.
+        if (waiting.reactTs.length === 0 && waiting.lastTs) waiting.reactTs.push(waiting.lastTs);
+        for (const ts of waiting.reactTs) {
+          await this.react(client, 'add', waiting.channel, ts);
+        }
         let result: TurnResult;
         try {
           result = await this.runTurn(key, await this.displayName(client, key), merged, !forced);
@@ -916,11 +988,22 @@ export class ChatHost {
   ): Promise<void> {
     try {
       if (op === 'add') {
-        await client.reactions.add({ channel, timestamp: ts, name: THINKING });
+        await client.reactions.add({ channel, timestamp: ts, name: this.mark });
       } else {
-        await client.reactions.remove({ channel, timestamp: ts, name: THINKING });
+        await client.reactions.remove({ channel, timestamp: ts, name: this.mark });
       }
     } catch (error) {
+      // **이름이 틀린 것만은 크게 알린다.** 나머지(이미 붙음·글이 지워짐)는 흔한 일이라
+      // 조용히 넘기지만, 이름이 없으면 표시가 **한 번도 안 뜨는데 아무 티가 안 난다** —
+      // 그 상태를 debug 로 묻어 두면 「봇이 안 듣는다」로 잘못 읽히는 자리다.
+      const code = String((error as { data?: { error?: string } })?.data?.error ?? '');
+      if (code === 'invalid_name' && !this.toldBadMark) {
+        this.toldBadMark = true;
+        this.logger.warn(
+          `:${this.mark}: 라는 이모지가 이 워크스페이스에 없습니다 — 생각 중 표시가 안 뜹니다.`
+          + ` bots/${this.opts.name}/config.json 의 reaction 을 고쳐 주세요`);
+        return;
+      }
       this.logger.debug(`reactions.${op} failed`, error);
     }
   }
