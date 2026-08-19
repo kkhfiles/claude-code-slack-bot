@@ -367,12 +367,20 @@ export class ChatHost {
     // 편집·입퇴장 알림과 봇이 한 말은 사람의 발화가 아니다. **형제 봇만 예외로 듣는다.**
     const fromSibling = !!user && user !== this.selfUserId && siblingIds.has(user);
     if (m.bot_id && !fromSibling) {
-      // 봇인데 누구인지 못 가린 자리. 형제 봇의 말이 이 모양으로 오면 봇끼리 대화가
+      // 봇이 한 말인데 형제로 안 잡힌 자리. 이 모양으로 오면 봇끼리 대화가
       // **에러도 없이 안 열린다.** 방마다 한 번 적어 두어 그때 눈에 띄게 한다.
-      if (this.opts.botTalk && !user && channel && !this.toldMuteBot.has(channel)) {
+      //
+      // **못 가린 이유를 갈라 적는다.** 예전에는 `user` 가 없을 때만 적었는데, 그건
+      // 둘 중 흔하지 않은 쪽이다 — `user` 가 멀쩡히 실려 있는데 형제 명단에 없는
+      // 경우(뜰 때 자기 ID 를 못 적었거나 봇이 늦게 붙은 경우)가 그대로 묻혔다.
+      // **안 적히는 절반이 하필 더 잦은 쪽이면 기록은 있으나 마나다.**
+      if (this.opts.botTalk && channel && user !== this.selfUserId
+          && !this.toldMuteBot.has(channel)) {
         this.toldMuteBot.add(channel);
         note(this.opts.name, '물러섬', { 어디: channel, 말: text,
-          왜: '봇이 한 말인데 누구인지 못 가렸다 — 형제 봇이면 봇끼리 대화가 안 열린다' });
+          왜: user
+            ? `봇이 한 말인데 형제 명단에 없다 — 말한 이 ${user} · 아는 형제 [${[...siblingIds].join(' ')}]`
+            : '봇이 한 말인데 누구인지 못 가렸다(user 없음) — 형제 봇이면 봇끼리 대화가 안 열린다' });
       }
       return;
     }
