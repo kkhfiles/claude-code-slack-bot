@@ -321,6 +321,20 @@ export async function mailMark(ts: string): Promise<boolean> {
   }
 }
 
+/**
+ * 판에서 누른 것의 출력 중 **사람이 봐야 하는 줄만** 남긴다.
+ *
+ * ✅ 줄과 칸반 링크는 판이 이미 보여 준다 — 같은 사실을 슬랙에 또 적으면 알림만
+ * 는다. 하지만 **경고는 판에 없는 말이다**: 「3회 연기 — 추정이 틀렸거나 버려야
+ * 할 업무인지 다시 본다」가 이 출력에 실려 오는데, 통째로 삼키면 **일부러 만든
+ * 신호가 조용히 사라진다**(2026-08-19 검토에서 잡았다 — 처음 고친 판이 그랬다).
+ *
+ * 기호로 고른다. 새 경고가 늘어도 여기 손댈 것이 없다.
+ */
+export function boardOutputToTell(output: string): string {
+  return (output || '').split('\n').filter((l) => /[⚠⛔]/.test(l)).join('\n').trim();
+}
+
 export async function isQuietPeriod(): Promise<boolean> {
   try {
     const { code, stdout } = await runTasks(['quiet'], 20_000);

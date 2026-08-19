@@ -12,7 +12,7 @@ import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
-  offsitePush, workAssistantRoot, mailCandidates, mailMark } from './work-assistant';
+  offsitePush, workAssistantRoot, mailCandidates, mailMark, boardOutputToTell } from './work-assistant';
 import { boardLabel, boardQueueEnabled, drain } from './board-queue';
 
 /**
@@ -1072,8 +1072,15 @@ export class AssistantScheduler {
         //
         // ⚠️ **말은 실패할 때만 한다** — 아래 `dropped`·`lost` 알림은 그대로다.
         // 조용한 것이 「됐다」는 뜻이 되려면 안 된 것은 반드시 말해야 한다.
+        //
+        // **경고만 골라 남긴다** — ✅ 줄은 판이 보여 주지만 「3회 연기」 같은 경고는
+        // 판 어디에도 안 뜬다. 통째로 삼키면 일부러 만든 신호가 조용히 사라진다.
+        for (const { output } of r.applied) {
+          const tell = boardOutputToTell(output);
+          if (tell) await this.sendMessage(tell).catch(() => { });
+        }
         if (r.applied.length) {
-          this.logger.info(`판에서 누른 것 ${r.applied.length}건 반영 — 알리지 않음`);
+          this.logger.info(`판에서 누른 것 ${r.applied.length}건 반영`);
         }
         for (const item of r.dropped) {
           // **원인을 좁혀 말하지 않는다.** rc 2 는 「업무를 못 찾음」과 「형식이

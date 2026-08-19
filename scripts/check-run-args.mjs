@@ -59,7 +59,26 @@ try {
   fails.push('따옴표가 든 값은 멈춰야 한다 — 조용히 넘기면 명령줄이 깨진다');
 } catch { /* 멈추는 것이 맞다 */ }
 
-// ── ② 실물 — 공백이 든 시각이 mail.py 에 온전히 닿는가 ──────────────────
+// ── ②  판에서 누른 것 중 무엇을 사람에게 말하나 ───────────────────────────
+//
+// **잘된 것은 조용히, 경고는 남긴다.** 처음 고친 판은 출력을 통째로 삼켰는데,
+// 거기에 「3회 연기 — 버려야 할 업무인지 다시 본다」가 실려 있었다. 판 어디에도
+// 안 뜨는 말이라 그대로 사라졌다(2026-08-19 검토에서 잡음).
+{
+  const WARN = '   ⚠️ 3회 연기 — 추정이 틀렸거나 버려야 할 업무인지 다시 본다';
+  const ok = [
+    '✅ TSK-6 제품소개서 — 소프트 마감=2026-08-26, 연기 횟수=3',
+    '🗂 Work Board https://x/board/',
+  ].join(String.fromCharCode(10));
+  const warn = [ok, WARN].join(String.fromCharCode(10));
+  eq('잘된 것만 있으면 아무 말 안 한다', wa.boardOutputToTell(ok), '');
+  eq('경고 줄만 남긴다', wa.boardOutputToTell(warn), WARN.trim());
+  eq('막힌 것도 남긴다', wa.boardOutputToTell('⛔ 노션 조회가 100행에서 잘렸습니다'),
+     '⛔ 노션 조회가 100행에서 잘렸습니다');
+  eq('빈 출력은 빈 채로', wa.boardOutputToTell(''), '');
+}
+
+// ── ③ 실물 — 공백이 든 시각이 mail.py 에 온전히 닿는가 ──────────────────
 const TS = '2026-08-19 06:55';
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-args-'));
 
@@ -106,4 +125,4 @@ if (fails.length) {
   console.error(`실패 ${fails.length}건\n\n  ${fails.join('\n\n  ')}`);
   process.exit(1);
 }
-console.log('통과 — 따옴표 규칙(공백·셸 기호·따옴표) · 공백이 든 시각이 mail.py 워터마크에 온전히 · 안 감싸면 실제로 깨짐');
+console.log('통과 — 따옴표 규칙(공백·셸 기호·따옴표) · 잘된 것은 조용히·경고는 남김 · 공백이 든 시각이 mail.py 워터마크에 온전히 · 안 감싸면 실제로 깨짐');
