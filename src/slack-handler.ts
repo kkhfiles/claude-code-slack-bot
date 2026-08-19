@@ -509,9 +509,24 @@ export class SlackHandler {
     // ⚠️ **응답을 되돌려줘야 한다.** 슬랙이 주는 `say` 는 API 응답을 돌려주고,
     // 아래 흐름은 그 `ts` 로 상태 메시지를 나중에 고쳐 쓴다. 안 돌려주면
     // `statusResult.ts` 에서 터진다 — 2026-08-12 에 첫 실사용이 그렇게 죽었다.
-    const say = async (msg: any) => this.app.client.chat.postMessage(
-      typeof msg === 'string' ? { channel, text: msg } : { channel, ...msg },
-    );
+    //
+    // **말한 대로 반영하기만 했으면 답하지 않는다** (2026-08-19 사용자 결정).
+    // 판에서 한 줄 던진 사람은 그 화면을 보고 있고, 바뀐 것은 몇 초 뒤 카드에
+    // 그대로 뜬다 — 같은 사실을 슬랙에 또 적으면 알림만 는다. 그래서 비서가
+    // `[조용히]` 한 줄을 내면 여기서 삼킨다.
+    //
+    // ⚠️ **판단이 든 것은 그대로 말한다** — 해석해서 넣은 날짜, 되물을 것,
+    // 못 한 것. 조용한 것이 「그대로 됐다」는 뜻이 되려면 그래야 한다.
+    const say = async (msg: any) => {
+      const text = typeof msg === 'string' ? msg : String(msg?.text ?? '');
+      if (/^\s*\[조용히\]\s*$/m.test(text.split('\n')[0])) {
+        this.logger.info('판에서 온 것을 조용히 처리 — 답을 안 보냅니다');
+        return {};
+      }
+      return this.app.client.chat.postMessage(
+        typeof msg === 'string' ? { channel, text: msg } : { channel, ...msg },
+      );
+    };
     await this.handleMessage(
       { type: 'message', channel, user, text, ts: String(posted.ts) } as MessageEvent,
       say,
