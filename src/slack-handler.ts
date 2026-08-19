@@ -527,8 +527,10 @@ export class SlackHandler {
         typeof msg === 'string' ? { channel, text: msg } : { channel, ...msg },
       );
     };
+    // `pushed` 는 **사람이 말을 건 것이 아니라는 표시**다 — 완료 줄을 남길지가
+    // 여기서 갈린다(사람이 물었으면 「끝났다」이고, 안 물었으면 아무 말도 아니다).
     await this.handleMessage(
-      { type: 'message', channel, user, text, ts: String(posted.ts) } as MessageEvent,
+      { type: 'message', channel, user, text, ts: String(posted.ts), pushed: true } as unknown as MessageEvent,
       say,
     );
   }
@@ -1383,7 +1385,18 @@ export class SlackHandler {
         ? t('apiKey.costSuffix', locale, { queryCost: apiKeyCostInfo.queryCost.toFixed(4), totalCost: apiKeyCostInfo.totalCost.toFixed(4) })
         : '';
       if (statusMessageTs) {
-        await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `${doneEmoji} ${doneLabel}${toolSummary}${costSuffix}` }).catch(() => {});
+        // **봇이 스스로 띄운 세션은 「작업 완료」를 안 남긴다** (2026-08-19 사용자 결정).
+        // 사람이 물어본 것이면 그 줄이 「받았고 끝났다」를 알리지만, 판에서 누른 것과
+        // 메일 후보는 사람이 말을 건 적이 없어 **아무것도 안 알리는 줄**이 된다.
+        //
+        // ⚠️ **오류일 때는 남긴다** — ❌ 는 이 줄에만 뜬다. 지우면 세션이 넘어진
+        // 사실이 채널 어디에도 안 남는다.
+        const pushed = Boolean((event as any).pushed);
+        if (pushed && !cliError) {
+          await this.app.client.chat.delete({ channel, ts: statusMessageTs }).catch(() => {});
+        } else {
+          await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `${doneEmoji} ${doneLabel}${toolSummary}${costSuffix}` }).catch(() => {});
+        }
       }
       await this.updateMessageReaction(sessionKey, doneEmoji);
       await this.removeAnchorReaction(sessionKey);
