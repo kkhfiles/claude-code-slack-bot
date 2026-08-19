@@ -13,7 +13,8 @@
     "check:board": "node scripts/check-board-queue.mjs",
     "check:timers": "node scripts/check-timers.mjs",
     "check:args": "node scripts/check-run-args.mjs",
-    "check:bottalk": "node scripts/check-bot-talk.mjs"
+    "check:bottalk": "node scripts/check-bot-talk.mjs",
+    "check:marks": "node scripts/check-marks.mjs"
   },
   "keywords": [],
   "author": "",
