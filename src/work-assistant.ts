@@ -123,7 +123,11 @@ export function openCaptureCount(): number {
  * 모든 호출자가 걸리는 변경이라, 지금 틀린 것만 고친다.
  */
 export function quoteForShell(arg: string): string {
-  if (!/[\s"]/.test(arg)) return arg;
+  // 공백만 보면 모자란다 — cmd.exe 는 `&`·`|`·`<`·`>` 에서도 줄을 끊는다.
+  // 「R&D회의」처럼 공백 없이 붙어 오는 값이 실제로 있다(메일 제목).
+  // ⚠️ `%VAR%` 는 따옴표로 못 막는다(치환이 먼저 일어난다) — 여기 인자에는
+  // 그런 값이 안 오지만, 오게 되면 셸을 걷어내는 쪽으로 가야 한다.
+  if (!/[\s"&|<>^()]/.test(arg)) return arg;
   if (arg.includes('"')) throw new Error(`셸에 못 넘기는 인자입니다(따옴표 포함): ${arg}`);
   return `"${arg}"`;
 }

@@ -49,6 +49,11 @@ const eq = (label, got, want) => {
 // ── ① 따옴표 규칙 자체 ────────────────────────────────────────────────────
 eq('공백 없는 값은 그대로', wa.quoteForShell('--json'), '--json');
 eq('공백이 있으면 감싼다', wa.quoteForShell('2026-08-19 06:55'), '"2026-08-19 06:55"');
+// **공백만 보면 모자란다** — cmd.exe 는 `&` 에서도 줄을 끊는다. 「R&D회의」처럼
+// 붙어 오는 값이 메일 제목에 실제로 있다.
+for (const c of ['R&D회의', 'a|b', 'c>d', 'e^f', 'g(h)']) {
+  eq(`셸 기호가 붙은 값도 감싼다 — ${c}`, wa.quoteForShell(c), `"${c}"`);
+}
 try {
   wa.quoteForShell('그는 "말했다"');
   fails.push('따옴표가 든 값은 멈춰야 한다 — 조용히 넘기면 명령줄이 깨진다');
@@ -101,4 +106,4 @@ if (fails.length) {
   console.error(`실패 ${fails.length}건\n\n  ${fails.join('\n\n  ')}`);
   process.exit(1);
 }
-console.log('통과 — 따옴표 규칙 3종 · 공백이 든 시각이 mail.py 워터마크에 온전히 · 안 감싸면 실제로 깨짐');
+console.log('통과 — 따옴표 규칙(공백·셸 기호·따옴표) · 공백이 든 시각이 mail.py 워터마크에 온전히 · 안 감싸면 실제로 깨짐');
