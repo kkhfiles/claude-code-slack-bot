@@ -171,15 +171,16 @@ const marks = (log, op) => log.filter((r) => r[0] === op).map((r) => r[2]);
     host['sawLive'] === true, host['sawLive']);
 }
 
-// --- 형제 봇의 말은 도는 중에도 안 버린다 -------------------------------------------
-// **봇 말에는 두 번째 기회가 없다.** 사람 말은 낱말 관문이나 「지금 도는 중」에 걸려도
-// 훑기가 다시 집어 오지만, 훑기는 봇 말을 지운다. 여기서 빠지면 영영 없던 말이 된다.
-// 실측(2026-08-19 15:44): 턴이 도는 16초 사이에 온 형제의 말이 담기지도 않고 사라졌다.
+// --- 형제 봇의 말은 안 버리되, 답할지는 모델이 정한다 -------------------------------
+// **담는 것과 답하는 것은 다르다.** 봇 말에는 두 번째 기회가 없어서(훑기가 봇 말을
+// 경계로 삼아 지운다) 여기서 빠지면 영영 없던 말이 되지만, 그렇다고 형제라서 무조건
+// 받아치면 그건 대화가 아니라 반사다. 실측(2026-08-19 15:44): 턴이 도는 16초 사이에
+// 온 형제의 말이 담기지도 않고 사라졌다.
 {
   const { host, client } = make('busy', 'cow');
   host['selfUserId'] = 'B_SELF';
-  const taken = [];
-  host['kick'] = (_c, key) => { taken.push(key); };
+  const kicked = [];
+  host['kick'] = (_c, key, _ch, forced) => { kicked.push({ key, forced }); };
 
   // 턴이 도는 중으로 만들어 둔다 — 사라졌던 그 조건 그대로.
   host['active'].add(ROOM);
@@ -188,8 +189,10 @@ const marks = (log, op) => log.filter((r) => r[0] === op).map((r) => r[2]);
   const waiting = host['pending'].get(ROOM);
   check('도는 중에 온 형제의 말도 대기열에 담긴다',
     !!waiting && waiting.texts.length === 1, waiting && waiting.texts);
-  check('그 말은 부른 것으로 쳐서 표시 자리를 잡는다',
-    !!waiting && waiting.reactTs.length === 1, waiting && waiting.reactTs);
+  check('형제의 말이라고 부른 것으로 치지는 않는다 (낄지는 모델이 정한다)',
+    kicked.length === 1 && kicked[0].forced === false, kicked);
+  check('형제가 남긴 말이라고 표시해 둔다 (훑기가 못 집는 말이라서)',
+    waiting?.hasSibling === true, waiting?.hasSibling);
 
   // 같은 조건에서 **사람 말**은 낱말·한도에 걸려 빠지는 것이 맞다(훑기가 다시 집어 온다).
   const plain = make('busy2', 'cow');
@@ -200,6 +203,32 @@ const marks = (log, op) => log.filter((r) => r[0] === op).map((r) => r[2]);
     '규황: 점심 뭐 먹지', false);
   check('사람 말은 그대로 굴레를 받는다 (형제만 예외다)',
     plain.host['pending'].get(ROOM) === undefined, plain.host['pending'].get(ROOM));
+}
+
+// --- 자리가 나면 묻힌 형제 말을 집는다 ---------------------------------------------
+// 여기서 안 집으면 그 말은 **사람이 입을 열 때까지** 대기열에 묻힌다 — 봇끼리만 말하는
+// 자리에서는 영영이다. 집어는 오되 답할지는 여전히 모델이 정한다.
+{
+  const { host, client } = make('drain', 'cow');
+  const pumped = [];
+  host['pump'] = async (_c, key, forced) => { pumped.push({ key, forced }); };
+
+  host['pending'].set(ROOM, { channel: ROOM, texts: ['소인: 안녕하시옵니까'], reactTs: [],
+    toldBusy: false, hasSibling: true, seen: new Set(['1.1']) });
+  host['drain'](client);
+  check('자리가 나면 묻힌 형제 말을 집는다',
+    pumped.length === 1 && pumped[0].key === ROOM, pumped);
+  check('집어 와도 부른 것으로 치지 않는다',
+    pumped[0]?.forced === false, pumped);
+
+  // 형제 표시가 없는 채널 대기열은 그대로 둔다 — 훑기가 조건을 다시 보는 자리다.
+  const quiet = make('drain2', 'cow');
+  const p2 = [];
+  quiet.host['pump'] = async (_c, key, forced) => { p2.push({ key, forced }); };
+  quiet.host['pending'].set(ROOM, { channel: ROOM, texts: ['규황: 배고프다'], reactTs: [],
+    toldBusy: false, seen: new Set(['2.2']) });
+  quiet.host['drain'](quiet.client);
+  check('조용히 쌓이던 사람 말은 자리가 났다고 꺼내지 않는다', p2.length === 0, p2);
 }
 
 // --- 인사는 붙일 자리가 없다 --------------------------------------------------------

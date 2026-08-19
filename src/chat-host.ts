@@ -163,6 +163,11 @@ interface Waiting {
    * 에서도 「지금 이 말에 답을 만들고 있다」를 하나는 보여 주려고 들고 있는다.
    */
   lastTs?: string;
+  /**
+   * 이 묶음에 **형제 봇의 말이 들어 있나.** 훑기는 봇 말을 못 집으므로, 자리가 났을 때
+   * 여기서 안 집으면 그 말은 사람이 입을 열 때까지 대기열에 묻힌다.
+   */
+  hasSibling?: boolean;
   /** 이미 담은 글의 ts. 훑기가 채널에서 다시 읽어 와도 같은 말을 두 번 안 담게. */
   seen: Set<string>;
 }
@@ -573,22 +578,24 @@ export class ChatHost {
     client: App['client'], user: string, channel: string, ts: string,
     threadTs: string | undefined, text: string, fromSibling = false,
   ): Promise<void> {
-    // **형제 봇의 말은 부른 것으로 친다.** 그 말에는 **두 번째 기회가 없기 때문**이다 —
-    // 사람 말은 낱말 관문이나 「지금 도는 중」에 걸려 빠져도 1분 뒤 훑기가 다시 집어
-    // 오지만, 훑기는 봇 말을 「이야기가 지나간 자리」로 삼아 지운다. 여기서 한 번
-    // 빠지면 그 말은 영영 없던 것이 된다.
+    const called = text.includes(`<@${this.selfUserId}>`);
+    // **바로 반응할 자리에서만 담는다.** 나머지는 훑기가 채널에서 직접 읽어 온다 —
+    // 여기서 다 쌓아 두면 재시작 한 번에 통째로 사라지고, 소켓이 흘린 말은 애초에
+    // 담기지도 않는다. 둘 다 실제로 겪었다.
+    //
+    // **형제 봇의 말만은 여기서 안 버린다** — 그 말에는 **두 번째 기회가 없기 때문**이다.
+    // 사람 말은 낱말이나 굴레에 걸려 빠져도 1분 뒤 훑기가 다시 집어 오지만, 훑기는
+    // 봇 말을 「이야기가 지나간 자리」로 삼아 지운다. 여기서 한 번 빠지면 영영 없던 말이 된다.
     //
     // 실측(2026-08-19 15:44) — 커피콩이 자기 턴을 도는 16초 사이에 소인이 말을 걸었고,
     // 「도는 중」이라는 이유로 **담기지도 않고 버려졌다.** 도는 중이면 버릴 것이 아니라
     // 합쳐야 하는데(그러라고 대기열이 있다), 낄지 말지를 재는 자리가 그 둘을 안 갈랐다.
     //
-    // 굴레가 헐거워지는 것은 아니다 — 봇끼리 주고받는 횟수는 `botTalkTurn` 이 따로
-    // 세서 10마디에 맺으라 이르고 20마디에 끊는다. 사람이 한 마디 하면 처음으로 돌아간다.
-    const called = fromSibling || text.includes(`<@${this.selfUserId}>`);
-    // **바로 반응할 자리에서만 담는다.** 나머지는 훑기가 채널에서 직접 읽어 온다 —
-    // 여기서 다 쌓아 두면 재시작 한 번에 통째로 사라지고, 소켓이 흘린 말은 애초에
-    // 담기지도 않는다. 둘 다 실제로 겪었다.
-    if (!called && !this.shouldButtIn(channel, text)) return;
+    // **담는 것과 답하는 것은 다르다.** 담아 두되 아래에서 `forced` 를 안 준다 —
+    // 낄 자리인지는 사람 말과 똑같이 모델이 정한다. 형제라고 무조건 받아치면 그건
+    // 대화가 아니라 반사다. 봇끼리 주고받는 횟수는 `botTalkTurn` 이 따로 세서
+    // 10마디에 맺으라 이르고 20마디에 끊는다.
+    if (!called && !fromSibling && !this.shouldButtIn(channel, text)) return;
 
     const name = await this.displayName(client, user);
     // 방에서는 누가 한 말인지가 곧 맥락이다. 한 줄에 이름을 붙여 넘긴다.
@@ -599,6 +606,7 @@ export class ChatHost {
       // 그래도 답을 만드는 동안 아무 표시가 없으면 안 듣는 것과 구분이 안 되므로,
       // 그런 자리에서는 `pump` 가 **가장 새 글 하나에만** 붙인다.
       react: called,
+      sibling: fromSibling,
     });
 
     if (called) {
@@ -793,7 +801,8 @@ export class ChatHost {
    * 첫 줄이 사라지고 그 메시지의 🤔 도 영영 남는다.
    */
   private enqueue(key: string, item: {
-    channel: string; text: string; ts: string; threadTs?: string; react?: boolean;
+    channel: string; text: string; ts: string; threadTs?: string;
+    react?: boolean; sibling?: boolean;
   }): void {
     const waiting = this.pending.get(key)
       ?? { channel: item.channel, texts: [], reactTs: [], toldBusy: false, seen: new Set<string>() };
@@ -808,6 +817,7 @@ export class ChatHost {
     if (waiting.texts.length >= MAX_MERGED_LINES) waiting.texts.shift();
     waiting.texts.push(item.text);
     if (item.react !== false) waiting.reactTs.push(item.ts);
+    if (item.sibling) waiting.hasSibling = true;
     this.pending.set(key, waiting);
   }
 
@@ -921,9 +931,13 @@ export class ChatHost {
       if (globalRunning >= CONCURRENCY_CAP) return;
       if (this.active.has(key)) continue;
       const waiting = this.pending.get(key);
-      // 채널에서 조용히 쌓이던 것은 자리가 났다고 발화하지 않는다 — 조건은 따로다.
-      if (!this.isDmKey(key) && !waiting?.toldBusy && !waiting?.reactTs.length) continue;
-      void this.pump(client, key, true);
+      // 부른 자리(표시가 달렸다)와 기다리라고 한 자리는 **반드시 답해야 하는** 자리다.
+      const forced = this.isDmKey(key) || !!waiting?.toldBusy || !!waiting?.reactTs.length;
+      // 채널에서 조용히 쌓이던 것은 자리가 났다고 발화하지 않는다 — 훑기가 조건을 다시 본다.
+      // **다만 형제 봇의 말은 훑기가 못 집는다**(봇 말을 경계로 삼아 지운다). 여기서
+      // 안 집으면 사람이 입을 열 때까지 묻히므로 집어는 오되, **답할지는 모델이 정한다.**
+      if (!forced && !waiting?.hasSibling) continue;
+      void this.pump(client, key, forced);
     }
   }
 
