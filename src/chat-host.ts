@@ -76,6 +76,30 @@ export interface ButtInRule {
   sweepMinutes?: number;  // 이만큼마다 쌓인 말을 통째로 보고 낄지 다시 본다 (0=끔)
 }
 
+export interface BotTalkRule {
+  softTurns: number;      // 이만큼 오가면 「마무리하라」고 한마디 붙인다
+  hardTurns: number;      // 이만큼을 넘기면 사람이 말할 때까지 끊는다
+}
+
+/**
+ * 형제 봇들의 슬랙 사용자 ID. 호스트가 뜨면서 자기 것을 적어 두고, 서로를 여기서 알아본다.
+ *
+ * **설정에 적게 하지 않는다** — 봇이 늘 때마다 사람이 ID 를 옮겨 적어야 하고, 한 번
+ * 빠뜨리면 그 봇의 말만 조용히 안 들린다(에러도 로그도 없이 기능만 사라지는 종류).
+ */
+const siblingIds = new Set<string>();
+
+/** 봇끼리 길어졌을 때 붙이는 한마디. **스스로 맺게 먼저 해 본다** — 끊는 것은 그다음이다. */
+const WRAP_UP = '(봇끼리 이야기가 길어졌습니다. 이번 답으로 자연스럽게 마무리하세요.)';
+
+/**
+ * 사람이 치는 멈춤·풀기 낱말. **모델에게 묻지 않고 낱말로 잡는다** — 멈추라는 말은
+ * 모델 왕복(10초)을 기다릴 수 없고, 한창 주고받는 중이면 그 물음마저 줄을 선다.
+ * 푸는 말도 같이 둔다. 없으면 봇을 재시작해야 풀린다.
+ */
+const HUSH = /(그만|멈춰|멈춰라|조용히?\s*해|입\s*다)/;
+const UNHUSH = /(다시\s*(해|시작|얘기|이야기)|계속\s*해)/;
+
 export interface ChatBotOptions {
   name: string;           // turn.py 의 봇 이름이자 로그 이름
   botToken: string;
@@ -100,6 +124,15 @@ export interface ChatBotOptions {
    * 헛경고가 뜨고, 그러면 **진짜 낯선 방에 불렸을 때 그 줄을 안 보게 된다.**
    */
   knownRooms?: string[];
+  /**
+   * **봇끼리 말 섞기.** null 이면 봇이 한 말은 전부 안 들린다(기본).
+   *
+   * 켤 때 굴레가 반드시 같이 온다 — 부름(멘션)은 조용한 시간·하루 한도를 건너뛰도록
+   * 해 놨기 때문에, 봇 둘이 서로를 부르기 시작하면 **아무 굴레도 안 걸린 채 최고 속도로**
+   * 주고받는다. 사람이 「그만」을 치는 사이에도 몇 번이 더 오간다. 그래서 세는 자리를
+   * 따로 두고 거기서만 끊는다.
+   */
+  botTalk?: BotTalkRule | null;
   buttIn?: ButtInRule | null;   // channel: null 이면 불렀을 때만 답한다
   /** 방에 들어간 직후 한 번 인사할지. 인사말은 그 자리에서 지어낸다(고정 문구 아님). */
   greetOnJoin?: boolean;
@@ -154,6 +187,10 @@ export class ChatHost {
    * 「봤고 안 끼기로 했다」를 남길 자리가 없던 것이 원인이라, 여기에 남긴다.
    */
   private sweptUpTo = new Map<string, number>();
+  /** 방마다 봇끼리 이어 온 횟수. **사람이 한 마디 하면 처음으로 돌아간다.** */
+  private botTurns = new Map<string, number>();
+  /** 사람이 그만하라고 한 방. 봇끼리만 막고 사람에게는 그대로 답한다. */
+  private hushed = new Set<string>();
   /** 채널에서 우리가 마지막으로 입을 연 시각·횟수. */
   private lastSpoke = new Map<string, number>();
   private spokenToday = new Map<string, { day: string; count: number }>();
@@ -161,6 +198,8 @@ export class ChatHost {
   private toldNotYet = new Map<string, number>();
   /** 아직 초대 안 된 방 — 같은 말을 1분마다 찍지 않으려고 한 번만 알린다. */
   private toldNotInChannel = new Set<string>();
+  /** 누구인지 못 가린 봇 말이 온 방. 방마다 한 번만 적는다. */
+  private toldMuteBot = new Set<string>();
   /** **허락 안 한 방**인데 불려 간 곳. 주인에게 방마다 한 번만 알린다. */
   private toldStranger = new Set<string>();
   /** 이미 인사한 방. 들어왔다 나갔다 해도 한 살림에 한 번만 인사한다. */
@@ -225,6 +264,8 @@ export class ChatHost {
       try {
         const me = await app.client.auth.test();
         this.selfUserId = (me.user_id as string) ?? '';
+        // 형제 봇들이 서로를 알아볼 자리. 여기 없는 봇의 말은 안 들린다.
+        if (this.selfUserId) siblingIds.add(this.selfUserId);
       } catch (error) {
         this.logger.warn('auth.test failed — mentions will not be recognised', error);
       }
@@ -291,8 +332,19 @@ export class ChatHost {
     const user = m.user as string | undefined;
     const ts = m.ts as string | undefined;
     const text = ((m.text as string) ?? '').trim();
-    // 편집·입퇴장 알림과 봇이 한 말은 사람의 발화가 아니다.
-    if (m.subtype || m.bot_id || !channel || !user || !ts || !text) return;
+    // 편집·입퇴장 알림과 봇이 한 말은 사람의 발화가 아니다. **형제 봇만 예외로 듣는다.**
+    const fromSibling = !!user && user !== this.selfUserId && siblingIds.has(user);
+    if (m.bot_id && !fromSibling) {
+      // 봇인데 누구인지 못 가린 자리. 형제 봇의 말이 이 모양으로 오면 봇끼리 대화가
+      // **에러도 없이 안 열린다.** 방마다 한 번 적어 두어 그때 눈에 띄게 한다.
+      if (this.opts.botTalk && !user && channel && !this.toldMuteBot.has(channel)) {
+        this.toldMuteBot.add(channel);
+        note(this.opts.name, '물러섬', { 어디: channel, 말: text,
+          왜: '봇이 한 말인데 누구인지 못 가렸다 — 형제 봇이면 봇끼리 대화가 안 열린다' });
+      }
+      return;
+    }
+    if (m.subtype || !channel || !user || !ts || !text) return;
     if (user === this.selfUserId) return;
 
     // **어느 자리인지는 들어온 것이 정한다.** 호스트의 설정으로 가르면 자리가 늘 때마다
@@ -308,8 +360,51 @@ export class ChatHost {
       await this.notInvitedHere(client, user, channel, ts, text);
       return;
     }
+    // 사람이 한 마디 하면 봇끼리 세던 것이 처음으로 돌아간다. 멈춤·풀기도 여기서 본다.
+    let say: string | null = text;
+    if (fromSibling) say = this.botTalkTurn(channel, text);
+    else this.humanSpoke(channel, text);
+    if (say === null) return;
+
     await this.onChannelMessage(client, user, channel, ts,
-      m.thread_ts as string | undefined, text);
+      m.thread_ts as string | undefined, say);
+  }
+
+  /**
+   * 봇이 한 말을 받을 차례인가. 받는다면 **넘길 글**을, 아니면 null 을 돌려준다.
+   *
+   * **사람이 없어도 저절로 멈춰야 한다.** 봇 둘이 서로를 부르면 조용한 시간·하루 한도가
+   * 통째로 건너뛰어지므로, 세는 일을 여기 한 곳에 몰아 두고 여기서만 끊는다.
+   */
+  private botTalkTurn(channel: string, text: string): string | null {
+    const rule = this.opts.botTalk;
+    if (!rule) return null;                       // 안 켰으면 봇이 한 말은 안 듣는다
+    if (this.hushed.has(channel)) return null;    // 사람이 그만하라고 했다
+    const n = (this.botTurns.get(channel) ?? 0) + 1;
+    this.botTurns.set(channel, n);
+    if (n > rule.hardTurns) {
+      // **넘긴 첫 번에만 적는다.** 매번 적으면 끊긴 뒤에도 기록만 계속 쌓인다.
+      if (n === rule.hardTurns + 1) {
+        this.logger.info(`봇끼리 ${rule.hardTurns}번을 넘겨 끊었습니다 (${channel})`);
+        note(this.opts.name, '물러섬', { 어디: channel, 말: text,
+          왜: `봇끼리 ${rule.hardTurns}번을 넘겼다 — 사람이 말할 때까지 멈춘다` });
+      }
+      return null;
+    }
+    return n >= rule.softTurns ? `${text}\n\n${WRAP_UP}` : text;
+  }
+
+  /** 사람이 말했다 — 봇끼리 세던 것을 처음으로 돌리고, 멈춤·풀기 낱말을 본다. */
+  private humanSpoke(channel: string, text: string): void {
+    this.botTurns.delete(channel);
+    if (HUSH.test(text)) {
+      if (!this.hushed.has(channel)) {
+        this.hushed.add(channel);
+        this.logger.info(`봇끼리 대화를 멈춥니다 (${channel})`);
+      }
+    } else if (UNHUSH.test(text)) {
+      this.hushed.delete(channel);
+    }
   }
 
   // ── DM ────────────────────────────────────────────────────────────────

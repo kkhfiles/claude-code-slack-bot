@@ -12,7 +12,8 @@
     "check:rlq": "node scripts/check-rate-limit-queue.mjs",
     "check:board": "node scripts/check-board-queue.mjs",
     "check:timers": "node scripts/check-timers.mjs",
-    "check:args": "node scripts/check-run-args.mjs"
+    "check:args": "node scripts/check-run-args.mjs",
+    "check:bottalk": "node scripts/check-bot-talk.mjs"
   },
   "keywords": [],
   "author": "",
