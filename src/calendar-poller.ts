@@ -603,7 +603,10 @@ export class CalendarPoller {
         workingDirectory: os.tmpdir(),  // No CLAUDE.md → saves ~39K tokens
         model: 'claude-haiku-4-5-20251001',
         permissionMode: 'default',
-        maxBudgetUsd: config.reminders.maxBudgetUsd || 0.02,
+        // **정본은 `assistant/config.json` 의 `reminders.maxBudgetUsd`.** 여기 숫자는
+        // 그 키가 없을 때만 쓰는 값인데, 둘이 다르면 설정을 지웠을 때 조용히
+        // 빠듯해진다 — 2026-08-21 까지 여기는 0.02, 설정은 0.05 였다. 같은 값으로 맞춘다.
+        maxBudgetUsd: config.reminders.maxBudgetUsd || 0.15,
         systemPrompt: 'You judge calendar events and output JSON. No other output.',
         tools: [],
         noSessionPersistence: true,
@@ -629,7 +632,14 @@ export class CalendarPoller {
         this.pauseAiJudgment();
         return [];
       }
-      errorCollector.add('CalendarPoller', `AI 판단 실패: ${msg}`);
+      // **예산에 걸린 것을 「AI 판단 실패」로만 적으면 고칠 데를 못 찾는다.**
+      // 브리핑의 「시스템 이슈」에 이 줄이 그대로 실리는데, 원인이 안 보여
+      // 2026-08-21 까지 38번이 같은 문장으로 쌓였다. 무엇을 고치면 되는지 같이 낸다.
+      const capped = /maximum budget|max_budget/i.test(msg);
+      errorCollector.add('CalendarPoller', capped
+        ? `회의 알림 판단이 예산 상한($${config.reminders.maxBudgetUsd ?? 0.15})에 걸렸다`
+          + ' — 그 차례는 알림을 못 보낸다. assistant/config.json 의 reminders.maxBudgetUsd 를 올릴 것'
+        : `AI 판단 실패: ${msg}`);
       this.logger.error('AI judgment failed', error);
       return [];
     }
