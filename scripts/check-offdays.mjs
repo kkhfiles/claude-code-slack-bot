@@ -21,8 +21,9 @@
  * 틀린 티가 안 난다.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import Holidays from 'date-holidays';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -47,9 +48,16 @@ if (!root) {
 } else {
   // --- ① 봇이 그 목록을 읽는가
   const src = fs.readFileSync(SRC, 'utf-8');
-  const gate = src.slice(src.indexOf('private isNonWorkingDay('));
-  const body = gate.slice(0, gate.indexOf('\n  /**', 1));
-  if (!body.includes('offDays()')) {
+  // **못 찾으면 멈춘다.** 이름이 바뀌었는데 조용히 넘어가면 「안 본다」가 아니라
+  // 「검사가 안 돌았다」인데, 둘이 화면에서 똑같아 보인다.
+  const head = src.indexOf('private isNonWorkingDay(');
+  const gate = head < 0 ? '' : src.slice(head);
+  const tail = gate.indexOf('\n  /**', 1);
+  if (head < 0) {
+    fails.push('isNonWorkingDay() 을 못 찾았다 — 이름이 바뀌었나 (검사가 헛돈다)');
+  } else if (tail < 0) {
+    fails.push('isNonWorkingDay() 의 끝을 못 찾았다 — 다음 메서드 앞 주석이 사라졌나');
+  } else if (!gate.slice(0, tail).includes('offDays()')) {
     fails.push('isNonWorkingDay() 가 config.json 의 쉬는 날을 안 본다 '
       + '— 개인 휴가에 봇이 말을 건다');
   }
@@ -80,6 +88,38 @@ if (!root) {
   }
   for (const m of missing) {
     fails.push(`공휴일인데 config.json 에 없다 — 파이썬이 그날 착수하라고 말한다: ${m}`);
+  }
+
+  // --- ③ 캐시가 고친 파일을 다시 읽는가
+  //
+  // `offDays()` 는 `isWorkingHours()` 를 거쳐 30초 타이머에 걸려 있어 하루
+  // 2,880번 불린다. 그래서 캐시를 뒀는데, **캐시가 안 풀리면 휴가를 넣어도
+  // 봇이 모른다** — 고쳐 놓고 그날 아침에야 안 먹은 것을 알게 된다.
+  const dist = path.join(ROOT, 'dist', 'work-assistant.js');
+  if (!fs.existsSync(dist)) {
+    console.log('⏭ dist 가 없어 캐시 검사는 건너뛴다 (npm run build 먼저)');
+  } else {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'offdays-'));
+    try {
+      fs.mkdirSync(path.join(tmp, 'bin'), { recursive: true });
+      fs.writeFileSync(path.join(tmp, 'bin', 'tasks.py'), '# 있는 척');
+      const cfgPath = path.join(tmp, 'config.json');
+      fs.writeFileSync(cfgPath, JSON.stringify({ holidays: ['2026-08-20'] }));
+      process.env.WORK_ASSISTANT_ROOT = tmp;
+      const { offDays } = await import(pathToFileURL(dist).href);
+      if (!offDays().has('2026-08-20')) {
+        fails.push('캐시 검사가 첫 읽기부터 실패했다 — 검사가 헛돈다');
+      } else if (offDays() !== offDays()) {
+        fails.push('캐시가 안 돈다 — 30초마다 config.json 을 다시 읽는다');
+      } else {
+        fs.writeFileSync(cfgPath, JSON.stringify({ holidays: ['2026-08-20', '2026-09-01'] }));
+        if (!offDays().has('2026-09-01')) {
+          fails.push('캐시가 안 풀린다 — 휴가를 넣어도 봇이 모른다');
+        }
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   }
 
   if (fails.length) {
