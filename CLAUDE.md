@@ -40,6 +40,21 @@ update.bat                    # Windows
 - pm2 프로세스명: `claude-slack-bot`
 - 로그: `pm2 logs claude-slack-bot`
 
+### 재시작은 `npm run restart` 로 — `pm2 restart` 를 직접 치지 않는다
+
+`pm2 restart` 는 **처리 중이던 판 메모를 죽인다.** 2026-08-21 에 큐가 TSK-35 메모를 세션에 넘긴 **6초 뒤** 재시작이 그 세션을 죽였고, 다시 가져왔을 때는 부르기 전에 찍어 둔 처리 표시 때문에 「이미 반영한 것」으로 버려졌다(`board-queue.ts` 의 「한 번만 시도한다」). 원문은 캡처 큐에 살아 있었지만 그것을 알려 주는 것은 다음 브리핑뿐이라 14시간 뒤였다.
+
+```bash
+npm run restart              # 걸리는 것을 세고 안전하면 재시작
+npm run restart -- --dry     # 세기만
+npm run restart -- --force   # 다 알고 그냥
+npm run check:restart        # 그 문이 실제로 막는지
+```
+
+- **아직 반영 안 된 사람 말이 있으면 멈춘다** — 재시작해도 해결 안 되고 도는 것만 또 죽인다
+- **큐가 방금 움직였으면 기다린다** — 최대 3분, 넘으면 사람에게 넘긴다
+- **규칙으로 적지 않고 길에 붙인 이유** — 「재시작 전에 확인할 것」은 사람이 기억해야 하는 구조라 실패한다
+
 ## Coding Rules
 
 ### TypeScript
