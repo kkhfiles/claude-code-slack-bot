@@ -15,7 +15,9 @@
     "check:args": "node scripts/check-run-args.mjs",
     "check:bottalk": "node scripts/check-bot-talk.mjs",
     "check:marks": "node scripts/check-marks.mjs",
-    "check:offdays": "node scripts/check-offdays.mjs"
+    "check:offdays": "node scripts/check-offdays.mjs",
+    "restart": "node scripts/restart.mjs",
+    "check:restart": "node scripts/check-restart.mjs"
   },
   "keywords": [],
   "author": "",
