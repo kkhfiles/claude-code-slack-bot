@@ -363,14 +363,25 @@ export async function isQuietPeriod(): Promise<boolean> {
  * 못 읽으면 **빈 집합**을 준다 — 그러면 `date-holidays` 만 보던 예전 행동으로
  * 돌아갈 뿐이라 조용히 더 시끄러워질 뿐 아무것도 안 깨진다.
  */
+let offDaysCache: { key: string; days: Set<string> } | null = null;
+
 export function offDays(): Set<string> {
   const root = workAssistantRoot();
   if (!root) return new Set();
+  const file = path.join(root, 'config.json');
   try {
-    const raw = fs.readFileSync(path.join(root, 'config.json'), 'utf-8');
-    const list = (JSON.parse(raw) as { holidays?: unknown }).holidays;
-    if (!Array.isArray(list)) return new Set();
-    return new Set(list.filter((d): d is string => typeof d === 'string'));
+    // **고친 파일을 곧 반영하되 30초마다 읽지는 않는다.** 이 함수는
+    // `isWorkingHours()` 를 거쳐 30초 타이머에 걸려 있어 하루 2,880번 불린다.
+    // 크기·수정시각이 그대로면 내용도 그대로다 — 휴가를 넣으면 둘 다 바뀐다.
+    const st = fs.statSync(file);
+    const key = `${st.mtimeMs}:${st.size}`;
+    if (offDaysCache && offDaysCache.key === key) return offDaysCache.days;
+    const list = (JSON.parse(fs.readFileSync(file, 'utf-8')) as { holidays?: unknown }).holidays;
+    const days = Array.isArray(list)
+      ? new Set(list.filter((d): d is string => typeof d === 'string'))
+      : new Set<string>();
+    offDaysCache = { key, days };
+    return days;
   } catch {
     return new Set();
   }
