@@ -12,7 +12,8 @@ import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
-  offsitePush, workAssistantRoot, mailCandidates, mailMark, boardOutputToTell } from './work-assistant';
+  offsitePush, workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
+  offDays, ymd } from './work-assistant';
 import { boardLabel, boardQueueEnabled, drain } from './board-queue';
 
 /**
@@ -59,11 +60,20 @@ const BOARD_QUEUE_POLL_MS = 5_000;
  * 망을 안 탄다. 비싼 것은 **후보가 나왔을 때 띄우는 세션**이고, 그것은
  * 하루 여섯 번쯤이다(거르개 통과가 하루 대여섯 통).
  *
- * 창 밖에는 숨만 돌고 아무것도 안 한다. 쉬는 날을 가리지 않는 이유는
- * **임원 메일이 주말에도 오기 때문**이다. 「조용히」 기간은 파이썬이 막는다.
+ * 창 밖에는 숨만 돌고 아무것도 안 한다. 「조용히」 기간은 파이썬이 막는다.
+ *
+ * **쉬는 날에는 말을 안 건다** (2026-08-21 사용자 결정). 전에는 임원 메일이
+ * 주말에도 온다는 이유로 가리지 않았는데, 그것 때문에 **건강검진일에 후보가
+ * 세 번 나갔다.** 메일은 쌓아 두는 것이 안전하다 — 넘기기가 성공해야 표시가
+ * 옮겨지므로 **안 넘기면 그대로 남아 있다가 다음 업무일에 한꺼번에 나온다.**
+ * 거슬러 읽는 상한이 7일이라 나흘짜리 연휴까지는 통째로 들고 온다.
+ *
+ * 그래서 첫 회차를 **8시**로 내렸다 — 브리핑과 같은 시각이라 쉬는 날에 쌓인
+ * 것이 아침 한자리에서 같이 읽힌다. 7시는 사람이 아직 화면 앞에 없는 시각이라
+ * 한 시간 일찍 나가는 값이 없었다.
  */
 const MAIL_POLL_MS = 600_000;
-const MAIL_POLL_FROM_HOUR = 7;
+const MAIL_POLL_FROM_HOUR = 8;
 const MAIL_POLL_TO_HOUR = 20;
 /**
  * 노션이 직접 고쳐졌는지 보는 간격. **이 값이 곧 화면이 낡아 있을 수 있는
@@ -824,6 +834,9 @@ export class AssistantScheduler {
   private async runMailPoll(): Promise<void> {
     const h = new Date().getHours();
     if (h < MAIL_POLL_FROM_HOUR || h >= MAIL_POLL_TO_HOUR) return;
+    // 쉬는 날에는 읽지도 않는다 — **읽고 안 넘기면 표시가 옮겨질 위험만 남는다.**
+    const nonWorking = this.isNonWorkingDay();
+    if (nonWorking.skip) return;
     if (this.mailPollBusy) return;
     this.mailPollBusy = true;
     try {
@@ -1957,11 +1970,18 @@ export class AssistantScheduler {
     return { run: true };
   }
 
-  /** Check if today is a non-working day (schedule-manager.ts:231-241 pattern). */
+  /**
+   * 오늘이 내가 일하지 않는 날인가 (schedule-manager.ts:231-241 pattern).
+   *
+   * 달력 **둘을 합친다.** `date-holidays` 는 해마다 바뀌는 한국 공휴일을 알고,
+   * `config.json` 의 `holidays` 는 **개인 휴가·건강검진**을 안다 — 후자는 파이썬
+   * 쪽 마감 역산이 이미 보던 목록인데 **봇만 안 보고 있었다**(2026-08-21 발견).
+   */
   private isNonWorkingDay(date: Date = new Date()): { skip: boolean; reason?: string } {
     const day = date.getDay();
     if (day === 0) return { skip: true, reason: 'Sunday' };
     if (day === 6) return { skip: true, reason: 'Saturday' };
+    if (offDays().has(ymd(date))) return { skip: true, reason: '휴가·휴일 (config.json)' };
     const result = this.holidays.isHoliday(date);
     if (Array.isArray(result)) {
       const publicHoliday = result.find(h => h.type === 'public');

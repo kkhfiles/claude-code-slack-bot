@@ -345,6 +345,44 @@ export async function isQuietPeriod(): Promise<boolean> {
 }
 
 /**
+ * 내가 일하지 않는 날 — `YYYY-MM-DD` 집합.
+ *
+ * **정본은 `work-assistant/config.json` 의 `holidays` 한 줄**이다. 이름은
+ * 공휴일이지만 뜻은 「내가 일하지 않는 날」이라 **개인 휴가·건강검진도 여기
+ * 들어간다**(2026-08-11 확정). 파이썬 쪽 마감 역산·용량·「N영업일 경과」가
+ * 전부 이 목록을 본다.
+ *
+ * **봇이 이것을 안 읽어서 실제로 틀렸다** (2026-08-21 발견). 봇은 `date-holidays`
+ * 의 한국 공휴일만 봤고, 그 달력에 없는 **개인 휴가는 업무일로 보였다** — 2026-08-20
+ * 건강검진일에 메일 후보가 세 번 나갔고 사용자가 손으로 「조용히」를 켜야 했다.
+ * 파이썬은 같은 날을 쉬는 날로 세고 있었으니 **두 쪽이 서로 다른 달력을 보고 있었다.**
+ *
+ * `date-holidays` 는 그대로 둔다 — 둘은 겹치는 것이 아니라 **합쳐진다**(설·추석처럼
+ * 매년 바뀌는 것은 그쪽이 알고, 개인 휴가는 이쪽만 안다).
+ *
+ * 못 읽으면 **빈 집합**을 준다 — 그러면 `date-holidays` 만 보던 예전 행동으로
+ * 돌아갈 뿐이라 조용히 더 시끄러워질 뿐 아무것도 안 깨진다.
+ */
+export function offDays(): Set<string> {
+  const root = workAssistantRoot();
+  if (!root) return new Set();
+  try {
+    const raw = fs.readFileSync(path.join(root, 'config.json'), 'utf-8');
+    const list = (JSON.parse(raw) as { holidays?: unknown }).holidays;
+    if (!Array.isArray(list)) return new Set();
+    return new Set(list.filter((d): d is string => typeof d === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+/** `2026-08-20` — 로컬 달력 기준. `toISOString()` 은 UTC 로 밀려 하루가 어긋난다. */
+export function ymd(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/**
  * 사람과 이야기하고 적은 「지금 집중할 것」이 아직 이 차례 안에 있는가.
  *
  * **아침에 같이 정한 순서를 두 시간 뒤 자동 실행이 모른 채 덮는다** — 그쪽은
