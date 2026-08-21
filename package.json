@@ -14,7 +14,8 @@
     "check:timers": "node scripts/check-timers.mjs",
     "check:args": "node scripts/check-run-args.mjs",
     "check:bottalk": "node scripts/check-bot-talk.mjs",
-    "check:marks": "node scripts/check-marks.mjs"
+    "check:marks": "node scripts/check-marks.mjs",
+    "check:offdays": "node scripts/check-offdays.mjs"
   },
   "keywords": [],
   "author": "",
