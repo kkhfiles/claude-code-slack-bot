@@ -18,7 +18,7 @@ import * as crypto from 'crypto';
 import { Logger } from './logger';
 import { errorCollector } from './error-collector';
 import type { SpawnOpts, SessionResult } from './assistant-scheduler';
-import { isRateLimitText } from './rate-limit-utils';
+import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
 
 // --- Types ---
@@ -617,8 +617,11 @@ export class CalendarPoller {
 
       this.recordCost('reminder-judgment', result);
 
-      // Check for rate limit in response text
-      if (isRateLimitText(result.text)) {
+      // **판단 결과 본문을 정규식으로 훑지 않는다.** 여기서 걸리면 AI 판단이
+      // 통째로 일시정지되는데, 정상 응답에 그 낱말이 섞였을 뿐인 경우까지 멈춘다.
+      // 실제로 막혔다는 것은 `rate_limit_event` 가 알려 주고, 텍스트 검사는
+      // 에러일 때만 연다(분석·브리핑 경로와 같은 형태).
+      if (isSessionRateLimited(result)) {
         this.pauseAiJudgment();
         return [];
       }
