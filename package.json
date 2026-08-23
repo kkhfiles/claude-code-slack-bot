@@ -19,7 +19,8 @@
     "restart": "node scripts/restart.mjs",
     "check:restart": "node scripts/check-restart.mjs",
     "test": "node scripts/check-all.mjs",
-    "check:cli": "node scripts/check-cli-contract.mjs"
+    "check:cli": "node scripts/check-cli-contract.mjs",
+    "prepare": "git config core.hooksPath .githooks"
   },
   "keywords": [],
   "author": "",
