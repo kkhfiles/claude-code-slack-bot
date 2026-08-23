@@ -18,7 +18,8 @@
     "check:offdays": "node scripts/check-offdays.mjs",
     "restart": "node scripts/restart.mjs",
     "check:restart": "node scripts/check-restart.mjs",
-    "test": "node scripts/check-all.mjs"
+    "test": "node scripts/check-all.mjs",
+    "check:cli": "node scripts/check-cli-contract.mjs"
   },
   "keywords": [],
   "author": "",
