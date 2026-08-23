@@ -1837,7 +1837,9 @@ export class AssistantScheduler {
         // 적어서, 감시 검사(M12)가 재시도로 살아난 타입까지 「무기록」으로 셌다.
         const done: string[] = [];
         const failed: string[] = [];
-        for (const { type, sessionId } of failedRetryTypes) {
+        let stoppedAt = -1;
+        for (let i = 0; i < failedRetryTypes.length; i++) {
+          const { type, sessionId } = failedRetryTypes[i];
           try {
             this.logger.info(`Retrying analysis: ${type}`, { sessionId });
             const r = await this.runSingleAnalysis(type, sessionId);
@@ -1846,6 +1848,11 @@ export class AssistantScheduler {
             this.appendAnalysisJournal(schedule, {
               kind: 'outcome', type, outcome, viaRetry: true, sessionId: r.sessionId,
             });
+            // **또 막히면 거기서 멈춘다.** 큐에 잔여 타입까지 담게 되면서 큐 길이가
+            // 1 에서 최대 그룹 크기로 늘었는데, 한도가 아직 안 풀린 상태로 전부
+            // 돌리면 그만큼을 그대로 낭비한다. 한 번 막히면 그 시점의 한도는
+            // 나머지에도 똑같이 걸린다.
+            if (r.rateLimited) { stoppedAt = i; break; }
           } catch (error) {
             failed.push(type);
             this.logger.error(`Retry failed for: ${type}`, error);
@@ -1855,10 +1862,17 @@ export class AssistantScheduler {
             });
           }
         }
+        // 멈춘 뒤로 아예 손도 안 댄 것 — 저널에 남기지 않는다(무기록이 곧
+        // M12 의 「그룹 중단」 신호다). 다만 사람에게는 적는다.
+        const notTried = stoppedAt >= 0
+          ? failedRetryTypes.slice(stoppedAt + 1).map(f => f.type) : [];
         // **성공한 것만 완료라고 적는다.** 예전에는 무엇이 어찌 됐든 「재시도 완료」
         // 한 줄이라, 아무 일도 안 한 회차가 성공으로 읽혔다(2026-08-22).
         const lines = [`📊 재시도 완료: ${done.join(', ') || '(없음)'}`];
         if (failed.length > 0) lines.push(`⚠️ 재시도 실패: ${failed.join(', ')}`);
+        if (notTried.length > 0) {
+          lines.push(`🚧 한도가 안 풀려 미시도: ${notTried.join(', ')}`);
+        }
         await this.sendMessage(lines.join('\n')).catch(() => {});
       }, msUntil);
 
