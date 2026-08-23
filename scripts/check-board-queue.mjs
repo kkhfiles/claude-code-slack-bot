@@ -1,15 +1,24 @@
 /**
  * Work Board 폴러 자가 검사 — 슬랙도 노션도 타지 않는다.
  *
- *   터미널 A:  cd P:/github/artifact-host  &&  npm run dev
- *   터미널 B:  npm run build
- *              npm run check:board
+ *   npm run build
+ *   npm run check:board
+ *
+ * **검사가 서버를 직접 띄우고 트리째 내린다.** 전에는 다른 터미널에서 사람이
+ * `wrangler dev` 를 띄워 두기를 요구했는데, **사람이 기억해야 하는 구조는
+ * 실패한다** — 검사 아홉 중 이것 하나만 못 도는 상태로 있었다(2026-08-23).
+ * 이미 떠 있으면 그것을 쓰고, 없으면 띄웠다가 끝에 내린다.
+ *
+ * 포트는 **사람이 쓰는 8787 과 다르게** 8788 이다 — 사람이 보던 화면을 검사가
+ * 뺏지 않는다. 판을 내주는 곳은 `work-assistant/config.json` 의
+ * `board_publish_dir` 에서 읽는다(공개 레포에 남의 디스크 경로를 안 박는다).
  *
  * **여기 케이스는 설계에서 갈렸던 자리들이다.** 두 번 반영하면 진행 로그가 두 줄이
  * 되고, 일시 실패한 것을 지워 버리면 누른 것이 조용히 사라지며, 문법이 아닌 것을
  * 안 버리면 30초마다 영원히 되돌아온다. 셋 다 화면은 멀쩡해 보인다.
  */
 import { createRequire } from 'node:module';
+import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,17 +27,71 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MOD = path.join(ROOT, 'dist', 'board-queue.js');
-const BASE = process.env.QUEUE_BASE ?? 'http://127.0.0.1:8787';
+const PORT = Number(process.env.QUEUE_PORT ?? 8788);
+const BASE = process.env.QUEUE_BASE ?? `http://127.0.0.1:${PORT}`;
+const READY_MS = 120_000;
 
 if (!fs.existsSync(MOD)) {
   console.error('dist 가 없습니다 — 먼저 `npm run build`');
   process.exit(1);
 }
-try {
-  await fetch(`${BASE}/api/pending`);
-} catch {
-  console.error(`Work Board dev 서버가 없습니다 (${BASE}) — artifact-host 에서 \`npm run dev\``);
-  process.exit(1);
+
+// **띄운 것은 반드시 내린다.** `process.on('exit')` 는 `process.exit()` 로 나갈
+// 때도 도니 어느 길로 끝나든 한 번은 지나간다. 두 번 불러도 안전하다.
+let server = null;
+function stopServer() {
+  if (!server) return;
+  const { pid } = server;
+  server = null;
+  try {
+    if (process.platform === 'win32') {
+      // 자식 트리째 — wrangler 가 workerd 를 또 띄운다. **PID 로만 부른다**
+      // (이미지 이름으로 부르면 사람이 쓰던 것까지 같이 죽는다).
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      process.kill(-pid, 'SIGKILL');
+    }
+  } catch { /* 이미 죽었으면 그만 */ }
+}
+process.on('exit', stopServer);
+
+const alive = () => fetch(`${BASE}/api/pending`).then(() => true, () => false);
+
+if (!(await alive())) {
+  const boardDir = (() => {
+    try {
+      const wa = require(path.join(ROOT, 'dist', 'work-assistant.js'));
+      const root = wa.workAssistantRoot();
+      if (!root) return null;
+      const cfg = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf-8'));
+      return cfg.board_publish_dir || null;
+    } catch { return null; }
+  })();
+  if (!boardDir || !fs.existsSync(boardDir)) {
+    console.error('판을 내주는 곳을 못 찾았습니다 —'
+      + ' work-assistant/config.json 의 board_publish_dir 를 확인하세요');
+    process.exit(1);
+  }
+  console.log(`Work Board dev 서버를 띄웁니다 (포트 ${PORT}) — 끝나면 내립니다`);
+  server = spawn('npm', ['run', 'dev', '--', '--port', String(PORT)], {
+    cwd: boardDir,
+    shell: true,
+    stdio: 'ignore',
+    detached: process.platform !== 'win32',
+  });
+  server.on('error', () => { server = null; });
+  const deadline = Date.now() + READY_MS;
+  let ready = false;
+  while (Date.now() < deadline) {
+    if (await alive()) { ready = true; break; }
+    if (!server) break;              // 띄우다 죽었으면 더 기다릴 것이 없다
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  if (!ready) {
+    console.error(`서버가 ${READY_MS / 1000}초 안에 안 떴습니다 —`
+      + ` ${boardDir} 에서 \`npm run dev\` 가 도는지 보세요`);
+    process.exit(1);
+  }
 }
 
 // **실제 상태 파일을 건드리지 않는다.** 여기서 처리한 id 를 진짜 파일에 적으면
@@ -184,10 +247,13 @@ eq('큐에 그대로 있다', (await pending()).length, 1);
 await clear();
 fs.rmSync(DONE, { force: true });
 
+// **`process.exit` 대신 `exitCode`** — 여기서 즉시 나가면 뒷정리를 건너뛴다.
 if (fails.length) {
   console.log(`실패 ${fails.length}건\n`);
   for (const f of fails) console.log('  ✗ ' + f);
-  process.exit(1);
+  process.exitCode = 1;
+} else {
+  console.log('통과 — Work Board 폴러 (빈 큐 · 반영 · 중복 방지 · 문법 아님 버리기 · '
+    + '일시 실패 남기기 · 섞인 판 · 복구 후 반영 · 사람 말 넘기기 · 한 번만 시도 · 받을 곳 없음)');
 }
-console.log('통과 — Work Board 폴러 (빈 큐 · 반영 · 중복 방지 · 문법 아님 버리기 · '
-  + '일시 실패 남기기 · 섞인 판 · 복구 후 반영 · 사람 말 넘기기 · 한 번만 시도 · 받을 곳 없음)');
+stopServer();
