@@ -1,0 +1,2 @@
+# 훅은 sh 스크립트라 CRLF 로 체크아웃되면 bad interpreter 로 죽는다.
+.githooks/** text eol=lf
