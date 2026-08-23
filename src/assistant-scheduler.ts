@@ -1736,8 +1736,13 @@ export class AssistantScheduler {
             // Weekly: 기본 retry (retryOnLimit=false면 차단)
             const shouldRetry = typeConfig?.retryOnLimit === true
               || (!isDaily && typeConfig?.retryOnLimit !== false);
-            if (shouldRetry && result.sessionId) {
-              failedRetryTypes.push({ type, sessionId: result.sessionId });
+            // 세션 id 가 없으면(init 전에 죽은 회차 — 2026-04-24 처럼 CLI 가 3초 만에
+            // rc=1 로 끝나는 모양) 이어받을 것이 없으니 **새로** 돌린다. 예전에는
+            // 이 경우 큐가 비어 그 타입이 조용히 빠졌다.
+            if (shouldRetry) {
+              failedRetryTypes.push(result.sessionId
+                ? { type, sessionId: result.sessionId }
+                : { type });
             }
             // **뒤쪽 타입도 같은 큐에 넣는다.** 리미트는 그룹 전체를 끊는데
             // 재시도는 당사자만 돌리던 비대칭이 2026-08-22에 보고서 4종을
