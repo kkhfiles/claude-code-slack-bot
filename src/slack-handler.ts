@@ -2693,10 +2693,28 @@ export class SlackHandler {
     // 말고는 길이 없었다. 세는 값은 여기서 같이 남긴다.
     let turns = 0;
     let toolCalls = 0;
+    // **리미트는 산문이 아니라 이벤트로 온다.** 여기서 안 받으면 부르는 쪽은
+    // 모델이 쓴 본문을 정규식으로 훑는 수밖에 없고, 그러면 「429를 분석한
+    // 보고서」가 「429에 걸린 세션」으로 둔갑한다(2026-05~08 오탐 13회).
+    let rateLimited = false;
+    let rateLimitResetsAt: number | undefined;
+    let isError = false;
 
     for await (const event of proc) {
       if (event.type === 'system' && (event as any).subtype === 'init') {
         sessionId = (event as CliInitEvent).session_id;
+      }
+      // status: 'allowed' | 'allowed_warning' | 'rejected'.
+      // **'rejected' 만 실제 차단이다** — 'allowed_warning' 은 한도에 가까워졌다는
+      // 예고일 뿐 요청은 그대로 통과한다. 곁의 `overageStatus` 도 판정에 쓰지
+      // 않는다(정액 초과분 거절이라 `status: allowed` 와 함께 상시로 온다).
+      if (event.type === 'rate_limit_event') {
+        const info = (event as CliRateLimitEvent).rate_limit_info;
+        if (info?.status === 'rejected') {
+          rateLimited = true;
+          if (info.resetsAt) rateLimitResetsAt = info.resetsAt;
+        }
+        continue;
       }
       if (event.type === 'assistant') {
         const assistantEvent = event as CliAssistantEvent;
@@ -2713,6 +2731,7 @@ export class SlackHandler {
         const resultEvent = event as CliResultEvent;
         costUsd = resultEvent.total_cost_usd || 0;
         subtype = resultEvent.subtype || 'success';
+        isError = resultEvent.is_error === true;
         const rawUsage = (event as any).usage;
         if (rawUsage) {
           usage = {
@@ -2740,10 +2759,12 @@ export class SlackHandler {
 
     // result를 받은 뒤의 abort(grace/wall-clock)는 timeout이 아니라 정상 완료.
     if (timedOut && !resultReceived) {
-      return { text, costUsd, sessionId, subtype: 'error_timeout', usage, turns, toolCalls };
+      return { text, costUsd, sessionId, subtype: 'error_timeout', usage, turns, toolCalls,
+               rateLimited, rateLimitResetsAt, isError: true };
     }
 
-    return { text, costUsd, sessionId, subtype, usage, turns, toolCalls };
+    return { text, costUsd, sessionId, subtype, usage, turns, toolCalls,
+             rateLimited, rateLimitResetsAt, isError };
   }
 
   /**

@@ -6,7 +6,7 @@ import Holidays from 'date-holidays';
 import { Logger } from './logger';
 import { CalendarPoller } from './calendar-poller';
 import { errorCollector } from './error-collector';
-import { isRateLimitText } from './rate-limit-utils';
+import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
@@ -145,9 +145,24 @@ export interface AssistantConfig {
       sessionBudgetUsd?: number;
       maxDurationMinutes?: number;
       maxRetries?: number;
+      /** 이 타입의 보고서가 떨어지는 디렉터리 이름. 생략하면 타입 이름과 같다.
+       *  둘이 갈리는 타입이 있어서 둔다(`product-docs-sync` → `product-docs`).
+       *  같은 값을 파이썬 쪽 감시 검사도 읽는다 — 규칙을 두 곳에서 추측하면
+       *  한쪽이 조용히 틀린다(M12가 그렇게 3종을 상시 오탐했다). */
+      reportDir?: string;
       [key: string]: unknown;
     }>;
   };
+}
+
+/** 분석 한 종을 돌린 결과. `resetsAt` 은 리미트가 풀리는 시각(epoch sec)으로,
+ *  있으면 재시도를 그 시각 기준으로 잡는다(없으면 종전대로 다음 정시+5분). */
+export interface AnalysisRunResult {
+  rateLimited: boolean;
+  timedOut: boolean;
+  sessionId?: string;
+  costUsd: number;
+  resetsAt?: number;
 }
 
 export interface SpawnOpts {
@@ -188,6 +203,19 @@ export interface SessionResult {
    *  회당 $45 회차의 원인(같은 명령 900회)을 원장만으로는 볼 수 없었다. */
   turns?: number;
   toolCalls?: number;
+  /** `rate_limit_event.status === 'rejected'` — **실제로 막혔다는 구조화 신호**.
+   *  이 값이 없던 동안 스케줄러는 모델이 쓴 본문을 정규식으로 훑어 리미트를
+   *  추정했고, 2026-05~08 사이 13번을 오탐했다(전부 `subtype: success`, 보고서도
+   *  이미 나온 뒤였다). 분석 주제가 「사용량·한도·실패」라 보고서가 잘 나올수록
+   *  `429`·`usage limit` 같은 낱말이 본문에 들어간다 — 감지 어휘와 분석 주제가
+   *  같은 공간을 쓰는 한 정규식을 다듬어도 안 갈린다. 판정은 이 필드로 한다. */
+  rateLimited?: boolean;
+  /** 리미트 해제 시각(epoch sec). 재시도를 「다음 정시+5분」이 아니라 근거 있는
+   *  시각에 잡으려고 같이 싣는다. */
+  rateLimitResetsAt?: number;
+  /** result 이벤트의 `is_error`. 본문 정규식 검사를 **에러일 때만** 열어 주는
+   *  열쇠다(사용자 세션 경로가 이미 쓰는 형태 — slack-handler.ts의 NOTE 참조). */
+  isError?: boolean;
 }
 
 // Google Calendar MCP tools via local @cocal/google-calendar-mcp server
@@ -1160,8 +1188,11 @@ export class AssistantScheduler {
         const result = await this.executeBriefing();
         this.recordSessionCost('briefing', result);
 
-        // Check rate limit in result text
-        if (isRateLimitText(result.text)) {
+        // **브리핑 본문을 정규식으로 훑지 않는다.** 브리핑은 그날의 보고서를 읽어
+        // 요약하는데, 그 보고서 주제가 「사용량·한도·실패」다. 본문만 보고 판정하면
+        // 「429가 적힌 보고서를 요약한 브리핑」이 통째로 삼켜지고 사용자는 그날
+        // 브리핑 대신 「rate limit 도달」 한 줄만 받는다. 판정은 구조화 신호로 한다.
+        if (isSessionRateLimited(result)) {
           this.logger.warn('Briefing hit rate limit');
           await this.sendMessage('⏳ 브리핑 실행 중 rate limit 도달. 다음 업무일에 재시도합니다.').catch(() => {});
         } else {
@@ -1639,7 +1670,15 @@ export class AssistantScheduler {
     const completedTypes: string[] = [];
     const skippedTypes: { type: string; reason: string }[] = [];
     const timedOutTypes: string[] = [];
-    const failedRetryTypes: { type: string; sessionId: string }[] = [];
+    // `sessionId` 가 있으면 그 세션을 이어받고(리미트에 걸린 당사자), 없으면 새로
+    // 돌린다(중단 때문에 **아예 못 돈** 뒤쪽 타입). 둘을 한 큐에 담아야 중단과
+    // 재개가 대칭이 된다 — 예전에는 당사자만 큐에 들어가서, 뒤쪽 타입은 재시도
+    // 대상에도 안 들고 저널에도 안 남아 그 주 산출물이 통째로 사라졌다.
+    const failedRetryTypes: { type: string; sessionId?: string }[] = [];
+    /** 중단 때문에 못 돈 타입 — 종료 메시지에 그대로 적는다. */
+    let deferredTypes: string[] = [];
+    /** 리미트 해제 시각(epoch sec) — 있으면 재시도를 그 시각 기준으로 잡는다. */
+    let limitResetsAt: number | undefined;
 
     // Filter by cadence (weekly / biweekly / monthly)
     const today = new Date();
@@ -1700,9 +1739,19 @@ export class AssistantScheduler {
             if (shouldRetry && result.sessionId) {
               failedRetryTypes.push({ type, sessionId: result.sessionId });
             }
+            // **뒤쪽 타입도 같은 큐에 넣는다.** 리미트는 그룹 전체를 끊는데
+            // 재시도는 당사자만 돌리던 비대칭이 2026-08-22에 보고서 4종을
+            // 통째로 날렸다(kg-regression 광역 게이트 포함). 못 돈 것은
+            // 「나중에 돌 것」이지 「없던 일」이 아니다.
+            if (shouldRetry) {
+              deferredTypes = runnableTypes.slice(runnableTypes.indexOf(type) + 1);
+              for (const rest of deferredTypes) failedRetryTypes.push({ type: rest });
+            }
+            if (result.resetsAt) limitResetsAt = result.resetsAt;
             this.appendAnalysisJournal(schedule, {
               kind: 'outcome', type, outcome: 'rate_limited',
               sessionId: result.sessionId, willRetry: shouldRetry,
+              deferred: deferredTypes,
             });
             break; // Stop remaining types in this group (rate limit affects all)
           }
@@ -1746,36 +1795,66 @@ export class AssistantScheduler {
     if (skippedTypes.length > 0) {
       parts.push(`⏭️ cadence 스킵: ${skippedTypes.map(s => s.type).join(', ')}`);
     }
+    // **계획을 기준으로 보고한다.** 「완료 5 · 스킵 5」만 적으면 계획이 10종이었다는
+    // 것을 읽는 사람이 산술해서 알아내야 한다 — 2026-08-22에 4종이 그렇게 조용히
+    // 빠졌다. 못 돈 것은 못 돌았다고 적는다.
+    if (deferredTypes.length > 0) {
+      parts.push(`🚧 중단으로 미실행: ${deferredTypes.join(', ')}`);
+    }
     await this.sendMessage(parts.join('\n')).catch(() => {});
 
     // Schedule retry for session-limit failures (weekly only)
     if (failedRetryTypes.length > 0) {
-      const retryTime = this.getNextHourPlus5Min();
+      // 해제 시각을 받았으면 그 시각 +5분에 잡는다. 없으면 종전대로 다음 정시+5분
+      // (근거가 없는 값이라 폴백으로만 남긴다). 어느 쪽이든 최소 1분은 띄운다.
+      const retryTime = limitResetsAt
+        ? new Date(Math.max(Date.now() + 60_000, limitResetsAt * 1000 + 5 * 60_000))
+        : this.getNextHourPlus5Min();
       const msUntil = retryTime.getTime() - Date.now();
       const retryTypes = failedRetryTypes.map(f => f.type);
 
       this.logger.info('Scheduling retry for session-limited types', {
         types: retryTypes,
         retryTime: retryTime.toISOString(),
+        via: limitResetsAt ? 'resetsAt' : 'next-hour',
       });
+      const deferredNote = deferredTypes.length > 0
+        ? ` (중단으로 미실행 ${deferredTypes.length}종 포함)` : '';
       await this.sendMessage(
-        `⏳ 세션 리미트 초과: ${retryTypes.join(', ')} → ${retryTime.toLocaleTimeString('ko-KR')} 재시도 예정`,
+        `⏳ 세션 리미트 초과: ${retryTypes.join(', ')}${deferredNote}`
+        + ` → ${retryTime.toLocaleTimeString('ko-KR')} 재시도 예정`,
       ).catch(() => {});
 
       const retryTimerKey = `retry-${schedule}`;
       const retryTimer = setTimeout(async () => {
         this.analysisTimers.delete(retryTimerKey);
+        // **재시도 결과도 저널에 남긴다.** 예전에는 재시도가 저널에 아무것도 안
+        // 적어서, 감시 검사(M12)가 재시도로 살아난 타입까지 「무기록」으로 셌다.
+        const done: string[] = [];
+        const failed: string[] = [];
         for (const { type, sessionId } of failedRetryTypes) {
           try {
             this.logger.info(`Retrying analysis: ${type}`, { sessionId });
-            await this.runSingleAnalysis(type, sessionId);
+            const r = await this.runSingleAnalysis(type, sessionId);
+            const outcome = r.rateLimited ? 'rate_limited' : r.timedOut ? 'timeout' : 'completed';
+            (outcome === 'completed' ? done : failed).push(type);
+            this.appendAnalysisJournal(schedule, {
+              kind: 'outcome', type, outcome, viaRetry: true, sessionId: r.sessionId,
+            });
           } catch (error) {
+            failed.push(type);
             this.logger.error(`Retry failed for: ${type}`, error);
+            this.appendAnalysisJournal(schedule, {
+              kind: 'outcome', type, outcome: 'error', viaRetry: true,
+              error: ((error as Error).message || '').slice(0, 300),
+            });
           }
         }
-        await this.sendMessage(
-          `📊 재시도 완료: ${retryTypes.join(', ')}`,
-        ).catch(() => {});
+        // **성공한 것만 완료라고 적는다.** 예전에는 무엇이 어찌 됐든 「재시도 완료」
+        // 한 줄이라, 아무 일도 안 한 회차가 성공으로 읽혔다(2026-08-22).
+        const lines = [`📊 재시도 완료: ${done.join(', ') || '(없음)'}`];
+        if (failed.length > 0) lines.push(`⚠️ 재시도 실패: ${failed.join(', ')}`);
+        await this.sendMessage(lines.join('\n')).catch(() => {});
       }, msUntil);
 
       this.analysisTimers.set(retryTimerKey, retryTimer);
@@ -1789,10 +1868,44 @@ export class AssistantScheduler {
     return next;
   }
 
+  /** 이 타입의 보고서가 떨어지는 디렉터리 이름 (config 우선, 없으면 타입 이름). */
+  private reportDirFor(type: string): string {
+    const configured = this.config?.analysis.types[type]?.reportDir;
+    return typeof configured === 'string' && configured ? configured : type;
+  }
+
+  /**
+   * `sinceMs` 이후에 쓰인 이 타입의 보고서를 찾아 경로를 돌려준다(없으면 null).
+   *
+   * **존재만으로는 근거가 못 된다** — 사람이 같은 창에 수동으로 돌려 둔 파일이
+   * 그대로 걸린다. 그래서 세션 시작 시각을 기준선으로 받아 그 뒤에 쓰인 것만 센다.
+   * 감시가 감시 대상을 죽이면 안 되므로 어떤 예외도 밖으로 내보내지 않는다.
+   */
+  private reportWrittenSince(type: string, sinceMs: number): string | null {
+    const dir = this.reportDirFor(type);
+    for (const base of [
+      path.join(this.workingDir, 'reports', 'scheduled-reports', dir),
+      path.join(this.workingDir, 'reports', 'archived', dir),
+    ]) {
+      try {
+        if (!fs.existsSync(base)) continue;
+        for (const name of fs.readdirSync(base)) {
+          if (!name.toLowerCase().endsWith('.md')) continue;
+          const full = path.join(base, name);
+          if (fs.statSync(full).mtimeMs >= sinceMs) return full;
+        }
+      } catch {
+        // 읽기 실패는 「산출물 없음」으로 두고 넘어간다 — 백스톱이 판정을
+        // 뒤집는 쪽이라, 못 읽었을 때는 원래 판정을 살리는 것이 안전하다.
+      }
+    }
+    return null;
+  }
+
   private async runSingleAnalysis(
     type: string,
     resumeSessionId?: string,
-  ): Promise<{ rateLimited: boolean; timedOut: boolean; sessionId?: string; costUsd: number }> {
+  ): Promise<AnalysisRunResult> {
     const promptPath = path.join(this.promptsDir, `analysis-${type}.md`);
     if (!fs.existsSync(promptPath)) {
       this.logger.warn(`Analysis prompt not found: ${promptPath}`);
@@ -1821,6 +1934,9 @@ export class AssistantScheduler {
     const analysisModel = (typeConfig as any)?.model
       ?? process.env.ANALYSIS_MODEL
       ?? 'claude-sonnet-4-6';
+
+    // 산출물 백스톱의 기준선 — **이 시각 이후에 쓰인 파일만** 이 세션의 성과다.
+    const startedAtMs = Date.now();
 
     const result = await this.spawnSession(
       resumeSessionId ? 'continue' : prompt,
@@ -1858,8 +1974,34 @@ export class AssistantScheduler {
     }
 
     // Rate limit / session limit detection
-    if (isRateLimitText(result.text) || result.subtype === 'error_max_budget_usd') {
-      return { rateLimited: true, timedOut: false, sessionId: result.sessionId, costUsd: result.costUsd };
+    //
+    // **정상 완료한 세션의 본문은 보지 않는다.** 예전에는 `result.text` 를 그대로
+    // 정규식에 넣었는데, 이 분석들이 다루는 주제가 「사용량·한도·실패」라 보고서가
+    // 잘 나올수록 `429`·`usage limit` 이 요약문에 들어간다. 그래서 2026-05-22 부터
+    // 08-22 까지 13번을 오탐했고, 그때마다 그룹 뒤쪽 타입이 통째로 날아갔다.
+    // 사용자 세션 경로는 이미 같은 결론에 도달해 `is_error` 뒤로 텍스트 검사를
+    // 가둬 뒀다(slack-handler.ts 의 NOTE) — 여기도 같은 형태로 맞춘다.
+    // 자기 예산 상한은 여기서만 더한다 — 분석은 그때 재시도가 맞고,
+    // 브리핑은 있는 만큼이라도 전달하는 것이 맞아서 대응이 갈린다.
+    const flaggedLimit = isSessionRateLimited(result)
+      || result.subtype === 'error_max_budget_usd';
+
+    // **산출물 백스톱** — 판정이 무엇을 잘못 보든, 이번 세션이 보고서를 남겼으면
+    // 그 세션은 일을 마친 것이다. 「성공으로 기록됨 ≠ 일을 마쳤음」의 반대 방향.
+    // 시작 시각 이후에 쓰인 파일만 인정한다 — 그냥 존재만 보면 사람이 같은 창에
+    // 수동으로 돌려 둔 것을 이 세션의 성과로 착각한다.
+    if (flaggedLimit) {
+      const produced = this.reportWrittenSince(type, startedAtMs);
+      if (produced) {
+        this.logger.warn('리미트로 찍혔지만 이번 세션이 보고서를 남겼다 — 완료로 처리', {
+          type, produced, subtype: result.subtype, rateLimitEvent: result.rateLimited === true,
+        });
+        return { rateLimited: false, timedOut: false, sessionId: result.sessionId, costUsd: result.costUsd };
+      }
+      return {
+        rateLimited: true, timedOut: false, sessionId: result.sessionId,
+        costUsd: result.costUsd, resetsAt: result.rateLimitResetsAt,
+      };
     }
 
     return { rateLimited: false, timedOut: false, sessionId: result.sessionId, costUsd: result.costUsd };
@@ -1878,7 +2020,7 @@ export class AssistantScheduler {
   private async runAgyAnalysis(
     type: string,
     promptPath: string,
-  ): Promise<{ rateLimited: boolean; timedOut: boolean; sessionId?: string; costUsd: number }> {
+  ): Promise<AnalysisRunResult> {
     const dateStr = new Date().toISOString().substring(0, 10);
     const outDir = path.join(this.workingDir, 'reports', type);
     const outPath = path.join(outDir, `.agy-raw-${dateStr}.txt`);
