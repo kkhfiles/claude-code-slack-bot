@@ -142,6 +142,15 @@ export interface ChatBotOptions {
    */
   knownRooms?: string[];
   /**
+   * **부른 것만 받는 방.** `channels` 에도 함께 넣어야 열린다.
+   *
+   * `knownRooms` 와 다르다 — 그쪽은 불러도 「여기서는 활동하지 않아요」만 돌려주는
+   * 아예 닫힌 방이고, 이쪽은 **부르면 제대로 답하되 먼저 끼어들지는 않는** 방이다.
+   * 식단 알림처럼 사람이 보러 오는 방에 쓴다: 답이 없으면 고장으로 보이고, 끼어들면
+   * 알림 방이 잡담 방이 된다. 낱말·굴레·봇끼리 말 섞기가 여기서는 전부 안 걸린다.
+   */
+  quietRooms?: string[];
+  /**
    * **봇끼리 말 섞기.** null 이면 봇이 한 말은 전부 안 들린다(기본).
    *
    * 켤 때 굴레가 반드시 같이 온다 — 부름(멘션)은 조용한 시간·하루 한도를 건너뛰도록
@@ -605,7 +614,11 @@ export class ChatHost {
     // 낄 자리인지는 사람 말과 똑같이 모델이 정한다. 형제라고 무조건 받아치면 그건
     // 대화가 아니라 반사다. 봇끼리 주고받는 횟수는 `botTalkTurn` 이 따로 세서
     // 10마디에 맺으라 이르고 20마디에 끊는다.
-    if (!called && !fromSibling && !this.shouldButtIn(channel, text)) return;
+    // **조용한 방에서는 부른 것만 받는다.** 형제 봇의 말도 여기서는 안 받는다 —
+    // 그 방은 사람이 알림을 보러 오는 곳이라, 봇끼리 주고받기 시작하면 알림이 묻힌다.
+    if (this.isQuiet(channel)) {
+      if (!called) return;
+    } else if (!called && !fromSibling && !this.shouldButtIn(channel, text)) return;
 
     const name = await this.displayName(client, user);
     // 방에서는 누가 한 말인지가 곧 맥락이다. 한 줄에 이름을 붙여 넘긴다.
@@ -633,7 +646,19 @@ export class ChatHost {
    * **자기 얘기가 아니면 바로 빠진다** — 그 판단은 낱말로 하는 것이 싸고 확실하다.
    * 매번 모델에게 물으면 한 번에 10초씩 걸리고 쿼터도 금방 마른다.
    */
+  /**
+   * **부른 것만 받는 방**인가. 여기서는 낱말이 걸려도, 굴레가 남아 있어도 안 끼어든다.
+   *
+   * 대화를 아예 안 여는 것(`knownRooms`)과 다르다 — 그쪽은 불러도 「여기서는 활동하지
+   * 않아요」만 돌려주고, 이쪽은 부르면 제대로 답한다. 식단 알림처럼 **사람이 보러 오는
+   * 방**에 쓴다: 답이 없으면 고장으로 보이고, 끼어들면 알림 방이 잡담 방이 된다.
+   */
+  private isQuiet(channel: string): boolean {
+    return (this.opts.quietRooms ?? []).includes(channel);
+  }
+
   private shouldButtIn(channel: string, text: string): boolean {
+    if (this.isQuiet(channel)) return false;
     if (this.interest && !this.interest.test(text)) return false;
     return this.withinLimits(channel);
   }
@@ -762,6 +787,10 @@ export class ChatHost {
     const mine = (m: Record<string, unknown>) =>
       !!this.selfUserId && ((m.text as string) ?? '').includes(`<@${this.selfUserId}>`);
     const called = after.some(mine);
+
+    // **조용한 방은 훑기에서도 부른 것만 집는다.** 살아 있는 길에만 굴레를 걸고 훑는
+    // 길을 비워 두면, 이벤트가 안 오는 앱에서는 그 방이 그냥 열린 방이 된다.
+    if (this.isQuiet(channel) && !called) return;
 
     // **부른 자리가 아니면 여기서 굴레를 본다.** 조용한 시간·하루 한도는 먼저 말 거는
     // 것에만 걸리는 굴레지, 사람이 직접 부른 말을 막으라고 둔 것이 아니다.
