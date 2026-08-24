@@ -151,8 +151,29 @@ const now = Date.now() / 1000;
   const chan = qi > 0 ? lunch.slice(lunch.indexOf('channels:'), qi) : '';
   check('식단 알림 방을 대화하는 방 목록에도 넣는다',
     /readLunchAnnounceChannel/.test(chan), chan);
-  check('아예 닫힌 방 목록에는 안 남긴다 (거기 있으면 불러도 「활동 안 해요」만 돌아온다)',
-    !/knownRooms/.test(lunch), lunch.slice(0, 400));
+}
+
+// --- 반만 적으면 어떻게 되나 --------------------------------------------------------
+// `quietRooms` 에만 적고 `channels` 에 안 넣는 것이 이 기능의 함정이다 — 설정 파일에는
+// 그 방이 **적혀 있는데** 봇은 불러도 안 온다. 위 두 검사가 지키는 것이 이 상태다.
+{
+  const host = new ChatHost({
+    name: 'lunch', botToken: '', appToken: '', python: '', script: profileFor(),
+    surfaces: ['channel'], channels: [LOUD], quietRooms: [QUIET],
+    buttIn: { quietMinutes: 0, dailyCap: 99 },
+  });
+  host['loadProfile']();
+  host['selfUserId'] = ME;
+  const kicked = [];
+  host['kick'] = (_c, _k, ch) => { kicked.push(ch); };
+  // **`onEvent` 로 들어가야 한다.** 방 목록 관문은 그 위에 있어서, 안쪽
+  // (`onChannelMessage`)을 직접 부르면 관문을 건너뛴 채로 재게 된다 — 처음에 그렇게
+  // 짰다가 「안 열린다」고 적어 둔 것이 실은 열려 있는 것으로 나왔다.
+  await host['onEvent'](client, {
+    channel: QUIET, user: 'U1', ts: '9.9', text: `<@${ME}> 있느냐`,
+  });
+  check('조용한 방으로만 적고 대화 목록에 안 넣으면 불러도 안 온다',
+    kicked.length === 0 && said(host, QUIET) === 0, { kicked, 담김: said(host, QUIET) });
 }
 
 console.log(`\n통과 ${pass} / 실패 ${fails.length}`);
