@@ -9,12 +9,18 @@
  */
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const FILE = path.join(ROOT, '.rate-limit-queue.json');
+// **운영 큐 파일에 쓰지 않는다.** 예전에는 그 파일을 그대로 썼는데, 밀린 요청이
+// 있으면 검사가 스스로 물러섰다 — 지우면 사용자가 보낸 원문이 날아가니 지울 수도
+// 없었다. 그 사이 이 검사가 푸시 전 관문에 걸려 **한도에 걸린 동안 무관한 변경까지
+// 푸시가 막혔다**(2026-08-24 실측). 임시 자리로 돌려놓으면 둘 다 사라진다.
+const FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rlq-')), 'queue.json');
+process.env.RATE_LIMIT_QUEUE_FILE = FILE;
 const MOD = path.join(ROOT, 'dist', 'rate-limit-queue.js');
 
 if (!fs.existsSync(MOD)) {
@@ -29,12 +35,10 @@ const eq = (label, got, want) => {
   }
 };
 
-// 실제 큐 파일을 쓰므로 돌리기 전에 비운다 — 밀린 것이 있으면 그것부터 처리할 것.
-const had = fs.existsSync(FILE);
-if (had) {
-  console.error('⚠️ 밀린 요청이 남아 있습니다. 처리하거나 버린 뒤 다시 돌리세요.');
-  process.exit(1);
-}
+// **검사가 진짜 큐를 안 건드리는지부터 잰다.** 자리를 옮긴 것이 이 검사의 전제라,
+// 그 전제가 깨지면 나머지 결과가 사용자 원문을 지우고 나온 것이 된다.
+const REAL = path.join(ROOT, '.rate-limit-queue.json');
+const realBefore = fs.existsSync(REAL) ? fs.readFileSync(REAL, 'utf-8') : null;
 
 const q = require(MOD);
 const now = Math.floor(Date.now() / 1000);
@@ -76,6 +80,10 @@ q2.clear();
 eq('버리면 비워진다', q2.peek().items.length, 0);
 
 fs.rmSync(FILE, { force: true });
+
+// **진짜 큐가 그대로인가.** 여기가 틀리면 위의 통과는 사용자 원문을 지우고 얻은 것이다.
+const realAfter = fs.existsSync(REAL) ? fs.readFileSync(REAL, 'utf-8') : null;
+eq('진짜 큐 파일은 건드리지 않는다', realAfter, realBefore);
 
 if (fails.length) {
   console.log(`실패 ${fails.length}건\n`);

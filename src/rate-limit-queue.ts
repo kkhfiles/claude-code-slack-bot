@@ -16,7 +16,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const FILE = path.join(__dirname, '..', '.rate-limit-queue.json');
+/**
+ * **검사가 이 자리를 옮길 수 있어야 한다.** 자가 검사가 운영 파일에 그대로 쓰면
+ * 밀린 요청이 있는 동안에는 검사를 못 돌린다 — 지우면 사용자가 보낸 원문이 날아가서
+ * 지울 수도 없다. 그 검사가 푸시 전 관문에 걸려 있어서, **한도에 걸려 요청이 밀린
+ * 동안에는 무관한 변경까지 푸시가 통째로 막힌다.** 2026-08-24 에 실제로 막혔다.
+ */
+const FILE = process.env.RATE_LIMIT_QUEUE_FILE
+  || path.join(__dirname, '..', '.rate-limit-queue.json');
 
 export interface QueuedRequest {
   id: string;
