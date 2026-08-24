@@ -135,13 +135,6 @@ export interface ChatBotOptions {
   managerUserId?: string;
   channels?: string[];    // channel: 여기 적힌 방에서만
   /**
-   * **아는 방인데 대화는 안 하는 방.** 공지를 올리라고 일부러 넣어 둔 방 같은 것.
-   *
-   * 여기 적어 두면 「낯선 방에 불렸다」 경고를 안 낸다. 안 적으면 재시작할 때마다
-   * 헛경고가 뜨고, 그러면 **진짜 낯선 방에 불렸을 때 그 줄을 안 보게 된다.**
-   */
-  knownRooms?: string[];
-  /**
    * **부른 것만 받는 방.** `channels` 에도 함께 넣어야 열린다.
    *
    * `knownRooms` 와 다르다 — 그쪽은 불러도 「여기서는 활동하지 않아요」만 돌려주는
@@ -567,12 +560,9 @@ export class ChatHost {
     }
     // 물러선 것은 슬랙에 아무 흔적이 안 남는다 — 길목으로는 안 잡히니 여기서 적는다.
     // **매번 적는다.** 아래 경고는 방마다 한 번뿐이라 그것만으로는 몇 번인지 모른다.
-    const known = (this.opts.knownRooms ?? []).includes(channel);
     note(this.opts.name, '물러섬', {
-      어디: channel, 누가: user, 말: text,
-      왜: known ? '대화는 안 하는 아는 방' : '허락하지 않은 방',
+      어디: channel, 누가: user, 말: text, 왜: '허락하지 않은 방',
     });
-    if (known) return;
 
     if (this.toldStranger.has(channel)) return;
     this.toldStranger.add(channel);
