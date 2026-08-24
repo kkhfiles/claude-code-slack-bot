@@ -373,8 +373,13 @@ export class SlackHandler {
           python: config.chat.python,
           script: turnScript,
           surfaces: ['channel'],
-          channels: rooms(config.lunchBot.chatChannel),
-          knownRooms: [readLunchAnnounceChannel(config.lunchBot.script)].filter(Boolean),
+          // 식단 알림 방(`일용할-양식`)도 **부르면 답하는 방**으로 연다. `channels` 에
+          // 없으면 부름조차 안 들리고, `quietRooms` 에만 있으면 방 자체가 안 열린다.
+          channels: rooms(config.lunchBot.chatChannel)
+            .concat([readLunchAnnounceChannel(config.lunchBot.script)].filter(Boolean)),
+          // 다만 **먼저 끼어들지는 않는다** — 사람이 식단을 보러 오는 방이라 잡담이 끼면
+          // 알림이 묻힌다. 부르면 답하고, 안 부르면 조용하다.
+          quietRooms: [readLunchAnnounceChannel(config.lunchBot.script)].filter(Boolean),
           managerUserId: config.letter.managerUserId,
           botTalk,
           buttIn: config.chat.buttIn.enabled ? config.chat.buttIn : null,
