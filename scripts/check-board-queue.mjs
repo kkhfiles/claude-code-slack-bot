@@ -141,12 +141,26 @@ const ask = async (text) => {
   if (text.startsWith('askfail')) throw new Error('비서가 안 받았습니다');
 };
 
+/**
+ * 여러 줄 글을 받는 쪽. **묶음 규칙이 없다** — 건별로 온 것을 그대로 판정한다.
+ * 첫 줄로 결과를 정한다: 「fail…」 일시 실패 · 「nq…」 문법 아님 · 그 외 성공.
+ */
+const noted = [];
+const note = async (text) => {
+  noted.push(text);
+  const head = text.split('\n')[0];
+  if (head.startsWith('fail')) return { kind: 'failed', message: '볼트가 안 열립니다' };
+  if (head.startsWith('nq')) return { kind: 'not-quick', detail: '첫 줄이 「업무 칸」이 아니다' };
+  return { kind: 'ok', output: `${head} ${text.length}자` };
+};
+
 async function clear() {
   const items = await pending();
   if (items.length) await post('ack', { ids: items.map((i) => i.id) });
   fs.rmSync(DONE, { force: true });
   applied.length = 0;
   asked.length = 0;
+  noted.length = 0;
 }
 
 // 1. 빈 큐
@@ -244,6 +258,45 @@ r = await q.drain(apply, null, BASE);
 eq('받을 곳이 없으면 남긴다', [r.retry.length, r.lost.length, r.dropped.length], [1, 0, 0]);
 eq('큐에 그대로 있다', (await pending()).length, 1);
 
+// 11. **여러 줄 글은 묶지 않는다.** 짧은 문법은 `·` 로 이어 보내는데 사람이 쓴
+//     글에는 그 글자와 줄바꿈이 그대로 들어 있어, 이으면 조각이 쪼개진다.
+await clear();
+await post('act', { text: 'TSK-5 메모\n오늘 통화 · 다음 주 초안', kind: 'note', label: '백서' });
+await post('act', { text: 'TSK-6 요약\n두 줄짜리\n요약이다', kind: 'note', label: '제품소개서' });
+r = await q.drain(apply, ask, BASE, note);
+eq('여러 줄 글은 note 로 간다', [noted.length, applied.length, asked.length], [2, 0, 0]);
+eq('**건별로 부른다 — 이어 붙이지 않는다**', noted[0], 'TSK-5 메모\n오늘 통화 · 다음 주 초안');
+// `|| ''` 는 게으름이 아니다 — note 가 짧은 문법으로 새면 `noted` 가 비는데,
+// 그때 그냥 색인하면 검사가 **터진다**. 터지는 검사는 무엇이 틀렸는지 안 말한다.
+eq('줄바꿈이 그대로 도착한다', (noted[1] || '').split('\n').length, 3);
+eq('둘 다 반영되고 큐에서 사라진다',
+   [r.applied.length, (await pending()).length], [2, 0]);
+
+// 12. 문법이 아니면 버린다 — 짧은 문법과 같은 규율이다(안 버리면 영원히 돌아온다)
+await clear();
+await post('act', { text: 'nq 첫 줄이 업무가 아님', kind: 'note' });
+r = await q.drain(apply, ask, BASE, note);
+eq('note 도 문법이 아니면 버린다', [r.dropped.length, (await pending()).length], [1, 0]);
+
+// 13. **일시 실패는 남긴다 — 사람이 쓴 글은 다시 만들 수 없다.** 같은 칸에 같은
+//     글을 두 번 앉혀도 결과가 같아(진행 로그처럼 쌓이지 않는다) 다시 시도해도 된다.
+await clear();
+await post('act', { text: 'fail TSK-7 메모\n나중에 될 것', kind: 'note' });
+r = await q.drain(apply, ask, BASE, note);
+eq('note 의 일시 실패는 큐에 남는다',
+   [r.retry.length, r.dropped.length, (await pending()).length], [1, 0, 1]);
+r = await q.drain(apply, ask, BASE,
+                  async () => ({ kind: 'ok', output: '나중에 됐다' }));
+eq('복구되면 저절로 반영된다', [r.applied.length, (await pending()).length], [1, 0]);
+
+// 14. 받을 곳이 없으면 **버리지 않고 남긴다** — 사람 말과 같은 이유다.
+//     (봇이 옛 판이면 note 를 모른다. 그때 버리면 쓴 글이 조용히 사라진다.)
+await clear();
+await post('act', { text: 'TSK-8 메모\n받을 곳이 없을 때', kind: 'note' });
+r = await q.drain(apply, ask, BASE);
+eq('받을 곳이 없으면 남긴다',
+   [r.retry.length, r.dropped.length, (await pending()).length], [1, 0, 1]);
+
 await clear();
 fs.rmSync(DONE, { force: true });
 
@@ -254,6 +307,7 @@ if (fails.length) {
   process.exitCode = 1;
 } else {
   console.log('통과 — Work Board 폴러 (빈 큐 · 반영 · 중복 방지 · 문법 아님 버리기 · '
-    + '일시 실패 남기기 · 섞인 판 · 복구 후 반영 · 사람 말 넘기기 · 한 번만 시도 · 받을 곳 없음)');
+    + '일시 실패 남기기 · 섞인 판 · 복구 후 반영 · 사람 말 넘기기 · 한 번만 시도 · 받을 곳 없음 · '
+    + '여러 줄 글 안 묶기 · note 버리기 · note 다시 시도 · note 받을 곳 없음)');
 }
 stopServer();

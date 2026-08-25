@@ -42,7 +42,7 @@ export interface QueueItem {
   id: string;
   text: string;
   /** 어디로 갈지. 없으면 짧은 문법이다 — 이 표시가 생기기 전에 담긴 것도 있다. */
-  kind?: 'quick' | 'ask';
+  kind?: 'quick' | 'ask' | 'note';
   label?: string;
   ts: number;
   taken?: number;
@@ -162,8 +162,13 @@ function saveDone(ids: string[]): void {
  * 한 판 돈다. 큐가 비어 있으면 아무것도 안 하고 조용히 끝난다.
  *
  * `base` 는 검사에서 로컬 dev 서버를 가리키려고 있다.
+ *
+ * `note` 는 여러 줄 글(요약·메모)을 받는 쪽이다. **뒤에 붙인 이유**는 앞에
+ * 끼우면 `base` 를 세 번째로 넘기던 자리가 조용히 어긋나서다 — 부르는 쪽이
+ * 둘(스케줄러·자가 검사)뿐이라도 인자 순서가 바뀌면 검사가 먼저 거짓말을 한다.
  */
-export async function drain(apply: Apply, ask: Ask | null, base?: string): Promise<DrainResult> {
+export async function drain(apply: Apply, ask: Ask | null, base?: string,
+                            note?: Apply | null): Promise<DrainResult> {
   const out: DrainResult = { applied: [], dropped: [], retry: [], lost: [], duplicates: 0 };
   // `pull` 은 「가져간 표시」를 남기므로 읽기가 아니다 — 워커가 POST 만 받는다.
   const { items } = (await call('pull', {}, base)) as { items: QueueItem[] };
@@ -179,6 +184,8 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string): Promi
   const ack: string[] = [];
   /** 짧은 문법은 모았다 한 번에 보낸다 — 아래 「한 번에 묶는 이유」 참조. */
   const quicks: QueueItem[] = [];
+  /** 여러 줄 글. **모으지 않는다** — 아래 `note` 갈래의 주석 참조. */
+  const notes: QueueItem[] = [];
 
   /** 반영됐다고 적고 지운다. **적는 것이 먼저다** — 순서가 바뀌면 그 사이에 죽었을 때 두 번 쓴다. */
   const settle = (item: QueueItem, output: string) => {
@@ -230,10 +237,24 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string): Promi
       continue;
     }
 
+    if (item.kind === 'note') {
+      // **묶지 않는다.** 짧은 문법은 `·` 로 이어 한 번에 보내는데, 사람이 쓴 글에는
+      // 그 글자와 줄바꿈이 그대로 들어 있어 이으면 조각이 쪼개진다.
+      //
+      // **한 번만 시도하는 경로가 아니다** — 같은 칸에 같은 글을 두 번 앉히면
+      // 결과가 같다(진행 로그처럼 쌓이지 않는다). 그래서 일시 실패는 큐에 남겨
+      // 두고 다음 판에 맡긴다. 사람이 쓴 글은 다시 만들 수 없어, 잃는 쪽보다
+      // 늦는 쪽이 싸다.
+      if (!note) { out.retry.push(item); continue; }
+      notes.push(item);
+      continue;
+    }
+
     quicks.push(item);
   }
 
   await applyQuicks();
+  if (notes.length && note) await applyEach(notes, note);
 
   if (ack.length) await call('ack', { ids: ack }, base);
   return out;
@@ -251,7 +272,7 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string): Promi
    */
   async function applyQuicks(): Promise<void> {
     if (!quicks.length) return;
-    if (quicks.length === 1) { await applyEach(quicks); return; }
+    if (quicks.length === 1) { await applyEach(quicks, apply); return; }
     const r = await apply(quicks.map((i) => i.text).join(' · '));
     if (r.kind === 'ok') {
       // **답은 한 번만 낸다** — 건마다 같은 글을 DM 으로 보내면 소음이다.
@@ -262,13 +283,13 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string): Promi
     } else {
       logger.warn(`묶음이 문법에 안 맞아 건별로 다시 시도합니다 (${quicks.length}건) · ` +
         (r.detail || '이유 없음'));
-      await applyEach(quicks);
+      await applyEach(quicks, apply);
     }
   }
 
-  async function applyEach(list: QueueItem[]): Promise<void> {
+  async function applyEach(list: QueueItem[], fn: Apply): Promise<void> {
     for (const item of list) {
-      const r = await apply(item.text);
+      const r = await fn(item.text);
       if (r.kind === 'ok') settle(item, r.output);
       else if (r.kind === 'not-quick') drop(item, r.detail);
       else {
