@@ -26,6 +26,7 @@ const REGISTRAR = {
   boardQueueTimer: 'startBoardQueuePoller',
   daouKeepAliveTimer: 'scheduleDaouKeepAlive',
   focusTimer: 'scheduleFocus',
+  summaryTimer: 'scheduleSummary',
   offsitePushTimer: 'scheduleOffsitePush',
   mailPollTimer: 'startMailPoller',
 };
