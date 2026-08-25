@@ -19,6 +19,7 @@ import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
+import { nudgeDecision } from './rlq-nudge';
 import { enqueue as rlqEnqueue, peek as rlqPeek, takeAll as rlqTakeAll, clear as rlqClear, remove as rlqRemove, QueuedRequest } from './rate-limit-queue';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 import { LunchPoller } from './lunch-poller';
@@ -153,6 +154,16 @@ interface MessageEvent {
 // result 이벤트 후 스트림이 닫히기를 기다리는 한계 (자식 프로세스/훅 hang 대비)
 const RESULT_GRACE_MS = 120_000;
 
+// 밀린 요청을 **다시 알리는** 굴레. 자동 실행이 아니라 사람이 눌러야 끝나는 구조라,
+// 알림이 한 번뿐이면 자리를 비운 사이 그대로 묻힌다(2026-08-24: 한 번 알리고 22시간).
+// 0 을 주면 다시 알리지 않는다.
+const RLQ_NUDGE_MIN = Number(process.env.RLQ_NUDGE_MINUTES ?? 120);
+const RLQ_NUDGE_FROM_HOUR = Number(process.env.RLQ_NUDGE_FROM_HOUR ?? 8);
+const RLQ_NUDGE_TO_HOUR = Number(process.env.RLQ_NUDGE_TO_HOUR ?? 20);
+// **끝없이 두드리지 않는다.** 그러면 사람이 그 알림 자체를 안 보게 되고, 다시 알리는
+// 뜻이 사라진다. 여기까지 왔는데도 안 눌렀으면 그건 안 급한 것이다.
+const RLQ_NUDGE_MAX = Number(process.env.RLQ_NUDGE_MAX ?? 5);
+
 export class SlackHandler {
   private app: App;
   private cliHandler: CliHandler;
@@ -192,6 +203,11 @@ export class SlackHandler {
   private pendingAutoRetries: Map<string, ReturnType<typeof setTimeout>> = new Map();
   // 한도 회복 시각에 깨어나는 타이머. 큐가 파일이라 재시작해도 다시 걸 수 있다.
   private rlqTimer?: ReturnType<typeof setTimeout>;
+  /** 다시 알리기. 밀린 것이 남아 있는 동안만 산다. */
+  private rlqNudgeTimer?: ReturnType<typeof setTimeout>;
+  private rlqNudges = 0;
+  /** 마지막으로 올린 알림. 다시 알릴 때 이것을 지우고 새로 올린다. */
+  private rlqPrompt?: { channel: string; ts: string };
 
   // Plan mode: store session info for "Execute" button
   private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string | undefined; user: string }> = new Map();
@@ -1702,6 +1718,9 @@ export class SlackHandler {
   private armRateLimitRecovery(resetsAt: number | null): void {
     if (!resetsAt) return;
     if (this.rlqTimer) clearTimeout(this.rlqTimer);
+    // 새로 막힌 것은 **새 사건**이다 — 앞 건에서 다 쓴 되풀이 횟수를 물려받으면
+    // 이번 것은 한 번도 다시 안 알리게 된다.
+    this.rlqNudges = 0;
     const delay = Math.max(60_000, resetsAt * 1000 + 60_000 - Date.now());
     this.rlqTimer = setTimeout(() => {
       this.rlqTimer = undefined;
@@ -1731,7 +1750,7 @@ export class SlackHandler {
    */
   private async postRecoveryPrompt(): Promise<void> {
     const s = rlqPeek();
-    if (s.items.length === 0) return;
+    if (s.items.length === 0) { this.stopRlqNudge(); return; }
     // 여러 채널에 흩어져 있어도 **마지막으로 말을 건 자리 한 곳에만** 올린다 —
     // 밀린 것을 알리려고 여러 방을 두드리면 그것이 또 소음이다.
     const last = s.items[s.items.length - 1];
@@ -1740,8 +1759,22 @@ export class SlackHandler {
       const body = it.text.length > 60 ? `${it.text.slice(0, 60)}…` : it.text;
       return `${i + 1}. 「${body}」  _${formatTime(new Date(it.ts * 1000), locale)}_`;
     });
-    const head = t('rlq.recovered', locale, { count: String(s.items.length) });
-    await this.app.client.chat.postMessage({
+    // 되풀이할 때는 **얼마나 기다렸는지**를 앞에 둔다. 같은 문장을 또 올리면 앞서 본
+    // 그 알림과 구별이 안 돼서 또 넘어간다.
+    const waitedH = s.resetsAt
+      ? Math.floor((Date.now() - s.resetsAt * 1000) / 3_600_000) : 0;
+    const head = this.rlqNudges > 0 && waitedH > 0
+      ? t('rlq.stillWaiting', locale, { count: String(s.items.length), hours: String(waitedH) })
+      : t('rlq.recovered', locale, { count: String(s.items.length) });
+    // **앞 알림은 지우고 새로 올린다.** 고쳐 쓰면(`chat.update`) 슬랙이 새 알림을 안 보내
+    // 되풀이하는 뜻이 없어지고, 안 지우면 버튼 달린 옛 글이 줄줄이 쌓인다.
+    const prev = this.rlqPrompt;
+    this.rlqPrompt = undefined;
+    if (prev) {
+      await this.app.client.chat.delete({ channel: prev.channel, ts: prev.ts })
+        .catch(() => undefined);   // 사람이 이미 지웠으면 그만이다
+    }
+    const res = await this.app.client.chat.postMessage({
       channel: last.channel,
       thread_ts: last.threadTs,
       text: head,
@@ -1755,7 +1788,59 @@ export class SlackHandler {
           ],
         },
       ],
-    }).catch((e) => this.logger.error('Failed to post rate-limit recovery prompt', e));
+    }).catch((e) => {
+      this.logger.error('Failed to post rate-limit recovery prompt', e);
+      return undefined;
+    });
+    if (res?.ts) this.rlqPrompt = { channel: last.channel, ts: res.ts as string };
+    // **올리고 나서 다시 예약한다.** 한 번 뜬 알림은 자리를 비운 사이 그대로 묻힌다 —
+    // 실측(2026-08-24) 20:10 에 한 번 알리고 그대로 **22시간을 기다렸다.**
+    this.armRlqNudge();
+  }
+
+  /**
+   * 밀린 것이 남아 있으면 **일정 간격으로 다시 알린다.**
+   *
+   * 자동으로 실행하지 않는 구조라 사람이 눌러야 끝나는데, 알림이 한 번뿐이면 자리를
+   * 비운 사이 그대로 묻힌다. 그렇다고 밤새 두드리면 그게 또 소음이라 **깨어 있는
+   * 시간에만**, 그리고 **몇 번까지만** 다시 올린다 — 끝없이 되풀이하면 사람이
+   * 그 알림 자체를 안 보게 되고, 그러면 되풀이하는 뜻이 사라진다.
+   */
+  private armRlqNudge(): void {
+    if (this.rlqNudgeTimer) clearTimeout(this.rlqNudgeTimer);
+    this.rlqNudgeTimer = undefined;
+    if (RLQ_NUDGE_MIN <= 0) return;
+    this.rlqNudgeTimer = setTimeout(() => {
+      this.rlqNudgeTimer = undefined;
+      void this.nudgeRecovery();
+    }, RLQ_NUDGE_MIN * 60_000);
+  }
+
+  private stopRlqNudge(): void {
+    if (this.rlqNudgeTimer) clearTimeout(this.rlqNudgeTimer);
+    this.rlqNudgeTimer = undefined;
+    this.rlqNudges = 0;
+    this.rlqPrompt = undefined;
+  }
+
+  private async nudgeRecovery(): Promise<void> {
+    const pending = rlqPeek().items.length;
+    const what = nudgeDecision({
+      pending, hour: new Date().getHours(), nudges: this.rlqNudges,
+      fromHour: RLQ_NUDGE_FROM_HOUR, toHour: RLQ_NUDGE_TO_HOUR, max: RLQ_NUDGE_MAX,
+    });
+    if (what === 'wait') { this.armRlqNudge(); return; }
+    if (what === 'stop') {
+      if (pending > 0) {
+        this.logger.warn('Rate-limit queue still pending — stopped nudging', {
+          times: this.rlqNudges, items: pending,
+        });
+      }
+      this.stopRlqNudge();
+      return;
+    }
+    this.rlqNudges += 1;
+    await this.postRecoveryPrompt();
   }
 
   /**
@@ -4252,6 +4337,8 @@ export class SlackHandler {
 
     this.action('rlq_run_all', async ({ ack, body, respond }) => {
       await ack();
+      // 사람이 골랐으면 **다시 알리기를 그 자리에서 끈다.**
+      this.stopRlqNudge();
       const locale = await this.getUserLocale((body as any).user.id);
       const items = rlqTakeAll();
       if (items.length === 0) {
@@ -4265,6 +4352,8 @@ export class SlackHandler {
 
     this.action('rlq_run_last', async ({ ack, body, respond }) => {
       await ack();
+      // 사람이 골랐으면 **다시 알리기를 그 자리에서 끈다.**
+      this.stopRlqNudge();
       const locale = await this.getUserLocale((body as any).user.id);
       const items = rlqTakeAll();
       if (items.length === 0) {
@@ -4278,6 +4367,8 @@ export class SlackHandler {
 
     this.action('rlq_drop', async ({ ack, body, respond }) => {
       await ack();
+      // 사람이 골랐으면 **다시 알리기를 그 자리에서 끈다.**
+      this.stopRlqNudge();
       const locale = await this.getUserLocale((body as any).user.id);
       const n = rlqPeek().items.length;
       rlqClear();

@@ -165,6 +165,12 @@ const messages: Record<string, Record<Locale, string>> = {
     en: '⏰ *The expected reset time has passed.* {{count}} message(s) were held.',
     ko: '⏰ *한도 회복 예정 시각이 지났습니다.* 밀린 {{count}}건이 있습니다.',
   },
+  // 다시 알릴 때. **얼마나 기다렸는지를 앞에 둔다** — 「밀린 게 있다」만 되풀이하면
+  // 앞서 본 그 알림과 구별이 안 돼서 또 넘어간다.
+  'rlq.stillWaiting': {
+    en: '⏰ *Still held — {{hours}}h since the expected reset.* {{count}} message(s) are waiting.',
+    ko: '⏰ *아직 그대로입니다 — 회복 예정 시각에서 {{hours}}시간 지났습니다.* 밀린 {{count}}건이 있습니다.',
+  },
   'rlq.runAll': { en: 'Run now', ko: '지금 실행' },
   'rlq.runLast': { en: 'Only the last one', ko: '마지막 것만' },
   'rlq.drop': { en: 'Discard', ko: '버림' },
