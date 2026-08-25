@@ -80,6 +80,33 @@ q2.clear();
 eq('버리면 비워진다', q2.peek().items.length, 0);
 
 
+// --- 다시 알린 자취는 재시작을 넘겨야 한다 -----------------------------------------
+// 메모리에만 뒀더니 재시작마다 0 으로 돌아가, 저녁에 네 번 재시작하는 사이 같은 알림이
+// **넉 장 그대로 쌓였다**(앞 것을 지울 대상을 몰라서). 횟수도 매번 초기화돼 「얼마나
+// 기다렸는지」가 한 번도 안 붙고 상한도 안 걸렸다. 2026-08-25 실측.
+q2.enqueue({ channel: 'D9', threadTs: '9', user: 'U1', text: '밀린 것' }, now + 60);
+q2.setNotice({ channel: 'D9', ts: '111.1', count: 2 });
+eq('자취가 남는다', q2.getNotice(), { channel: 'D9', ts: '111.1', count: 2 });
+
+delete require.cache[require.resolve(MOD)];
+const q3 = require(MOD);
+eq('재시작해도 자취가 남는다', q3.getNotice(), { channel: 'D9', ts: '111.1', count: 2 });
+
+// **사람이 처리하면 자취도 같이 사라져야 한다.** 안 지우면 다음 건에서 없는 글을
+// 지우려 들고, 횟수를 물려받아 한 번도 다시 안 알린다.
+q3.takeAll();
+eq('꺼내면 자취도 사라진다', q3.getNotice(), undefined);
+
+q3.enqueue({ channel: 'D9', threadTs: '9', user: 'U1', text: '또' }, now + 60);
+q3.setNotice({ channel: 'D9', ts: '222.2', count: 1 });
+q3.clear();
+eq('버리면 자취도 사라진다', q3.getNotice(), undefined);
+
+// 밀린 것이 없는데 자취만 남기지 않는다 — 지울 글도 셀 횟수도 없다.
+q3.setNotice({ channel: 'D9', ts: '333.3', count: 1 });
+eq('빈 큐에는 자취를 안 남긴다', q3.getNotice(), undefined);
+
+
 // --- 다시 알릴지 정하는 규칙 -------------------------------------------------------
 // 한 번 알리고 마는 구조라 자리를 비운 사이 그대로 묻혔다 — 2026-08-24 에 20:10 에
 // 한 번 알리고 **22시간을 기다렸다.** 되풀이는 세 가지로 조용히 틀린다:
