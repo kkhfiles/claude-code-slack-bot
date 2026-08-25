@@ -20,6 +20,7 @@ import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n }
 import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
 import { nudgeDecision } from './rlq-nudge';
+import { setNotice as rlqSetNotice, getNotice as rlqGetNotice } from './rate-limit-queue';
 import { enqueue as rlqEnqueue, peek as rlqPeek, takeAll as rlqTakeAll, clear as rlqClear, remove as rlqRemove, QueuedRequest } from './rate-limit-queue';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 import { LunchPoller } from './lunch-poller';
@@ -203,11 +204,12 @@ export class SlackHandler {
   private pendingAutoRetries: Map<string, ReturnType<typeof setTimeout>> = new Map();
   // 한도 회복 시각에 깨어나는 타이머. 큐가 파일이라 재시작해도 다시 걸 수 있다.
   private rlqTimer?: ReturnType<typeof setTimeout>;
-  /** 다시 알리기. 밀린 것이 남아 있는 동안만 산다. */
+  /**
+   * 다시 알리기 타이머. **횟수와 앞 알림은 여기 안 둔다** — 큐 파일에 둔다.
+   * 메모리에 뒀더니 재시작마다 0 으로 돌아가 알림이 쌓이고 상한이 안 걸렸다
+   * (2026-08-25 실측: 저녁 재시작 네 번에 같은 알림 넉 장).
+   */
   private rlqNudgeTimer?: ReturnType<typeof setTimeout>;
-  private rlqNudges = 0;
-  /** 마지막으로 올린 알림. 다시 알릴 때 이것을 지우고 새로 올린다. */
-  private rlqPrompt?: { channel: string; ts: string };
 
   // Plan mode: store session info for "Execute" button
   private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string | undefined; user: string }> = new Map();
@@ -1720,7 +1722,8 @@ export class SlackHandler {
     if (this.rlqTimer) clearTimeout(this.rlqTimer);
     // 새로 막힌 것은 **새 사건**이다 — 앞 건에서 다 쓴 되풀이 횟수를 물려받으면
     // 이번 것은 한 번도 다시 안 알리게 된다.
-    this.rlqNudges = 0;
+    const seen = rlqGetNotice();
+    if (seen) rlqSetNotice({ ...seen, count: 0 });
     const delay = Math.max(60_000, resetsAt * 1000 + 60_000 - Date.now());
     this.rlqTimer = setTimeout(() => {
       this.rlqTimer = undefined;
@@ -1763,13 +1766,12 @@ export class SlackHandler {
     // 그 알림과 구별이 안 돼서 또 넘어간다.
     const waitedH = s.resetsAt
       ? Math.floor((Date.now() - s.resetsAt * 1000) / 3_600_000) : 0;
-    const head = this.rlqNudges > 0 && waitedH > 0
+    const head = waitedH > 0
       ? t('rlq.stillWaiting', locale, { count: String(s.items.length), hours: String(waitedH) })
       : t('rlq.recovered', locale, { count: String(s.items.length) });
     // **앞 알림은 지우고 새로 올린다.** 고쳐 쓰면(`chat.update`) 슬랙이 새 알림을 안 보내
     // 되풀이하는 뜻이 없어지고, 안 지우면 버튼 달린 옛 글이 줄줄이 쌓인다.
-    const prev = this.rlqPrompt;
-    this.rlqPrompt = undefined;
+    const prev = rlqGetNotice();
     if (prev) {
       await this.app.client.chat.delete({ channel: prev.channel, ts: prev.ts })
         .catch(() => undefined);   // 사람이 이미 지웠으면 그만이다
@@ -1792,7 +1794,9 @@ export class SlackHandler {
       this.logger.error('Failed to post rate-limit recovery prompt', e);
       return undefined;
     });
-    if (res?.ts) this.rlqPrompt = { channel: last.channel, ts: res.ts as string };
+    if (res?.ts) {
+      rlqSetNotice({ channel: last.channel, ts: res.ts as string, count: prev?.count ?? 0 });
+    }
     // **올리고 나서 다시 예약한다.** 한 번 뜬 알림은 자리를 비운 사이 그대로 묻힌다 —
     // 실측(2026-08-24) 20:10 에 한 번 알리고 그대로 **22시간을 기다렸다.**
     this.armRlqNudge();
@@ -1819,27 +1823,27 @@ export class SlackHandler {
   private stopRlqNudge(): void {
     if (this.rlqNudgeTimer) clearTimeout(this.rlqNudgeTimer);
     this.rlqNudgeTimer = undefined;
-    this.rlqNudges = 0;
-    this.rlqPrompt = undefined;
+    rlqSetNotice(null);
   }
 
   private async nudgeRecovery(): Promise<void> {
     const pending = rlqPeek().items.length;
     const what = nudgeDecision({
-      pending, hour: new Date().getHours(), nudges: this.rlqNudges,
+      pending, hour: new Date().getHours(), nudges: rlqGetNotice()?.count ?? 0,
       fromHour: RLQ_NUDGE_FROM_HOUR, toHour: RLQ_NUDGE_TO_HOUR, max: RLQ_NUDGE_MAX,
     });
     if (what === 'wait') { this.armRlqNudge(); return; }
     if (what === 'stop') {
       if (pending > 0) {
         this.logger.warn('Rate-limit queue still pending — stopped nudging', {
-          times: this.rlqNudges, items: pending,
+          times: rlqGetNotice()?.count ?? 0, items: pending,
         });
       }
       this.stopRlqNudge();
       return;
     }
-    this.rlqNudges += 1;
+    const seen = rlqGetNotice();
+    if (seen) rlqSetNotice({ ...seen, count: seen.count + 1 });
     await this.postRecoveryPrompt();
   }
 

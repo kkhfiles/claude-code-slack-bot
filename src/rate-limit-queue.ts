@@ -35,10 +35,25 @@ export interface QueuedRequest {
   text: string;
 }
 
+/**
+ * 마지막으로 올린 알림과 **몇 번째인지.**
+ *
+ * **파일에 둔다 — 메모리에 두면 재시작이 다 지운다.** 2026-08-25 실측: 저녁에 네 번
+ * 재시작하는 사이 같은 알림이 넉 장 그대로 쌓였고(앞 것을 지울 대상을 몰라서),
+ * 횟수도 매번 0 으로 돌아가 「얼마나 기다렸는지」가 한 번도 안 붙고 상한도 안 걸렸다.
+ */
+export interface QueueNotice {
+  channel: string;
+  ts: string;
+  /** 지금까지 다시 알린 횟수 */
+  count: number;
+}
+
 interface QueueState {
   /** 한도가 풀리는 시각 (epoch 초). 이 시각에 사람에게 묻는다. */
   resetsAt: number | null;
   items: QueuedRequest[];
+  notice?: QueueNotice;
 }
 
 const EMPTY: QueueState = { resetsAt: null, items: [] };
@@ -46,7 +61,11 @@ const EMPTY: QueueState = { resetsAt: null, items: [] };
 function read(): QueueState {
   try {
     const s = JSON.parse(fs.readFileSync(FILE, 'utf-8'));
-    return { resetsAt: s.resetsAt ?? null, items: Array.isArray(s.items) ? s.items : [] };
+    return {
+      resetsAt: s.resetsAt ?? null,
+      items: Array.isArray(s.items) ? s.items : [],
+      notice: s.notice && s.notice.channel && s.notice.ts ? s.notice : undefined,
+    };
   } catch {
     return { ...EMPTY, items: [] };
   }
@@ -94,6 +113,20 @@ export function takeAll(): QueuedRequest[] {
 
 export function clear(): void {
   write({ resetsAt: null, items: [] });
+}
+
+/**
+ * 다시 알린 자취를 남긴다. **큐를 비우는 길에서는 함께 지워진다** — 위 `takeAll`·
+ * `clear` 가 `notice` 를 안 실어 쓰므로, 사람이 처리하면 자취도 같이 사라진다.
+ */
+export function setNotice(notice: QueueNotice | null): void {
+  const s = read();
+  if (s.items.length === 0) return;   // 비어 있으면 남길 이유가 없다
+  write({ ...s, notice: notice ?? undefined });
+}
+
+export function getNotice(): QueueNotice | undefined {
+  return read().notice;
 }
 
 /** 한 건만 뺀다 — 한도 안내에서 「취소」를 누른 경우. 안 빼면 회복 때 다시 뜬다. */
