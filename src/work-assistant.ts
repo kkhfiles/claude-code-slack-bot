@@ -267,6 +267,69 @@ export async function offsitePush(): Promise<{ ok: boolean; detail: string }> {
   }
 }
 
+/** 요약을 다시 쓸 업무 하나. **뜻은 파이썬만 안다** — 여기서는 나르기만 한다. */
+export interface SummaryItem {
+  id: string;
+  title: string;
+  why: string;
+  material: string;
+}
+
+/**
+ * 요약을 다시 쓸 업무와 그 재료.
+ *
+ * **무엇을 다시 쓸지는 여기서 안 정한다** — 「사람이 고친 것은 안 덮는다」를
+ * 비롯한 규칙이 전부 파이썬 한 곳에 있다. 못 읽으면 빈 목록이라 그 회차는
+ * 조용히 넘어간다(없는 것을 지어내 부르는 것보다 안 부르는 편이 싸다).
+ */
+export async function summaryCandidates(): Promise<SummaryItem[]> {
+  try {
+    const { code, stdout, stderr } = await runTasks(['summary'], 90_000);
+    if (code !== 0) {
+      logger.warn(`tasks.py summary 실패 (rc=${code})`, (stderr || stdout).slice(-300));
+      return [];
+    }
+    const d = JSON.parse(stdout) as { items?: SummaryItem[] };
+    return Array.isArray(d.items) ? d.items : [];
+  } catch (err) {
+    logger.warn('summary 후보를 못 읽었습니다', err);
+    return [];
+  }
+}
+
+/**
+ * 받은 요약을 **한 번에** 앉힌다.
+ *
+ * ⚠️ **건마다 부르지 않는다** — 쓰기마다 판을 다시 그리고 올리므로, 열 건이면
+ * 열 번 올라가고 열려 있는 화면은 올라온 판 수만큼 통째로 다시 읽는다(판의
+ * 묶어 보내기를 만든 것과 같은 이유). 파이썬이 건별로 쓰되 다시 그리기는
+ * 마지막 한 번이다.
+ *
+ * 원문은 파일로 넘긴다 — 여러 줄과 한글이 인자로 오면 win32 `shell:true`
+ * spawn 에서 깨진다(`quick`·`note` 와 같은 이유).
+ */
+export async function summaryApply(got: Record<string, string>): Promise<string> {
+  const file = path.join(os.tmpdir(), `wa-sum-${randomId()}.json`);
+  try {
+    fs.writeFileSync(file, JSON.stringify(got), { encoding: 'utf-8' });
+    const { code, stdout, stderr } = await runTasks(
+      ['summary', '--apply', file], 120_000);
+    if (code !== 0) {
+      logger.warn(`요약을 못 썼습니다 (rc=${code})`, (stderr || stdout).slice(-300));
+      return '';
+    }
+    // **마지막 줄이 아니라 우리 줄을 집는다** — 쓰기 뒤에 판 링크(`🗂`)가 한 줄
+    // 더 붙어서, 꼬리만 집으면 로그에 「몇 건 썼나」 대신 주소가 남는다.
+    const lines = (stdout || '').trim().split('\n').map((l) => l.trim()).filter(Boolean);
+    return lines.find((l) => l.startsWith('요약 ')) || lines.pop() || '';
+  } catch (err) {
+    logger.warn('요약 쓰기가 터졌습니다', err);
+    return '';
+  } finally {
+    try { fs.unlinkSync(file); } catch { /* 이미 없다 */ }
+  }
+}
+
 /** `bin/mail.py` 가 내는 스레드 하나. 뜻은 파이썬만 알고 여기서는 나르기만 한다. */
 export interface MailThread {
   subject: string;

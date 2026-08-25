@@ -11,7 +11,7 @@ import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
-  noteUpdate,
+  noteUpdate, summaryCandidates, summaryApply,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
   offDays, ymd } from './work-assistant';
@@ -105,6 +105,63 @@ const FOCUS_EVERY_HOURS = 2;
  */
 const FOCUS_MODEL = 'opus';
 const FOCUS_EFFORT = 'low' as const;
+
+/**
+ * 카드 요약 — **업무일 하루 한 번, 묶어서 한 호출.**
+ *
+ * ⚠️ **값을 정하는 것은 업무 수가 아니라 호출 수다**(2026-08-25 실측). 도구를
+ * 다 끄고 설정도 안 읽는데 호출마다 밑바탕 6만 토큰이 실린다 — 재료는 2~5천
+ * 토큰뿐이라, 건마다 부르면 그 밑바탕 값을 건 수만큼 낸다.
+ *
+ *   한 건씩 sonnet $0.238/건 · 5건 묶음 sonnet $0.250(건당 $0.050)
+ *   → 하루 한 번 몰아서 약 $5/월 · 로그 붙을 때마다면 $16~26/월
+ *
+ * **벌은 sonnet**(2026-08-25 사용자). haiku 는 절반값인데 두 줄이 15~20자로
+ * 짧아 카드가 이미 아는 것만 말했다.
+ */
+const SUMMARY_TIME = '19:30';
+const SUMMARY_MODEL = 'sonnet';
+const SUMMARY_EFFORT = 'low' as const;
+/**
+ * 한 호출에 넣는 업무 수 상한. 넘치면 **남은 것은 내일 나온다** — 밀린 첫
+ * 회차(23건)가 프롬프트를 통째로 부풀리지 않게 하는 문이다. 잘랐으면 로그에
+ * 남긴다(조용히 자르면 「다 했다」로 읽힌다).
+ *
+ * ⚠️ **값보다 시간이 먼저 걸린다** — 12건이 161초였다(실측). 평소는 3~5건이라
+ * 30~60초지만 밀린 회차는 상한에 닿으므로 아래 `maxDurationMs` 에 여유를 둔다.
+ */
+const SUMMARY_MAX = 10;
+
+/**
+ * 요약 세션이 돌려준 글 → `{업무 번호: 요약}`.
+ *
+ * **울타리를 관대하게 벗긴다** — 프롬프트가 코드 울타리를 붙이지 말라고 하지만
+ * 붙여 오는 회차가 반드시 생기고, 그때 통째로 버리면 그날 요약이 하나도 안
+ * 들어온다. 첫 `{` 와 마지막 `}` 사이만 본다.
+ *
+ * **모양이 아니면 `null`** — 빈 객체와 갈라야 부르는 쪽이 「형식이 어긋났다」와
+ * 「쓸 것이 없다」를 다르게 말할 수 있다.
+ */
+export function parseSummaryReply(text: string): Record<string, string> | null {
+  const s = text.indexOf('{');
+  const e = text.lastIndexOf('}');
+  if (s < 0 || e <= s) return null;
+  try {
+    // 잘라 낸 것은 **늘 `{` 로 시작해 `}` 로 끝난다** — 그러면 `JSON.parse` 는
+    // 객체를 주거나 던지거나 둘 중 하나다. 배열·기본값을 거르는 문을 뒀었는데
+    // 변이 시험에서 **한 번도 안 걸리는 줄**로 드러나 걷었다(2026-08-25).
+    const d = JSON.parse(text.slice(s, e + 1)) as Record<string, unknown>;
+    // 글자가 아닌 값은 **그 칸만 버린다** — 한 칸이 이상하다고 나머지 열한 건을
+    // 같이 버리면 그날 요약이 통째로 없어진다.
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(d)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
 
 export interface AssistantConfig {
   briefing: {
@@ -279,6 +336,7 @@ export class AssistantScheduler {
   private daouKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
   private focusTimer: ReturnType<typeof setTimeout> | null = null;
   private focusBusy = false;
+  private summaryTimer: ReturnType<typeof setTimeout> | null = null;
   private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
   private mailPollTimer: ReturnType<typeof setInterval> | null = null;
   private mailPollBusy = false;
@@ -647,6 +705,7 @@ export class AssistantScheduler {
       this.startBoardQueuePoller();
       void this.startNotionWatch();
       this.scheduleFocus();
+      this.scheduleSummary();
       this.scheduleOffsitePush();
       this.startMailPoller();
     }
@@ -696,6 +755,10 @@ export class AssistantScheduler {
     if (this.focusTimer) {
       clearTimeout(this.focusTimer);
       this.focusTimer = null;
+    }
+    if (this.summaryTimer) {
+      clearTimeout(this.summaryTimer);
+      this.summaryTimer = null;
     }
     if (this.offsitePushTimer) {
       clearTimeout(this.offsitePushTimer);
@@ -811,6 +874,114 @@ export class AssistantScheduler {
    *
    * **말을 걸지 않는다.** 성공도 실패도 로그까지다.
    */
+  /**
+   * 카드 요약 — **업무일 하루 한 번, 한 호출로 몰아서.**
+   *
+   * 「지금 집중할 것」과 갈리는 자리 둘 — ①두 시간마다가 아니라 하루 한 번이고
+   * ②판단이 아니라 **글짓기**라 도구를 아예 안 쓴다. 값이 왜 이렇게 나뉘는지는
+   * `SUMMARY_TIME` 위 주석에 실측으로 적어 뒀다.
+   *
+   * **말을 걸지 않는다.** 성공도 실패도 로그까지다 — 요약은 카드를 열면 보이는
+   * 것이라 슬랙에 또 적을 이유가 없다.
+   */
+  private scheduleSummary(): void {
+    const nextFire = this.getNextWorkingDay(SUMMARY_TIME);
+    this.logger.info('Scheduled card summaries', {
+      time: SUMMARY_TIME, nextFire: nextFire.toISOString(),
+    });
+    this.summaryTimer = setTimeout(async () => {
+      try {
+        const nonWorking = this.isNonWorkingDay();
+        if (nonWorking.skip) {
+          this.logger.info(`Skipping summaries (${nonWorking.reason})`);
+        } else if (await isQuietPeriod()) {
+          // 「조용히」는 **미는 것**을 멈추는 장치다. 요약은 밀지 않지만 돈이
+          // 나가는 자리라, 사람이 자리에 없는 동안 매일 청구되게 두지 않는다.
+          this.logger.info('Skipping summaries (조용히 기간)');
+        } else {
+          await this.runSummaries();
+        }
+      } catch (error) {
+        this.logger.warn('Card summaries failed', {
+          why: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        this.scheduleSummary();
+      }
+    }, nextFire.getTime() - Date.now());
+  }
+
+  /** 한 판 돈다. **절대 던지지 않는다** — 부르는 쪽의 `finally` 가 재예약한다. */
+  private async runSummaries(): Promise<void> {
+    // **나가는 길마다 한 줄 남긴다.** 조용히 돌아 나가면 「안 돌았다」와
+    // 「돌았는데 쓸 것이 없었다」를 못 가른다 — 하루 한 번짜리라 그 차이를
+    // 다음 날에야 눈치채고, 그때는 왜인지가 어디에도 안 남아 있다.
+    const root = workAssistantRoot();
+    if (!root) { this.logger.warn('Summaries: work-assistant 를 못 찾음'); return; }
+    const all = await summaryCandidates();
+    this.logger.info(`Summaries: 후보 ${all.length}건`);
+    if (!all.length) return;
+    const items = all.slice(0, SUMMARY_MAX);
+    if (all.length > items.length) {
+      // **자른 것을 말한다.** 조용히 자르면 「다 했다」로 읽힌다.
+      this.logger.info(`Summaries: ${all.length}건 중 ${items.length}건만 이번 회차`
+        + ` — 남은 ${all.length - items.length}건은 내일`);
+    }
+    // **`focus.md` 와 사는 곳이 다르다** — 이 글은 판의 요약 칸이 무엇인지를
+    // 적은 것이라 그 칸을 만든 레포(`work-assistant`)에 둔다. 거기는 매일 밤
+    // 밖으로 나가고, 카드·메모 규칙이 이미 그 옆에 있다.
+    const promptPath = path.join(root, 'prompts', 'summary.md');
+    if (!fs.existsSync(promptPath)) {
+      this.logger.warn(`Summary prompt not found: ${promptPath}`);
+      return;
+    }
+    const body = items
+      .map((i) => `=== ${i.id} ===\n${i.material}`)
+      .join('\n\n');
+    const result = await this.spawnSession(body, {
+      workingDirectory: root,
+      model: SUMMARY_MODEL,
+      effort: SUMMARY_EFFORT,
+      permissionMode: 'default',
+      // **도구가 하나도 없다.** 이 세션은 받은 글을 읽고 글을 지을 뿐이고,
+      // 볼트에 앉히는 것은 아래 파이썬이 한다 — 규칙이 그쪽 한 곳에 있다.
+      tools: [],
+      allowedTools: [],
+      // 규칙 파일을 안 읽는다 — 두 CLAUDE.md 가 따라 들어오면 그것만으로
+      // 건당 값이 몇 배가 된다(focus 에서 겪은 것).
+      settingSources: [],
+      appendSystemPrompt: fs.readFileSync(promptPath, 'utf-8'),
+      env: { ASSISTANT_MODE: 'summary', CLAUDE_SCHEDULED: '1' },
+      skipMcp: true,
+      noSessionPersistence: true,
+      // 12건이 161초였다 — 상한(10건)에 닿아도 두 배 넘게 남는다.
+      maxDurationMs: 6 * 60_000,
+      useSdk: true,
+    });
+    this.recordSessionCost('summary', result);
+
+    const got = parseSummaryReply(result.text || '');
+    if (!got) {
+      // **원문 꼬리를 남긴다** — 형식이 어긋난 것이 그날의 유일한 단서다.
+      this.logger.warn('Summaries: JSON 이 아니라 아무것도 못 썼습니다 · 꼬리 = '
+        + (result.text || '').slice(-300));
+      return;
+    }
+    // **보낸 번호만 받는다** — 세션이 없는 번호를 지어내면 그 글은 어느 업무의
+    // 것도 아니다. 안 온 것은 세어서 로그에 남긴다.
+    const use: Record<string, string> = {};
+    const missing: string[] = [];
+    for (const it of items) {
+      const text = (got[it.id] || '').trim();
+      if (text) use[it.id] = text; else missing.push(it.id);
+    }
+    const detail = Object.keys(use).length
+      ? await summaryApply(use)
+      : '쓸 것 없음';
+    this.logger.info(`Summaries: ${detail} · $${result.costUsd?.toFixed(4) ?? '?'}`
+      + (missing.length ? ` · 안 온 것 ${missing.join(',')}` : ''));
+  }
+
   private scheduleOffsitePush(): void {
     const nextFire = this.getNextEveryDay(OFFSITE_PUSH_TIME);
     this.logger.info('Scheduled vault push', {
