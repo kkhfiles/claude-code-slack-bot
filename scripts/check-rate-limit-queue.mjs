@@ -79,6 +79,30 @@ q2.enqueue({ channel: 'D1', threadTs: '6', user: 'U1', text: '또' }, now + 60);
 q2.clear();
 eq('버리면 비워진다', q2.peek().items.length, 0);
 
+
+// --- 다시 알릴지 정하는 규칙 -------------------------------------------------------
+// 한 번 알리고 마는 구조라 자리를 비운 사이 그대로 묻혔다 — 2026-08-24 에 20:10 에
+// 한 번 알리고 **22시간을 기다렸다.** 되풀이는 세 가지로 조용히 틀린다:
+// 밤사이에 상한이 닳아 아침에 한 번도 안 알리거나, 처리한 뒤에도 두드리거나,
+// 끝없이 두드려 사람이 알림 자체를 안 보게 되거나.
+const { nudgeDecision } = require(path.join(ROOT, 'dist', 'rlq-nudge.js'));
+const NB = { fromHour: 8, toHour: 20, max: 5 };
+const dec = (o) => nudgeDecision({ ...NB, ...o });
+
+eq('밀린 것이 없으면 그만둔다', dec({ pending: 0, hour: 10, nudges: 0 }), 'stop');
+eq('깨어 있는 시간이면 알린다', dec({ pending: 1, hour: 10, nudges: 0 }), 'post');
+eq('시작 시각이 되면 알린다', dec({ pending: 1, hour: 8, nudges: 0 }), 'post');
+// **밤에는 세지 않는다.** 여기서 횟수를 쓰면 밤사이에 상한이 다 닳아 아침에 한 번도
+// 안 알린다 — 다시 알리기를 넣은 이유 자체가 사라진다.
+eq('자는 시간에는 미룬다', dec({ pending: 1, hour: 3, nudges: 0 }), 'wait');
+eq('끝 시각부터는 미룬다', dec({ pending: 1, hour: 20, nudges: 0 }), 'wait');
+eq('밤에는 횟수를 다 썼어도 미루기다 (그만두기가 아니다)',
+   dec({ pending: 1, hour: 3, nudges: 99 }), 'wait');
+eq('상한 직전까지는 알린다', dec({ pending: 1, hour: 10, nudges: 4 }), 'post');
+eq('상한에 닿으면 그만둔다', dec({ pending: 1, hour: 10, nudges: 5 }), 'stop');
+// 밀린 것이 없는 쪽이 먼저다 — 사람이 처리했으면 시각과 무관하게 끝이다.
+eq('처리했으면 자는 시간에도 그만둔다', dec({ pending: 0, hour: 3, nudges: 0 }), 'stop');
+
 fs.rmSync(FILE, { force: true });
 
 // **진짜 큐가 그대로인가.** 여기가 틀리면 위의 통과는 사용자 원문을 지우고 얻은 것이다.
@@ -90,4 +114,4 @@ if (fails.length) {
   for (const f of fails) console.log('  ✗ ' + f);
   process.exit(1);
 }
-console.log('통과 — 한도 큐 (쌓기 · 회복 시각 · 순서 · 재시작 · 꺼내기 · 취소 · 버리기)');
+console.log('통과 — 한도 큐 (쌓기 · 회복 시각 · 순서 · 재시작 · 꺼내기 · 취소 · 버리기 · 다시 알리기)');
