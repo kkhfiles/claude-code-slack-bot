@@ -527,21 +527,43 @@ export type QuickOutcome =
  * win32 `shell:true` spawn 에서 깨지거나 주입 위험이 생긴다(캡처와 같은 이유).
  */
 export async function quickUpdate(text: string): Promise<QuickOutcome> {
+  return byFile('quick', text);
+}
+
+/**
+ * 여러 줄 글을 한 칸에 앉힌다 — 판의 요약·메모 칸이 이리로 온다.
+ *
+ * **짧은 문법과 갈라 둔 이유는 봇이 아니라 파이썬 쪽에 있다**(`tasks.py` 의
+ * `cmd_note`): 자유 서술에 「완료」·「2h」가 들어 있으면 짧은 문법이 그것을
+ * 지시로 읽고, 줄바꿈과 `·` 는 그 문법의 조각 구분자다. 여기서는 여전히
+ * **종료 코드만** 본다 — 뜻은 저쪽 한 곳에만 있다.
+ */
+export async function noteUpdate(text: string): Promise<QuickOutcome> {
+  return byFile('note', text);
+}
+
+/**
+ * 원문을 파일로 넘겨 `tasks.py` 한 서브커맨드를 부른다.
+ *
+ * 파일로 넘기는 이유 — 따옴표·줄바꿈·한글이 섞인 문자열을 인자로 주면
+ * win32 `shell:true` spawn 에서 깨지거나 주입 위험이 생긴다(캡처와 같은 이유).
+ */
+async function byFile(cmd: 'quick' | 'note', text: string): Promise<QuickOutcome> {
   const root = workAssistantRoot();
   if (!root) return { kind: 'not-quick' };
-  const file = path.join(os.tmpdir(), `wa-quick-${randomId()}.txt`);
+  const file = path.join(os.tmpdir(), `wa-${cmd}-${randomId()}.txt`);
   try {
     fs.writeFileSync(file, text, { encoding: 'utf-8' });
-    const { code, stdout, stderr } = await runTasks(['quick', '--file', file], 90_000);
+    const { code, stdout, stderr } = await runTasks([cmd, '--file', file], 90_000);
     if (code === 0) return { kind: 'ok', output: stdout.trim() };
     if (code === 2) {
       return { kind: 'not-quick', detail: (stderr || stdout).trim().split('\n').slice(-2).join(' / ') };
     }
     const tail = (stderr || stdout).trim().split('\n').slice(-3).join('\n');
-    logger.error(`tasks.py quick 실패 (rc=${code})`, tail);
+    logger.error(`tasks.py ${cmd} 실패 (rc=${code})`, tail);
     return { kind: 'failed', message: tail || `rc=${code}` };
   } catch (err) {
-    logger.error('quick update failed', err);
+    logger.error(`${cmd} update failed`, err);
     return { kind: 'failed', message: String(err) };
   } finally {
     try { fs.unlinkSync(file); } catch { /* 이미 없다 */ }
