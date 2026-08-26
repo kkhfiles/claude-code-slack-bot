@@ -13,7 +13,7 @@ import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
   noteUpdate, summaryCandidates, summaryApply,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
-  offsitePush, workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
+  offsitePush, commitHarvest, workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
   offDays, ymd } from './work-assistant';
 import { boardLabel, boardQueueEnabled, drain } from './board-queue';
 
@@ -989,9 +989,29 @@ export class AssistantScheduler {
     });
 
     this.offsitePushTimer = setTimeout(async () => {
+      // **걷기가 내보내기보다 먼저다** — 순서를 뒤집으면 그날 걷은 커밋이
+      // 하루를 꼬박 PC 안에만 머문다. 걷기가 실패해도 내보내기는 그대로 돈다
+      // (백업이 다른 일 때문에 멈추면 방향이 거꾸로다).
+      await this.runCommitHarvest();
       await this.runOffsitePush('daily');
       this.scheduleOffsitePush();
     }, nextFire.getTime() - Date.now());
+  }
+
+  /**
+   * 커밋을 진행 로그로 한 번 걷는다. **절대 던지지 않는다** — 여기서 터지면
+   * 뒤따르는 내보내기와 재예약이 같이 끊긴다.
+   */
+  private async runCommitHarvest(): Promise<void> {
+    try {
+      const r = await commitHarvest();
+      // **나가는 길마다 한 줄 남긴다** — 조용히 돌아 나가면 「안 돌았다」와
+      // 「돌았는데 걷을 것이 없었다」를 못 가른다.
+      if (r.ok) this.logger.info(`Commit harvest — ${r.detail || '걷을 것 없음'}`);
+      else this.logger.warn(`Commit harvest failed — ${r.detail}`);
+    } catch (error) {
+      this.logger.error('Commit harvest threw', error);
+    }
   }
 
   /** 한 번 내보낸다. **절대 던지지 않는다** — 여기서 터지면 재예약이 끊긴다. */

@@ -31,6 +31,17 @@ const REGISTRAR = {
   mailPollTimer: 'startMailPoller',
 };
 
+/**
+ * 한 타이머 자리에서 **같이** 하기로 한 일.
+ *
+ * 타이머는 하나인데 하는 일이 둘 이상이면 뒤엣것이 빠져도 아래 검사 셋이 전부
+ * 통과한다 — 타이머는 여전히 걸리고 지워지고 스스로 재예약하니까. 20:00 자리가
+ * 그렇다(커밋 걷기 다음에 밖으로 내보내기). 그래서 하는 일을 따로 센다.
+ */
+const ALSO_DOES = {
+  scheduleOffsitePush: ['runCommitHarvest', 'runOffsitePush'],
+};
+
 /** 소스에서 그 함수의 본문만 떼어 온다. 못 찾으면 멈춘다 — 조용히 빈 문자열을
  *  돌려주면 「아무것도 안 걸려 있다」가 아니라 「검사가 안 돌았다」가 된다. */
 function body(src, name) {
@@ -78,9 +89,21 @@ for (const [timer, fn] of Object.entries(REGISTRAR)) {
   }
 }
 
+// ④ 그 자리에서 하기로 한 일이 다 불리는가.
+for (const [fn, jobs] of Object.entries(ALSO_DOES)) {
+  const b = body(src, fn);
+  for (const job of jobs) {
+    if (!b.includes(`this.${job}(`)) {
+      fails.push(`${fn}() — ${job}() 을 안 부른다 (그 자리에서 같이 하기로 한 일)`);
+    }
+  }
+}
+
 if (fails.length) {
   console.error('타이머 짝이 안 맞는다\n' + fails.map((f) => `  ✗ ${f}`).join('\n'));
   process.exitCode = 1;
 } else {
-  console.log(`통과 — 타이머 ${cleared.size}개: 지움·다시 걺·자기 재예약 셋 다`);
+  const jobs = Object.values(ALSO_DOES).flat().length;
+  console.log(`통과 — 타이머 ${cleared.size}개: 지움·다시 걺·자기 재예약 셋 다`
+    + ` · 한자리에서 같이 하는 일 ${jobs}개`);
 }

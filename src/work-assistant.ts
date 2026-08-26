@@ -267,6 +267,31 @@ export async function offsitePush(): Promise<{ ok: boolean; detail: string }> {
   }
 }
 
+/**
+ * 작업 디렉터리의 **내 커밋**을 진행 로그로 걷는다 (하루 한 번).
+ *
+ * **무엇을 어느 업무에 적을지는 여기서 안 정한다** — 거슬러 읽는 창·겹침을 막는
+ * 자국·「누가 나인가」가 전부 파이썬 한 곳에 있다. 여기는 부르고 결과 한 줄을
+ * 로그에 남길 뿐이다.
+ *
+ * **사람에게 아무 말도 안 간다.** 카드를 열면 보이는 것이라 또 알릴 이유가 없다.
+ * 그래서 「조용히」 기간과 쉬는 날에도 그냥 돈다 — 미는 장치가 아니고 돈도 안
+ * 드는데, 쉬는 날 커밋했다면 그것이야말로 적어 둘 한 일이다.
+ */
+export async function commitHarvest(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const { code, stdout, stderr } = await runTasks(['commits'], 180_000);
+    const lines = (stdout || stderr).trim().split('\n')
+      .map((l) => l.trim()).filter(Boolean);
+    // **마지막 줄이 아니라 우리 줄을 집는다** — 쓰기 뒤에 판 링크(`🗂`)가 한 줄
+    // 더 붙어서, 꼬리만 집으면 로그에 「몇 건 걷었나」 대신 주소가 남는다.
+    const detail = lines.find((l) => l.startsWith('커밋 ')) || lines.pop() || '';
+    return { ok: code === 0, detail };
+  } catch (err) {
+    return { ok: false, detail: String(err) };
+  }
+}
+
 /** 요약을 다시 쓸 업무 하나. **뜻은 파이썬만 안다** — 여기서는 나르기만 한다. */
 export interface SummaryItem {
   id: string;
