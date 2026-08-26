@@ -13,7 +13,8 @@ import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
   noteUpdate, summaryCandidates, summaryApply,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
-  offsitePush, commitHarvest, workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
+  offsitePush, commitHarvest, remindDue, remindDone,
+  workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
   offDays, ymd } from './work-assistant';
 import { boardLabel, boardQueueEnabled, drain } from './board-queue';
 
@@ -76,6 +77,17 @@ const BOARD_QUEUE_POLL_MS = 5_000;
 const MAIL_POLL_MS = 600_000;
 const MAIL_POLL_FROM_HOUR = 8;
 const MAIL_POLL_TO_HOUR = 20;
+/**
+ * 시각 알림을 보는 간격. **이 값이 곧 늦게 울릴 수 있는 최대 시간이다** —
+ * 「11시에」 부탁한 것이 11:02 에 오는 것은 괜찮지만 11:10 은 늦다.
+ *
+ * 다음 울릴 시각을 계산해 한 번만 예약하는 편이 싸 보이지만, 그러면 **그 사이에
+ * 새로 걸린 알림을 못 본다** — 예약을 다시 잡을 자리가 어디에도 없다(판에서도
+ * 세션에서도 걸 수 있다). 2분마다 보는 값이 그 구멍보다 싸다.
+ */
+const REMIND_POLL_MS = 120_000;
+const REMIND_FROM_HOUR = 8;
+const REMIND_TO_HOUR = 20;
 /**
  * 노션이 직접 고쳐졌는지 보는 간격. **이 값이 곧 화면이 낡아 있을 수 있는
  * 최대 시간이다.** 안 바뀌었으면 1행 질의(0.5초)로 끝나므로 짧게 잡아도
@@ -356,6 +368,8 @@ export class AssistantScheduler {
   private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
   private mailPollTimer: ReturnType<typeof setInterval> | null = null;
   private mailPollBusy = false;
+  private remindTimer: ReturnType<typeof setInterval> | null = null;
+  private remindBusy = false;
   /** 한 판이 끝나기 전에 다음 판이 겹치지 않게. 노션 왕복이 폴링 간격보다 길 수 있다. */
   private boardQueueBusy = false;
   private boardQueueFailures = 0;
@@ -724,6 +738,7 @@ export class AssistantScheduler {
       this.scheduleSummary();
       this.scheduleOffsitePush();
       this.startMailPoller();
+      this.startRemindPoller();
     }
 
     if (this.getEnabledAnalysisTypes().length > 0) {
@@ -767,6 +782,10 @@ export class AssistantScheduler {
     if (this.mailPollTimer) {
       clearInterval(this.mailPollTimer);
       this.mailPollTimer = null;
+    }
+    if (this.remindTimer) {
+      clearInterval(this.remindTimer);
+      this.remindTimer = null;
     }
     if (this.focusTimer) {
       clearTimeout(this.focusTimer);
@@ -1057,6 +1076,50 @@ export class AssistantScheduler {
    * ⚠️ **표시는 Outlook 을 다시 읽지 않고 찍는다**(`mailMark`). 다시 읽으면 그
    * 사이 도착한 메일까지 본 것으로 찍혀 조용히 건너뛴다.
    */
+  /**
+   * 시각 알림. **세션을 안 띄운다** — 판단할 것이 없고 사람이 정한 시각에 정한
+   * 말을 그대로 내는 자리라, 돈이 드는 길로 보낼 이유가 없다.
+   */
+  private startRemindPoller(): void {
+    this.logger.info('Started remind poller', {
+      everyMs: REMIND_POLL_MS, window: `${REMIND_FROM_HOUR}~${REMIND_TO_HOUR}시`,
+    });
+    this.remindTimer = setInterval(() => {
+      void this.runRemindPoll();
+    }, REMIND_POLL_MS);
+  }
+
+  /** 한 판 돈다. **절대 던지지 않는다** — 여기서 터지면 조용히 안 울린다. */
+  private async runRemindPoll(): Promise<void> {
+    const h = new Date().getHours();
+    if (h < REMIND_FROM_HOUR || h >= REMIND_TO_HOUR) return;
+    // **쉬는 날과 「조용히」 기간에는 안 울린다** — 미는 것은 전부 멈춘다는 규칙을
+    // 여기만 예외로 두지 않는다. 지난 알림은 **버려지지 않고** 자국이 없는 채로
+    // 남아, 다음 업무일 첫 회차에 그대로 나온다.
+    if (this.isNonWorkingDay().skip) return;
+    if (await isQuietPeriod()) return;
+    if (this.remindBusy) return;
+    this.remindBusy = true;
+    try {
+      const due = await remindDue();
+      if (!due.length) return;
+      for (const it of due) {
+        const when = it.at.slice(11);
+        await this.sendMessage(
+          `⏰ ${when} — ${it.title}` + (it.next ? `\n다음 행동: ${it.next}` : ''));
+        // **보낸 뒤에 찍는다** — 먼저 찍고 보내다 실패하면 영영 안 울린다.
+        if (!await remindDone(it.id)) {
+          this.logger.warn(`Remind: 표시를 못 찍었습니다 — 또 울립니다 (${it.id})`);
+        }
+      }
+      this.logger.info(`Remind — ${due.length}건 울림`);
+    } catch (error) {
+      this.logger.error('Remind poll threw', error);
+    } finally {
+      this.remindBusy = false;
+    }
+  }
+
   private startMailPoller(): void {
     this.logger.info('Started mail poller', {
       everyMs: MAIL_POLL_MS, window: `${MAIL_POLL_FROM_HOUR}~${MAIL_POLL_TO_HOUR}시`,

@@ -29,6 +29,7 @@ const REGISTRAR = {
   summaryTimer: 'scheduleSummary',
   offsitePushTimer: 'scheduleOffsitePush',
   mailPollTimer: 'startMailPoller',
+  remindTimer: 'startRemindPoller',
 };
 
 /**

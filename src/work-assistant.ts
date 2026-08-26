@@ -292,6 +292,47 @@ export async function commitHarvest(): Promise<{ ok: boolean; detail: string }> 
   }
 }
 
+/** 울릴 때가 된 알림 하나. **뜻은 파이썬만 안다** — 여기서는 나르기만 한다. */
+export interface RemindItem {
+  id: string;
+  title: string;
+  at: string;
+  next: string;
+}
+
+/**
+ * 시각이 지났는데 아직 안 울린 알림.
+ *
+ * **되풀이가 아니다** — 한 업무의 한 번짜리 약속이고(「금요일 오전 11시에 ~
+ * 요청하기」), 되풀이는 정기 업무가 맡는다. 못 읽으면 빈 목록이라 그 회차는
+ * 조용히 넘어간다 — 없는 것을 지어내 울리는 것보다 안 울리는 편이 싸다.
+ */
+export async function remindDue(): Promise<RemindItem[]> {
+  try {
+    const { code, stdout } = await runTasks(['remind'], 60_000);
+    if (code !== 0) return [];
+    const r = JSON.parse(stdout) as { items?: RemindItem[] };
+    return Array.isArray(r.items) ? r.items : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 그 업무의 알림을 울린 것으로 표시한다.
+ *
+ * ⚠️ **넘긴 뒤에 찍는다** — 먼저 찍고 보내다 실패하면 그 알림은 영영 안 울린다.
+ * 반대로 두면 최악이 「한 번 더 울림」이라 값이 훨씬 싸다(메일 표시와 같은 결).
+ */
+export async function remindDone(id: string): Promise<boolean> {
+  try {
+    const { code } = await runTasks(['remind', '--done', id], 60_000);
+    return code === 0;
+  } catch {
+    return false;
+  }
+}
+
 /** 요약을 다시 쓸 업무 하나. **뜻은 파이썬만 안다** — 여기서는 나르기만 한다. */
 export interface SummaryItem {
   id: string;
