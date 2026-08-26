@@ -31,7 +31,7 @@ import { LetterBooking } from './letter-booking';
 import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
-import { captureToInbox, checkinMap, checkinNow, checkinOnce, isWorkAssistantEnabled, quickUpdate } from './work-assistant';
+import { captureToInbox, checkinMap, checkinNow, isWorkAssistantEnabled, quickUpdate } from './work-assistant';
 import { boardLabel } from './board-queue';
 
 /**
@@ -1022,17 +1022,11 @@ export class SlackHandler {
       }
     }
 
-    // --- 어제 진행 체크인 (하루 한 번 · 첫 접촉이 방아쇠) ---
-    //
-    // **시각이 아니라 첫 접촉에 건다.** 퇴근·출근 시각은 날마다 다르지만 첫
-    // 접촉은 사람이 그 자리에 있다는 확실한 신호다. 예약 발신(브리핑)은
-    // 제외한다 — 사람이 없는 시각에 물어 놓고 물었다고 치면 그날은 못 묻는다.
-    //
-    // 답이 먼저 온 경우(위 빠른 경로)는 여기 도달하지 않는다.
-    if (isDM && !event.accountId && isWorkAssistantEnabled()) {
-      const ci = await checkinOnce();
-      if (ci) await say({ text: ci, thread_ts: replyTs }).catch(() => { });
-    }
+    // 첫 접촉에 걸던 「어제 진행 체크인」은 2026-08-26 에 걷었다 — 「칸반에서
+    // 항목 보고 업데이트 요청하는 것이 훨씬 자연스럽고 편해졌다 · 복잡한 건만
+    // 스탠리와 이야기하게 됨」(사용자). 말을 걸자마자 질문이 붙는 것이 바로
+    // 그 「복잡한 건」 앞을 막고 있었다. 아침에 한 번 묻는 것은 08:55 넛지에
+    // 남아 있고, 부르면 나오는 「체크인」도 그대로다.
 
     this.originalMessages.set(sessionKey, { channel, ts: originalMessageTs });
 

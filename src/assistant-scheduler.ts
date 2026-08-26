@@ -41,7 +41,9 @@ const OFFSITE_PUSH_TIME = '20:00';
  * 17:00 인 이유: 하루가 끝나기 전이되 아직 자리에 있을 시각. 무시되기 시작하면
  * 시각을 옮기지 말고 **오후 것부터 끈다**(그게 이 값의 유일한 조정 방향이다).
  */
-const CHECKIN_PM_TIME = '17:00';
+// 17:00 오후 체크인은 2026-08-26 에 걷었다 — 「칸반에서 항목 보고 업데이트
+// 요청하는 것이 훨씬 자연스럽고 편해졌다 · 복잡한 건만 스탠리와 이야기」(사용자).
+// 넛지할 것이 있으면 판이 깜빡인다(`alarm_tasks`). 되살리려면 그 판단부터 뒤집는다.
 /**
  * Work Board 큐를 가져오는 간격. **이 값이 곧 「무르기」 창의 길이다** — 빠르게 만드는
  * 것과 무를 수 있는 것은 같은 손잡이의 양끝이라, 30초에서 5초로 내리며 무르기를
@@ -154,10 +156,16 @@ const SUMMARY_MAX = 10;
  * **모양이 아니면 `null`** — 빈 객체와 갈라야 부르는 쪽이 「형식이 어긋났다」와
  * 「쓸 것이 없다」를 다르게 말할 수 있다.
  */
-/** 업무 하나에 대한 답. `title` 은 **단계가 넘어갔을 때만** 온다. */
+/** 업무 하나에 대한 답. **요약뿐이다.**
+ *
+ * 제목은 2026-08-26 에 뺐다 — 「기존 항목에 모두 자동 적용할 필요는 없고,
+ * 프롬프트로 업데이트 요청 시 자체 판단」(사용자). 이름을 바꾸는 자리는
+ * 프롬프트를 받은 세션 하나이고, `tasks.py summary --apply` 는 `title` 이
+ * 실려 와도 버린다. 여기서도 안 나른다 — 안 닿는 값을 나르면 다음에 읽는
+ * 사람이 제목이 이 길로 흐른다고 읽는다.
+ */
 export interface SummaryReply {
   summary: string;
-  title?: string;
 }
 
 export function parseSummaryReply(text: string): Record<string, SummaryReply> | null {
@@ -172,7 +180,7 @@ export function parseSummaryReply(text: string): Record<string, SummaryReply> | 
     // 모양이 어긋난 값은 **그 칸만 버린다** — 한 칸이 이상하다고 나머지 열한
     // 건을 같이 버리면 그날 요약이 통째로 없어진다.
     //
-    // **글자 하나로 온 것도 받는다** — 요약만 있고 제목이 없던 옛 모양이다.
+    // **글자 하나로 온 것도 받는다** — 덩이가 아니라 요약 문자열만 온 모양이다.
     // 안 받으면 모델이 그 모양으로 답한 날은 그날치가 통째로 사라지는데,
     // 뜻이 어긋나지 않으므로 받아 주는 편이 싸다.
     const out: Record<string, SummaryReply> = {};
@@ -181,9 +189,8 @@ export function parseSummaryReply(text: string): Record<string, SummaryReply> | 
       if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
       const o = v as Record<string, unknown>;
       if (typeof o.summary !== 'string') continue;
-      const one: SummaryReply = { summary: o.summary };
-      if (typeof o.title === 'string' && o.title.trim()) one.title = o.title;
-      out[k] = one;
+      // `title` 이 실려 와도 버린다 — 위 주석 참고.
+      out[k] = { summary: o.summary };
     }
     return out;
   } catch {
@@ -356,7 +363,6 @@ export class AssistantScheduler {
   private analysisTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private workNudgeTimer: ReturnType<typeof setTimeout> | null = null;
-  private checkinPmTimer: ReturnType<typeof setTimeout> | null = null;
   private offsitePushTimer: ReturnType<typeof setTimeout> | null = null;
   private notionWatchTimer: ReturnType<typeof setInterval> | null = null;
   private notionWatchBusy = false;
@@ -370,6 +376,11 @@ export class AssistantScheduler {
   private mailPollBusy = false;
   private remindTimer: ReturnType<typeof setInterval> | null = null;
   private remindBusy = false;
+  /** 이 프로세스에서 이미 보낸 알림. **자국을 못 찍었을 때의 퓨즈다** — 파일
+   *  자국이 정본이고 이것은 그 자국이 실패했을 때 2분마다 같은 DM 이 무한히
+   *  나가는 것을 막는다(하루 08~20시면 360통). 재시작하면 비므로 한 번은 다시
+   *  울릴 수 있는데, 그것이 「영영 안 울림」보다 싸다. */
+  private remindSent = new Set<string>();
   /** 한 판이 끝나기 전에 다음 판이 겹치지 않게. 노션 왕복이 폴링 간격보다 길 수 있다. */
   private boardQueueBusy = false;
   private boardQueueFailures = 0;
@@ -731,7 +742,6 @@ export class AssistantScheduler {
     // 이 타이머를 지우므로, 재등록 지점이 scheduleAll() 이다.
     if (isWorkAssistantEnabled()) {
       this.scheduleWorkNudge();
-      this.scheduleCheckinPm();
       this.startBoardQueuePoller();
       void this.startNotionWatch();
       this.scheduleFocus();
@@ -766,10 +776,6 @@ export class AssistantScheduler {
     if (this.workNudgeTimer) {
       clearTimeout(this.workNudgeTimer);
       this.workNudgeTimer = null;
-    }
-    if (this.checkinPmTimer) {
-      clearTimeout(this.checkinPmTimer);
-      this.checkinPmTimer = null;
     }
     if (this.notionWatchTimer) {
       clearInterval(this.notionWatchTimer);
@@ -1104,12 +1110,17 @@ export class AssistantScheduler {
       const due = await remindDue();
       if (!due.length) return;
       for (const it of due) {
+        // 자국이 「그 값」이라 시각을 고치면 다시 울려야 한다 — 열쇠에 시각을 넣는다.
+        const key = `${it.id}@${it.at}`;
+        if (this.remindSent.has(key)) continue;
         const when = it.at.slice(11);
         await this.sendMessage(
           `⏰ ${when} — ${it.title}` + (it.next ? `\n다음 행동: ${it.next}` : ''));
         // **보낸 뒤에 찍는다** — 먼저 찍고 보내다 실패하면 영영 안 울린다.
+        this.remindSent.add(key);
         if (!await remindDone(it.id)) {
-          this.logger.warn(`Remind: 표시를 못 찍었습니다 — 또 울립니다 (${it.id})`);
+          this.logger.warn(
+            `Remind: 표시를 못 찍었습니다 — 이 프로세스에서는 안 울립니다 (${it.id})`);
         }
       }
       this.logger.info(`Remind — ${due.length}건 울림`);
@@ -1175,32 +1186,6 @@ export class AssistantScheduler {
     }
   }
 
-  private scheduleCheckinPm(): void {
-    const nextFire = this.getNextWorkingDay(CHECKIN_PM_TIME);
-    this.logger.info('Scheduled afternoon check-in', {
-      time: CHECKIN_PM_TIME, nextFire: nextFire.toISOString(),
-    });
-
-    this.checkinPmTimer = setTimeout(async () => {
-      try {
-        const nonWorking = this.isNonWorkingDay();
-        if (nonWorking.skip) {
-          this.logger.info(`Skipping afternoon check-in (${nonWorking.reason})`);
-        } else {
-          const ask = await checkinNudge(true);
-          if (ask) {
-            await this.sendMessage(ask);
-          } else {
-            this.logger.info('Skipping afternoon check-in (nothing to ask)');
-          }
-        }
-      } catch (error) {
-        // 조용히 넘긴다 — 08:55 넛지가 같은 조회 실패를 이미 시끄럽게 알린다.
-        this.logger.error('Afternoon check-in failed', error);
-      }
-      this.scheduleCheckinPm();
-    }, nextFire.getTime() - Date.now());
-  }
 
   /**
    * 노션에서 **직접** 고친 것을 따라잡는다 — 3분마다.

@@ -21,7 +21,6 @@ const SRC = path.join(ROOT, 'src', 'assistant-scheduler.ts');
 const REGISTRAR = {
   briefingTimer: 'scheduleBriefing',
   workNudgeTimer: 'scheduleWorkNudge',
-  checkinPmTimer: 'scheduleCheckinPm',
   notionWatchTimer: 'startNotionWatch',
   boardQueueTimer: 'startBoardQueuePoller',
   daouKeepAliveTimer: 'scheduleDaouKeepAlive',

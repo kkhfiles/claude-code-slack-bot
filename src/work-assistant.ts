@@ -376,7 +376,7 @@ export async function summaryCandidates(): Promise<SummaryItem[]> {
  */
 /** 요약(그리고 단계가 넘어갔으면 제목)을 한 번에 앉힌다. **뜻은 파이썬만 안다.** */
 export async function summaryApply(
-  got: Record<string, { summary: string; title?: string }>,
+  got: Record<string, { summary: string }>,
 ): Promise<string> {
   const file = path.join(os.tmpdir(), `wa-sum-${randomId()}.json`);
   try {
@@ -551,27 +551,6 @@ export async function sessionFocusWithin(hours: number): Promise<boolean> {
 
 // ------------------------------------------------- 체크인 (진행이 들어오는 입구)
 
-/**
- * 어제 진행 체크인. 물을 게 없거나 슬랙에서 오늘 이미 물었으면 **빈 문자열**.
- *
- * 하루 1회 래치는 `tasks.py` 가 든다 — 봇은 비었는지만 본다. 실패해도 조용히
- * 넘어간다: 매 메시지마다 도는 자리라 여기서 시끄러우면 아무도 안 읽게 된다
- * (넛지·브리핑 실패는 여전히 시끄럽게 알린다 — 그쪽은 하루 한 번이다).
- */
-export async function checkinOnce(): Promise<string> {
-  try {
-    const { code, stdout, stderr } = await runTasks(
-      ['checkin', '--once', '--surface', 'slack', '--slack'], 20_000);
-    if (code !== 0) {
-      logger.error(`tasks.py checkin 실패 (rc=${code})`, (stderr || stdout).trim());
-      return '';
-    }
-    return stdout.trim();
-  } catch (err) {
-    logger.error('checkin failed', err);
-    return '';
-  }
-}
 
 /**
  * 중간 체크인 — 사람이 부른 것이라 래치도 침묵도 없다. 방금까지를 묻는다.
