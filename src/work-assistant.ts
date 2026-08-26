@@ -333,7 +333,10 @@ export async function summaryCandidates(): Promise<SummaryItem[]> {
  * 원문은 파일로 넘긴다 — 여러 줄과 한글이 인자로 오면 win32 `shell:true`
  * spawn 에서 깨진다(`quick`·`note` 와 같은 이유).
  */
-export async function summaryApply(got: Record<string, string>): Promise<string> {
+/** 요약(그리고 단계가 넘어갔으면 제목)을 한 번에 앉힌다. **뜻은 파이썬만 안다.** */
+export async function summaryApply(
+  got: Record<string, { summary: string; title?: string }>,
+): Promise<string> {
   const file = path.join(os.tmpdir(), `wa-sum-${randomId()}.json`);
   try {
     fs.writeFileSync(file, JSON.stringify(got), { encoding: 'utf-8' });

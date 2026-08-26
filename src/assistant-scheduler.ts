@@ -142,7 +142,13 @@ const SUMMARY_MAX = 10;
  * **모양이 아니면 `null`** — 빈 객체와 갈라야 부르는 쪽이 「형식이 어긋났다」와
  * 「쓸 것이 없다」를 다르게 말할 수 있다.
  */
-export function parseSummaryReply(text: string): Record<string, string> | null {
+/** 업무 하나에 대한 답. `title` 은 **단계가 넘어갔을 때만** 온다. */
+export interface SummaryReply {
+  summary: string;
+  title?: string;
+}
+
+export function parseSummaryReply(text: string): Record<string, SummaryReply> | null {
   const s = text.indexOf('{');
   const e = text.lastIndexOf('}');
   if (s < 0 || e <= s) return null;
@@ -151,11 +157,21 @@ export function parseSummaryReply(text: string): Record<string, string> | null {
     // 객체를 주거나 던지거나 둘 중 하나다. 배열·기본값을 거르는 문을 뒀었는데
     // 변이 시험에서 **한 번도 안 걸리는 줄**로 드러나 걷었다(2026-08-25).
     const d = JSON.parse(text.slice(s, e + 1)) as Record<string, unknown>;
-    // 글자가 아닌 값은 **그 칸만 버린다** — 한 칸이 이상하다고 나머지 열한 건을
-    // 같이 버리면 그날 요약이 통째로 없어진다.
-    const out: Record<string, string> = {};
+    // 모양이 어긋난 값은 **그 칸만 버린다** — 한 칸이 이상하다고 나머지 열한
+    // 건을 같이 버리면 그날 요약이 통째로 없어진다.
+    //
+    // **글자 하나로 온 것도 받는다** — 요약만 있고 제목이 없던 옛 모양이다.
+    // 안 받으면 모델이 그 모양으로 답한 날은 그날치가 통째로 사라지는데,
+    // 뜻이 어긋나지 않으므로 받아 주는 편이 싸다.
+    const out: Record<string, SummaryReply> = {};
     for (const [k, v] of Object.entries(d)) {
-      if (typeof v === 'string') out[k] = v;
+      if (typeof v === 'string') { out[k] = { summary: v }; continue; }
+      if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+      const o = v as Record<string, unknown>;
+      if (typeof o.summary !== 'string') continue;
+      const one: SummaryReply = { summary: o.summary };
+      if (typeof o.title === 'string' && o.title.trim()) one.title = o.title;
+      out[k] = one;
     }
     return out;
   } catch {
@@ -969,11 +985,11 @@ export class AssistantScheduler {
     }
     // **보낸 번호만 받는다** — 세션이 없는 번호를 지어내면 그 글은 어느 업무의
     // 것도 아니다. 안 온 것은 세어서 로그에 남긴다.
-    const use: Record<string, string> = {};
+    const use: Record<string, SummaryReply> = {};
     const missing: string[] = [];
     for (const it of items) {
-      const text = (got[it.id] || '').trim();
-      if (text) use[it.id] = text; else missing.push(it.id);
+      const one = got[it.id];
+      if (one && one.summary.trim()) use[it.id] = one; else missing.push(it.id);
     }
     const detail = Object.keys(use).length
       ? await summaryApply(use)
