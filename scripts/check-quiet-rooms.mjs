@@ -176,5 +176,39 @@ const now = Date.now() / 1000;
     kicked.length === 0 && said(host, QUIET) === 0, { kicked, 담김: said(host, QUIET) });
 }
 
+// --- 허락 안 한 방 — 알릴 것과 안 알릴 것 ------------------------------------------
+// 구독을 켜면 **안 들어간 방의 말까지** 온다(실측 2026-08-27, 하루에 두 방·16건). 그때마다
+// 실장에게 알리면 알림이 통째로 소음이 되고, 실제로 첫 알림이 헛알림이었다. 손 쓸 일이
+// 생기는 것은 **누가 이 봇을 부른 자리**뿐이다.
+const STRANGE = 'C_STRANGE';   // 설정에 없는 방
+function withDm() {
+  const { host, kicked } = make();
+  const dms = [];
+  const c = {
+    ...client,
+    chat: { ...client.chat, postMessage: async (o) => { dms.push(o); return { ok: true }; } },
+  };
+  return { host, kicked, dms, c };
+}
+{
+  const { host, kicked, dms, c } = withDm();
+  host['opts'].managerUserId = 'U_MGR';
+  await host['onEvent'](c, { channel: STRANGE, user: 'U1', ts: '10.1', text: '이거 재기동하면 되나요?' });
+  check('허락 안 한 방에서는 아무것도 안 한다',
+    kicked.length === 0 && said(host, STRANGE) === 0, { kicked });
+  check('부르지 않았으면 실장에게 알리지도 않는다', dms.length === 0,
+    dms.map((d) => String(d.text).slice(0, 40)));
+}
+{
+  const { host, dms, c } = withDm();
+  host['opts'].managerUserId = 'U_MGR';
+  await host['onEvent'](c, { channel: STRANGE, user: 'U1', ts: '10.2', text: `<@${ME}> 이것 좀 봐줘` });
+  check('부르면 그때는 실장에게 알린다', dms.length === 1, dms.length);
+  // 말이 들어온다고 그 방 멤버인 것이 아니다 — 멤버라고 적으면 받는 사람이 있지도 않은
+  // 초대 기록을 찾으러 간다. 실제로 그 문구 때문에 헛걸음이 났다.
+  check('알림이 「들어가 있다」고 단정하지 않는다',
+    !String(dms[0]?.text ?? '').includes('들어가 있습니다'), dms[0]?.text);
+}
+
 console.log(`\n통과 ${pass} / 실패 ${fails.length}`);
 if (fails.length) { console.log(fails.join('\n')); process.exitCode = 1; }
