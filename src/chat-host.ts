@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
-import { tagApp, tagToken, note } from './activity-log';
+import { tagApp, tagToken, tagRooms, note } from './activity-log';
 
 /**
  * agy 위에 얹은 슬랙 대화 계층. **봇 여러 개가 이 한 클래스를 같이 쓴다.**
@@ -280,6 +280,9 @@ export class ChatHost {
     });
     tagApp(app, this.opts.name);
     tagToken(this.opts.botToken, this.opts.name);
+    // **맡은 방을 활동 기록에 알려 준다.** 구독을 켜면 안 맡은 방의 말까지 들어오는데,
+    // 안 알려 주면 그 원문이 전부 디스크에 쌓인다(2026-08-27 실측 110건).
+    tagRooms(this.opts.name, this.opts.channels ?? []);
 
     this.loadProfile();
 

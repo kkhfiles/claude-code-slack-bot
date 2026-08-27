@@ -23,7 +23,8 @@
     "check:cli": "node scripts/check-cli-contract.mjs",
     "check:limit": "node scripts/check-limit-detection.mjs",
     "prepare": "git config core.hooksPath .githooks",
-    "check:quiet": "node scripts/check-quiet-rooms.mjs"
+    "check:quiet": "node scripts/check-quiet-rooms.mjs",
+    "check:activity": "node scripts/check-activity-log.mjs"
   },
   "keywords": [],
   "author": "",
