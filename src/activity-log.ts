@@ -60,6 +60,50 @@ export function tagApp(app: App, bot: string): void {
   byApp.set(app, bot);
 }
 
+/** 이 봇이 **맡은 방**. 여기 없는 방의 말은 원문을 안 남긴다(아래 `inbound` 참조). */
+const byBotRooms = new Map<string, Set<string>>();
+
+/**
+ * 이 봇이 맡은 방을 알려 준다. **안 알려 주면 그 봇은 아무 방도 안 맡은 것으로 본다** —
+ * 모르는 쪽으로 기울일 때 안 남기는 편이 맞다.
+ */
+export function tagRooms(bot: string, channels: (string | undefined)[]): void {
+  const set = byBotRooms.get(bot) ?? new Set<string>();
+  for (const c of channels) if (c) set.add(c);
+  byBotRooms.set(bot, set);
+}
+
+/**
+ * 이 방의 말을 원문으로 남겨도 되나.
+ *
+ * **구독을 켜면 우리가 안 맡은 방의 말까지 들어온다**(2026-08-27 실측: 한 봇이 무관한
+ * 업무 방 110건을 그대로 적고 있었다). 남의 방 대화는 우리 디스크에 쌓일 것이 아니다.
+ * 1:1 은 우리에게 건 말이라 남긴다.
+ */
+function mayKeepText(bot: string, channel: unknown): boolean {
+  const ch = String(channel ?? '');
+  if (!ch) return false;
+  if (ch.startsWith('D')) return true;                 // 1:1 — 우리에게 건 말
+  return byBotRooms.get(bot)?.has(ch) ?? false;
+}
+
+/**
+ * 남길 줄에서 **안 맡은 방의 원문을 걷어낸다.** 자리에 두면 못 재는 판단이라 떼어냈다 —
+ * 틀려도 오류가 안 나고 조용히 남의 대화가 쌓일 뿐이다.
+ *
+ * 우리를 부른 것(`부름받음`)·슬래시 명령·버튼은 **우리에게 건 말이라 그대로 남긴다.**
+ * 그냥 오간 말(`들음`)만 맡은 방인지 따진다.
+ */
+export function redactForeign(
+  bot: string, kind: string, rest: Record<string, unknown>,
+): Record<string, unknown> {
+  if (kind !== '들음' || mayKeepText(bot, rest.어디)) return rest;
+  const out: Record<string, unknown> = {
+    ...rest, 글자수: String(rest.말 ?? '').length, 왜: '안 맡은 방 — 원문은 안 남긴다' };
+  delete out.말;
+  return out;
+}
+
 function stamp(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
@@ -179,7 +223,8 @@ export function installActivityLog(): void {
       const row = inbound(event?.body);
       if (row) {
         const { kind, ...rest } = row as any;
-        note(byApp.get(this) ?? '?', kind, rest);
+        const bot = byApp.get(this) ?? '?';
+        note(bot, kind, redactForeign(bot, kind, rest));
       }
     } catch {
       // 기록 때문에 들어온 말을 놓치면 안 된다.
