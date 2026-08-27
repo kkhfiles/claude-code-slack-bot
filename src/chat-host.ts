@@ -547,7 +547,9 @@ export class ChatHost {
   private async notInvitedHere(
     client: App['client'], user: string, channel: string, ts: string, text: string,
   ): Promise<void> {
-    const called = this.selfUserId && text.includes(`<@${this.selfUserId}>`);
+    // `selfUserId` 가 빈 문자열일 수 있어 **불린으로 굳힌다** — 아래에서 이 값이 알릴지
+    // 말지를 가르므로, 빈 문자열이 그대로 흐르면 기록에 `""` 가 찍히고 판정도 흐려진다.
+    const called = Boolean(this.selfUserId && text.includes(`<@${this.selfUserId}>`));
     if (called) {
       try {
         await client.chat.postEphemeral({
@@ -572,6 +574,12 @@ export class ChatHost {
     });
 
     if (this.toldStranger.has(channel)) return;
+    // **부르지도 않았는데 알리지 않는다.** 구독을 켜면 **안 들어간 방**의 말까지 오는데
+    // 그때마다 알리면 알림이 통째로 소음이 된다 — 실측(2026-08-27) 그날 들어온 16건이
+    // 전부 부른 것이 아니었고, 그래서 첫 알림이 헛알림이었다. 사람이 손 쓸 일이 생기는
+    // 것은 **누가 이 봇을 부른 자리**뿐이다. 「나 모르게 불려서 활동하면 안 된다」의
+    // 「불려서」가 여기다 — 남의 방에서 오가는 말은 알림거리가 아니다.
+    if (!called) return;
     this.toldStranger.add(channel);
     this.logger.warn(`허락하지 않은 방에서 불렸습니다 (${channel}) — 아무것도 하지 않았습니다`);
     if (!this.opts.managerUserId) return;
@@ -580,8 +588,12 @@ export class ChatHost {
       if (im.channel?.id) {
         await client.chat.postMessage({
           channel: im.channel.id,
-          text: `<#${channel}> 방에 제가 들어가 있습니다. **그 방에서는 아무것도 하지 않습니다.**\n`
-            + '거기서도 움직이게 하시려면 설정에 그 방을 넣어 주세요. 그대로 두셔도 되고요.',
+          // **「들어가 있습니다」라고 적지 않는다.** 말이 들어온다고 그 방 멤버인 것이
+          // 아니다 — 구독을 켜면 안 들어간 방의 말도 온다(실측 2026-08-27, 읽기를 걸면
+          // `not_in_channel` 이 났다). 멤버라고 적으면 받는 사람이 있지도 않은 초대
+          // 기록을 찾으러 간다. 본 것만 적는다.
+          text: `<#${channel}> 방에서 누가 저를 불렀습니다. **그 방에서는 아무것도 하지 않았습니다.**\n`
+            + '거기서도 답하게 하시려면 설정에 그 방을 넣어 주세요. 그대로 두셔도 되고요.',
         });
       }
     } catch (error) {
