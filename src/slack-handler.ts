@@ -28,6 +28,7 @@ import { LunchButtons, readLunchBotToken, readLunchAnnounceChannel } from './lun
 import { ChatHost } from './chat-host';
 import { LetterRelay } from './letter-relay';
 import { LetterBooking } from './letter-booking';
+import { LetterBoost } from './letter-boost';
 import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
@@ -373,6 +374,14 @@ export class SlackHandler {
               open: config.letter.booking.open,
             }).register(app);
           }
+          // 주 첫 업무일 아침, 후보 다섯 중 하나를 고르는 버튼. **글을 만드는 일은
+          // 전부 파이썬 쪽이고** 여기는 눌린 것을 넘겨 주기만 한다.
+          new LetterBoost({
+            managerUserId: config.letter.managerUserId,
+            python: config.letter.python,
+            script: path.join(path.dirname(turnScript), 'weekly_boost.py'),
+            logger: this.logger,
+          }).register(app);
         },
       }));
     }
