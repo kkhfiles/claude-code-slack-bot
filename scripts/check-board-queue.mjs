@@ -99,6 +99,11 @@ if (!(await alive())) {
 const DONE = path.join(os.tmpdir(), `board-queue-done-${process.pid}.json`);
 process.env.BOARD_QUEUE_DONE_FILE = DONE;
 
+// 관찰 기록도 같은 이유로 갈아 끼운다 — 검사가 진짜 파일에 쌓으면 「판 프롬프트가
+// 몇 건이었나」가 검사 횟수만큼 부풀어 관찰이 거짓 신호를 낸다.
+const EVENTS = path.join(os.tmpdir(), `work-events-${process.pid}.jsonl`);
+process.env.WORK_EVENTS_FILE = EVENTS;
+
 const q = require(MOD);
 
 const fails = [];
@@ -251,6 +256,29 @@ eq('**다시 부르지 않는다** — 큐에서 지워진다', (await pending()
 r = await q.drain(apply, ask, BASE);
 eq('다음 판에도 안 돌아온다', [r.lost.length, asked.length], [0, 1]);
 
+// 9-b. **관찰 기록** — 「판 「프롬프트」가 슬랙을 대신하는가」의 판정 근거다
+//      (`work-assistant/docs/status.md` 「관찰 항목」). 위 8·9 가 성공 하나와
+//      실패 하나를 지났으니 여기서 두 줄이 있어야 한다.
+const evLines = fs.existsSync(EVENTS)
+  ? fs.readFileSync(EVENTS, 'utf-8').split('\n').filter(Boolean).map((x) => JSON.parse(x))
+  : [];
+eq('사람 말 한 건마다 한 줄이 쌓인다', evLines.length, 2);
+eq('갈래는 ask 하나', [...new Set(evLines.map((x) => x.kind))], ['ask']);
+// **못 넘긴 것도 센다** — 성공만 세면 비율이 늘 100%가 되어 「한 번만 시도하는
+// 대가가 실제로 나오는가」를 영영 못 본다.
+eq('성공과 실패를 둘 다 남긴다', evLines.map((x) => x.ok), [true, false]);
+
+// ⚠️ **시각은 지역시각이어야 한다.** `toISOString()` 은 UTC 라 파이썬이 같은 파일에
+//    쓰는 줄과 어긋나고, 그러면 날짜별 집계(「넛지 난 날에 세션이 열렸나」)가 조용히
+//    틀린 날에 붙는다. `Z` 검사는 어느 시간대의 기계에서도 걸린다.
+eq('UTC 로 적지 않는다', evLines.every((x) => !String(x.ts).endsWith('Z')), true);
+const nowLocal = (() => {
+  const d = new Date(); const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}`;
+})();
+eq('파이썬과 같은 지역시각 형식', evLines.every((x) => String(x.ts).startsWith(nowLocal)), true);
+fs.rmSync(EVENTS, { force: true });
+
 // 10. 받을 곳이 없으면 **버리지 않고 남긴다** — 사람 말은 다시 만들 수 없다
 await clear();
 await post('act', { text: '받을 곳이 없을 때', kind: 'ask' });
@@ -299,6 +327,7 @@ eq('받을 곳이 없으면 남긴다',
 
 await clear();
 fs.rmSync(DONE, { force: true });
+fs.rmSync(EVENTS, { force: true });
 
 // **`process.exit` 대신 `exitCode`** — 여기서 즉시 나가면 뒷정리를 건너뛴다.
 if (fails.length) {
@@ -308,6 +337,7 @@ if (fails.length) {
 } else {
   console.log('통과 — Work Board 폴러 (빈 큐 · 반영 · 중복 방지 · 문법 아님 버리기 · '
     + '일시 실패 남기기 · 섞인 판 · 복구 후 반영 · 사람 말 넘기기 · 한 번만 시도 · 받을 곳 없음 · '
-    + '여러 줄 글 안 묶기 · note 버리기 · note 다시 시도 · note 받을 곳 없음)');
+    + '여러 줄 글 안 묶기 · note 버리기 · note 다시 시도 · note 받을 곳 없음 · '
+    + '관찰 기록(건마다 한 줄 · 성공과 실패 둘 다 · UTC 아닌 지역시각))');
 }
 stopServer();
