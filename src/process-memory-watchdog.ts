@@ -13,6 +13,13 @@ interface ProcessInfo {
   pid: number;
   name: string;
   commitMB: number;
+  /** 프로세스 인스턴스 식별자. PID 는 재사용되므로 이것과 짝지어야 같은 놈인지 안다.
+   *
+   *  **문자열이다.** ticks 는 19자리라 JS 의 안전 정수 범위(2^53)를 넘어, 숫자로 받으면
+   *  값이 뭉개져 원래 값과 다시 비교했을 때 늘 어긋난다 — 그러면 감시기가 겉보기엔
+   *  멀쩡한데 아무것도 못 죽인다(실측으로 잡았다).
+   *  빈 문자열·'0' = 읽지 못함(권한). 확인 못 한 것은 죽이지 않는다. */
+  startTicks: string;
 }
 
 /** Pending kill confirmation state */
@@ -20,6 +27,7 @@ interface PendingKill {
   pid: number;
   name: string;
   commitMB: number;
+  startTicks: string;
   messageTs: string;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -207,16 +215,22 @@ export class ProcessMemoryWatchdog {
     clearTimeout(pending.timer);
     this.pendingKills.delete(pid);
 
-    const killed = this.killProcess(pid);
-    const text = killed
+    // 버튼은 그 메시지가 남아 있는 한 언제든 눌린다 — 잡아 둘 때와 같은 프로세스인지
+    // 지금 다시 본다.
+    const outcome = this.killIfSame(pid, pending.name, pending.startTicks);
+    const text = outcome === 'killed'
       ? t('watchdog.killed', this.locale, { pid: String(pid), name: pending.name, commitMB: String(pending.commitMB) })
-      : t('watchdog.alreadyGone', this.locale, { pid: String(pid), name: pending.name });
+      : outcome === 'gone'
+        ? t('watchdog.alreadyGone', this.locale, { pid: String(pid), name: pending.name })
+        : outcome === 'recycled'
+          ? `PID ${pid} 은 이제 다른 프로세스입니다 — ${pending.name} 은 이미 끝났고 번호가 재사용됐습니다. 죽이지 않았습니다.`
+          : `PID ${pid} (${pending.name}) 종료 실패 — 권한이거나 확인이 안 됐습니다.`;
 
     await this.updateMessage(pending.messageTs, text).catch(e =>
       this.logger.error('Failed to update watchdog message', e),
     );
 
-    if (killed) {
+    if (outcome === 'killed') {
       this.onProcessKilled?.(pid, pending.name);
       this.logger.info(`Process killed by user: ${pending.name} (PID ${pid}, ${pending.commitMB} MB)`);
     }
@@ -469,16 +483,21 @@ export class ProcessMemoryWatchdog {
       if (!pending) return;
       this.pendingKills.delete(target.pid);
 
-      const killed = this.killProcess(target.pid);
-      const autoText = killed
+      // 기본 10분 뒤에 도는 자리다. 그 사이 PID 가 재사용됐으면 쏘지 않는다.
+      const outcome = this.killIfSame(target.pid, target.name, target.startTicks);
+      const autoText = outcome === 'killed'
         ? t('watchdog.autoKill', this.locale, { pid: String(target.pid), name: target.name, commitMB: String(target.commitMB), minutes: String(Math.round(this.autoKillDelaySec / 60)) })
-        : t('watchdog.alreadyGone', this.locale, { pid: String(target.pid), name: target.name });
+        : outcome === 'gone'
+          ? t('watchdog.alreadyGone', this.locale, { pid: String(target.pid), name: target.name })
+          : outcome === 'recycled'
+            ? `PID ${target.pid} 은 이제 다른 프로세스입니다 — ${target.name} 은 이미 끝났습니다. 죽이지 않았습니다.`
+            : `PID ${target.pid} (${target.name}) 자동 종료 실패.`;
 
       await this.updateMessage(pending.messageTs, autoText).catch(e =>
         this.logger.error('Failed to update watchdog auto-kill message', e),
       );
 
-      if (killed) {
+      if (outcome === 'killed') {
         this.onProcessKilled?.(target.pid, target.name);
         errorCollector.add('MemoryWatchdog', `Auto-killed ${target.name} (PID ${target.pid}, ${target.commitMB} MB) after ${this.autoKillDelaySec}s timeout`);
       }
@@ -488,6 +507,7 @@ export class ProcessMemoryWatchdog {
       pid: target.pid,
       name: target.name,
       commitMB: target.commitMB,
+      startTicks: target.startTicks,
       messageTs,
       timer,
     });
@@ -543,25 +563,24 @@ export class ProcessMemoryWatchdog {
 
   private async getTopProcesses(count: number): Promise<ProcessInfo[]> {
     try {
+      // StartTime 을 함께 걷는다 — 죽일 때 같은 프로세스인지 확인할 유일한 근거다.
+      // 보호 프로세스는 StartTime 읽기가 거부되는데, 그건 0 으로 두고 죽이지 않는다.
+      const ps = `Get-Process | Where-Object { $_.PM -gt 100MB } | Sort-Object PM -Descending | Select-Object -First ${count} | ForEach-Object { $tk = 0; try { $tk = $_.StartTime.Ticks } catch { }; '{0}|{1}|{2}|{3}' -f $_.Id, $_.Name, $_.PM, $tk }`;
       const { stdout } = await execAsync(
-        `powershell -NoProfile -Command "Get-Process | Where-Object { $_.PM -gt 100MB } | Sort-Object PM -Descending | Select-Object -First ${count} Id,Name,PM | ConvertTo-Csv -NoTypeInformation"`,
+        `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`,
         { timeout: 15_000, windowsHide: true },
       );
-      const lines = stdout.trim().split('\n');
-      if (lines.length < 2) return []; // header only or empty
-
       const results: ProcessInfo[] = [];
-      // Skip header line ("Id","Name","PM")
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim();
+      for (const raw of stdout.trim().split('\n')) {
+        const line = raw.trim();
         if (!line) continue;
-        // CSV: "pid","name","pm_bytes"
-        const match = line.match(/^"(\d+)","([^"]+)","(\d+)"$/);
+        const match = line.match(/^(\d+)\|(.+)\|(\d+)\|(\d+)$/);
         if (match) {
           results.push({
             pid: parseInt(match[1], 10),
             name: match[2],
             commitMB: Math.round(parseInt(match[3], 10) / (1024 * 1024)),
+            startTicks: match[4],   // 문자열 그대로 — 숫자로 바꾸면 정밀도가 깨진다
           });
         }
       }
@@ -570,6 +589,36 @@ export class ProcessMemoryWatchdog {
       this.logger.error('Failed to query top processes', e);
       return [];
     }
+  }
+
+  /**
+   * **PID 만으로 쏘지 않는다.** 이 감시기는 후보를 잡아 두고 한참 뒤에 죽인다 —
+   * 자동 종료는 기본 10분 뒤이고, 슬랙 버튼은 그 메시지가 남아 있는 한 언제든
+   * 눌린다. 그 사이에 대상이 스스로 끝나고 Windows 가 같은 번호를 다른 프로세스에
+   * 내주면, PID 로 쏜 `SIGKILL`/`taskkill /F` 가 그것을 맞힌다.
+   *
+   * 이름과 시작시각이 잡아 둘 때와 같을 때만 죽인다. 시작시각을 못 읽었으면(0)
+   * 신원 확인이 안 된 것이라 죽이지 않는다.
+   *
+   * 반환값은 무슨 일이 있었는지 그대로 낸다 — 예전에는 `taskkill` 이 도는 데
+   * 성공했는지만 봐서, 이미 사라진 것도 「죽였다」로 보고했다.
+   */
+  private killIfSame(pid: number, name: string, startTicks: string):
+      'killed' | 'gone' | 'recycled' | 'failed' {
+    if (!startTicks || startTicks === '0') return 'recycled';   // 확인 못 한 것은 건드리지 않는다
+    try {
+      const check = require('child_process').execSync(
+        `powershell -NoProfile -Command "$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; `
+        + `if (-not $p) { 'gone' } else { $tk = 0; try { $tk = $p.StartTime.Ticks } catch { }; `
+        + `if ($p.Name -ne '${name.replace(/'/g, "''")}' -or $tk -ne ${startTicks}) { 'recycled' } else { 'same' } }"`,
+        { timeout: 15_000, encoding: 'utf-8', windowsHide: true },
+      ).toString().trim();
+      if (check === 'gone') return 'gone';
+      if (check !== 'same') return 'recycled';
+    } catch {
+      return 'failed';   // 확인 자체가 실패했으면 쏘지 않는다
+    }
+    return this.killProcess(pid) ? 'killed' : 'failed';
   }
 
   private killProcess(pid: number): boolean {
