@@ -33,6 +33,37 @@ const DONE_FILE = process.env.BOARD_QUEUE_DONE_FILE
 const DONE_KEEP = 500;
 
 /**
+ * 관찰 기록 — **파이썬과 같은 파일에 쌓는다**(`tasks.py` 의 `EVENTS`).
+ * 검사가 실제 상태 파일을 건드리면 안 되므로 여기만 바꿔 끼운다.
+ */
+const EVENTS_FILE = process.env.WORK_EVENTS_FILE
+  || path.join(STATE, 'work-events.jsonl');
+
+/**
+ * 관찰용 한 줄을 쌓는다 — 「판 「프롬프트」가 슬랙을 대신하는가」의 판정 근거.
+ *
+ * **판에서 온 말은 파이썬을 안 지난다.** 관찰 넷 중 이 갈래만 봇이 쓰는 이유다.
+ *
+ * ⚠️ **시각은 지역시각이다.** `toISOString()` 은 UTC 라 파이썬이 쓰는 줄과 9시간
+ * 어긋나고, 그러면 `events` 의 날짜별 집계(「넛지 난 날에 세션이 열렸나」)가
+ * 조용히 틀린 날에 붙는다. 같은 파일에 쌓으므로 형식이 같아야 한다.
+ *
+ * ⚠️ **계측이 반영을 막으면 안 된다** — 막는 순간 그 계측은 꺼야 하는 것이 되고,
+ * 꺼진 계측은 없는 것과 같다. 그래서 무엇이 터져도 삼킨다.
+ */
+function event(kind: string, extra: Record<string, unknown> = {}): void {
+  try {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, '0');
+    const ts = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+      + `T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    fs.appendFileSync(EVENTS_FILE, JSON.stringify({ ts, kind, ...extra }) + '\n', 'utf-8');
+  } catch {
+    // 삼킨다 — 위 주석 참조.
+  }
+}
+
+/**
  * ⚠️ **User-Agent 가 없으면 서비스 토큰이 맞아도 403 이다.** Cloudflare 가 Access
  * 앞에서 막는다 — 2026-08-07 에 이것을 토큰 문제로 오인했다.
  */
@@ -229,9 +260,13 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
       try {
         await ask(item.text);
         logger.info(`비서에게 넘김 — ${item.id} ${item.text.slice(0, 80)}`);
+        event('ask', { ok: true });
         out.applied.push({ item, output: '' });
       } catch (err) {
         logger.error('Work Board에서 온 말을 비서에게 못 넘겼습니다', err);
+        // **못 넘긴 것도 센다** — 성공만 세면 비율이 늘 100%가 되어 「한 번만
+        // 시도하는 대가가 실제로 나오는가」를 영영 못 본다.
+        event('ask', { ok: false });
         out.lost.push(item);
       }
       continue;
