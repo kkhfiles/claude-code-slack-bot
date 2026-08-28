@@ -1,4 +1,6 @@
 import { exec } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 import { promisify } from 'util';
 import { Logger } from './logger';
 import { errorCollector } from './error-collector';
@@ -145,7 +147,92 @@ export class ProcessMemoryWatchdog {
 
   // --- Private methods ---
 
+  /**
+   * 데일리 시스템 점검(`mycelium.batch.windows_health_check`)이 남긴 큐를 읽어
+   * **이미 메모리에 진단·절차가 적힌 문제**만 알린다.
+   *
+   * 왜 여기냐 — 이 감시기가 이미 「시스템 이상 → 스탠리」 경로를 갖고 있다. 두 번째
+   * 발송 경로를 만들면 토큰과 채널 설정이 두 군데가 된다.
+   *
+   * 왜 나눠 보나 — 이 감시기가 보는 것은 **한 프로세스가 임계를 넘는 급성 상태**다.
+   * 커밋 80%에 140MB짜리 프로세스가 55개인 상태는 여기 안 걸린다(2026-08-28 사건이
+   * 그랬고, 이 감시기는 그때 `— OK`를 찍었다). 그 축은 파이썬 점검이 재고 결과만
+   * 여기로 온다.
+   *
+   * 처음 보는 증상은 큐에 안 들어온다 — 절차가 없으면 즉시 알려도 할 수 있는 일이
+   * 조사뿐이라, 그건 아침 브리핑 몫이다.
+   */
+  private async reportKnownIssues(): Promise<void> {
+    const stateDir = path.join(
+      process.env.USERPROFILE || process.env.HOME || '', '.claude', 'state');
+    const queueFile = path.join(stateDir, 'windows-health-latest.json');
+    const sentFile = path.join(stateDir, 'stanley-notified.json');
+
+    let queue: any;
+    try {
+      queue = JSON.parse(fs.readFileSync(queueFile, 'utf-8'));
+    } catch {
+      return;   // 점검이 아직 안 돌았거나 파일이 깨졌다. 알림은 부수 신호라 조용히 넘긴다.
+    }
+    const items: any[] = Array.isArray(queue?.notify) ? queue.notify : [];
+    if (items.length === 0) return;
+
+    // 보낸 표시는 **봇만** 쓴다. 파이썬이 같은 파일을 고치면 어느 쪽 쓰기가 이기는지가
+    // 타이밍에 달리고, 그러면 알림이 사라지거나 두 번 간다.
+    let sent: string[] = [];
+    try {
+      const parsed = JSON.parse(fs.readFileSync(sentFile, 'utf-8'));
+      if (Array.isArray(parsed)) sent = parsed;
+    } catch {
+      sent = [];
+    }
+    const sentSet = new Set(sent);
+    const fresh = items.filter(i => i?.key && !sentSet.has(i.key));
+    if (fresh.length === 0) return;
+
+    for (const item of fresh) {
+      const mark = item.severity === 'action' ? '🔴' : '🟡';
+      const refs: string[] = (item.refs || [])
+        .map((r: any) => `• 진단·복구 절차: \`${r.path}\``);
+      const text = [
+        `${mark} *시스템 점검 — 전에 진단해 둔 문제가 다시 잡혔습니다*`,
+        '',
+        `*${item.title}*`,
+        item.detail,
+        '',
+        `현재 상태: ${item.summary}`,
+        ...refs,
+      ].join('\n');
+
+      try {
+        await this.sendMessage(text);
+        sentSet.add(item.key);
+        this.logger.info('Known issue reported to Slack', { key: item.key });
+      } catch (e) {
+        // 못 보냈으면 보낸 표시를 하지 않는다 — 다음 회차에 다시 시도한다.
+        this.logger.error('Failed to report known issue', e as Error);
+      }
+    }
+
+    // 키에 날짜가 들어 있어 무한히 늘지 않지만, 지난 날짜가 쌓이면 파일만 커진다.
+    const today = new Date();
+    const cutoff = new Date(today.getTime() - 14 * 86_400_000)
+      .toISOString().slice(0, 10);
+    const kept = Array.from(sentSet).filter(k => (k.split(':')[1] || '') >= cutoff);
+    try {
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(sentFile, JSON.stringify(kept, null, 2), 'utf-8');
+    } catch {
+      // 표시를 못 남기면 다음 회차에 한 번 더 간다. 안 가는 것보다 낫다.
+    }
+  }
+
   private async checkMemory(): Promise<void> {
+    // 파이썬 점검 결과를 먼저 흘려보낸다. 아래 급성 판정과는 보는 축이 달라
+    // 서로의 결과에 기대지 않는다 — 한쪽이 실패해도 다른 쪽은 그대로 돈다.
+    await this.reportKnownIssues().catch(e =>
+      this.logger.error('Known issue report failed', e as Error));
+
     // Clean up pendingKills for processes that have already exited
     for (const [pid, pending] of this.pendingKills) {
       const alive = await this.isProcessAlive(pid);
