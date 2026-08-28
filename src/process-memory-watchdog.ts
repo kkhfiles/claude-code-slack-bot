@@ -36,6 +36,37 @@ type SendMessageFn = (text: string, blocks?: any[]) => Promise<string>;
 type UpdateMessageFn = (ts: string, text: string, blocks?: any[]) => Promise<void>;
 type OnProcessKilledFn = (pid: number, name: string) => void;
 
+/**
+ * 알림에 붙는 조치 버튼. **한 번 눌러 되돌릴 수 있는 것만** 버튼으로 낸다.
+ *
+ * 없는 것에 이유가 있다 — 핸들 누수(`winhealth-handles`)는 2026-08-28 사건에서
+ * 누수 주체가 사내 네트워크 접근 제어 서비스였고 표준 사용자에게 중지 권한이
+ * 없었다. 버튼으로 끊으면 네트워크가 잠깐 끊기므로 사람이 절차를 보고 판단한다.
+ * 메모리 고갈 이벤트도 이미 일어난 일의 기록이라 되돌릴 대상이 아니다.
+ *
+ * **가동 일수에는 알림 자체가 없다**(2026-08-28 폐기). 오래 켜 둔 것은 고장이 아니라
+ * 상관 지표라, 실제로 나빠진 것이 없는데도 재부팅할 때까지 계속 뜨는 경고가 됐다.
+ * 재시작 버튼은 재시작이 실제로 고치는 항목(커밋 압박)에만 남긴다.
+ *
+ * 재시작은 두 단계다. 슬랙 버튼은 휴대폰에서 잘못 눌리고, 그 한 번이 저장 안 한
+ * 작업을 날린다. 예약 뒤에도 지연 시간 안에는 취소 버튼이 남는다.
+ */
+const HEALTH_FIX_BUTTONS: Record<string, Array<{
+  label: string; actionId: string; style?: 'primary' | 'danger';
+}>> = {
+  'winhealth-explorer': [
+    { label: '🧹 유령 Explorer 정리', actionId: 'health_fix_explorer', style: 'primary' },
+  ],
+  'winhealth-watchers': [
+    { label: '🧹 오래된 감시 프로세스 정리', actionId: 'health_fix_watchers', style: 'primary' },
+  ],
+  'winhealth-commit': [
+    { label: '🧹 유령 Explorer 정리', actionId: 'health_fix_explorer', style: 'primary' },
+    { label: '🧹 감시 프로세스 정리', actionId: 'health_fix_watchers' },
+    { label: '🔄 재시작 예약', actionId: 'health_reboot_ask', style: 'danger' },
+  ],
+};
+
 // System processes that must never be killed
 const PROTECTED_PROCESSES = new Set([
   'system', 'idle', 'smss', 'csrss', 'wininit', 'winlogon',
@@ -88,6 +119,84 @@ export class ProcessMemoryWatchdog {
     }
     this.pendingKills.clear();
     this.logger.info('Memory watchdog stopped');
+  }
+
+  /**
+   * 알림 버튼 처리. 실제 조치는 파이썬 쪽(`windows_health_fix`)이 한다 — 대상을
+   * 고르는 규칙(주 탐색기 보존·나이 기준)이 점검 쪽과 한 벌이어야 하는데, 여기에
+   * 옮겨 적으면 둘이 갈라진다.
+   *
+   * 결과는 원래 메시지를 **고쳐서** 보여 준다. 새 메시지를 붙이면 버튼이 남아 두 번
+   * 눌리고, 이미 정리한 것을 또 정리하려 든다.
+   */
+  async handleHealthFixAction(actionId: string, messageTs: string): Promise<void> {
+    const ACTIONS: Record<string, { arg: string; apply: boolean; label: string }> = {
+      health_fix_explorer: { arg: 'explorer', apply: true, label: '유령 Explorer 정리' },
+      health_fix_watchers: { arg: 'watchers', apply: true, label: '감시 프로세스 정리' },
+      health_reboot_confirm: { arg: 'reboot', apply: true, label: '재시작 예약' },
+      health_reboot_cancel: { arg: 'reboot-cancel', apply: true, label: '재시작 취소' },
+    };
+    const spec = ACTIONS[actionId];
+    if (!spec) return;
+
+    await this.updateMessage(messageTs, `⏳ ${spec.label} 중…`).catch(() => {});
+
+    let line: string;
+    try {
+      line = await this.runHealthFix(spec.arg, spec.apply);
+    } catch (e) {
+      line = `⚠️ ${spec.label} 실패 — ${(e as Error).message}`;
+    }
+
+    // 재시작을 예약했으면 지연 시간 안에 되돌릴 길을 같은 메시지에 남긴다.
+    const blocks: any[] = [{ type: 'section', text: { type: 'mrkdwn', text: line } }];
+    if (actionId === 'health_reboot_confirm' && !line.startsWith('⚠️')) {
+      blocks.push({ type: 'actions', elements: [{
+        type: 'button', text: { type: 'plain_text', text: '↩️ 재시작 취소' },
+        action_id: 'health_reboot_cancel', value: 'cancel',
+      }] });
+    }
+    await this.updateMessage(messageTs, line, blocks).catch(e =>
+      this.logger.error('Failed to update health fix message', e as Error));
+    this.logger.info('Health fix action done', { actionId, result: line });
+  }
+
+  /** 재시작은 두 단계. 첫 버튼은 묻기만 하고 아무것도 예약하지 않는다. */
+  async handleRebootAsk(messageTs: string): Promise<void> {
+    const text = [
+      '🔄 *재시작을 예약할까요?*',
+      '',
+      '예약하면 60초 뒤에 이 PC가 재시작합니다. 저장 안 한 작업이 있으면 먼저 저장하세요.',
+      '예약 뒤에도 60초 안에는 취소 버튼으로 되돌릴 수 있습니다.',
+    ].join('\n');
+    const blocks = [
+      { type: 'section', text: { type: 'mrkdwn', text } },
+      { type: 'actions', elements: [
+        { type: 'button', text: { type: 'plain_text', text: '🔄 60초 뒤 재시작' },
+          style: 'danger', action_id: 'health_reboot_confirm', value: 'confirm' },
+        { type: 'button', text: { type: 'plain_text', text: '취소' },
+          action_id: 'health_dismiss', value: 'dismiss' },
+      ] },
+    ];
+    await this.updateMessage(messageTs, text, blocks).catch(e =>
+      this.logger.error('Failed to ask reboot', e as Error));
+  }
+
+  /** 버튼을 거둔다. 조치는 안 한다. */
+  async handleHealthDismiss(messageTs: string): Promise<void> {
+    await this.updateMessage(messageTs, '조치하지 않았습니다. 아침 브리핑에 계속 뜹니다.')
+      .catch(() => {});
+  }
+
+  private runHealthFix(action: string, apply: boolean): Promise<string> {
+    const repo = process.env.MYCELIUM_REPO || 'P:/github/claude-workflow';
+    const argv = ['-X', 'utf8', '-m', 'mycelium.batch.windows_health_fix', action];
+    if (apply) argv.push('--apply');
+    return new Promise((resolve, reject) => {
+      execAsync(`python ${argv.join(' ')}`, { cwd: repo, timeout: 180_000 })
+        .then(({ stdout }) => resolve(stdout.trim() || '(출력 없음)'))
+        .catch(err => reject(err));
+    });
   }
 
   /** Called from Slack action handler when user clicks [Kill] */
@@ -204,8 +313,20 @@ export class ProcessMemoryWatchdog {
         ...refs,
       ].join('\n');
 
+      const blocks: any[] = [{ type: 'section', text: { type: 'mrkdwn', text } }];
+      const buttons = HEALTH_FIX_BUTTONS[item.id];
+      if (buttons?.length) {
+        blocks.push({ type: 'actions', elements: buttons.map(b => ({
+          type: 'button',
+          text: { type: 'plain_text', text: b.label },
+          ...(b.style ? { style: b.style } : {}),
+          action_id: b.actionId,
+          value: item.key,
+        })) });
+      }
+
       try {
-        await this.sendMessage(text);
+        await this.sendMessage(text, blocks.length > 1 ? blocks : undefined);
         sentSet.add(item.key);
         this.logger.info('Known issue reported to Slack', { key: item.key });
       } catch (e) {

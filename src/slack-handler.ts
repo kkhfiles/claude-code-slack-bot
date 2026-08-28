@@ -4439,6 +4439,29 @@ export class SlackHandler {
         const pid = parseInt((body as any).actions[0].value, 10);
         await this.memoryWatchdog?.handleExcludeAction(pid);
       });
+
+      // 데일리 시스템 점검이 낸 「알려진 문제」 알림의 조치 버튼.
+      // `ack()` 를 먼저 보낸다 — 정리는 몇 초 걸리는데 3초 안에 응답이 없으면
+      // 슬랙이 버튼을 실패로 표시한다.
+      const healthActions = ['health_fix_explorer', 'health_fix_watchers',
+                             'health_reboot_confirm', 'health_reboot_cancel'];
+      for (const actionId of healthActions) {
+        this.action(actionId, async ({ ack, body }) => {
+          await ack();
+          const ts = (body as any).message?.ts;
+          if (ts) await this.memoryWatchdog?.handleHealthFixAction(actionId, ts);
+        });
+      }
+      this.action('health_reboot_ask', async ({ ack, body }) => {
+        await ack();
+        const ts = (body as any).message?.ts;
+        if (ts) await this.memoryWatchdog?.handleRebootAsk(ts);
+      });
+      this.action('health_dismiss', async ({ ack, body }) => {
+        await ack();
+        const ts = (body as any).message?.ts;
+        if (ts) await this.memoryWatchdog?.handleHealthDismiss(ts);
+      });
     }
   }
 
