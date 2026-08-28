@@ -1,5 +1,5 @@
 /**
- * Work Board 맨 위 한 줄에 실제로 얼마가 드는지 재는 자리.
+ * 판 맨 위 한 줄에 실제로 얼마가 드는지 재는 자리.
  *
  *     node scripts/focus-cost.mjs
  *

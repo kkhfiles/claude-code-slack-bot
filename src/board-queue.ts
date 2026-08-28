@@ -1,5 +1,5 @@
 /**
- * Work Board에서 누른 것을 가져와 반영한다.
+ * 판에서 누른 것을 가져와 반영한다.
  *
  * **여기에는 업무 로직이 없다.** 큐에 담긴 것은 `tasks.py quick` 이 읽는 문자열
  * 하나뿐이고, 그것을 노션에 어떻게 쓸지는 파이썬만 안다. 이 모듈은 나르고,
@@ -151,7 +151,7 @@ export function boardQueueEnabled(): boolean {
 
 async function call(op: string, body?: unknown, base?: string): Promise<any> {
   const origin = base ?? boardOrigin();
-  if (!origin) throw new Error('Work Board 주소가 없습니다');
+  if (!origin) throw new Error('판 주소가 없습니다');
   const t = token();
   const headers: Record<string, string> = { 'user-agent': UA };
   // 열쇠는 Access 뒤에 있을 때만 필요하다. 없으면 안 붙이고 그대로 간다 —
@@ -263,7 +263,7 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
         event('ask', { ok: true });
         out.applied.push({ item, output: '' });
       } catch (err) {
-        logger.error('Work Board에서 온 말을 비서에게 못 넘겼습니다', err);
+        logger.error('판에서 온 말을 비서에게 못 넘겼습니다', err);
         // **못 넘긴 것도 센다** — 성공만 세면 비율이 늘 100%가 되어 「한 번만
         // 시도하는 대가가 실제로 나오는가」를 영영 못 본다.
         event('ask', { ok: false });
