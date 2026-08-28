@@ -68,7 +68,7 @@ try {
   const WARN = '   ⚠️ 3회 연기 — 추정이 틀렸거나 버려야 할 업무인지 다시 본다';
   const ok = [
     '✅ TSK-6 제품소개서 — 소프트 마감=2026-08-26, 연기 횟수=3',
-    '🗂 Work Board https://x/board/',
+    '🗂 판 https://x/board/',
   ].join(String.fromCharCode(10));
   const warn = [ok, WARN].join(String.fromCharCode(10));
   eq('잘된 것만 있으면 아무 말 안 한다', wa.boardOutputToTell(ok), '');

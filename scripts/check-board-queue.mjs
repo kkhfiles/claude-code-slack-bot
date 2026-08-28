@@ -1,5 +1,5 @@
 /**
- * Work Board 폴러 자가 검사 — 슬랙도 노션도 타지 않는다.
+ * 판 폴러 자가 검사 — 슬랙도 노션도 타지 않는다.
  *
  *   npm run build
  *   npm run check:board
@@ -72,7 +72,7 @@ if (!(await alive())) {
       + ' work-assistant/config.json 의 board_publish_dir 를 확인하세요');
     process.exit(1);
   }
-  console.log(`Work Board dev 서버를 띄웁니다 (포트 ${PORT}) — 끝나면 내립니다`);
+  console.log(`판 dev 서버를 띄웁니다 (포트 ${PORT}) — 끝나면 내립니다`);
   server = spawn('npm', ['run', 'dev', '--', '--port', String(PORT)], {
     cwd: boardDir,
     shell: true,
@@ -335,7 +335,7 @@ if (fails.length) {
   for (const f of fails) console.log('  ✗ ' + f);
   process.exitCode = 1;
 } else {
-  console.log('통과 — Work Board 폴러 (빈 큐 · 반영 · 중복 방지 · 문법 아님 버리기 · '
+  console.log('통과 — 판 폴러 (빈 큐 · 반영 · 중복 방지 · 문법 아님 버리기 · '
     + '일시 실패 남기기 · 섞인 판 · 복구 후 반영 · 사람 말 넘기기 · 한 번만 시도 · 받을 곳 없음 · '
     + '여러 줄 글 안 묶기 · note 버리기 · note 다시 시도 · note 받을 곳 없음 · '
     + '관찰 기록(건마다 한 줄 · 성공과 실패 둘 다 · UTC 아닌 지역시각))');
