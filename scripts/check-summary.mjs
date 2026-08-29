@@ -14,6 +14,7 @@
  * 사라진다. 반대로 **모양이 아닌 것을 빈 값으로 삼키면** 「형식이 어긋났다」와
  * 「쓸 것이 없다」를 부르는 쪽이 못 가른다.
  */
+import './lib/fresh-dist.mjs';
 import { parseSummaryReply as P } from '../dist/assistant-scheduler.js';
 
 const fails = [];

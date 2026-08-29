@@ -10,6 +10,7 @@
  * 그날 한 번 고쳤다고 보고했는데 **다른 경로가 계속 적고 있었다.** 물러섬 기록만 막고
  * 길목(`processEvent`)은 안 봤다. 그래서 이 검사를 둔다.
  */
+import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
