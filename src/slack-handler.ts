@@ -1082,8 +1082,12 @@ export class SlackHandler {
     const channelModel = SlackHandler.resolveModelAlias(this.channelModels.get(channel) || config.defaultModel);
     let apiKeyCostInfo: { queryCost: number; totalCost: number } | null = null;
     let cliError = false;
-    /** 이 차례에 쓴 SDK 옵션 — 끝나고 같은 모양으로 하나 미리 띄우려고 붙든다. */
-    let sdkOptsForWarm: SdkRunOptions | null = null;
+    // **띄우기 전 준비가 얼마나 먹나** (2026-08-29). 판 한 건 23.1초 중 이 구간이
+    // 1.12초인데(75건 중앙값) **안에 로그가 하나도 없어 무엇이 도는지 몰랐다.**
+    // 줄일 값이 있는지는 재 봐야 안다 — 짐작으로 손대지 않는다.
+    const spawnT0 = Date.now();
+    const lap: Record<string, number> = {};
+    const mark = (k: string) => { lap[k] = Date.now() - spawnT0; };
 
     try {
       this.logger.info('Spawning Claude CLI process', {
@@ -1098,10 +1102,12 @@ export class SlackHandler {
       const statusText = isPlanMode ? t('status.planning', locale) : t('status.thinking', locale);
       const statusResult = await say({ text: `${statusEmoji} ${statusText}`, thread_ts: replyTs });
       statusMessageTs = statusResult.ts;
+      mark('생각중 표시');
 
       // Add anchor reaction first to prevent line jumping when progress reactions change
       await this.addAnchorReaction(sessionKey);
       await this.updateMessageReaction(sessionKey, statusEmoji);
+      mark('반응 달기');
 
       // Show command hint on first message in a new thread
       const threadKey = `${channel}:${replyTs}`;
@@ -1161,11 +1167,13 @@ export class SlackHandler {
       // JSONL 에 직접 붙이므로, 노션이 막혀도 세션이 재시작에 죽어도 원문은 남는다.
       // 세션에 맡겼더니 안 했다(2026-08-06: 캡처 0건) — 그래서 봇이 한다.
       const capture = text?.trim() ? captureToInbox(text, 'slack', thread_ts) : null;
+      mark('원문 캡처');
       // 체크인이 화면에 떠 있는데 답이 짧은 문법에 안 맞아 여기까지 왔다면,
       // **번호의 뜻을 같이 넘긴다.** 안 넘기면 세션이 추측하고, 업무 ID 와 숫자가
       // 겹쳐 그럴듯하게 틀린다(2026-08-06: 「3번 논의 완료」가 TSK-10 이 아니라
       // TSK-3 에 붙었다). 세션이 할 일은 번역 하나로 좁히고 쓰기는 quick 이 한다.
       const slotMap = isDM ? await checkinMap() : '';
+      mark('체크인 번호표');
       const surfaceNote = [
         SLACK_SURFACE_NOTE,
         capture ? captureNote(capture.id) : '',
@@ -1189,15 +1197,17 @@ export class SlackHandler {
       // 모델을 내리는 것보다 여기를 먼저 조이는 이유는 잃는 것이 다르기 때문이다 —
       // 등록 해석(추정·중요도·마감)의 품질은 오래 생각해서가 아니라 모델이 맥락을
       // 아는 데서 나오고, 그 해석은 어차피 사용자 컨펌을 거친다.
-      // **다음 것을 미리 띄우려고 옵션을 붙들어 둔다** (2026-08-29). 판에서 오는
-      // 말은 모양이 같아서, 방금 쓴 옵션 그대로 하나 띄워 두면 다음 것이 맞는다.
-      sdkOptsForWarm = {
+      const sdkOpts: SdkRunOptions = {
         ...runOpts, env: sessionEnv, skills: 'all', effort: INTERACTIVE_EFFORT,
         appendSystemPrompt: surfaceNote,
         settings: { autoCompactWindow: INTERACTIVE_COMPACT_WINDOW },
       };
+      // **띄우기 전 준비의 구간별 값.** 합이 23.1초 중 1.12초라 큰 몫은 아니지만,
+      // 안에 로그가 없어 **무엇이 도는지조차 몰랐다**(2026-08-29). 재고 나서 정한다.
+      mark('옵션 짓기');
+      this.logger.info('띄우기 전 준비', { ms: lap });
       const cliProcess = useSdk
-        ? this.sdkHandler.runQuery(finalPrompt, sdkOptsForWarm)
+        ? this.sdkHandler.runQuery(finalPrompt, sdkOpts)
         : this.cliHandler.runQuery(finalPrompt, {
             ...runOpts, env: sessionEnv, appendSystemPrompt: surfaceNote,
           });
@@ -1526,20 +1536,17 @@ export class SlackHandler {
       this.activeProcesses.delete(sessionKey);
       { const m = readInflight(); delete m[sessionKey]; writeInflight(m); }
 
-      // **다음 차례를 미리 띄운다** — 판에서 오는 말은 모양이 같아 대개 맞는다.
-      // 실측 8.3 → 5.0초(2026-08-29). 안 맞으면 그냥 안 쓰고 평소대로 돈다.
+      // ⛔ **다음 차례를 미리 띄우던 자리 — 2026-08-29 에 걷었다.**
       //
-      // ⚠️ **세션은 떼고 띄운다** — 이 차례가 끝나면서 `session.sessionId` 가
-      // 채워지는데, 그대로 두면 「그 대화를 이어받는」 세션이 떠서 **다음 사람의
-      // 말이 남의 대화에 붙는다.** 새 스레드는 id 가 없으므로 그때 맞는다.
-      if (sdkOptsForWarm) {
-        this.sdkHandler.prewarm({
-          ...sdkOptsForWarm,
-          session: undefined,
-          resumeSessionId: undefined,
-          continueLastSession: undefined,
-        });
-      }
+      // 실물에서 **한 번도 안 쓰였다**(로그 두 차례 다 「옵션이 다름」). 판
+      // 프롬프트마다 새 캡처가 생기고 그 id 가 시스템 프롬프트와 `env` 양쪽에
+      // 박히는데, 둘 다 프로세스를 띄울 때 굳어 나중에 갈아 끼울 수 없다. 억지로
+      // 쓰면 앞 차례의 캡처를 닫고 **이번 것이 큐에 남는다** — 원문 유실을 막는
+      // 마지막 안전망을 깨는 거래다. **세션 id 는 원인이 아니었다**(두 차례가 같다).
+      //
+      // **애초에 값이 작았다** — 판 한 건 23.1초 중 프로세스 띄우기가 3.3초이고
+      // **21.5초가 모델 차례**다(75건 중앙값). 줄일 곳은 여기가 아니다.
+      // 근거·재는 법 = work-assistant `docs/design.md` §5.17.
 
       if (session?.sessionId) {
         setTimeout(() => {
