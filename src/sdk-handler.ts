@@ -205,7 +205,95 @@ export class SdkHandler {
     this.mcpManager = mcpManager;
   }
 
+  /**
+   * 미리 띄워 둔 세션을 쓴다 — **옵션이 한 글자도 안 다를 때만**.
+   *
+   * 재는 값(2026-08-29, 시스템 프롬프트 140KB 로 실측):
+   *   매번 새로 8.3초 · 미리 이어만 둠 5.0초 · 이어 두고 한 마디로 데움 4.7초
+   * **데우는 한 마디는 안 쓴다** — 92%를 이어 두는 것만으로 벌고, 그 한 마디가
+   * 대화에 남으면 판단이 달라질 수 있다(정확도가 첫째다).
+   */
+  private warm: {
+    key: string; q: Query; send: (t: string) => void;
+    abortController: AbortController; bornAt: number;
+  } | null = null;
+
+  /** 미리 띄운 것을 얼마나 들고 있나. 넘으면 버리고 새로 띄운다. */
+  static WARM_TTL_MS = 10 * 60_000;
+
+  /**
+   * `query` 를 한 겹 감싸 둔다 — **시험이 바꿔 끼우려고**.
+   *
+   * 미리 띄우기의 값은 「언제 재사용하나」라는 규칙에 있는데, 진짜 프로세스를
+   * 띄워 재면 한 번에 몇 초씩 들고 구독 한도를 먹는다. 여기를 바꿔 끼우면
+   * 규칙만 따로 잴 수 있다.
+   */
+  static queryFn: typeof query = query;
+
+  /**
+   * 다음 호출을 위해 하나 띄워 둔다. **방금 쓴 것과 같은 옵션으로** 부르면
+   * 판에서 오는 말처럼 모양이 같은 것이 이어질 때 그대로 맞는다.
+   *
+   * ⚠️ **여기서 터져도 아무 일도 없어야 한다** — 이것은 빠르게 하는 장치이지
+   * 반영의 일부가 아니다.
+   */
+  prewarm(opts: SdkRunOptions): void {
+    try {
+      if (this.warm && Date.now() - this.warm.bornAt < SdkHandler.WARM_TTL_MS) return;
+      this.dropWarm();
+      const built = this.buildOptions('', opts);
+      const input = pushableInput();
+      const q = SdkHandler.queryFn({ prompt: input.stream, options: built.sdkOptions });
+      this.warm = {
+        key: warmKey(built.sdkOptions), q, send: input.send,
+        abortController: built.abortController, bornAt: Date.now(),
+      };
+      // ⚠️ **안 쓰이면 스스로 죽는다.** 다음 호출이 와야 낡은 것을 버린다면,
+      // 조용한 밤에는 프로세스 하나(350MB 안팎)가 아침까지 앉아 있는다.
+      const mine = this.warm;
+      setTimeout(() => { if (this.warm === mine) this.dropWarm(); },
+        SdkHandler.WARM_TTL_MS).unref?.();
+      this.logger.info('세션을 미리 띄워 둠');
+    } catch (err) {
+      this.logger.error('미리 띄우기 실패 (평소대로 돕니다)', err);
+      this.warm = null;
+    }
+  }
+
+  /** 들고 있던 것을 버린다 — 낡았거나 옵션이 다를 때. */
+  private dropWarm(): void {
+    const w = this.warm;
+    this.warm = null;
+    if (!w) return;
+    try { w.abortController.abort(); } catch { /* 이미 죽었다 */ }
+  }
+
   runQuery(prompt: string, opts: SdkRunOptions): SdkProcess {
+    const built = this.buildOptions(prompt, opts);
+    const key = warmKey(built.sdkOptions);
+
+    // **미리 띄운 것이 맞으면 그것을 쓴다.** 옵션이 다르면 버리고 평소대로 —
+    // 남의 옵션으로 뜬 세션에 이 대화를 밀어 넣으면 조용히 다른 규칙으로 답한다.
+    if (this.warm) {
+      const fresh = Date.now() - this.warm.bornAt < SdkHandler.WARM_TTL_MS;
+      if (this.warm.key === key && fresh) {
+        const w = this.warm;
+        this.warm = null;
+        this.logger.info('미리 띄운 세션을 씀', { agedMs: Date.now() - w.bornAt });
+        w.send(prompt);
+        return new SdkProcess(w.q, w.abortController);
+      }
+      this.logger.info('미리 띄운 것을 못 씀 — 새로 띄웁니다',
+        { reason: fresh ? '옵션이 다름' : '낡음' });
+      this.dropWarm();
+    }
+
+    const q = SdkHandler.queryFn({ prompt, options: built.sdkOptions });
+    return new SdkProcess(q, built.abortController);
+  }
+
+  private buildOptions(prompt: string, opts: SdkRunOptions):
+      { sdkOptions: any; abortController: AbortController } {
     const abortController = new AbortController();
 
     // 'default' would prompt the user for risky tool calls, but background
@@ -330,7 +418,53 @@ export class SdkHandler {
       effort: sdkOptions.effort,
     });
 
-    const q = query({ prompt, options: sdkOptions });
-    return new SdkProcess(q, abortController);
+    return { sdkOptions, abortController };
   }
+}
+
+/**
+ * 프롬프트를 나중에 밀어 넣을 수 있는 입력 흐름.
+ *
+ * **이것이 미리 띄우기의 열쇠다** — `query()` 는 만들자마자 프로세스를 띄우는데
+ * (실측 2026-08-29: 읽기를 시작하지 않아도 뜬다), 프롬프트를 문자열로 주면
+ * 그때 이미 무엇을 물을지 정해야 한다. 흐름으로 주면 **띄워 놓고 나중에 넣는다.**
+ *
+ * ⚠️ **넣고 곧바로 닫는다.** 안 닫으면 SDK 가 「대화가 이어진다」고 보아 답이
+ * 끝나도 표준입력을 안 닫고, 읽는 쪽의 `for await` 이 영영 안 끝난다.
+ */
+export function pushableInput(): { stream: AsyncIterable<any>; send: (t: string) => void } {
+  const queue: any[] = [];
+  let wake: (() => void) | null = null;
+  let closed = false;
+  const stream = (async function* () {
+    for (;;) {
+      if (queue.length) { yield queue.shift(); continue; }
+      if (closed) return;
+      await new Promise<void>((r) => { wake = r; });
+    }
+  })();
+  return {
+    stream,
+    send(t: string) {
+      queue.push({
+        type: 'user',
+        message: { role: 'user', content: t },
+        parent_tool_use_id: null,
+        session_id: '',
+      });
+      closed = true;
+      const w = wake; wake = null; w?.();
+    },
+  };
+}
+
+/**
+ * 옵션 지문. **다르면 미리 띄운 것을 안 쓴다.**
+ *
+ * 함수와 중단기는 뺀다 — 값이 없어 견줄 수 없고, 견줄 필요도 없다(모양이 같으면
+ * 같은 자리에서 만들어진 것이다).
+ */
+export function warmKey(sdkOptions: any): string {
+  return JSON.stringify(sdkOptions, (k, v) =>
+    (k === 'abortController' || typeof v === 'function' ? undefined : v));
 }

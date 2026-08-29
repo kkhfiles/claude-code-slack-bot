@@ -21,6 +21,7 @@
     "check:restart": "node scripts/check-restart.mjs",
     "test": "node scripts/check-all.mjs",
     "check:cli": "node scripts/check-cli-contract.mjs",
+    "check:prewarm": "node scripts/check-prewarm.mjs",
     "check:limit": "node scripts/check-limit-detection.mjs",
     "prepare": "git config core.hooksPath .githooks",
     "check:quiet": "node scripts/check-quiet-rooms.mjs",

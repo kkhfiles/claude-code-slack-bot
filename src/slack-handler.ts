@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { CliHandler, type CliEvent, type CliProcess, type CliAssistantEvent, type CliInitEvent, type CliResultEvent, type CliRateLimitEvent } from './cli-handler';
-import { SdkHandler, SdkProcess, shouldUseSdk } from './sdk-handler';
+import { SdkHandler, SdkProcess, SdkRunOptions, shouldUseSdk } from './sdk-handler';
 import { PendingDenial } from './types';
 import { Logger } from './logger';
 import { WorkingDirectoryManager } from './working-directory-manager';
@@ -1082,6 +1082,8 @@ export class SlackHandler {
     const channelModel = SlackHandler.resolveModelAlias(this.channelModels.get(channel) || config.defaultModel);
     let apiKeyCostInfo: { queryCost: number; totalCost: number } | null = null;
     let cliError = false;
+    /** 이 차례에 쓴 SDK 옵션 — 끝나고 같은 모양으로 하나 미리 띄우려고 붙든다. */
+    let sdkOptsForWarm: SdkRunOptions | null = null;
 
     try {
       this.logger.info('Spawning Claude CLI process', {
@@ -1187,12 +1189,15 @@ export class SlackHandler {
       // 모델을 내리는 것보다 여기를 먼저 조이는 이유는 잃는 것이 다르기 때문이다 —
       // 등록 해석(추정·중요도·마감)의 품질은 오래 생각해서가 아니라 모델이 맥락을
       // 아는 데서 나오고, 그 해석은 어차피 사용자 컨펌을 거친다.
+      // **다음 것을 미리 띄우려고 옵션을 붙들어 둔다** (2026-08-29). 판에서 오는
+      // 말은 모양이 같아서, 방금 쓴 옵션 그대로 하나 띄워 두면 다음 것이 맞는다.
+      sdkOptsForWarm = {
+        ...runOpts, env: sessionEnv, skills: 'all', effort: INTERACTIVE_EFFORT,
+        appendSystemPrompt: surfaceNote,
+        settings: { autoCompactWindow: INTERACTIVE_COMPACT_WINDOW },
+      };
       const cliProcess = useSdk
-        ? this.sdkHandler.runQuery(finalPrompt, {
-            ...runOpts, env: sessionEnv, skills: 'all', effort: INTERACTIVE_EFFORT,
-            appendSystemPrompt: surfaceNote,
-            settings: { autoCompactWindow: INTERACTIVE_COMPACT_WINDOW },
-          })
+        ? this.sdkHandler.runQuery(finalPrompt, sdkOptsForWarm)
         : this.cliHandler.runQuery(finalPrompt, {
             ...runOpts, env: sessionEnv, appendSystemPrompt: surfaceNote,
           });
@@ -1520,6 +1525,21 @@ export class SlackHandler {
     } finally {
       this.activeProcesses.delete(sessionKey);
       { const m = readInflight(); delete m[sessionKey]; writeInflight(m); }
+
+      // **다음 차례를 미리 띄운다** — 판에서 오는 말은 모양이 같아 대개 맞는다.
+      // 실측 8.3 → 5.0초(2026-08-29). 안 맞으면 그냥 안 쓰고 평소대로 돈다.
+      //
+      // ⚠️ **세션은 떼고 띄운다** — 이 차례가 끝나면서 `session.sessionId` 가
+      // 채워지는데, 그대로 두면 「그 대화를 이어받는」 세션이 떠서 **다음 사람의
+      // 말이 남의 대화에 붙는다.** 새 스레드는 id 가 없으므로 그때 맞는다.
+      if (sdkOptsForWarm) {
+        this.sdkHandler.prewarm({
+          ...sdkOptsForWarm,
+          session: undefined,
+          resumeSessionId: undefined,
+          continueLastSession: undefined,
+        });
+      }
 
       if (session?.sessionId) {
         setTimeout(() => {
