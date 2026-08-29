@@ -10,6 +10,7 @@
  * 이름이 봇마다 달라야 하는 것도 같이 잰다 — 한 방에 봇이 둘이면 같은 표시로는
  * **누가 생각 중인지 못 가려서** 이 기능이 있으나 마나가 된다.
  */
+import './lib/fresh-dist.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
