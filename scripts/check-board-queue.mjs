@@ -36,6 +36,20 @@ if (!fs.existsSync(MOD)) {
   process.exit(1);
 }
 
+// ⛔ **낡은 dist 로 도는 것을 막는다** (2026-08-29). 이 검사는 `src` 가 아니라
+// `dist` 를 읽는데, 빌드는 `npm test`(check-all) 만 한다. 그래서 TypeScript 를
+// 고치고 `npm run check:board` 만 돌리면 **옛 코드가 통과 도장을 받는다** —
+// 새로 넣은 문 셋을 변이 시험으로 재 보다가 셋 다 「못 잡음」이 나와서 알았다.
+// 통과가 거짓말을 하느니 멈추는 편이 낫다.
+{
+  const SRC = path.join(ROOT, 'src', 'board-queue.ts');
+  if (fs.existsSync(SRC)
+      && fs.statSync(SRC).mtimeMs > fs.statSync(MOD).mtimeMs) {
+    console.error('dist 가 src 보다 낡았습니다 — `npm run build` 뒤에 다시 도세요');
+    process.exit(1);
+  }
+}
+
 // **띄운 것은 반드시 내린다.** `process.on('exit')` 는 `process.exit()` 로 나갈
 // 때도 도니 어느 길로 끝나든 한 번은 지나간다. 두 번 불러도 안전하다.
 let server = null;
@@ -325,6 +339,29 @@ r = await q.drain(apply, ask, BASE);
 eq('받을 곳이 없으면 남긴다',
    [r.retry.length, r.dropped.length, (await pending()).length], [1, 0, 1]);
 
+// 15. **원문을 먼저 박는 갈래** (2026-08-29). 카드가 3초 안에 움직이게 하는 장치라
+//     세션보다 **앞서** 불려야 하고, **터져도 세션은 그대로 가야** 한다 — 여기서
+//     막으면 사람이 쓴 말이 통째로 사라진다.
+await clear();
+const staged = [];
+const stage = async (text) => { staged.push(text); return { kind: 'ok', output: '' }; };
+const HEAD = '[진행판] TSK-9 「먼저 박기」' + String.fromCharCode(10);
+await post('act', { text: HEAD + '다음 주로 미룸', kind: 'ask' });
+r = await q.drain(apply, ask, BASE, note, stage);
+eq('원문을 먼저 박는다', [staged.length, asked.length], [1, 1]);
+eq('박은 것과 넘긴 것이 같은 원문이다', staged[0], asked[0]);
+
+await clear();
+const boom = async () => { throw new Error('먼저 박기 실패'); };
+await post('act', { text: HEAD + '또 한 줄', kind: 'ask' });
+r = await q.drain(apply, ask, BASE, note, boom);
+eq('먼저 박기가 터져도 세션은 간다', [asked.length, r.applied.length, r.lost.length], [1, 1, 0]);
+
+await clear();
+await post('act', { text: HEAD + '옛 봇', kind: 'ask' });
+r = await q.drain(apply, ask, BASE, note);
+eq('먼저 박기를 안 넘겨도 그대로 돈다', [asked.length, r.applied.length], [1, 1]);
+
 await clear();
 fs.rmSync(DONE, { force: true });
 fs.rmSync(EVENTS, { force: true });
@@ -338,6 +375,7 @@ if (fails.length) {
   console.log('통과 — 판 폴러 (빈 큐 · 반영 · 중복 방지 · 문법 아님 버리기 · '
     + '일시 실패 남기기 · 섞인 판 · 복구 후 반영 · 사람 말 넘기기 · 한 번만 시도 · 받을 곳 없음 · '
     + '여러 줄 글 안 묶기 · note 버리기 · note 다시 시도 · note 받을 곳 없음 · '
+    + '먼저 박기(같은 원문 · 터져도 세션은 감 · 안 넘겨도 돎) · '
     + '관찰 기록(건마다 한 줄 · 성공과 실패 둘 다 · UTC 아닌 지역시각))');
 }
 stopServer();

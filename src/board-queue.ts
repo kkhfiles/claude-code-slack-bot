@@ -199,7 +199,8 @@ function saveDone(ids: string[]): void {
  * 둘(스케줄러·자가 검사)뿐이라도 인자 순서가 바뀌면 검사가 먼저 거짓말을 한다.
  */
 export async function drain(apply: Apply, ask: Ask | null, base?: string,
-                            note?: Apply | null): Promise<DrainResult> {
+                            note?: Apply | null,
+                            stage?: Apply | null): Promise<DrainResult> {
   const out: DrainResult = { applied: [], dropped: [], retry: [], lost: [], duplicates: 0 };
   // `pull` 은 「가져간 표시」를 남기므로 읽기가 아니다 — 워커가 POST 만 받는다.
   const { items } = (await call('pull', {}, base)) as { items: QueueItem[] };
@@ -257,6 +258,22 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
       seen.add(item.id);
       saveDone(done);
       ack.push(item.id);
+      // **원문을 카드에 먼저 박는다** (2026-08-29). 세션은 17.9초가 걸리고 그동안
+      // 판은 아무 일도 없던 것처럼 보인다 — 이 한 번으로 카드가 3초 안에 움직인다.
+      //
+      // ⚠️ **여기서 터져도 세션은 그대로 간다.** 이것은 있으면 좋은 것이지 반영의
+      // 일부가 아니다 — 막으면 사람 말이 통째로 사라진다.
+      //
+      // ⚠️ **속성은 한 칸도 안 건드린다**(파이썬 `cmd_stage`). 판단은 세션 몫이라
+      // 이 장치가 정확도를 못 바꾼다 — 그래야 켤 수 있다.
+      if (stage) {
+        try {
+          const r = await stage(item.text);
+          if (r.kind === 'ok') logger.info(`원문을 먼저 남김 — ${item.id}`);
+        } catch (err) {
+          logger.error('원문을 먼저 남기지 못했습니다 (세션은 그대로 갑니다)', err);
+        }
+      }
       try {
         await ask(item.text);
         logger.info(`비서에게 넘김 — ${item.id} ${item.text.slice(0, 80)}`);
