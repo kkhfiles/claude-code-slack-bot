@@ -17,6 +17,7 @@
  * 에 넘겨 워터마크 파일에 그대로 들어갔는지 본다. 사용자의 진짜 워터마크를 건드리지
  * 않도록 홈 디렉터리를 임시 폴더로 돌려 놓는다.
  */
+import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';

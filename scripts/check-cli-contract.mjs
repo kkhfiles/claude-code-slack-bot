@@ -17,6 +17,7 @@
  * ⚠️ **서브커맨드별로 센다.** 전체 플래그 집합으로 대조하면 `--slack` 처럼
  * 여러 서브커맨드에 따로 붙은 이름이 엉뚱한 곳에서도 통과한다.
  */
+import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';

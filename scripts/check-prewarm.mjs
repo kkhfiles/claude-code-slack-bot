@@ -10,6 +10,7 @@
  * 세션에 이 대화를 밀어 넣으면 조용히 다른 규칙으로 답하고, 세션 id 가 붙은 채로
  * 뜬 것을 재사용하면 **다음 사람의 말이 남의 대화에 붙는다.**
  */
+import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,18 +19,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MOD = path.join(ROOT, 'dist', 'sdk-handler.js');
-const SRC = path.join(ROOT, 'src', 'sdk-handler.ts');
-
-if (!fs.existsSync(MOD)) {
-  console.error('dist 가 없습니다 — 먼저 `npm run build`');
-  process.exit(1);
-}
-// ⛔ 낡은 dist 로 도는 것을 막는다 — 빌드는 `npm test` 만 한다. TypeScript 를
-//    고치고 이 검사만 돌리면 옛 코드가 통과 도장을 받는다(2026-08-29 실제로 겪음).
-if (fs.existsSync(SRC) && fs.statSync(SRC).mtimeMs > fs.statSync(MOD).mtimeMs) {
-  console.error('dist 가 src 보다 낡았습니다 — `npm run build` 뒤에 다시 도세요');
-  process.exit(1);
-}
+// dist 가 없거나 낡았으면 맨 위 `./lib/fresh-dist.mjs` 가 이미 멈춘다.
 
 const { SdkHandler, warmKey, pushableInput } = require(MOD);
 

@@ -17,6 +17,7 @@
  * 되고, 일시 실패한 것을 지워 버리면 누른 것이 조용히 사라지며, 문법이 아닌 것을
  * 안 버리면 30초마다 영원히 되돌아온다. 셋 다 화면은 멀쩡해 보인다.
  */
+import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -36,19 +37,7 @@ if (!fs.existsSync(MOD)) {
   process.exit(1);
 }
 
-// ⛔ **낡은 dist 로 도는 것을 막는다** (2026-08-29). 이 검사는 `src` 가 아니라
-// `dist` 를 읽는데, 빌드는 `npm test`(check-all) 만 한다. 그래서 TypeScript 를
-// 고치고 `npm run check:board` 만 돌리면 **옛 코드가 통과 도장을 받는다** —
-// 새로 넣은 문 셋을 변이 시험으로 재 보다가 셋 다 「못 잡음」이 나와서 알았다.
-// 통과가 거짓말을 하느니 멈추는 편이 낫다.
-{
-  const SRC = path.join(ROOT, 'src', 'board-queue.ts');
-  if (fs.existsSync(SRC)
-      && fs.statSync(SRC).mtimeMs > fs.statSync(MOD).mtimeMs) {
-    console.error('dist 가 src 보다 낡았습니다 — `npm run build` 뒤에 다시 도세요');
-    process.exit(1);
-  }
-}
+// 낡은 dist 로 도는 것은 맨 위 `./lib/fresh-dist.mjs` 가 막는다.
 
 // **띄운 것은 반드시 내린다.** `process.on('exit')` 는 `process.exit()` 로 나갈
 // 때도 도니 어느 길로 끝나든 한 번은 지나간다. 두 번 불러도 안전하다.

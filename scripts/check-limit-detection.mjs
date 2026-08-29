@@ -12,6 +12,7 @@
  *
  * 그래서 이 검사는 **정상 완료한 글이 리미트로 읽히지 않는가**를 먼저 본다.
  */
+import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';

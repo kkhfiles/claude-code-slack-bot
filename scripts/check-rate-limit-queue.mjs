@@ -7,6 +7,7 @@
  * 회복 시각을 늘 덮어쓰면 아직 안 풀린 채로 깨우고, 취소를 큐에 반영하지 않으면
  * 취소해 놓은 것이 몇 시간 뒤 다시 올라온다. 둘 다 조용히 틀린다.
  */
+import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
