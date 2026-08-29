@@ -654,12 +654,29 @@ export async function noteUpdate(text: string): Promise<QuickOutcome> {
 }
 
 /**
+ * 판에서 온 원문을 **세션에 넘기기 전에** 진행 로그에 먼저 박는다 (2026-08-29).
+ *
+ * **왜** — 칸반 기준으로 프롬프트 한 줄이 카드에 닿기까지 21.9초이고 그중
+ * 17.9초가 세션이다(실측). 그동안 판은 아무 일도 없던 것처럼 보인다. 원문을
+ * 먼저 남기면 사람은 자기 말이 들어온 것을 3초 안에 본다.
+ *
+ * ⚠️ **판단은 세션이 그대로 한다** — 파이썬 쪽이 속성을 한 칸도 안 건드린다.
+ * 정확도에 영향이 없어야 이 장치를 켤 수 있다(2026-08-29 사용자: 정확도 우선).
+ *
+ * rc 2 는 「여기 앉힐 것이 아니다」 — 정기 업무·새 업무처럼 볼트 파일이 없는 것.
+ * 그때는 아무 일도 안 일어나고 세션이 평소대로 받는다.
+ */
+export async function stageUpdate(text: string): Promise<QuickOutcome> {
+  return byFile('stage', text);
+}
+
+/**
  * 원문을 파일로 넘겨 `tasks.py` 한 서브커맨드를 부른다.
  *
  * 파일로 넘기는 이유 — 따옴표·줄바꿈·한글이 섞인 문자열을 인자로 주면
  * win32 `shell:true` spawn 에서 깨지거나 주입 위험이 생긴다(캡처와 같은 이유).
  */
-async function byFile(cmd: 'quick' | 'note', text: string): Promise<QuickOutcome> {
+async function byFile(cmd: 'quick' | 'note' | 'stage', text: string): Promise<QuickOutcome> {
   const root = workAssistantRoot();
   if (!root) return { kind: 'not-quick' };
   const file = path.join(os.tmpdir(), `wa-${cmd}-${randomId()}.txt`);

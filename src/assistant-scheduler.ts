@@ -11,7 +11,7 @@ import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
-  noteUpdate, summaryCandidates, summaryApply,
+  noteUpdate, stageUpdate, summaryCandidates, summaryApply,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
@@ -1362,7 +1362,8 @@ export class AssistantScheduler {
       if (this.boardQueueBusy) return;
       this.boardQueueBusy = true;
       try {
-        const r = await drain(quickUpdate, this.askFromBoard ?? null, undefined, noteUpdate);
+        const r = await drain(quickUpdate, this.askFromBoard ?? null, undefined,
+          noteUpdate, stageUpdate);
         if (this.boardQueueFailures) {
           this.logger.info(`Board queue recovered (${this.boardQueueFailures}회 실패 뒤)`);
           this.boardQueueFailures = 0;
