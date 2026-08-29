@@ -19,7 +19,15 @@ const GUARD = "import './lib/fresh-dist.mjs'";
 /** CommonJS 라 ESM 가드를 못 붙이는 것들. 옮기면 목록에서 뺀다. */
 const CJS_EXEMPT = new Set(['check-1on1.js', 'check-booking-nudge.js']);
 
-const READS_DIST = /require\(MOD\)|require\([^)]*dist|from ['"][^'"]*dist|join\(ROOT, ['"]dist['"]\)/;
+/**
+ * dist 를 읽는 모양들.
+ *
+ * ⚠️ **좁게 적으면 조용히 빠진다** — 처음에 `join(ROOT, 'dist')` 로 닫아 놨더니
+ * `path.join(ROOT, 'dist', 'work-assistant.js')` 처럼 인자가 하나 더 붙은
+ * `check-offdays.mjs` 가 통째로 안 세어졌다(2026-08-29). 이 검사가 「10개 봤다」고
+ * 말하는 동안 한 개가 가드 없이 돌고 있었다. **넓게 잡고 오탐은 목록으로 뺀다.**
+ */
+const READS_DIST = /require\(MOD\)|require\([^)]*dist|from ['"][^'"]*dist|['"]dist['"]|import\([^)]*dist/;
 
 const fails = [];
 let checked = 0;

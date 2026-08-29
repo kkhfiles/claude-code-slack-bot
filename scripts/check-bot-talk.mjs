@@ -11,6 +11,7 @@
  * 기록 폴더를 임시 자리로 돌려 놓고 돈다 — 검사가 진짜 활동 기록에 줄을 남기면
  * 돌지도 않은 대화가 돈 것처럼 보인다.
  */
+import './lib/fresh-dist.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

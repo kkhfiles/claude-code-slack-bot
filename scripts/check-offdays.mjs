@@ -20,6 +20,7 @@
  * ②는 「연말까지 넣어 둔 목록이 해를 넘겼다」를 잡는 자리다 — 조용히 틀리고,
  * 틀린 티가 안 난다.
  */
+import './lib/fresh-dist.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

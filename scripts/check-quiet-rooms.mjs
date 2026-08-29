@@ -12,6 +12,7 @@
  * 길이 둘이라(살아 있는 이벤트·1분마다 훑기) **한쪽만 막으면 다른 쪽으로 샌다.**
  * 그래서 둘 다 잰다.
  */
+import './lib/fresh-dist.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
