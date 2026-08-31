@@ -94,6 +94,36 @@ export function captureToInbox(text: string, source = 'slack', thread?: string):
   }
 }
 
+/**
+ * 그 차례가 처리 못 하고 끝났다고 캡처에 적는다.
+ *
+ * **이유를 안 가린다** (2026-08-31 사용자) — 한도든 서버 장애든 재시작이든
+ * 「정상 종료 못 했다」 하나로 묶는다. 이유별 장치를 따로 두었더니 실제로
+ * 어긋났다: 한도 큐가 08/24 의 서버 과부하(529)를 5시간짜리 한도로 잡아
+ * 이레를 들고 있는 동안, 캡처 큐는 같은 건을 그날 안에 제대로 닫았다.
+ *
+ * ⚠️ **캡처를 붙일 때와 달리 파이썬을 거친다.** 붙이기는 이어 쓰기라 봇이 직접
+ * 해도 안전한데, 이것은 **파일 전체를 다시 쓰는 일**이라 소유자가 하나여야 한다.
+ * 느리지만(0.4초) 이 길은 드물게 돈다 — 로그 전체에서 실제로 막힌 것이 1건이다.
+ *
+ * ⚠️ **닫힌 캡처에도 적는다.** 「닫힘」은 「다 했다」가 아니라 「무언가 썼다」라서
+ * (첫 쓰기에 닫힌다), 일하다 끊긴 차례가 닫힌 채로 남는다. 다시 돌리지는 않고
+ * 아침 브리핑이 한 줄로 알린다.
+ */
+export async function markCaptureFailed(
+  id: string, why: 'limit' | 'error' | 'interrupted',
+): Promise<void> {
+  if (!id || !isWorkAssistantEnabled()) return;
+  try {
+    const { code, stderr, stdout } = await runTasks(
+      ['inbox', 'fail', '--id', id, '--why', why], 30_000);
+    if (code !== 0) logger.error('캡처에 실패를 못 적었습니다', { id, why, out: (stderr || stdout).slice(-200) });
+  } catch (err) {
+    // 안전망이라 실패해도 본 차례를 막지 않는다 — 대신 조용히 지나가지 않게 남긴다.
+    logger.error('캡처에 실패를 못 적었습니다', err);
+  }
+}
+
 /** 아직 세션이 처리하지 않은 캡처 수. 브리핑 꼬리에 붙인다. */
 export function openCaptureCount(): number {
   const root = workAssistantRoot();
