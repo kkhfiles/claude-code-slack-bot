@@ -1107,10 +1107,24 @@ export class SlackHandler {
         fileCount: processedFiles.length,
       });
 
+      // **번호표를 먼저 걸어 둔다** — 파이썬을 한 번 띄우는 일이라 0.17초 걸리는데,
+      // 그동안 아래의 토큰 동기화·계정 조회가 어차피 돈다. 쓰는 곳은 저 아래
+      // `surfaceNote` 한 곳뿐이라 거기서 받으면 된다.
+      const slotMapPending: Promise<string> = isDM ? checkinMap() : Promise.resolve('');
+
       const statusEmoji = isPlanMode ? '📝' : '🤔';
       const statusText = isPlanMode ? t('status.planning', locale) : t('status.thinking', locale);
-      const statusResult = await say({ text: `${statusEmoji} ${statusText}`, thread_ts: replyTs });
-      statusMessageTs = statusResult.ts;
+      // **보내 놓고 기다리지 않는다** (2026-08-31). 이 `ts` 를 처음 쓰는 곳은 스트림
+      // 안(첫 도구 호출)이라 세션이 뜨는 3.7초 뒤다. 기다리면 슬랙 왕복 0.30초가
+      // 그대로 차례 앞에 붙는다. **띄운 직후에 한 번 받아 둔다** — 거기서 기다리는
+      // 것은 공짜다(어차피 첫 SDK 메시지를 기다리는 중이다).
+      //
+      // ⚠️ 실패하면 `statusMessageTs` 가 빈 채로 남는다. 쓰는 곳이 전부
+      // `if (statusMessageTs)` 로 막혀 있어 조용히 건너뛴다 — 상태 한 줄 때문에
+      // 차례를 죽이는 것보다 낫다(전에는 여기서 터지면 차례가 통째로 죽었다).
+      const statusSent = say({ text: `${statusEmoji} ${statusText}`, thread_ts: replyTs })
+        .then((r) => { statusMessageTs = r?.ts; })
+        .catch(() => { /* 상태 한 줄은 장식 */ });
       mark('생각중 표시');
 
       // Add anchor reaction first to prevent line jumping when progress reactions change
@@ -1181,7 +1195,8 @@ export class SlackHandler {
       // **번호의 뜻을 같이 넘긴다.** 안 넘기면 세션이 추측하고, 업무 ID 와 숫자가
       // 겹쳐 그럴듯하게 틀린다(2026-08-06: 「3번 논의 완료」가 TSK-10 이 아니라
       // TSK-3 에 붙었다). 세션이 할 일은 번역 하나로 좁히고 쓰기는 quick 이 한다.
-      const slotMap = isDM ? await checkinMap() : '';
+      // 위에서 미리 걸어 둔 것을 여기서 받는다 — 그동안 토큰 동기화가 돌았다.
+      const slotMap = await slotMapPending;
       mark('체크인 번호표');
       const surfaceNote = [
         SLACK_SURFACE_NOTE,
@@ -1222,6 +1237,9 @@ export class SlackHandler {
           });
 
       this.logger.info('Interactive session started', { via: useSdk ? 'sdk' : 'cli' });
+      // 여기서 상태 한 줄의 `ts` 를 받는다 — 세션이 뜨기를 기다리는 중이라 공짜다.
+      // 아래 스트림이 그 `ts` 로 상태를 고쳐 쓰므로 들어가기 전에 받아 둔다.
+      await statusSent;
       this.activeProcesses.set(sessionKey, cliProcess);
       { const m = readInflight(); m[sessionKey] = { channel, threadTs: replyTs, text: (text || '').slice(0, 160), startedAt: new Date().toISOString() }; writeInflight(m); }
 
@@ -1442,10 +1460,13 @@ export class SlackHandler {
         // ⚠️ **오류일 때는 남긴다** — ❌ 는 이 줄에만 뜬다. 지우면 세션이 넘어진
         // 사실이 채널 어디에도 안 남는다.
         const pushed = Boolean((event as any).pushed);
+        // **여기서도 기다리지 않는다** (2026-08-31). 상태 한 줄을 지우거나 고치는
+        // 것은 슬랙 왕복인데, 그 결과를 읽는 곳이 없고 뒤에 오는 것은 판 반영이다.
+        // 기다리면 **카드가 늦게 바뀐다** — 사람이 보는 것은 그 카드다.
         if (pushed && !cliError) {
-          await this.app.client.chat.delete({ channel, ts: statusMessageTs }).catch(() => {});
+          void this.app.client.chat.delete({ channel, ts: statusMessageTs }).catch(() => {});
         } else {
-          await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `${doneEmoji} ${doneLabel}${toolSummary}${costSuffix}` }).catch(() => {});
+          void this.app.client.chat.update({ channel, ts: statusMessageTs, text: `${doneEmoji} ${doneLabel}${toolSummary}${costSuffix}` }).catch(() => {});
         }
       }
       await this.updateMessageReaction(sessionKey, doneEmoji);
