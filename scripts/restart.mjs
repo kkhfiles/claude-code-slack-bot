@@ -58,7 +58,11 @@ function openCaptures() {
     return fs.readFileSync(file, 'utf-8')
       .split('\n').filter((l) => l.trim())
       .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-      .filter((r) => r && r.status === 'open');
+      // ⚠️ **실패 자국이 있는 것은 안 센다** — 이 문이 막는 것은 「지금 돌고
+      // 있는 차례」이지 「이미 죽은 차례」가 아니다. 밀린 것은 기동 때 드레인이
+      // 다시 돌리므로, 여기서 붙잡으면 **고칠 것이 고치는 길을 막는다**
+      // (2026-09-01 에 실제로 그랬다 — 밀린 한 건이 재시작을 통째로 막았다).
+      .filter((r) => r && r.status === 'open' && !r.failed);
   } catch {
     return [];
   }
@@ -92,6 +96,17 @@ if (!proc) {
   if (!dry) execSync(`pm2 restart ${APP} --update-env`, { stdio: 'inherit' });
   process.exit(0);
 }
+
+const stuck = (() => {
+  const root = process.env.WORK_ASSISTANT_ROOT || 'P:/github/work-assistant';
+  try {
+    return fs.readFileSync(path.join(root, 'inbox.jsonl'), 'utf-8')
+      .split('\n').filter((l) => l.trim())
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((r) => r && r.status === 'open' && r.failed).length;
+  } catch { return 0; }
+})();
+if (stuck) console.log(`↻ 처리 못 하고 밀린 ${stuck}건 — 기동하면 다시 돌립니다`);
 
 const captures = openCaptures();
 if (captures.length && !force) {
