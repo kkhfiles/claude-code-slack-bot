@@ -595,10 +595,21 @@ export class LetterBooking {
    * 이 사람이 **이번 달에 쓴** 신청. 취소한 것은 안 쓴 것으로 친다(그래서 다시 넣을 수 있다).
    * 실장이 처리한 것은 **쓴 것으로 친다** — 그 달 만남이 이미 잡혔다는 뜻이다.
    */
+  /**
+   * 이 사람이 **이번 달에** 넣어 둔 것.
+   *
+   * ⚠️ **UTC 로 세지 않는다** — 기록은 `toISOString()`(UTC)으로 적히는데 사람은
+   * 한국 시각으로 산다. UTC 로 자르면 **한국 시각 자정~오전 9시 동안 달이 전달로
+   * 보인다** — 그 아홉 시간에 넣은 신청이 지난달 몫으로 계산되어, 이번 달에 또
+   * 넣을 수 있게 되거나 반대로 막힌다. 달이 바뀌는 날에만, 조용히 틀린다
+   * (2026-09-01 에 자가 검사가 실제로 잡았다).
+   *
+   * 오늘도 기록도 **같은 자로** 잰다 — 한쪽만 고치면 어긋나는 것은 그대로다.
+   */
   private thisMonth(user: string): Alive | null {
-    const month = new Date().toISOString().slice(0, 7);
+    const month = localMonth(new Date());
     for (const a of this.alive().values()) {
-      if (a.entry.user === user && a.entry.ts.slice(0, 7) === month) return a;
+      if (a.entry.user === user && localMonth(new Date(a.entry.ts)) === month) return a;
     }
     return null;
   }
@@ -671,4 +682,9 @@ export class LetterBooking {
     this.names.set(id, name);
     return name;
   }
+}
+
+/** 그 시각이 **지역 시각으로** 몇 년 몇 월인가 (`YYYY-MM`). */
+export function localMonth(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
