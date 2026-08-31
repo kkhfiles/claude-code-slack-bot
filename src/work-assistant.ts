@@ -165,6 +165,20 @@ export async function markCaptureTried(id: string): Promise<void> {
   }
 }
 
+/**
+ * 캡처를 버린다 — 사람이 「취소」를 눌렀을 때.
+ *
+ * **안 버리면 취소해 놓고도 회복 시각에 드레인이 다시 돌린다.**
+ */
+export async function dropCapture(id: string, why: string): Promise<void> {
+  if (!id || !isWorkAssistantEnabled()) return;
+  try {
+    await runTasks(['inbox', 'resolve', '--id', id, '--drop', why], 30_000);
+  } catch (err) {
+    logger.error('캡처를 못 버렸습니다', err);
+  }
+}
+
 /** 아직 세션이 처리하지 않은 캡처 수. 브리핑 꼬리에 붙인다. */
 export function openCaptureCount(): number {
   const root = workAssistantRoot();

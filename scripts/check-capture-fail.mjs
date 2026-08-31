@@ -130,6 +130,64 @@ try {
     }
   }
 
+  // ---------- 회복 시각 ----------
+  //
+  // 한도 큐가 들던 몫 중 **남은 것은 이것 하나**다 — 언제 다시 해 볼지.
+  // 목록은 캡처 큐가 든다. 두 목록이 어긋난 것이 이번 결함의 뿌리였다.
+  {
+    const UNTIL = path.join(HOME, 'until.json');
+    process.env.RATE_LIMIT_UNTIL_FILE = UNTIL;
+    // ⚠️ `require` 는 한 번 읽은 모듈을 다시 안 읽는다 — 환경변수를 세운 뒤에
+    // 불러야 그 경로가 잡힌다.
+    const { getUntil, setUntil, stillBlocked, clearUntil } =
+      await import(new URL('../dist/rate-limit-until.js', import.meta.url).href);
+    const now = Date.now();
+
+    eq('처음에는 모른다', getUntil(), null);
+    eq('모르면 안 막힌 것으로 본다', stillBlocked(now), false);
+
+    const soon = Math.floor(now / 1000) + 600;
+    setUntil(soon);
+    eq('적으면 읽힌다', getUntil(), soon);
+    eq('아직이면 막혔다고 본다', stillBlocked(now), true);
+    eq('지나면 안 막혔다', stillBlocked(now + 601_000), false);
+
+    // **늦은 쪽으로만 민다** — 이른 쪽을 잡으면 아직 안 풀린 채로 또 해 본다.
+    setUntil(soon - 300);
+    eq('이른 값은 안 덮는다', getUntil(), soon);
+    setUntil(soon + 300);
+    eq('늦은 값은 덮는다', getUntil(), soon + 300);
+
+    clearUntil();
+    eq('지우면 다시 모른다', getUntil(), null);
+  }
+
+  // ---------- 한도 큐는 없다 ----------
+  //
+  // **같은 일을 하는 목록이 둘이면 한쪽이 조용히 낡는다.** 08/24 의 서버
+  // 과부하를 5시간짜리 한도로 잡아 이레를 들고 있던 것이 그 낡음이었다.
+  // 되살아나면 이 문이 잡는다.
+  {
+    for (const f of ['src/rate-limit-queue.ts', 'src/rlq-nudge.ts',
+                     'scripts/check-rate-limit-queue.mjs']) {
+      eq(`${f} 는 없다`, fs.existsSync(path.join(ROOT, f)), false);
+    }
+    const h = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
+    for (const name of ['rate-limit-queue', 'rlqEnqueue', 'postRecoveryPrompt',
+                        'replayQueued', 'rlq_run_all']) {
+      eq(`${name} 이 안 남았다`, h.includes(name), false);
+    }
+    // 회복 시각에 하는 일은 **드레인 하나**여야 한다.
+    const arm = h.slice(h.indexOf('private armRateLimitRecovery'));
+    const body = arm.slice(0, arm.indexOf('\n  }'));
+    eq('회복 시각에 드레인을 부른다', /drainStuck\('한도 회복'\)/.test(body), true);
+    eq('회복 시각에 사람에게 안 묻는다', /postMessage|button/.test(body), false);
+    // 아직 안 풀렸으면 안 돈다 — 안 그러면 기동마다 시도 횟수만 탄다.
+    eq('막혀 있으면 드레인이 쉰다', /if \(stillBlocked\(\)\)/.test(h), true);
+    // 취소를 누르면 캡처를 버린다 — 안 버리면 회복 시각에 다시 돌아온다.
+    eq('취소가 캡처를 버린다', /dropCapture\(captureId, '사람이 취소함'\)/.test(h), true);
+  }
+
   // 봇이 부르는 이름이 실제로 있는가 — 계약이 갈리면 조용히 안 남는다.
   const bridge = fs.readFileSync(path.join(ROOT, 'src', 'work-assistant.ts'), 'utf-8');
   const m = bridge.match(/'inbox',\s*'fail',\s*'--id',\s*id,\s*'--why',\s*why/);
@@ -156,5 +214,6 @@ if (fails.length) {
   process.exitCode = 1;
 } else {
   console.log('통과 — 처리 못 한 차례 (자국 남김 · 이유 안 가림 · 시도 상한 · 닫힌 것 제외 '
-    + '· 조회 제외 · 닫으면 자국 지움 · 드레인 배선 · 봇이 부르는 이름 · 세 자리 배선)');
+    + '· 조회 제외 · 닫으면 자국 지움 · 드레인 배선 · 회복 시각 · 한도 큐 없음 '
+    + '· 봇이 부르는 이름 · 세 자리 배선)');
 }

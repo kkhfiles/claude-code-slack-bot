@@ -19,9 +19,7 @@ import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
-import { nudgeDecision } from './rlq-nudge';
-import { setNotice as rlqSetNotice, getNotice as rlqGetNotice } from './rate-limit-queue';
-import { enqueue as rlqEnqueue, peek as rlqPeek, takeAll as rlqTakeAll, clear as rlqClear, remove as rlqRemove, QueuedRequest } from './rate-limit-queue';
+import { setUntil, stillBlocked, clearUntil } from './rate-limit-until';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 import { LunchPoller } from './lunch-poller';
 import { LunchButtons, readLunchBotToken, readLunchAnnounceChannel } from './lunch-buttons';
@@ -32,8 +30,8 @@ import { LetterBoost } from './letter-boost';
 import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
-import { captureToInbox, checkinMap, checkinNow, isWorkAssistantEnabled, markCaptureFailed,
-  markCaptureTried, pendingCaptures, quickUpdate } from './work-assistant';
+import { captureToInbox, checkinMap, checkinNow, dropCapture, isWorkAssistantEnabled,
+  markCaptureFailed, markCaptureTried, pendingCaptures, quickUpdate } from './work-assistant';
 import { boardLabel } from './board-queue';
 
 /**
@@ -265,13 +263,12 @@ export class SlackHandler {
   private pendingRetryCleanup: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private pendingAutoRetries: Map<string, ReturnType<typeof setTimeout>> = new Map();
   // 한도 회복 시각에 깨어나는 타이머. 큐가 파일이라 재시작해도 다시 걸 수 있다.
-  private rlqTimer?: ReturnType<typeof setTimeout>;
+  private limitTimer?: ReturnType<typeof setTimeout>;
   /**
    * 다시 알리기 타이머. **횟수와 앞 알림은 여기 안 둔다** — 큐 파일에 둔다.
    * 메모리에 뒀더니 재시작마다 0 으로 돌아가 알림이 쌓이고 상한이 안 걸렸다
    * (2026-08-25 실측: 저녁 재시작 네 번에 같은 알림 넉 장).
    */
-  private rlqNudgeTimer?: ReturnType<typeof setTimeout>;
 
   // Plan mode: store session info for "Execute" button
   private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string | undefined; user: string }> = new Map();
@@ -1606,7 +1603,7 @@ export class SlackHandler {
           : this.parseRetryAfterSeconds({ message: rateLimitMessageText });
 
         const nextAccount = this.accountManager.getNextAccount();
-        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccount ?? undefined, ts);
+        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccount ?? undefined, ts, captureId);
       }
 
       // Clean up temp files
@@ -1637,7 +1634,7 @@ export class SlackHandler {
           : this.parseRetryAfterSeconds(rateLimitSource);
 
         const nextAccountOnError = this.accountManager.getNextAccount();
-        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccountOnError ?? undefined, ts);
+        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccountOnError ?? undefined, ts, captureId);
       } else {
         await say({ text: t('error.generic', locale, { message: error.message || t('error.somethingWrong', locale) }), thread_ts: thread_ts || ts });
       }
@@ -1793,27 +1790,31 @@ export class SlackHandler {
     }
   }
 
+  /** 이번 한도 구간에서 안내를 이미 올렸나 — 두 번째부터는 ✋ 만 붙인다. */
+  private limitNoticed = false;
+
   private async handleRateLimitUI(
     channel: string, threadTs: string, user: string,
     prompt: string, retryAfterSec: number, locale: Locale, say: any,
-    nextAccount?: AccountId, messageTs?: string
+    nextAccount?: AccountId, messageTs?: string, captureId?: string
   ): Promise<void> {
     const postAt = Math.floor(Date.now() / 1000) + retryAfterSec;
     const retryTimeStr = formatTime(new Date(postAt * 1000), locale);
 
-    // **막힌 요청은 무조건 파일 큐에 남긴다.** 아래 버튼은 사람이 그 자리에 있을
-    // 때만 쓸모가 있고, 재시도 정보는 10분 뒤 지워진다 — 구독 한도는 보통 몇
-    // 시간 뒤에 풀리므로 그때는 이미 아무것도 남아 있지 않다.
-    const q = rlqEnqueue({ channel, threadTs, user, text: prompt }, postAt);
-    this.armRateLimitRecovery(q.resetsAt);
+    // **원문은 캡처 큐가 든다** — 이유를 안 가리고 쌓이며 처리되면 스스로 닫힌다
+    // (`markCaptureFailed` 가 이미 자국을 남겼다). 여기서 또 목록을 들면 두
+    // 목록이 어긋난다 — 2026-08/24 의 서버 과부하를 5시간짜리 한도로 잡아
+    // 이레를 들고 있던 것이 그 어긋남이었다. 남기는 것은 **풀리는 시각 하나**다.
+    setUntil(postAt);
+    this.armRateLimitRecovery(postAt);
 
     // 두 번째부터는 같은 안내를 올리지 않는다 — 한도가 걸린 동안 보낸 메시지마다
     // 버튼 뭉치가 하나씩 쌓이면 그 자체가 도배다. 회복 시각에 한 번에 보여 준다.
     //
     // **대신 ✋ 를 붙인다.** 아무 신호도 안 주면 이미 달린 ❌ 만 남아 실패로 읽히고,
-    // 실패로 읽힌 요청은 사람이 다시 보낸다 — 그러면 큐에 같은 것이 두 벌 쌓인다.
-    if (!q.first) {
-      this.logger.info('Rate-limited request queued', { size: q.size });
+    // 실패로 읽힌 요청은 사람이 다시 보낸다 — 그러면 같은 것이 두 번 처리된다.
+    if (this.limitNoticed) {
+      this.logger.info('한도 안내는 이미 올렸습니다 — 손만 듭니다');
       if (messageTs) {
         await this.app.client.reactions.add({ channel, timestamp: messageTs, name: 'raised_hand' })
           .catch(() => { /* 이미 달렸거나 지워진 메시지 */ });
@@ -1850,7 +1851,7 @@ export class SlackHandler {
     // 조회면 낭비로 끝나지만 등록·상태 변경이면 노션에 두 벌이 들어간다.
     buttons.push(
       { type: 'button', text: { type: 'plain_text', text: t('rateLimit.continueWithApiKey', locale) }, action_id: 'continue_with_apikey', value: JSON.stringify({ retryId, retryAfter: retryAfterSec }), style: nextAccount ? undefined : 'primary' },
-      { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: JSON.stringify({ retryId, rlqId: q.id }) },
+      { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: JSON.stringify({ retryId, captureId }) },
     );
 
     await say({
@@ -1860,7 +1861,6 @@ export class SlackHandler {
         { type: 'section', text: { type: 'mrkdwn', text: `⏳ ${t('rateLimit.reached', locale)}\n${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfterSec / 60) })}` } },
         { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.prompt', locale, { prompt: promptPreview }) }] },
         { type: 'actions', elements: buttons },
-        { type: 'context', elements: [{ type: 'mrkdwn', text: t('rlq.queued', locale) }] },
       ],
     });
   }
@@ -1875,157 +1875,15 @@ export class SlackHandler {
    */
   private armRateLimitRecovery(resetsAt: number | null): void {
     if (!resetsAt) return;
-    if (this.rlqTimer) clearTimeout(this.rlqTimer);
-    // 새로 막힌 것은 **새 사건**이다 — 앞 건에서 다 쓴 되풀이 횟수를 물려받으면
-    // 이번 것은 한 번도 다시 안 알리게 된다.
-    const seen = rlqGetNotice();
-    if (seen) rlqSetNotice({ ...seen, count: 0 });
+    if (this.limitTimer) clearTimeout(this.limitTimer);
     const delay = Math.max(60_000, resetsAt * 1000 + 60_000 - Date.now());
-    this.rlqTimer = setTimeout(() => {
-      this.rlqTimer = undefined;
-      // **밀린 것은 캡처 큐가 정본이다** — 이유를 안 가리고 쌓이며 처리되면
-      // 스스로 닫힌다. 아래 한도 큐는 이유별 장치라 실제로 어긋났다(08/24 의
-      // 서버 과부하를 5시간짜리 한도로 잡아 이레를 들고 있었다). 3단계에서
-      // 그쪽을 걷는다 — 지금은 나란히 두고 값을 본다.
+    this.limitTimer = setTimeout(() => {
+      this.limitTimer = undefined;
+      this.limitNoticed = false;
+      clearUntil();
       this.drainStuck('한도 회복').catch((e) => this.logger.error('drain failed', e));
-      this.postRecoveryPrompt().catch((e) => this.logger.error('Rate-limit recovery prompt failed', e));
     }, delay);
     this.logger.info('Rate-limit recovery armed', { resetsAt, inMinutes: Math.round(delay / 60_000) });
-  }
-
-  /** 기동 시 남아 있는 큐를 되살린다. 회복 시각이 이미 지났으면 바로 묻는다. */
-  private restoreRateLimitQueue(): void {
-    const s = rlqPeek();
-    if (s.items.length === 0) return;
-    this.logger.warn('Restoring rate-limit queue', { count: s.items.length, resetsAt: s.resetsAt });
-    if (!s.resetsAt || s.resetsAt * 1000 <= Date.now()) {
-      this.postRecoveryPrompt().catch((e) => this.logger.error('Rate-limit recovery prompt failed', e));
-    } else {
-      this.armRateLimitRecovery(s.resetsAt);
-    }
-  }
-
-  /**
-   * 밀린 것을 목록으로 보여 주고 사람이 고르게 한다.
-   *
-   * **자동으로 다 돌리지 않는 이유** — 몇 시간 전 지시가 그사이 뒤집혔을 수 있다.
-   * 「그거 말고 회의 메모로」가 앞 지시를 취소한 경우, 자동 실행은 둘 다 돌려
-   * 되돌리기 어려운 쓰기를 남긴다.
-   */
-  private async postRecoveryPrompt(): Promise<void> {
-    const s = rlqPeek();
-    if (s.items.length === 0) { this.stopRlqNudge(); return; }
-    // 여러 채널에 흩어져 있어도 **마지막으로 말을 건 자리 한 곳에만** 올린다 —
-    // 밀린 것을 알리려고 여러 방을 두드리면 그것이 또 소음이다.
-    const last = s.items[s.items.length - 1];
-    const locale = await this.getUserLocale(last.user);
-    const lines = s.items.map((it, i) => {
-      const body = it.text.length > 60 ? `${it.text.slice(0, 60)}…` : it.text;
-      return `${i + 1}. 「${body}」  _${formatTime(new Date(it.ts * 1000), locale)}_`;
-    });
-    // 되풀이할 때는 **얼마나 기다렸는지**를 앞에 둔다. 같은 문장을 또 올리면 앞서 본
-    // 그 알림과 구별이 안 돼서 또 넘어간다.
-    const waitedH = s.resetsAt
-      ? Math.floor((Date.now() - s.resetsAt * 1000) / 3_600_000) : 0;
-    const head = waitedH > 0
-      ? t('rlq.stillWaiting', locale, { count: String(s.items.length), hours: String(waitedH) })
-      : t('rlq.recovered', locale, { count: String(s.items.length) });
-    // **앞 알림은 지우고 새로 올린다.** 고쳐 쓰면(`chat.update`) 슬랙이 새 알림을 안 보내
-    // 되풀이하는 뜻이 없어지고, 안 지우면 버튼 달린 옛 글이 줄줄이 쌓인다.
-    const prev = rlqGetNotice();
-    if (prev) {
-      await this.app.client.chat.delete({ channel: prev.channel, ts: prev.ts })
-        .catch(() => undefined);   // 사람이 이미 지웠으면 그만이다
-    }
-    const res = await this.app.client.chat.postMessage({
-      channel: last.channel,
-      thread_ts: last.threadTs,
-      text: head,
-      blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: `${head}\n${lines.join('\n')}` } },
-        {
-          type: 'actions', elements: [
-            { type: 'button', text: { type: 'plain_text', text: t('rlq.runAll', locale) }, action_id: 'rlq_run_all', style: 'primary' },
-            { type: 'button', text: { type: 'plain_text', text: t('rlq.runLast', locale) }, action_id: 'rlq_run_last' },
-            { type: 'button', text: { type: 'plain_text', text: t('rlq.drop', locale) }, action_id: 'rlq_drop' },
-          ],
-        },
-      ],
-    }).catch((e) => {
-      this.logger.error('Failed to post rate-limit recovery prompt', e);
-      return undefined;
-    });
-    if (res?.ts) {
-      rlqSetNotice({ channel: last.channel, ts: res.ts as string, count: prev?.count ?? 0 });
-    }
-    // **올리고 나서 다시 예약한다.** 한 번 뜬 알림은 자리를 비운 사이 그대로 묻힌다 —
-    // 실측(2026-08-24) 20:10 에 한 번 알리고 그대로 **22시간을 기다렸다.**
-    this.armRlqNudge();
-  }
-
-  /**
-   * 밀린 것이 남아 있으면 **일정 간격으로 다시 알린다.**
-   *
-   * 자동으로 실행하지 않는 구조라 사람이 눌러야 끝나는데, 알림이 한 번뿐이면 자리를
-   * 비운 사이 그대로 묻힌다. 그렇다고 밤새 두드리면 그게 또 소음이라 **깨어 있는
-   * 시간에만**, 그리고 **몇 번까지만** 다시 올린다 — 끝없이 되풀이하면 사람이
-   * 그 알림 자체를 안 보게 되고, 그러면 되풀이하는 뜻이 사라진다.
-   */
-  private armRlqNudge(): void {
-    if (this.rlqNudgeTimer) clearTimeout(this.rlqNudgeTimer);
-    this.rlqNudgeTimer = undefined;
-    if (RLQ_NUDGE_MIN <= 0) return;
-    this.rlqNudgeTimer = setTimeout(() => {
-      this.rlqNudgeTimer = undefined;
-      void this.nudgeRecovery();
-    }, RLQ_NUDGE_MIN * 60_000);
-  }
-
-  private stopRlqNudge(): void {
-    if (this.rlqNudgeTimer) clearTimeout(this.rlqNudgeTimer);
-    this.rlqNudgeTimer = undefined;
-    rlqSetNotice(null);
-  }
-
-  private async nudgeRecovery(): Promise<void> {
-    const pending = rlqPeek().items.length;
-    const what = nudgeDecision({
-      pending, hour: new Date().getHours(), nudges: rlqGetNotice()?.count ?? 0,
-      fromHour: RLQ_NUDGE_FROM_HOUR, toHour: RLQ_NUDGE_TO_HOUR, max: RLQ_NUDGE_MAX,
-    });
-    if (what === 'wait') { this.armRlqNudge(); return; }
-    if (what === 'stop') {
-      if (pending > 0) {
-        this.logger.warn('Rate-limit queue still pending — stopped nudging', {
-          times: rlqGetNotice()?.count ?? 0, items: pending,
-        });
-      }
-      this.stopRlqNudge();
-      return;
-    }
-    const seen = rlqGetNotice();
-    if (seen) rlqSetNotice({ ...seen, count: seen.count + 1 });
-    await this.postRecoveryPrompt();
-  }
-
-  /**
-   * 받은 순서대로 다시 돌린다. **하나씩 기다린다** — 한꺼번에 던지면 그 자리에서
-   * 다시 한도에 걸린다. 도중에 또 막히면 그쪽이 큐에 다시 쌓고 다음 회복 시각을
-   * 잡으므로 여기서 따로 처리하지 않는다.
-   */
-  private async replayQueued(items: QueuedRequest[]): Promise<void> {
-    for (const it of items) {
-      try {
-        const event: MessageEvent = {
-          user: it.user, channel: it.channel,
-          thread_ts: it.threadTs, ts: it.threadTs, text: it.text,
-        };
-        const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel: it.channel, ...msg });
-        await this.handleMessage(event, sayCb);
-      } catch (error) {
-        this.logger.error('Rate-limit queue replay failed', error);
-      }
-    }
   }
 
   /**
@@ -2046,6 +1904,13 @@ export class SlackHandler {
 
   private async drainStuck(why: string): Promise<void> {
     if (this.draining || !isWorkAssistantEnabled()) return;
+    // **아직 안 풀렸으면 안 돈다.** 기동 드레인이 한도에 곧바로 다시 부딪히면
+    // 아무것도 못 하면서 **시도 횟수만 태운다** — 상한이 3회라 두 번 재시작하면
+    // 사람 손으로 넘어간다.
+    if (stillBlocked()) {
+      this.logger.info('아직 한도가 안 풀려 다시 돌리지 않습니다', { why });
+      return;
+    }
     this.draining = true;
     try {
       const items = await pendingCaptures(DRAIN_MAX);
@@ -4309,15 +4174,15 @@ export class SlackHandler {
       const raw = (body as any).actions[0].value;
       // 예전 형식(문자열 그대로)도 받는다 — 봇을 올리기 전에 뿌려진 버튼이 살아 있다.
       let retryId = raw;
-      let rlqId: string | undefined;
+      let captureId: string | undefined;
       try {
         const parsed = JSON.parse(raw);
-        retryId = parsed.retryId; rlqId = parsed.rlqId;
+        retryId = parsed.retryId; captureId = parsed.captureId ?? parsed.rlqId;
       } catch { /* 예전 형식 */ }
       this.clearRetryTimers(retryId);
       this.pendingRetries.delete(retryId);
-      // **큐에서도 뺀다.** 안 빼면 취소해 놓고도 회복 시각에 다시 올라온다.
-      if (rlqId) rlqRemove(rlqId);
+      // **캡처도 버린다.** 안 버리면 취소해 놓고도 회복 시각에 드레인이 다시 돌린다.
+      if (captureId) await dropCapture(captureId, '사람이 취소함');
       await respond({ response_type: 'ephemeral', text: t('misc.cancelled', actionLocale) });
     });
 
@@ -4593,55 +4458,12 @@ export class SlackHandler {
       }
     });
 
-    this.action('rlq_run_all', async ({ ack, body, respond }) => {
-      await ack();
-      // 사람이 골랐으면 **다시 알리기를 그 자리에서 끈다.**
-      this.stopRlqNudge();
-      const locale = await this.getUserLocale((body as any).user.id);
-      const items = rlqTakeAll();
-      if (items.length === 0) {
-        await respond({ response_type: 'ephemeral', text: t('rlq.expired', locale) });
-        return;
-      }
-      await respond({ replace_original: true, text: t('rlq.running', locale, { count: String(items.length) }) });
-      // 기다리지 않는다 — 버튼 응답은 3초 안에 끝나야 하고, 재실행은 몇 분이 걸린다.
-      void this.replayQueued(items);
-    });
-
-    this.action('rlq_run_last', async ({ ack, body, respond }) => {
-      await ack();
-      // 사람이 골랐으면 **다시 알리기를 그 자리에서 끈다.**
-      this.stopRlqNudge();
-      const locale = await this.getUserLocale((body as any).user.id);
-      const items = rlqTakeAll();
-      if (items.length === 0) {
-        await respond({ response_type: 'ephemeral', text: t('rlq.expired', locale) });
-        return;
-      }
-      const last = items[items.length - 1];
-      await respond({ replace_original: true, text: t('rlq.running', locale, { count: '1' }) });
-      void this.replayQueued([last]);
-    });
-
-    this.action('rlq_drop', async ({ ack, body, respond }) => {
-      await ack();
-      // 사람이 골랐으면 **다시 알리기를 그 자리에서 끈다.**
-      this.stopRlqNudge();
-      const locale = await this.getUserLocale((body as any).user.id);
-      const n = rlqPeek().items.length;
-      rlqClear();
-      await respond({ replace_original: true, text: t('rlq.dropped', locale, { count: String(n) }) });
-    });
-
     // 재시작에 끊긴 대화 알리기. 기동 직후는 슬랙 연결이 아직이라 잠깐 미룬다.
     setTimeout(() => this.reportInterruptedSessions()
       // **알리고 나서 돌린다** — 순서가 규칙이다. 먼저 돌리면 끊긴 차례의
       // 자국(`interrupted`)이 아직 안 찍혀 그 건이 목록에서 빠진다.
       .then(() => this.drainStuck('기동'))
       .catch(() => { }), 12_000);
-    // 한도에 막혀 밀린 것도 같이 되살린다 — 재시작으로 사라지면 큐를 파일에 둔
-    // 뜻이 없다.
-    setTimeout(() => this.restoreRateLimitQueue(), 13_000);
 
     // Cleanup inactive sessions periodically
     setInterval(() => {

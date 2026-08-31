@@ -62,7 +62,7 @@ coverage/
 # 처리 중이던 대화 기록 (재시작 알림용 런타임 상태)
 .inflight-sessions.json
 # 한도에 막혀 밀린 요청 — 사용자가 보낸 원문이 들어간다
-.rate-limit-queue.json
+.rate-limit-until.json
 
 # 모델 실험 산출물 — 결과는 work-assistant/docs/design.md 에 정리해 둔다
 .bench/
