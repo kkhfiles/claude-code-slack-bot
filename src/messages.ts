@@ -154,30 +154,6 @@ const messages: Record<string, Record<Locale, string>> = {
   'rateLimit.continueWithApiKey': { en: 'Continue with API key', ko: 'API 키로 계속' },
   'rateLimit.switchAccount': { en: '🔄 Switch to {{account}}', ko: '🔄 {{account}}으로 전환' },
 
-  // 한도에 막혀 밀린 요청 — 회복 시각에 목록을 보여 주고 사람이 고른다
-  'rlq.queued': {
-    en: '_Messages you send from now on are held and shown when the limit lifts._',
-    ko: '_이후 보내시는 메시지는 쌓아 두었다가 한도가 풀리면 보여 드립니다._',
-  },
-  // 「풀렸다」고 단정하지 않는다 — 확인한 것은 예상 시각이 지났다는 것뿐이고,
-  // 실제로 안 풀렸으면 실행이 그 자리에서 다시 막힌다.
-  'rlq.recovered': {
-    en: '⏰ *The expected reset time has passed.* {{count}} message(s) were held.',
-    ko: '⏰ *한도 회복 예정 시각이 지났습니다.* 밀린 {{count}}건이 있습니다.',
-  },
-  // 다시 알릴 때. **얼마나 기다렸는지를 앞에 둔다** — 「밀린 게 있다」만 되풀이하면
-  // 앞서 본 그 알림과 구별이 안 돼서 또 넘어간다.
-  'rlq.stillWaiting': {
-    en: '⏰ *Still held — {{hours}}h since the expected reset.* {{count}} message(s) are waiting.',
-    ko: '⏰ *아직 그대로입니다 — 회복 예정 시각에서 {{hours}}시간 지났습니다.* 밀린 {{count}}건이 있습니다.',
-  },
-  'rlq.runAll': { en: 'Run now', ko: '지금 실행' },
-  'rlq.runLast': { en: 'Only the last one', ko: '마지막 것만' },
-  'rlq.drop': { en: 'Discard', ko: '버림' },
-  'rlq.running': { en: '▶️ Running {{count}} held message(s)…', ko: '▶️ 밀린 {{count}}건을 순서대로 처리합니다…' },
-  'rlq.dropped': { en: 'Discarded {{count}} held message(s).', ko: '밀린 {{count}}건을 버렸습니다.' },
-  'rlq.expired': { en: 'Nothing is held anymore.', ko: '밀려 있던 것이 이미 없습니다.' },
-
   // API key
   'apiKey.modalTitle': { en: 'API Key', ko: 'API 키' },
   'apiKey.modalSubmit': { en: 'Save', ko: '저장' },
