@@ -184,6 +184,15 @@ export class SlackHandler {
   private todoMessages: Map<string, string> = new Map();
   private originalMessages: Map<string, { channel: string; ts: string }> = new Map();
   private currentReactions: Map<string, Set<string>> = new Map();
+  // **반응은 순서만 지키고 기다리지 않는다** (2026-08-31). 반응 하나가 슬랙 왕복
+  // 한두 번인데 그 결과를 읽는 곳이 어디에도 없다. 그런데 차례의 앞뒤 양쪽에서
+  // 기다리고 있었다 — 띄우기 전 0.52초, 차례 끝 2.16초 중 대부분(08/31 실측).
+  //
+  // ⚠️ **그냥 안 기다리면 순서가 깨진다** — 반응을 바꾸는 함수가 `activeReactions`
+  // 를 **await 뒤에** 고치므로, 두 호출이 겹치면 서로의 중간 상태를 보고 충돌
+  // 반응을 안 지우거나 같은 것을 두 번 단다. 그래서 세션마다 줄을 세워 **순서는
+  // 그대로 두고 기다리는 것만 없앤다.**
+  private reactionChain: Map<string, Promise<void>> = new Map();
 
   // Thread hint tracking (show command hint once per thread)
   private hintShownThreads: Set<string> = new Set();
@@ -1554,6 +1563,8 @@ export class SlackHandler {
           this.todoMessages.delete(sessionKey);
           this.originalMessages.delete(sessionKey);
           this.currentReactions.delete(sessionKey);
+          // 줄에 선 반응은 진작 다 나갔다(5분). 안 지우면 세션마다 약속이 하나씩 쌓인다.
+          this.reactionChain.delete(sessionKey);
         }, 5 * 60 * 1000);
       }
     }
@@ -2074,66 +2085,89 @@ export class SlackHandler {
 
   private readonly ANCHOR_REACTION = 'hourglass_flowing_sand'; // ⏳
 
+  /**
+   * **줄에 세우고 바로 돌아온다.** 반응 API 를 기다리지 않으므로 부르는 쪽의
+   * `await` 는 즉시 풀린다 — 호출 지점을 하나도 안 고치고 대기만 걷어내려고
+   * 반환형을 `Promise<void>` 로 남겨 두었다.
+   *
+   * 순서는 세션마다 하나뿐인 약속 사슬이 지킨다. 실패는 삼킨다 — 반응은 장식이라
+   * 못 달렸다고 차례를 멈출 이유가 없고, 원래 코드도 통째로 `catch` 였다.
+   *
+   * ⚠️ **원본 메시지는 실행 시점에 읽는다** — 줄에 선 뒤에 세션이 정리될 수 있다.
+   * 정리는 5분 뒤라 실제로는 넉넉하지만, 사라졌으면 조용히 건너뛰는 것이 맞다.
+   */
+  private queueReaction(sessionKey: string, work: () => Promise<void>): void {
+    const prev = this.reactionChain.get(sessionKey) ?? Promise.resolve();
+    const next = prev.then(work).catch(() => { /* 반응은 장식 */ });
+    this.reactionChain.set(sessionKey, next);
+  }
+
   private async addAnchorReaction(sessionKey: string): Promise<void> {
-    const originalMessage = this.originalMessages.get(sessionKey);
-    if (!originalMessage) return;
-    try {
-      await this.app.client.reactions.add({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: this.ANCHOR_REACTION });
-    } catch { /* ignore */ }
+    this.queueReaction(sessionKey, async () => {
+      const originalMessage = this.originalMessages.get(sessionKey);
+      if (!originalMessage) return;
+      try {
+        await this.app.client.reactions.add({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: this.ANCHOR_REACTION });
+      } catch { /* ignore */ }
+    });
   }
 
   private async removeAnchorReaction(sessionKey: string): Promise<void> {
-    const originalMessage = this.originalMessages.get(sessionKey);
-    if (!originalMessage) return;
-    try {
-      await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: this.ANCHOR_REACTION });
-    } catch { /* ignore */ }
+    this.queueReaction(sessionKey, async () => {
+      const originalMessage = this.originalMessages.get(sessionKey);
+      if (!originalMessage) return;
+      try {
+        await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: this.ANCHOR_REACTION });
+      } catch { /* ignore */ }
+    });
   }
 
   private async updateMessageReaction(sessionKey: string, emoji: string): Promise<void> {
-    const originalMessage = this.originalMessages.get(sessionKey);
-    if (!originalMessage) return;
+    this.queueReaction(sessionKey, async () => {
+      const originalMessage = this.originalMessages.get(sessionKey);
+      if (!originalMessage) return;
 
-    const reactionName = this.emojiToReaction[emoji] || emoji;
-    let activeReactions = this.currentReactions.get(sessionKey);
-    if (!activeReactions) {
-      activeReactions = new Set();
-      this.currentReactions.set(sessionKey, activeReactions);
-    }
-
-    // Already showing this exact reaction — nothing to do
-    if (activeReactions.has(reactionName)) {
-      // Still remove any conflicting ones that shouldn't be there
-      const conflicts = this.getConflictingReactions(reactionName);
-      for (const conflict of conflicts) {
-        if (activeReactions.has(conflict)) {
-          try {
-            await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: conflict });
-          } catch { /* might not exist */ }
-          activeReactions.delete(conflict);
-        }
-      }
-      return;
-    }
-
-    try {
-      // Remove all conflicting reactions first
-      const conflicts = this.getConflictingReactions(reactionName);
-      for (const conflict of conflicts) {
-        if (activeReactions.has(conflict)) {
-          try {
-            await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: conflict });
-          } catch { /* might not exist */ }
-          activeReactions.delete(conflict);
-        }
+      const reactionName = this.emojiToReaction[emoji] || emoji;
+      let activeReactions = this.currentReactions.get(sessionKey);
+      if (!activeReactions) {
+        activeReactions = new Set();
+        this.currentReactions.set(sessionKey, activeReactions);
       }
 
-      // Add the new reaction
-      await this.app.client.reactions.add({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: reactionName });
-      activeReactions.add(reactionName);
-    } catch (error) {
-      this.logger.warn('Failed to update message reaction', error);
-    }
+      // Already showing this exact reaction — nothing to do
+      if (activeReactions.has(reactionName)) {
+        // Still remove any conflicting ones that shouldn't be there
+        const conflicts = this.getConflictingReactions(reactionName);
+        for (const conflict of conflicts) {
+          if (activeReactions.has(conflict)) {
+            try {
+              await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: conflict });
+            } catch { /* might not exist */ }
+            activeReactions.delete(conflict);
+          }
+        }
+        return;
+      }
+
+      try {
+        // Remove all conflicting reactions first
+        const conflicts = this.getConflictingReactions(reactionName);
+        for (const conflict of conflicts) {
+          if (activeReactions.has(conflict)) {
+            try {
+              await this.app.client.reactions.remove({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: conflict });
+            } catch { /* might not exist */ }
+            activeReactions.delete(conflict);
+          }
+        }
+
+        // Add the new reaction
+        await this.app.client.reactions.add({ channel: originalMessage.channel, timestamp: originalMessage.ts, name: reactionName });
+        activeReactions.add(reactionName);
+      } catch (error) {
+        this.logger.warn('Failed to update message reaction', error);
+      }
+    });
   }
 
   private async updateTaskProgressReaction(sessionKey: string, todos: Todo[]): Promise<void> {
