@@ -32,7 +32,7 @@ import { LetterBoost } from './letter-boost';
 import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
-import { captureToInbox, checkinMap, checkinNow, isWorkAssistantEnabled, quickUpdate } from './work-assistant';
+import { captureToInbox, checkinMap, checkinNow, isWorkAssistantEnabled, markCaptureFailed, quickUpdate } from './work-assistant';
 import { boardLabel } from './board-queue';
 
 /**
@@ -91,7 +91,10 @@ const INTERACTIVE_COMPACT_WINDOW = 433_000;
  */
 const INFLIGHT_FILE = path.join(__dirname, '..', '.inflight-sessions.json');
 
-interface InflightRecord { channel: string; threadTs?: string; text: string; startedAt: string; }
+interface InflightRecord { channel: string; threadTs?: string; text: string;
+  startedAt: string;
+  /** 이 차례가 든 캡처. 재시작으로 끊기면 그 캡처에 표시를 남긴다. */
+  captureId?: string; }
 
 function readInflight(): Record<string, InflightRecord> {
   try { return JSON.parse(fs.readFileSync(INFLIGHT_FILE, 'utf-8')); } catch { return {}; }
@@ -1135,6 +1138,9 @@ export class SlackHandler {
     // 줄일 값이 있는지는 재 봐야 안다 — 짐작으로 손대지 않는다.
     // 미리 띄우기는 차례가 **끝난 뒤**에 하므로, 그때 쓸 옵션을 여기 들어 둔다.
     let sdkOptsForWarm: SdkRunOptions | null = null;
+    // **`try` 밖에 둔다** — 차례가 터졌을 때 `catch` 에서도 캡처에 표시를 남겨야
+    // 한다. 안에 두면 그 자리에서 안 보여, 정작 실패한 차례가 자국을 못 남긴다.
+    let captureId = '';
     const spawnT0 = Date.now();
     const lap: Record<string, number> = {};
     const mark = (k: string) => { lap[k] = Date.now() - spawnT0; };
@@ -1238,6 +1244,7 @@ export class SlackHandler {
       // JSONL 에 직접 붙이므로, 노션이 막혀도 세션이 재시작에 죽어도 원문은 남는다.
       // 세션에 맡겼더니 안 했다(2026-08-06: 캡처 0건) — 그래서 봇이 한다.
       const capture = text?.trim() ? captureToInbox(text, 'slack', thread_ts) : null;
+      captureId = capture?.id ?? '';
       mark('원문 캡처');
       // 체크인이 화면에 떠 있는데 답이 짧은 문법에 안 맞아 여기까지 왔다면,
       // **번호의 뜻을 같이 넘긴다.** 안 넘기면 세션이 추측하고, 업무 ID 와 숫자가
@@ -1294,7 +1301,7 @@ export class SlackHandler {
       // 아래 스트림이 그 `ts` 로 상태를 고쳐 쓰므로 들어가기 전에 받아 둔다.
       await statusSent;
       this.activeProcesses.set(sessionKey, cliProcess);
-      { const m = readInflight(); m[sessionKey] = { channel, threadTs: replyTs, text: (text || '').slice(0, 160), startedAt: new Date().toISOString() }; writeInflight(m); }
+      { const m = readInflight(); m[sessionKey] = { channel, threadTs: replyTs, text: (text || '').slice(0, 160), startedAt: new Date().toISOString(), captureId }; writeInflight(m); }
 
       for await (const event of cliProcess) {
         // Session init tracking
@@ -1575,6 +1582,10 @@ export class SlackHandler {
 
       // Handle rate limit (from rate_limit_event or error text)
       if (rateLimitInfo || rateLimitMessageText) {
+        // **캡처에 남긴다 — 이유를 안 가리는 그 자국이다.** 아래 한도 큐는
+        // 이유별 장치라 실제로 어긋났다(08/24 의 서버 과부하를 5시간짜리 한도로
+        // 잡아 이레를 들고 있었다). 정본은 캡처 큐 한 곳으로 간다.
+        void markCaptureFailed(captureId, 'limit');
         const retryAfter = rateLimitInfo
           ? rateLimitInfo.retryAfterSec
           : this.parseRetryAfterSeconds({ message: rateLimitMessageText });
@@ -1600,6 +1611,10 @@ export class SlackHandler {
       const rateLimitSource = rateLimitMessageText
         ? { message: rateLimitMessageText }
         : this.isRateLimitError(error) ? error : null;
+
+      // **터진 것도 같은 자국을 남긴다.** 한도인지 아닌지는 재시도 *시점*만
+      // 가르고, 「처리 못 했다」는 사실은 둘이 같다.
+      void markCaptureFailed(captureId, rateLimitSource ? 'limit' : 'error');
 
       if (rateLimitSource) {
         const retryAfter = rateLimitInfo
@@ -3543,6 +3558,9 @@ export class SlackHandler {
     this.logger.warn('Reporting interrupted sessions', { count: keys.length });
     for (const key of keys) {
       const r = pending[key];
+      // **끊긴 것도 캡처에 남긴다.** 「다시 보내주세요」는 사람이 친 말에나
+      // 통하지, 판이나 메일 폴러가 민 것은 보낸 사람이 그 화면을 떠났다.
+      void markCaptureFailed(r.captureId ?? '', 'interrupted');
       await this.app.client.chat.postMessage({
         channel: r.channel,
         thread_ts: r.threadTs,

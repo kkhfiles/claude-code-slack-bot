@@ -80,10 +80,15 @@ for (const { file, toks } of calls) {
   const key = toks.join(' ');
   if (seen.has(key)) continue;
   seen.add(key);
-  const ok = allowed.get(toks[0]);
-  const miss = toks.slice(1).filter((x) => x.startsWith('--') && !ok.has(x));
+  // **두 단 명령을 안다** — `inbox` 처럼 안에 또 서브커맨드를 두는 것이 있다
+  // (`inbox fail --id …`). 첫 칸으로만 대조하면 플래그가 붙은 자리는 두 번째
+  // 칸인데 빈 집합과 견주게 되어 **멀쩡한 호출이 실패로 뜬다**(2026-08-31).
+  const two = toks.length > 1 && !toks[1].startsWith('--') && allowed.has(toks[1]);
+  const name = two ? `${toks[0]} ${toks[1]}` : toks[0];
+  const ok = allowed.get(two ? toks[1] : toks[0]);
+  const miss = toks.slice(two ? 2 : 1).filter((x) => x.startsWith('--') && !ok.has(x));
   if (miss.length) {
-    fails.push(`${file}: \`${key}\` — «${toks[0]}» 에 없는 플래그 ${miss.join(' ')}`
+    fails.push(`${file}: \`${key}\` — «${name}» 에 없는 플래그 ${miss.join(' ')}`
       + `\n    쓸 수 있는 것: ${[...ok].sort().join(' ') || '(없음)'}`);
   }
 }

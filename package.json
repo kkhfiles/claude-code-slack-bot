@@ -27,7 +27,8 @@
     "check:quiet": "node scripts/check-quiet-rooms.mjs",
     "check:activity": "node scripts/check-activity-log.mjs",
     "check:slackui": "node scripts/check-slack-queue.mjs",
-    "check:prewarm": "node scripts/check-prewarm.mjs"
+    "check:prewarm": "node scripts/check-prewarm.mjs",
+    "check:capfail": "node scripts/check-capture-fail.mjs"
   },
   "keywords": [],
   "author": "",
