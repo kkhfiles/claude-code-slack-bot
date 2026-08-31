@@ -192,7 +192,7 @@ export class SlackHandler {
   // 를 **await 뒤에** 고치므로, 두 호출이 겹치면 서로의 중간 상태를 보고 충돌
   // 반응을 안 지우거나 같은 것을 두 번 단다. 그래서 세션마다 줄을 세워 **순서는
   // 그대로 두고 기다리는 것만 없앤다.**
-  private reactionChain: Map<string, Promise<void>> = new Map();
+  private slackChain: Map<string, Promise<void>> = new Map();
 
   // Thread hint tracking (show command hint once per thread)
   private hintShownThreads: Set<string> = new Set();
@@ -1275,19 +1275,12 @@ export class SlackHandler {
               const newStatusText = `${toolEmoji} ${t('status.usingTool', locale, { toolName })}`;
               if (newStatusText === lastStatusText) {
                 statusRepeatCount++;
-                await this.app.client.chat.update({
-                  channel,
-                  ts: statusMessageTs,
-                  text: `${toolEmoji} ${t('status.usingToolCount', locale, { toolName, count: statusRepeatCount })}`,
-                }).catch(() => {});
+                this.queueStatus(sessionKey, channel, statusMessageTs,
+                  `${toolEmoji} ${t('status.usingToolCount', locale, { toolName, count: statusRepeatCount })}`);
               } else {
                 lastStatusText = newStatusText;
                 statusRepeatCount = 1;
-                await this.app.client.chat.update({
-                  channel,
-                  ts: statusMessageTs,
-                  text: newStatusText,
-                }).catch(() => {});
+                this.queueStatus(sessionKey, channel, statusMessageTs, newStatusText);
               }
             }
             await this.updateMessageReaction(sessionKey, toolEmoji);
@@ -1361,7 +1354,7 @@ export class SlackHandler {
                 if (newStatusText !== lastStatusText) {
                   lastStatusText = newStatusText;
                   statusRepeatCount = 1;
-                  await this.app.client.chat.update({ channel, ts: statusMessageTs, text: newStatusText }).catch(() => {});
+                  this.queueStatus(sessionKey, channel, statusMessageTs, newStatusText);
                 }
               }
               await this.updateMessageReaction(sessionKey, '✍️');
@@ -1463,11 +1456,11 @@ export class SlackHandler {
         // **여기서도 기다리지 않는다** (2026-08-31). 상태 한 줄을 지우거나 고치는
         // 것은 슬랙 왕복인데, 그 결과를 읽는 곳이 없고 뒤에 오는 것은 판 반영이다.
         // 기다리면 **카드가 늦게 바뀐다** — 사람이 보는 것은 그 카드다.
-        if (pushed && !cliError) {
-          void this.app.client.chat.delete({ channel, ts: statusMessageTs }).catch(() => {});
-        } else {
-          void this.app.client.chat.update({ channel, ts: statusMessageTs, text: `${doneEmoji} ${doneLabel}${toolSummary}${costSuffix}` }).catch(() => {});
-        }
+        //
+        // ⚠️ **스트림 안의 고치기와 같은 줄에 세운다** — 따로 두면 이 「지우기」가
+        // 아직 안 나간 「고치기」를 앞질러, 지운 메시지를 고치려 드는 순서가 나온다.
+        this.queueStatus(sessionKey, channel, statusMessageTs,
+          `${doneEmoji} ${doneLabel}${toolSummary}${costSuffix}`, pushed && !cliError);
       }
       await this.updateMessageReaction(sessionKey, doneEmoji);
       await this.removeAnchorReaction(sessionKey);
@@ -1538,7 +1531,7 @@ export class SlackHandler {
       this.logger.error('Error handling message', error);
 
       if (statusMessageTs) {
-        await this.app.client.chat.update({ channel, ts: statusMessageTs, text: `❌ ${t('status.errorOccurred', locale)}` }).catch(() => {});
+        this.queueStatus(sessionKey, channel, statusMessageTs, `❌ ${t('status.errorOccurred', locale)}`);
       }
       await this.updateMessageReaction(sessionKey, '❌');
       await this.removeAnchorReaction(sessionKey);
@@ -1585,7 +1578,7 @@ export class SlackHandler {
           this.originalMessages.delete(sessionKey);
           this.currentReactions.delete(sessionKey);
           // 줄에 선 반응은 진작 다 나갔다(5분). 안 지우면 세션마다 약속이 하나씩 쌓인다.
-          this.reactionChain.delete(sessionKey);
+          this.slackChain.delete(sessionKey);
         }, 5 * 60 * 1000);
       }
     }
@@ -2117,14 +2110,36 @@ export class SlackHandler {
    * ⚠️ **원본 메시지는 실행 시점에 읽는다** — 줄에 선 뒤에 세션이 정리될 수 있다.
    * 정리는 5분 뒤라 실제로는 넉넉하지만, 사라졌으면 조용히 건너뛰는 것이 맞다.
    */
-  private queueReaction(sessionKey: string, work: () => Promise<void>): void {
-    const prev = this.reactionChain.get(sessionKey) ?? Promise.resolve();
+  private queueSlack(sessionKey: string, work: () => Promise<void>): void {
+    const prev = this.slackChain.get(sessionKey) ?? Promise.resolve();
     const next = prev.then(work).catch(() => { /* 반응은 장식 */ });
-    this.reactionChain.set(sessionKey, next);
+    this.slackChain.set(sessionKey, next);
+  }
+
+  /**
+   * 상태 한 줄(「🔍 Read 사용 중」)을 **줄에 세워서** 고친다 (2026-08-31).
+   *
+   * 도구를 쓸 때마다 이 줄을 고치는데, 그때마다 슬랙 왕복을 **기다리고 있었다** —
+   * 도구 호출 수 × 0.26초가 그대로 차례에 실린다. 판에서 온 것은 그 줄을 끝에
+   * 지우므로 **아무도 안 읽는다.**
+   *
+   * ⚠️ **반응과 같은 줄에 세운다.** 따로 두면 차례 끝의 「지우기」가 진행 중이던
+   * 「고치기」를 앞질러, 지운 메시지를 고치려 드는 순서가 나온다.
+   */
+  private queueStatus(sessionKey: string, channel: string, ts: string | undefined,
+                      text: string, remove = false): void {
+    if (!ts) return;
+    this.queueSlack(sessionKey, async () => {
+      if (remove) {
+        await this.app.client.chat.delete({ channel, ts }).catch(() => {});
+      } else {
+        await this.app.client.chat.update({ channel, ts, text }).catch(() => {});
+      }
+    });
   }
 
   private async addAnchorReaction(sessionKey: string): Promise<void> {
-    this.queueReaction(sessionKey, async () => {
+    this.queueSlack(sessionKey, async () => {
       const originalMessage = this.originalMessages.get(sessionKey);
       if (!originalMessage) return;
       try {
@@ -2134,7 +2149,7 @@ export class SlackHandler {
   }
 
   private async removeAnchorReaction(sessionKey: string): Promise<void> {
-    this.queueReaction(sessionKey, async () => {
+    this.queueSlack(sessionKey, async () => {
       const originalMessage = this.originalMessages.get(sessionKey);
       if (!originalMessage) return;
       try {
@@ -2144,7 +2159,7 @@ export class SlackHandler {
   }
 
   private async updateMessageReaction(sessionKey: string, emoji: string): Promise<void> {
-    this.queueReaction(sessionKey, async () => {
+    this.queueSlack(sessionKey, async () => {
       const originalMessage = this.originalMessages.get(sessionKey);
       if (!originalMessage) return;
 

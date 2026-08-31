@@ -28,9 +28,9 @@ function restore() {
 }
 process.on('exit', restore);
 
-const CHAIN = `        const prev = this.reactionChain.get(sessionKey) ?? Promise.resolve();
+const CHAIN = `        const prev = this.slackChain.get(sessionKey) ?? Promise.resolve();
         const next = prev.then(work).catch(() => { });
-        this.reactionChain.set(sessionKey, next);`;
+        this.slackChain.set(sessionKey, next);`;
 
 const mutations = [
   {
@@ -42,24 +42,54 @@ const mutations = [
   {
     name: '실패를 안 삼킴 — 한 번 터지면 그 세션 반응이 통째로 죽는다',
     from: CHAIN,
-    to: `        const prev = this.reactionChain.get(sessionKey) ?? Promise.resolve();
+    to: `        const prev = this.slackChain.get(sessionKey) ?? Promise.resolve();
         const next = prev.then(work);
-        this.reactionChain.set(sessionKey, next);`,
+        this.slackChain.set(sessionKey, next);`,
   },
   {
     name: '줄을 세션마다 안 나눔 — 남의 느린 반응이 내 차례를 민다',
     from: CHAIN,
-    to: `        const prev = this.reactionChain.get('*') ?? Promise.resolve();
+    to: `        const prev = this.slackChain.get('*') ?? Promise.resolve();
         const next = prev.then(work).catch(() => { });
-        this.reactionChain.set('*', next);
-        this.reactionChain.set(sessionKey, next);`,
+        this.slackChain.set('*', next);
+        this.slackChain.set(sessionKey, next);`,
   },
   {
     name: '앞의 것을 안 기다림 — 순서가 뒤집힌다',
     from: CHAIN,
     to: `        const next = Promise.resolve().then(work).catch(() => { });
-        const prevAll = this.reactionChain.get(sessionKey) ?? Promise.resolve();
-        this.reactionChain.set(sessionKey, Promise.all([prevAll, next]).then(() => { }));`,
+        const prevAll = this.slackChain.get(sessionKey) ?? Promise.resolve();
+        this.slackChain.set(sessionKey, Promise.all([prevAll, next]).then(() => { }));`,
+  },
+  {
+    name: '상태 줄을 기다림 — 도구 호출 수만큼 슬랙 왕복이 차례에 실린다',
+    from: `        this.queueSlack(sessionKey, async () => {
+            if (remove) {
+                await this.app.client.chat.delete({ channel, ts }).catch(() => { });
+            }
+            else {
+                await this.app.client.chat.update({ channel, ts, text }).catch(() => { });
+            }
+        });`,
+    to: `        void sessionKey;
+        return (async () => {
+            if (remove) {
+                await this.app.client.chat.delete({ channel, ts }).catch(() => { });
+            }
+            else {
+                await this.app.client.chat.update({ channel, ts, text }).catch(() => { });
+            }
+        })();`,
+  },
+  {
+    name: '상태 줄을 따로 줄 세움 — 지우기가 고치기를 앞지른다',
+    from: '        this.queueSlack(sessionKey, async () => {\n            if (remove) {',
+    to: "        this.queueSlack(sessionKey + ':status', async () => {\n            if (remove) {",
+  },
+  {
+    name: '상태 줄이 없어도 슬랙을 부름 — 차례마다 헛왕복',
+    from: '        if (!ts)\n            return;\n        this.queueSlack(sessionKey',
+    to: '        if (false)\n            return;\n        this.queueSlack(sessionKey',
   },
 ];
 
@@ -73,7 +103,7 @@ for (const m of mutations) {
   fs.writeFileSync(DIST, original.replace(m.from, m.to));
   let caught = false;
   try {
-    execFileSync('node', [path.join(ROOT, 'scripts', 'check-reaction-queue.mjs')], { stdio: 'pipe' });
+    execFileSync('node', [path.join(ROOT, 'scripts', 'check-slack-queue.mjs')], { stdio: 'pipe' });
   } catch {
     caught = true;
   }
