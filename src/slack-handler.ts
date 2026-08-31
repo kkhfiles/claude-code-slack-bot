@@ -123,16 +123,55 @@ const SLACK_SURFACE_NOTE = [
  *
  * 안 닫힌 항목이 곧 "받았는데 처리 안 된 메시지" 다 — 재시작으로 죽은 세션도
  * 여기 걸린다. 그래서 닫는 책임을 분명히 적어 둔다.
+ *
+ * ⚠️ **캡처 id 를 여기 안 박는다** (2026-08-31). 박으면 이 안내가 차례마다 달라져
+ * **미리 띄운 세션을 다음 차례에 못 쓴다**(2026-08-29 에 그래서 미리 띄우기를
+ * 통째로 걷었다). id 는 `WORK_ASSISTANT_CAPTURE_FILE` 로 넘기고, 파이썬이
+ * 차례마다 그 파일에서 읽는다.
  */
-function captureNote(id: string): string {
-  return [
-    '',
-    `**이 메시지의 원문은 캡처 \`${id}\` 로 이미 저장돼 있다** (봇이 남겼다).`,
-    '처리를 마쳤으면 **반드시 닫는다** — 안 닫으면 아침 브리핑 맨 위 ⛔ 에',
-    '"미처리 캡처" 로 남아 처리된 것과 구분이 안 된다.',
-    `- 업무로 등록했으면: \`tasks.py add … --from-inbox ${id}\` (등록 성공 시 자동으로 닫힌다)`,
-    `- 조회·잡담이었거나 기존 업무에 로그만 남겼으면: \`tasks.py inbox resolve --id ${id} --drop "사유"\``,
-  ].join('\n');
+const CAPTURE_NOTE = [
+  '',
+  '**이 메시지의 원문은 캡처로 이미 저장돼 있다** (봇이 남겼다).',
+  '처리를 마쳤으면 **반드시 닫는다** — 안 닫으면 아침 브리핑 맨 위 ⛔ 에',
+  '"미처리 캡처" 로 남아 처리된 것과 구분이 안 된다.',
+  '- 업무로 등록했거나 기존 업무에 쓰기를 했으면: **아무것도 안 해도 스스로 닫힌다**',
+  '- 조회·잡담이라 쓰기가 없었으면: `tasks.py inbox resolve --drop "사유"`',
+].join('\n');
+
+/**
+ * 이번 차례의 캡처 id 가 적히는 곳. **방마다 하나로 고정**이라 세션 옵션이 안 바뀐다.
+ *
+ * ⚠️ **방 이름을 파일 이름에 그대로 안 쓴다** — 채널 id 는 안전하지만, 다른 방이
+ * 같은 파일을 쓰면 서로의 캡처를 닫는다. 그래서 방마다 따로 둔다.
+ */
+function capturePointer(channel: string): string {
+  const dir = path.join(os.homedir(), '.claude', 'state');
+  return path.join(dir, `work-capture-${channel.replace(/[^A-Za-z0-9_-]/g, '_')}.json`);
+}
+
+/**
+ * 이번 차례의 캡처 id 를 적는다. 빈 값이면 지운다 — **차례가 끝나면 반드시 비운다.**
+ *
+ * ⚠️ **안 비우면 다음 쓰기가 앞 차례의 캡처를 닫는다.** 파이썬 쪽도 적힌 시각을
+ * 보고 30분이 지난 것은 안 쓰지만(`CAPTURE_FILE_TTL_MIN`), 그것은 봇이 도중에
+ * 죽었을 때의 안전망이지 평소에 기대는 길이 아니다.
+ *
+ * 여기서 터져도 차례는 그대로 간다 — 못 적으면 캡처가 안 닫힐 뿐이고, 그건
+ * 아침 브리핑 ⛔ 에 남아 사람이 본다.
+ */
+function writeCapturePointer(channel: string, id: string): void {
+  const file = capturePointer(channel);
+  try {
+    if (!id) { fs.rmSync(file, { force: true }); return; }
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    // ⚠️ **지역 시각으로 적는다** — 파이썬이 `datetime.now()` 와 견주므로
+    // `toISOString()`(UTC)을 적으면 **늘 9시간 낡은 것으로 보여 통째로 버려진다.**
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, '0');
+    const at = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+      + `T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    fs.writeFileSync(file, JSON.stringify({ id, at }));
+  } catch { /* 캡처가 안 닫힐 뿐 — 차례를 막지 않는다 */ }
 }
 
 interface MessageEvent {
@@ -1094,6 +1133,8 @@ export class SlackHandler {
     // **띄우기 전 준비가 얼마나 먹나** (2026-08-29). 판 한 건 23.1초 중 이 구간이
     // 1.12초인데(75건 중앙값) **안에 로그가 하나도 없어 무엇이 도는지 몰랐다.**
     // 줄일 값이 있는지는 재 봐야 안다 — 짐작으로 손대지 않는다.
+    // 미리 띄우기는 차례가 **끝난 뒤**에 하므로, 그때 쓸 옵션을 여기 들어 둔다.
+    let sdkOptsForWarm: SdkRunOptions | null = null;
     const spawnT0 = Date.now();
     const lap: Record<string, number> = {};
     const mark = (k: string) => { lap[k] = Date.now() - spawnT0; };
@@ -1200,16 +1241,19 @@ export class SlackHandler {
       mark('체크인 번호표');
       const surfaceNote = [
         SLACK_SURFACE_NOTE,
-        capture ? captureNote(capture.id) : '',
+        capture ? CAPTURE_NOTE : '',
         slotMap,
       ].filter(Boolean).join('\n');
-      // **캡처 id 를 세션 환경으로 넘긴다.** 닫는 규칙을 세션에 맡겼더니 안 닫혔다
+      // **캡처 id 를 세션에 넘긴다.** 닫는 규칙을 세션에 맡겼더니 안 닫혔다
       // (2026-08-06: 업무 등록·로그·상호 링크까지 다 해 놓고 닫기만 빠져 두 건이
       // 큐에 남았다). 이제 tasks.py 의 쓰기 명령이 성공하면 스스로 닫는다 —
       // 세션이 기억해야 할 일이 하나 줄고, 큐는 「정말 처리 안 된 것」만 남는다.
-      const sessionEnv = capture
-        ? { ...(queryEnv ?? {}), WORK_ASSISTANT_CAPTURE: capture.id }
-        : queryEnv;
+      //
+      // ⚠️ **값이 아니라 파일 경로를 넘긴다** (2026-08-31). 값을 `env` 에 박으면
+      // 프로세스를 띄울 때 굳어 **미리 띄운 세션을 다음 차례에 못 쓴다.** 경로는
+      // 방마다 하나로 고정이고, 그 안의 id 만 차례마다 갈아 끼운다.
+      writeCapturePointer(channel, capture?.id ?? '');
+      const sessionEnv = { ...(queryEnv ?? {}), WORK_ASSISTANT_CAPTURE_FILE: capturePointer(channel) };
 
       // skills: 'all' surfaces ~/.claude/skills/ to the model so it can invoke
       // domain skills (notion-publish, mycelium, bbapi, …) by name. SDK headless
@@ -1226,6 +1270,8 @@ export class SlackHandler {
         appendSystemPrompt: surfaceNote,
         settings: { autoCompactWindow: INTERACTIVE_COMPACT_WINDOW },
       };
+      // 차례가 끝나면 이 옵션 그대로 하나 띄워 둔다 — 아래 `finally` 에서 쓴다.
+      sdkOptsForWarm = sdkOpts;
       // **띄우기 전 준비의 구간별 값.** 합이 23.1초 중 1.12초라 큰 몫은 아니지만,
       // 안에 로그가 없어 **무엇이 도는지조차 몰랐다**(2026-08-29). 재고 나서 정한다.
       mark('옵션 짓기');
@@ -1558,18 +1604,22 @@ export class SlackHandler {
     } finally {
       this.activeProcesses.delete(sessionKey);
       { const m = readInflight(); delete m[sessionKey]; writeInflight(m); }
+      // **차례가 끝나면 캡처 가리킴을 비운다.** 안 비우면 다음 쓰기가 앞 차례의
+      // 캡처를 닫는다 — 파이썬의 30분 시한은 봇이 죽었을 때의 안전망이지
+      // 평소에 기대는 길이 아니다.
+      writeCapturePointer(channel, '');
 
-      // ⛔ **다음 차례를 미리 띄우던 자리 — 2026-08-29 에 걷었다.**
+      // **다음 차례를 미리 띄워 둔다** — 방금 쓴 것과 같은 옵션으로. 판에서
+      // 오는 말처럼 모양이 같은 것이 이어질 때 그대로 맞는다(부팅 2.7~3.4초).
       //
-      // 실물에서 **한 번도 안 쓰였다**(로그 두 차례 다 「옵션이 다름」). 판
-      // 프롬프트마다 새 캡처가 생기고 그 id 가 시스템 프롬프트와 `env` 양쪽에
-      // 박히는데, 둘 다 프로세스를 띄울 때 굳어 나중에 갈아 끼울 수 없다. 억지로
-      // 쓰면 앞 차례의 캡처를 닫고 **이번 것이 큐에 남는다** — 원문 유실을 막는
-      // 마지막 안전망을 깨는 거래다. **세션 id 는 원인이 아니었다**(두 차례가 같다).
+      // ⚠️ **이어 붙일 지점이 이제 정해졌다** — 여기는 차례가 끝난 뒤라 지금
+      // 세션 id 가 곧 다음 차례의 값이다. 08-29 에 이것을 원인으로 잘못 짚었다.
       //
-      // **애초에 값이 작았다** — 판 한 건 23.1초 중 프로세스 띄우기가 3.3초이고
-      // **21.5초가 모델 차례**다(75건 중앙값). 줄일 곳은 여기가 아니다.
-      // 근거·재는 법 = work-assistant `docs/design.md` §5.17.
+      // ⚠️ **터져도 아무 일이 없어야 한다** — 빠르게 하는 장치이지 반영의 일부가
+      // 아니다. `prewarm` 이 통째로 `try` 로 감싸여 있다.
+      if (sdkOptsForWarm && shouldUseSdk('interactive')) {
+        this.sdkHandler.prewarm({ ...sdkOptsForWarm, resumeSessionId: session?.sessionId });
+      }
 
       if (session?.sessionId) {
         setTimeout(() => {
