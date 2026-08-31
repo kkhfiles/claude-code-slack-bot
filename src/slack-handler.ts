@@ -32,7 +32,8 @@ import { LetterBoost } from './letter-boost';
 import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
-import { captureToInbox, checkinMap, checkinNow, isWorkAssistantEnabled, markCaptureFailed, quickUpdate } from './work-assistant';
+import { captureToInbox, checkinMap, checkinNow, isWorkAssistantEnabled, markCaptureFailed,
+  markCaptureTried, pendingCaptures, quickUpdate } from './work-assistant';
 import { boardLabel } from './board-queue';
 
 /**
@@ -184,6 +185,13 @@ interface MessageEvent {
   ts: string;
   text?: string;
   accountId?: string; // Override account for token injection (used by scheduled sessions)
+  /**
+   * 다시 돌릴 때 **원래 캡처를 그대로 쓴다.**
+   *
+   * 이것이 없으면 `captureToInbox` 가 매번 새로 붙여, 다시 돌릴 때마다 큐가
+   * **줄어드는 게 아니라 늘어난다** — 옛 것은 열린 채 남고 새 것이 하나 더 생긴다.
+   */
+  captureId?: string;
   files?: Array<{
     id: string;
     name: string;
@@ -201,6 +209,8 @@ const RESULT_GRACE_MS = 120_000;
 // 밀린 요청을 **다시 알리는** 굴레. 자동 실행이 아니라 사람이 눌러야 끝나는 구조라,
 // 알림이 한 번뿐이면 자리를 비운 사이 그대로 묻힌다(2026-08-24: 한 번 알리고 22시간).
 // 0 을 주면 다시 알리지 않는다.
+/** 한 회차에 다시 돌릴 상한. 실측 최대가 2건이라 넉넉하다(2026-08-31). */
+const DRAIN_MAX = Number(process.env.DRAIN_MAX ?? 5);
 const RLQ_NUDGE_MIN = Number(process.env.RLQ_NUDGE_MINUTES ?? 120);
 const RLQ_NUDGE_FROM_HOUR = Number(process.env.RLQ_NUDGE_FROM_HOUR ?? 8);
 const RLQ_NUDGE_TO_HOUR = Number(process.env.RLQ_NUDGE_TO_HOUR ?? 20);
@@ -565,7 +575,8 @@ export class SlackHandler {
    * **스레드를 만들지 않는다.** 세션 키가 `thread_ts || 'direct'` 라, 스레드에 넣으면
    * 이 방에서 이어 가던 대화와 갈라진다.
    */
-  private async askFromBoard(text: string, lead?: string, shown?: string): Promise<void> {
+  private async askFromBoard(text: string, lead?: string, shown?: string,
+                             captureId?: string): Promise<void> {
     const channel = config.assistant.dmChannel;
     const user = config.bot.allowUsers[0];
     if (!channel || !user) throw new Error('비서 방 또는 사용자가 설정되지 않았습니다');
@@ -613,7 +624,8 @@ export class SlackHandler {
     // `pushed` 는 **사람이 말을 건 것이 아니라는 표시**다 — 완료 줄을 남길지가
     // 여기서 갈린다(사람이 물었으면 「끝났다」이고, 안 물었으면 아무 말도 아니다).
     await this.handleMessage(
-      { type: 'message', channel, user, text, ts: String(posted.ts), pushed: true } as unknown as MessageEvent,
+      { type: 'message', channel, user, text, ts: String(posted.ts), pushed: true,
+        captureId } as unknown as MessageEvent,
       say,
     );
   }
@@ -1243,7 +1255,10 @@ export class SlackHandler {
       // CLAUDE.md): 저장(결정론) → 해석(세션) → 닫기. 파이썬도 노션도 안 거치고
       // JSONL 에 직접 붙이므로, 노션이 막혀도 세션이 재시작에 죽어도 원문은 남는다.
       // 세션에 맡겼더니 안 했다(2026-08-06: 캡처 0건) — 그래서 봇이 한다.
-      const capture = text?.trim() ? captureToInbox(text, 'slack', thread_ts) : null;
+      // 다시 돌리는 길이면 **원래 캡처를 쓴다** — 새로 붙이면 큐가 안 줄어든다.
+      const capture = event.captureId
+        ? { id: event.captureId }
+        : (text?.trim() ? captureToInbox(text, 'slack', thread_ts) : null);
       captureId = capture?.id ?? '';
       mark('원문 캡처');
       // 체크인이 화면에 떠 있는데 답이 짧은 문법에 안 맞아 여기까지 왔다면,
@@ -1868,6 +1883,11 @@ export class SlackHandler {
     const delay = Math.max(60_000, resetsAt * 1000 + 60_000 - Date.now());
     this.rlqTimer = setTimeout(() => {
       this.rlqTimer = undefined;
+      // **밀린 것은 캡처 큐가 정본이다** — 이유를 안 가리고 쌓이며 처리되면
+      // 스스로 닫힌다. 아래 한도 큐는 이유별 장치라 실제로 어긋났다(08/24 의
+      // 서버 과부하를 5시간짜리 한도로 잡아 이레를 들고 있었다). 3단계에서
+      // 그쪽을 걷는다 — 지금은 나란히 두고 값을 본다.
+      this.drainStuck('한도 회복').catch((e) => this.logger.error('drain failed', e));
       this.postRecoveryPrompt().catch((e) => this.logger.error('Rate-limit recovery prompt failed', e));
     }, delay);
     this.logger.info('Rate-limit recovery armed', { resetsAt, inMinutes: Math.round(delay / 60_000) });
@@ -2005,6 +2025,51 @@ export class SlackHandler {
       } catch (error) {
         this.logger.error('Rate-limit queue replay failed', error);
       }
+    }
+  }
+
+  /**
+   * 처리 못 하고 밀린 것을 **한 건씩 순서대로** 다시 돌린다.
+   *
+   * **묶어서 한 프롬프트로 안 보낸다.** 캡처 id 는 차례마다 하나라
+   * (`WORK_ASSISTANT_CAPTURE_FILE` 에 id 하나), N건을 묶으면 세션이 다
+   * 처리해도 **닫히는 것은 하나**다 — 나머지는 열린 채 남아 다음 드레인이 또
+   * 집고, 큐가 영영 안 줄어든다.
+   *
+   * **이유를 안 가린다** — 한도든 서버 장애든 재시작이든 「정상 종료 못 했다」
+   * 하나로 온다(파이썬 `drain_list`). 무엇을 돌릴지 정하는 규칙도 거기 있다.
+   *
+   * ⚠️ **겹쳐 돌지 않게 막는다** — 기동과 회복 시각이 겹칠 수 있고, 겹치면
+   * 같은 캡처를 두 세션이 동시에 처리한다.
+   */
+  private draining = false;
+
+  private async drainStuck(why: string): Promise<void> {
+    if (this.draining || !isWorkAssistantEnabled()) return;
+    this.draining = true;
+    try {
+      const items = await pendingCaptures(DRAIN_MAX);
+      if (!items.length) return;
+      this.logger.warn('밀린 것을 다시 돌립니다', { count: items.length, why });
+      for (const [i, it] of items.entries()) {
+        // **넘기기 전에 센다** — 뒤에 세면 그 차례가 또 터졌을 때 못 세고,
+        // 그러면 같은 것을 끝없이 다시 돌린다.
+        await markCaptureTried(it.id);
+        try {
+          // **`askFromBoard` 를 그대로 쓴다** — 방·사용자·`[조용히]` 삼키기·
+          // `pushed` 표시가 전부 거기 있다. 여기서 다시 짜면 규칙이 두 곳으로
+          // 갈라지고, 갈라진 쪽이 조용히 낡는다.
+          await this.askFromBoard(
+            it.text,
+            `↻ 밀렸던 것 (${i + 1}/${items.length} · ${it.tries + 1}번째 시도)`,
+            '', it.id);
+        } catch (err) {
+          // 한 건이 터져도 나머지는 간다 — 여기서 멈추면 뒤가 통째로 밀린다.
+          this.logger.error('밀린 것을 다시 돌리다 터졌습니다', { id: it.id, err });
+        }
+      }
+    } finally {
+      this.draining = false;
     }
   }
 
@@ -4569,7 +4634,11 @@ export class SlackHandler {
     });
 
     // 재시작에 끊긴 대화 알리기. 기동 직후는 슬랙 연결이 아직이라 잠깐 미룬다.
-    setTimeout(() => this.reportInterruptedSessions().catch(() => { }), 12_000);
+    setTimeout(() => this.reportInterruptedSessions()
+      // **알리고 나서 돌린다** — 순서가 규칙이다. 먼저 돌리면 끊긴 차례의
+      // 자국(`interrupted`)이 아직 안 찍혀 그 건이 목록에서 빠진다.
+      .then(() => this.drainStuck('기동'))
+      .catch(() => { }), 12_000);
     // 한도에 막혀 밀린 것도 같이 되살린다 — 재시작으로 사라지면 큐를 파일에 둔
     // 뜻이 없다.
     setTimeout(() => this.restoreRateLimitQueue(), 13_000);

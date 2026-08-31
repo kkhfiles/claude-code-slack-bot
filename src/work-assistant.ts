@@ -124,6 +124,47 @@ export async function markCaptureFailed(
   }
 }
 
+export interface PendingCapture {
+  id: string;
+  text: string;
+  thread: string | null;
+  tries: number;
+}
+
+/**
+ * 다시 돌릴 것 — 가르는 규칙은 파이썬(`drain_list`)에 있다.
+ *
+ * **규칙을 여기 옮겨 적지 않는다.** 두 곳에 두면 한쪽이 낡고, 낡은 쪽이
+ * 조용히 이긴다 — 오늘 아침에 캡처 id 를 읽는 규칙이 갈려 메일 캡처 여섯 건이
+ * 통째로 안 닫혔다. 봇은 목록을 받아 넘기기만 한다.
+ */
+export async function pendingCaptures(limit = 5): Promise<PendingCapture[]> {
+  if (!isWorkAssistantEnabled()) return [];
+  try {
+    const { code, stdout } = await runTasks(['inbox', 'pending', '--limit', String(limit)], 30_000);
+    if (code !== 0) return [];
+    return JSON.parse(stdout).run ?? [];
+  } catch (err) {
+    logger.error('밀린 캡처를 못 읽었습니다', err);
+    return [];
+  }
+}
+
+/**
+ * 다시 돌려 봤다고 적는다 — **넘기기 전에** 부른다.
+ *
+ * ⚠️ 뒤에 부르면 그 차례가 또 터졌을 때 세지 못해, **같은 것을 끝없이 다시
+ * 돌린다.** 상한이 있는 이유가 그것이라 순서가 규칙이다.
+ */
+export async function markCaptureTried(id: string): Promise<void> {
+  if (!id || !isWorkAssistantEnabled()) return;
+  try {
+    await runTasks(['inbox', 'tried', '--id', id], 30_000);
+  } catch (err) {
+    logger.error('시도 횟수를 못 적었습니다', err);
+  }
+}
+
 /** 아직 세션이 처리하지 않은 캡처 수. 브리핑 꼬리에 붙인다. */
 export function openCaptureCount(): number {
   const root = workAssistantRoot();
