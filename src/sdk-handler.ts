@@ -206,22 +206,100 @@ export class SdkHandler {
   }
 
   /**
-   * ⛔ **미리 띄워 두던 자리 — 2026-08-29 에 걷었다.**
+   * 미리 띄워 둔 세션 — **옵션이 한 글자도 안 다를 때만 쓴다.**
    *
-   * 실물에서 **한 번도 안 쓰였다.** 판 프롬프트마다 새 캡처가 생기고 그 id 가
-   * 시스템 프롬프트와 `env` 양쪽에 박히는데, 둘 다 프로세스를 띄울 때 굳어
-   * 나중에 갈아 끼울 수 없다. 세션 id 는 원인이 아니었다(두 차례가 같았다).
+   * 실측 (2026-08-29 · 시스템 프롬프트 140KB · opus-5 · effort low):
+   *   매번 새로 8.3초 · 미리 이어만 둠 5.0초 · 이어 두고 한 마디로 데움 4.7초
+   * **데우는 한 마디는 안 쓴다** — 92%를 이어 두는 것만으로 벌고, 그 한 마디가
+   * 대화에 남으면 판단이 달라질 수 있다(정확도가 첫째다).
    *
-   * **억지로 쓰면 앞 차례의 캡처를 닫고 이번 것이 큐에 남는다** — 원문 유실을
-   * 막는 마지막 안전망을 깨는 거래다.
+   * ⛔ **08-29 저녁에 걷었다가 08-31 에 되살렸다.** 걷은 이유는 실물에서 한 번도
+   * 안 쓰였기 때문이고, 원인은 **캡처 id 가 시스템 프롬프트와 `env` 양쪽에 박혀
+   * 프로세스를 띄울 때 굳는 것**이었다. 08-31 에 그 id 를 파일로 넘기게 바꿔
+   * (`WORK_ASSISTANT_CAPTURE_FILE`) 옵션이 차례마다 같아졌다.
    *
-   * **값도 작았다** — 판 한 건 23.1초 중 프로세스 띄우기 3.3초 · **모델 차례
-   * 21.5초**(75건 중앙값). 줄일 곳은 여기가 아니라 무엇을 싣고 부르나다.
-   * 근거·재는 법 = work-assistant `docs/design.md` §5.17.
+   * ⚠️ **배관을 안 고치고 되살리면 안전망이 깨진다** — 억지로 쓰면 앞 차례의
+   * 캡처를 닫고 이번 것이 큐에 남는다(원문 유실을 막는 마지막 장치).
    */
+  private warm: {
+    key: string; q: Query; send: (t: string) => void;
+    abortController: AbortController; bornAt: number;
+  } | null = null;
+
+  /** 미리 띄운 것을 얼마나 들고 있나. 넘으면 버리고 새로 띄운다. */
+  static WARM_TTL_MS = 10 * 60_000;
+
+  /**
+   * `query` 를 한 겹 감싸 둔다 — **시험이 바꿔 끼우려고**.
+   *
+   * 미리 띄우기의 값은 「언제 재사용하나」라는 규칙에 있는데, 진짜 프로세스를
+   * 띄워 재면 한 번에 몇 초씩 들고 구독 한도를 먹는다. 여기를 바꿔 끼우면
+   * 규칙만 따로 잴 수 있다.
+   */
+  static queryFn: typeof query = query;
+
+  /**
+   * 다음 호출을 위해 하나 띄워 둔다. **방금 쓴 것과 같은 옵션으로** 부르면
+   * 판에서 오는 말처럼 모양이 같은 것이 이어질 때 그대로 맞는다.
+   *
+   * ⚠️ **여기서 터져도 아무 일도 없어야 한다** — 이것은 빠르게 하는 장치이지
+   * 반영의 일부가 아니다.
+   */
+  prewarm(opts: SdkRunOptions): void {
+    try {
+      if (this.warm && Date.now() - this.warm.bornAt < SdkHandler.WARM_TTL_MS) return;
+      this.dropWarm();
+      const built = this.buildOptions('', opts);
+      const input = pushableInput();
+      const q = SdkHandler.queryFn({ prompt: input.stream, options: built.sdkOptions });
+      this.warm = {
+        key: warmKey(built.sdkOptions), q, send: input.send,
+        abortController: built.abortController, bornAt: Date.now(),
+      };
+      // ⚠️ **안 쓰이면 스스로 죽는다.** 다음 호출이 와야 낡은 것을 버린다면,
+      // 조용한 밤에는 프로세스 하나(350MB 안팎)가 아침까지 앉아 있는다.
+      const mine = this.warm;
+      setTimeout(() => { if (this.warm === mine) this.dropWarm(); },
+        SdkHandler.WARM_TTL_MS).unref?.();
+      this.logger.info('세션을 미리 띄워 둠');
+    } catch (err) {
+      this.logger.error('미리 띄우기 실패 (평소대로 돕니다)', err);
+      this.warm = null;
+    }
+  }
+
+  /** 들고 있던 것을 버린다 — 낡았거나 옵션이 다를 때. */
+  private dropWarm(): void {
+    const w = this.warm;
+    this.warm = null;
+    if (!w) return;
+    try { w.abortController.abort(); } catch { /* 이미 죽었다 */ }
+  }
+
   runQuery(prompt: string, opts: SdkRunOptions): SdkProcess {
     const built = this.buildOptions(prompt, opts);
-    const q = query({ prompt, options: built.sdkOptions });
+    const key = warmKey(built.sdkOptions);
+
+    // **미리 띄운 것이 맞으면 그것을 쓴다.** 옵션이 다르면 버리고 평소대로 —
+    // 남의 옵션으로 뜬 세션에 이 대화를 밀어 넣으면 조용히 다른 규칙으로 답한다.
+    if (this.warm) {
+      const fresh = Date.now() - this.warm.bornAt < SdkHandler.WARM_TTL_MS;
+      if (this.warm.key === key && fresh) {
+        const w = this.warm;
+        this.warm = null;
+        this.logger.info('미리 띄운 세션을 씀', { agedMs: Date.now() - w.bornAt });
+        w.send(prompt);
+        return new SdkProcess(w.q, w.abortController);
+      }
+      // ⚠️ **왜 안 맞았는지 같이 남긴다** — 08-29 에 이 줄이 「옵션이 다름」만
+      // 말해서, 원인을 짚으려고 탐침을 따로 짜야 했다.
+      this.logger.info('미리 띄운 것을 못 씀 — 새로 띄웁니다',
+        { reason: fresh ? '옵션이 다름' : '낡음',
+          diff: fresh ? warmDiff(this.warm.key, key) : '' });
+      this.dropWarm();
+    }
+
+    const q = SdkHandler.queryFn({ prompt, options: built.sdkOptions });
     return new SdkProcess(q, built.abortController);
   }
 
@@ -355,3 +433,61 @@ export class SdkHandler {
   }
 }
 
+
+/**
+ * 프롬프트를 나중에 밀어 넣을 수 있는 입력 흐름.
+ *
+ * `query()` 는 만들자마자 프로세스를 띄운다(읽기를 시작하지 않아도 뜬다). 그래서
+ * 프롬프트를 흐름으로 주면 **띄워 놓고 나중에 말을 넣을 수 있다** — 미리 띄우기가
+ * 서는 자리다.
+ */
+export function pushableInput(): { stream: AsyncIterable<any>; send: (t: string) => void } {
+  const queue: any[] = [];
+  let wake: (() => void) | null = null;
+  let closed = false;
+  const stream = (async function* () {
+    for (;;) {
+      if (queue.length) { yield queue.shift(); continue; }
+      if (closed) return;
+      await new Promise<void>((r) => { wake = r; });
+    }
+  })();
+  return {
+    stream,
+    send(t: string) {
+      queue.push({
+        type: 'user',
+        message: { role: 'user', content: t },
+        parent_tool_use_id: null,
+        session_id: '',
+      });
+      closed = true;
+      const w = wake; wake = null; w?.();
+    },
+  };
+}
+
+/**
+ * 옵션 지문. **다르면 미리 띄운 것을 안 쓴다.**
+ *
+ * 함수와 중단기는 뺀다 — 값이 없어 견줄 수 없고, 견줄 필요도 없다(모양이 같으면
+ * 같은 자리에서 만들어진 것이다).
+ */
+export function warmKey(sdkOptions: any): string {
+  return JSON.stringify(sdkOptions, (k, v) =>
+    (k === 'abortController' || typeof v === 'function' ? undefined : v));
+}
+
+/**
+ * 두 지문이 **어느 칸에서** 갈렸나. 로그 한 줄에 담을 만큼만 낸다.
+ *
+ * ⚠️ **값을 안 찍는다** — 지문에는 OAuth 토큰과 시스템 프롬프트가 들어 있다.
+ * 칸 이름만으로도 원인을 짚기에 충분하다(08-29 에 필요했던 것이 그것이다).
+ */
+export function warmDiff(a: string, b: string): string {
+  let x: any, y: any;
+  try { x = JSON.parse(a); y = JSON.parse(b); } catch { return '읽을 수 없음'; }
+  const keys = [...new Set([...Object.keys(x ?? {}), ...Object.keys(y ?? {})])];
+  const off = keys.filter((k) => JSON.stringify(x?.[k]) !== JSON.stringify(y?.[k]));
+  return off.length ? off.join(',') : '(같은데 안 맞음)';
+}
