@@ -1609,16 +1609,23 @@ export class SlackHandler {
       // 평소에 기대는 길이 아니다.
       writeCapturePointer(channel, '');
 
-      // **다음 차례를 미리 띄워 둔다** — 방금 쓴 것과 같은 옵션으로. 판에서
-      // 오는 말처럼 모양이 같은 것이 이어질 때 그대로 맞는다(부팅 2.7~3.4초).
+      // **다음 차례를 미리 띄워 둔다** — 방금 쓴 것과 **한 글자도 안 고친** 옵션으로.
+      // 판에서 오는 말처럼 모양이 같은 것이 이어질 때 그대로 맞는다(부팅 2.7~3.4초).
       //
-      // ⚠️ **이어 붙일 지점이 이제 정해졌다** — 여기는 차례가 끝난 뒤라 지금
-      // 세션 id 가 곧 다음 차례의 값이다. 08-29 에 이것을 원인으로 잘못 짚었다.
+      // ⛔ **옛 코드는 여기서 세션을 떼고 띄웠다**(`session`·`resumeSessionId`·
+      // `continueLastSession` 을 전부 `undefined` 로). 그러면 **실제 차례와 영영
+      // 안 맞는다** — 실제 차례는 늘 이 방의 대화를 이어받기 때문이다. 08-29 에
+      // 「세션 id 는 원인이 아니다」로 적은 것은 **실제 차례 둘을 견준 것**이라
+      // 절반만 맞았다. 캡처 id 도 원인이었지만 이쪽이 더 앞이었다.
+      //
+      // ⚠️ **떼야 안전한 것이 아니다 — 지문이 막는다.** 다른 방은 작업 디렉터리도
+      // 캡처 파일 경로도 세션 id 도 달라 지문이 안 맞고, 안 맞으면 안 쓴다.
+      // 떼는 것은 안전을 더하지 않고 장치만 무력화했다.
       //
       // ⚠️ **터져도 아무 일이 없어야 한다** — 빠르게 하는 장치이지 반영의 일부가
       // 아니다. `prewarm` 이 통째로 `try` 로 감싸여 있다.
       if (sdkOptsForWarm && shouldUseSdk('interactive')) {
-        this.sdkHandler.prewarm({ ...sdkOptsForWarm, resumeSessionId: session?.sessionId });
+        this.sdkHandler.prewarm(sdkOptsForWarm);
       }
 
       if (session?.sessionId) {

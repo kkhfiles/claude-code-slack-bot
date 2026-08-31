@@ -153,6 +153,41 @@ eq('미리 띄우기가 터져도 평소대로', calls.length, 1);
 eq('갈린 칸 이름을 낸다', warmDiff(warmKey({ a: 1, b: 2 }), warmKey({ a: 1, b: 3 })), 'b');
 eq('값은 안 찍는다', /2|3/.test(warmDiff(warmKey({ a: 1, b: 2 }), warmKey({ a: 1, b: 3 }))), false);
 
+// 12. ⭐ **세션을 이어받는 옵션 그대로 띄워야 맞는다.**
+//
+//     ⛔ 옛 코드는 여기서 세션을 떼고 띄웠다(`session`·`resumeSessionId` 를
+//     `undefined` 로). 그러면 **실제 차례와 영영 안 맞는다** — 실제 차례는 늘 그
+//     방의 대화를 이어받기 때문이다. 미리 띄우기가 실물에서 한 번도 안 쓰인
+//     진짜 원인이 이것이고, 08-29 에는 캡처 id 만 보고 절반만 짚었다.
+const SESSION_OPTS = {
+  ...OPTS, session: { sessionId: 'abc-123', lastAssistantUuid: 'u-9' },
+};
+{
+  h = new SdkHandler(mcp);
+  calls.length = 0;
+  h.prewarm(SESSION_OPTS);
+  h.runQuery('판에서 온 말', SESSION_OPTS);
+  eq('세션을 이어받는 차례도 미리 띄운 것을 쓴다', calls.length, 1);
+}
+
+// 13. **떼고 띄우면 못 쓴다** — 옛 코드가 하던 그대로 재현한다. 12번이 진짜로
+//     무엇을 보는지 이 짝이 증명한다(안 그러면 늘 통과하는 문일 수 있다).
+{
+  h = new SdkHandler(mcp);
+  calls.length = 0;
+  h.prewarm({ ...SESSION_OPTS, session: undefined, resumeSessionId: undefined });
+  h.runQuery('판에서 온 말', SESSION_OPTS);
+  eq('세션을 떼고 띄우면 못 쓴다', calls.length, 2);
+}
+
+// 14. **부르는 쪽이 옵션을 안 고친다** — 한 칸만 덧씌워도 12번이 무의미해진다.
+//     실제로 되살릴 때 `resumeSessionId` 를 덧씌워 `resumeSessionAt` 이 갈렸다.
+{
+  const src = fs.readFileSync(path.join(ROOT, 'dist', 'slack-handler.js'), 'utf8');
+  const m = src.match(/sdkHandler\.prewarm\(([^)]*)\)/);
+  eq('미리 띄우기에 옵션을 그대로 넘긴다', m && m[1].trim(), 'sdkOptsForWarm');
+}
+
 if (fails.length) {
   console.log(`실패 ${fails.length}건\n`);
   for (const f of fails) console.log('  ✗ ' + f);
@@ -160,5 +195,6 @@ if (fails.length) {
 } else {
   console.log('통과 — 미리 띄우기 (하나 뜸 · 같은 옵션이면 재사용 · 프롬프트가 그리로 들어감 · '
     + '한 번 쓰면 사라짐 · 옵션이 다르면 버림 · 세션 id 는 다른 지문 · 낡으면 안 씀 · '
-    + '터져도 평소대로 · 넣고 닫힘 · 캡처 id 가 옵션에 안 박힘 · 갈린 칸을 말함)');
+    + '터져도 평소대로 · 넣고 닫힘 · 캡처 id 가 옵션에 안 박힘 · 갈린 칸을 말함 · '
+    + '세션을 이어받는 차례도 맞음 · 떼면 못 씀 · 부르는 쪽이 옵션을 안 고침)');
 }
