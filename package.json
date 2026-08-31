@@ -25,7 +25,8 @@
     "check:limit": "node scripts/check-limit-detection.mjs",
     "prepare": "git config core.hooksPath .githooks",
     "check:quiet": "node scripts/check-quiet-rooms.mjs",
-    "check:activity": "node scripts/check-activity-log.mjs"
+    "check:activity": "node scripts/check-activity-log.mjs",
+    "check:reactions": "node scripts/check-reaction-queue.mjs"
   },
   "keywords": [],
   "author": "",
