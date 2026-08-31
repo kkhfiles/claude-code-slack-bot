@@ -1138,6 +1138,13 @@ export class SlackHandler {
     const spawnT0 = Date.now();
     const lap: Record<string, number> = {};
     const mark = (k: string) => { lap[k] = Date.now() - spawnT0; };
+    // **뒤처리 1.8초 안에도 로그가 하나도 없다** (2026-08-31). 결과를 받은 뒤
+    // 세션 색인 등록까지가 그 구간인데, 그 사이에 슬랙 왕복 하나와 스트림이
+    // 닫히기를 기다리는 대목이 섞여 있어 **무엇이 먹는지 못 갈랐다.**
+    // 위 `mark` 와 같은 방식으로 잰다 — 짐작으로 손대지 않는다.
+    let tailT0 = 0;
+    const tail: Record<string, number> = {};
+    const tmark = (k: string) => { if (tailT0) tail[k] = Date.now() - tailT0; };
 
     try {
       this.logger.info('Spawning Claude CLI process', {
@@ -1409,6 +1416,7 @@ export class SlackHandler {
           }
         } else if (event.type === 'result') {
           const resultEvent = event as CliResultEvent;
+          tailT0 = Date.now();
           this.logger.info('Received result from CLI', {
             subtype: resultEvent.subtype,
             totalCost: resultEvent.total_cost_usd,
@@ -1469,15 +1477,19 @@ export class SlackHandler {
           if (resultEvent.subtype === 'success' && resultEvent.result) {
             if (!currentMessages.includes(resultEvent.result)) {
               await say({ text: this.formatMessage(resultEvent.result, true), thread_ts: replyTs });
+              tmark('마지막 글');
             }
           }
+          tmark('결과 처리');
         }
       }
+      tmark('스트림 닫힘');
 
       // Update session activity timestamp and flush to disk
       if (session) {
         session.lastActivity = new Date();
         this.cliHandler.saveNow();
+        tmark('세션 저장');
       }
 
       // Completed
@@ -1510,6 +1522,8 @@ export class SlackHandler {
       }
       await this.updateMessageReaction(sessionKey, doneEmoji);
       await this.removeAnchorReaction(sessionKey);
+      tmark('완료 표시');
+      if (tailT0) this.logger.info('뒤처리', { ms: tail });
 
       // Register session in sessions-index.json for CLI compatibility
       if (session?.sessionId && workingDirectory) {
