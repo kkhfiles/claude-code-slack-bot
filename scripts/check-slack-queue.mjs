@@ -1,25 +1,30 @@
 /**
- * 반응 줄 세우기 자가 검사 — 슬랙을 타지 않는다.
+ * 슬랙 UI 줄 세우기 자가 검사 — 슬랙을 타지 않는다.
  *
  *   npm run build
- *   npm run check:reactions
+ *   npm run check:slackui
  *
- * **왜 있나** (2026-08-31). 반응 하나가 슬랙 왕복 한두 번인데 그 결과를 읽는 곳이
- * 없다. 그런데 차례의 앞뒤 양쪽에서 기다리고 있었다 — 띄우기 전 0.52초, 차례 끝
- * 2.16초 중 대부분. 그래서 **순서는 그대로 두고 기다리는 것만** 걷어냈다.
+ * **왜 있나** (2026-08-31). 반응과 상태 한 줄은 슬랙 왕복 한두 번씩인데 그 결과를
+ * 읽는 곳이 없다. 그런데 차례의 앞·중간·끝 세 곳에서 기다리고 있었다 — 띄우기 전
+ * 0.70초, 도구를 쓸 때마다 0.26초, 차례 끝 2.17초 중 대부분. **순서는 그대로 두고
+ * 기다리는 것만** 걷어냈다.
  *
- * ⚠️ **그냥 안 기다리면 조용히 깨진다.** 반응을 바꾸는 함수가 `activeReactions` 를
- * await 뒤에 고치므로, 두 호출이 겹치면 서로의 중간 상태를 보고 충돌 반응을 안
- * 지우거나 같은 것을 두 번 단다. 화면에는 그냥 이상한 이모지가 남을 뿐이라
- * **아무도 버그로 안 읽는다** — 그래서 순서를 기계가 센다.
+ * ⚠️ **그냥 안 기다리면 조용히 깨진다.** 두 가지다.
+ *   ① 반응을 바꾸는 함수가 `activeReactions` 를 await 뒤에 고치므로, 두 호출이
+ *      겹치면 충돌 반응을 안 지우거나 같은 것을 두 번 단다.
+ *   ② 차례 끝의 「지우기」가 아직 안 나간 「고치기」를 앞지르면, 지운 메시지를
+ *      고치려 드는 순서가 나온다.
+ * 화면에는 이상한 이모지나 안 지워진 줄이 남을 뿐이라 **아무도 버그로 안 읽는다**
+ * — 그래서 순서를 기계가 센다.
  *
- * 생성자가 무거워 `Object.create` 로 껍데기를 만들고 반응이 쓰는 칸만 채운다.
- * 도는 것은 `dist` 의 진짜 메서드다. 이모지 표는 이 검사의 대상이 아니라
- * 재료라서 최소한만 둔다 — 여기서 보는 것은 **순서와 대기** 둘뿐이다.
+ * 생성자가 무거워 `Object.create` 로 껍데기를 만들고 쓰는 칸만 채운다. 도는 것은
+ * `dist` 의 진짜 메서드다. 이모지 표는 이 검사의 대상이 아니라 재료라서 최소한만
+ * 둔다 — 여기서 보는 것은 **순서와 대기** 둘뿐이다.
  */
 import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
@@ -39,20 +44,27 @@ function ok(name, cond, detail = '') {
   }
 }
 
-/** 반응만 쓰는 껍데기. `calls` 에 부른 순서가 쌓이고, `gate` 로 응답을 붙든다. */
+/** 껍데기. `calls` 에 부른 순서가 쌓이고, `delayFor` 로 응답을 늦춘다. */
 function makeHandler({ delayFor = () => 0 } = {}) {
   const calls = [];
   const api = (kind) => async (arg) => {
-    calls.push(`${kind}:${arg.name}`);
-    const ms = delayFor(arg.name);
+    // 반응은 `name`, 상태 줄은 `text` 로 온다 — 한 줄에 섞여 서므로 같이 기록한다.
+    const label = arg.name ?? arg.text ?? '';
+    calls.push(`${kind}:${label}`);
+    const ms = delayFor(label);
     if (ms) await new Promise((r) => setTimeout(r, ms));
   };
   const h = Object.create(SlackHandler.prototype);
-  h.app = { client: { reactions: { add: api('add'), remove: api('remove') } } };
+  h.app = {
+    client: {
+      reactions: { add: api('add'), remove: api('remove') },
+      chat: { update: api('update'), delete: api('delete') },
+    },
+  };
   h.logger = { warn() {}, info() {}, error() {}, debug() {} };
   h.originalMessages = new Map([[KEY, { channel: 'C1', ts: '1700000000.000100' }]]);
   h.currentReactions = new Map();
-  h.reactionChain = new Map();
+  h.slackChain = new Map();
   h.ANCHOR_REACTION = ANCHOR;
   h.emojiToReaction = { '🔍': 'mag', '✅': 'white_check_mark', '🤔': 'thinking_face' };
   h.conflictingReactionGroups = [
@@ -65,7 +77,7 @@ function makeHandler({ delayFor = () => 0 } = {}) {
 /** 줄이 다 빠질 때까지 기다린다 — 검사만 쓰는 길이다. */
 async function drain(h) {
   for (let i = 0; i < 50; i += 1) {
-    await (h.reactionChain.get(KEY) ?? Promise.resolve());
+    await (h.slackChain.get(KEY) ?? Promise.resolve());
     await new Promise((r) => setImmediate(r));
   }
 }
@@ -79,7 +91,7 @@ function withDeadline(p, ms, what) {
 }
 
 async function main() {
-  console.log('반응 줄 세우기');
+  console.log('슬랙 UI 줄 세우기');
 
   // ① **부르는 쪽이 슬랙을 안 기다린다.** 이것이 이 변경의 전부다.
   //    옛 코드는 응답이 올 때까지 붙들었으므로 여기서 시한에 걸려 죽는다.
@@ -131,7 +143,7 @@ async function main() {
   //    반응이 **그때부터 통째로 조용히 죽는다** — 에러도 안 남는다.
   {
     const { h, calls } = makeHandler();
-    h.queueReaction(KEY, async () => { throw new Error('일부러'); });
+    h.queueSlack(KEY, async () => { throw new Error('일부러'); });
     await h.updateMessageReaction(KEY, '✅');
     await drain(h);
     ok('앞의 것이 터져도 뒤의 것이 돈다', calls.includes('add:white_check_mark'), calls.join(' → '));
@@ -147,6 +159,54 @@ async function main() {
     await new Promise((r) => setTimeout(r, 20));
     ok('다른 세션은 안 기다린다', calls.includes('add:white_check_mark'), calls.join(' → '));
     await drain(h);
+  }
+
+  // ⑦ **상태 한 줄은 기다릴 것을 안 돌려준다.** 도구를 쓸 때마다 고치는 줄이라,
+  //    여기서 기다리면 도구 호출 수 × 슬랙 왕복이 그대로 차례에 실린다.
+  //
+  //    ⚠️ **부르지 말고 기다려 봐야 한다** — 안 기다리는 성질은 부르는 쪽이
+  //    `await` 를 안 붙여서 오는 것이라, 그냥 부르기만 하면 옛 코드로 되돌려도
+  //    통과한다(실제로 변이가 그렇게 빠져나갔다). 여기서 `await` 를 붙여도 즉시
+  //    풀려야 **「돌려주는 것이 없다」**가 증명된다.
+  {
+    const { h } = makeHandler({ delayFor: () => 5_000 });
+    const t0 = Date.now();
+    await withDeadline(
+      Promise.resolve(h.queueStatus(KEY, 'C1', '111.222', '🔍 Read 사용 중')),
+      1_000, '상태 줄 대기');
+    ok('상태 줄은 기다릴 것을 안 돌려준다', Date.now() - t0 < 500, `${Date.now() - t0}ms`);
+    await drain(h);
+  }
+
+  // ⑦-b **부르는 쪽도 안 기다린다.** 위 문은 함수의 계약만 본다 — 스트림 안에서
+  //      슬랙을 직접 `await` 로 부르는 줄이 되살아나면 그건 못 잡는다. 그 줄이
+  //      다시 생기는 것이 원래 결함이었으므로 **지어진 코드를 글자로도 센다.**
+  {
+    const src = readFileSync(path.join(ROOT, 'dist', 'slack-handler.js'), 'utf8');
+    const bad = [...src.matchAll(/await this\.app\.client\.chat\.(update|delete)\(\{\s*channel,\s*ts:\s*statusMessageTs/g)];
+    ok('상태 줄을 직접 기다리는 곳이 없다', bad.length === 0, `${bad.length}곳`);
+  }
+
+  // ⑧ **반응과 상태 줄이 한 줄에 선다.** 따로 두면 차례 끝의 「지우기」가 아직
+  //    안 나간 「고치기」를 앞질러, **지운 메시지를 고치려 드는** 순서가 나온다.
+  {
+    const { h, calls } = makeHandler({ delayFor: (n) => (n === '🔍 Read 사용 중' ? 80 : 0) });
+    h.queueStatus(KEY, 'C1', '111.222', '🔍 Read 사용 중');
+    await h.updateMessageReaction(KEY, '🔍');
+    h.queueStatus(KEY, 'C1', '111.222', '', true);      // 차례 끝 — 지우기
+    await drain(h);
+    ok('고치기 → 반응 → 지우기 순서가 그대로',
+      calls.join(' → ') === 'update:🔍 Read 사용 중 → add:mag → delete:',
+      calls.join(' → '));
+  }
+
+  // ⑨ **상태 줄이 없으면 아무것도 안 한다.** 「생각 중」 보내기가 실패하면 `ts` 가
+  //    빈 채로 남는데, 그때 슬랙을 부르면 차례마다 헛왕복이 붙는다.
+  {
+    const { h, calls } = makeHandler();
+    h.queueStatus(KEY, 'C1', undefined, '🔍 Read 사용 중');
+    await drain(h);
+    ok('상태 줄이 없으면 슬랙을 안 부른다', calls.length === 0, calls.join(' → '));
   }
 
   console.log(failed ? `\n${failed}건 실패` : '\n전부 통과');
