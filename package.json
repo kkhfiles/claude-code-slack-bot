@@ -11,6 +11,7 @@
     "check:1on1": "node scripts/check-1on1.js",
     "check:board": "node scripts/check-board-queue.mjs",
     "check:timers": "node scripts/check-timers.mjs",
+    "check:budget": "node scripts/check-queue-budget.mjs",
     "check:args": "node scripts/check-run-args.mjs",
     "check:bottalk": "node scripts/check-bot-talk.mjs",
     "check:marks": "node scripts/check-marks.mjs",

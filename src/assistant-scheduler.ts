@@ -63,8 +63,44 @@ const OFFSITE_PUSH_TIME = '20:00';
  * ⚠️ **1초로는 안 내린다** — 24시간 도는 타이머라 하루 86,400회가 되어 워커 무료
  * 한도 100,000회에 닿는다. 판을 여는 요청·지문 확인이 같은 한도를 쓴다.
  * 2초면 43,200회로 절반 아래에 머문다.
+ *
+ * ⛔ **그 절반 아래가 76%까지 찼다** (2026-09-01 Cloudflare 알림 · 재는 기간은
+ * 08/30 UTC 로 **새 주기의 첫 온전한 하루**였다). 위 계산이 틀린 것이 아니라
+ * **43,200 을 혼자 쓰는 것이 이미 컸다** — 하루의 43%를 아무도 판을 안 눌러도
+ * 쓴다. 한도에 닿으면 워커가 실패하고 **판이 죽는다.**
  */
 const BOARD_QUEUE_POLL_MS = 2_000;
+/**
+ * 자는 동안에는 이만큼 벌린다. **낮은 한 글자도 안 느려진다** — 잃는 것은
+ * 새벽에 누른 것이 최대 30초 뒤에 반영되는 것뿐이고, 그 시간대에 판을 누르는
+ * 일이 드물다.
+ *
+ * 07~23 을 2초로 두면 하루 **43,200 → 29,760회**(−31%). 더 줄여야 하면 다음
+ * 손잡이는 **낮 주기**다(3초면 20,160회 · −53% · 누른 뒤 평균 0.5초 손해).
+ * 밤을 아예 끄지 않는 이유는 폰으로 늦게 누른 것이 아침까지 안 가기 때문이다.
+ */
+const BOARD_QUEUE_NIGHT_MS = 30_000;
+const BOARD_QUEUE_AWAKE_FROM = 7;
+const BOARD_QUEUE_AWAKE_TO = 23;
+
+/**
+ * 지금 몇 초마다 봐야 하나. **타이머는 그대로 2초로 두고 이 값으로 건너뛴다** —
+ * 주기를 갈아 끼우면 시각이 바뀌는 순간 타이머를 다시 걸어야 하고, 다시 거는
+ * 자리는 `clearAllTimers()` 와 짝이 안 맞으면 조용히 사라진다(`check:timers` 가
+ * 세는 그 구멍이다). 건너뛰기는 짝이 하나뿐이라 그 위험이 없다.
+ */
+export function boardQueueGapMs(now: Date = new Date()): number {
+  const h = now.getHours();
+  const awake = h >= BOARD_QUEUE_AWAKE_FROM && h < BOARD_QUEUE_AWAKE_TO;
+  return awake ? BOARD_QUEUE_POLL_MS : BOARD_QUEUE_NIGHT_MS;
+}
+
+/** 이 주기로 하루를 돌면 워커 요청이 몇 번인가. 검사가 천장을 이 값으로 본다. */
+export function boardQueueDailyCalls(): number {
+  const awakeH = BOARD_QUEUE_AWAKE_TO - BOARD_QUEUE_AWAKE_FROM;
+  return Math.round(awakeH * 3600_000 / BOARD_QUEUE_POLL_MS
+    + (24 - awakeH) * 3600_000 / BOARD_QUEUE_NIGHT_MS);
+}
 /**
  * 메일을 얼마마다 보나 · 몇 시부터 몇 시까지 (2026-08-18 사용자 결정).
  *
@@ -392,6 +428,8 @@ export class AssistantScheduler {
   /** 한 판이 끝나기 전에 다음 판이 겹치지 않게. 노션 왕복이 폴링 간격보다 길 수 있다. */
   private boardQueueBusy = false;
   private boardQueueFailures = 0;
+  /** 마지막으로 큐를 본 때. 밤에 건너뛰는 판정이 이 값 하나를 본다. */
+  private boardQueueLast = 0;
 
   // File watcher debounce (account-manager.ts:59-62 pattern)
   private watchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1357,9 +1395,18 @@ export class AssistantScheduler {
       this.logger.info('Board queue poller off (주소나 열쇠 없음)');
       return;
     }
-    this.logger.info('Started board queue poller', { everyMs: BOARD_QUEUE_POLL_MS });
+    this.logger.info('Started board queue poller', {
+      everyMs: BOARD_QUEUE_POLL_MS,
+      nightMs: BOARD_QUEUE_NIGHT_MS,
+      awake: `${BOARD_QUEUE_AWAKE_FROM}~${BOARD_QUEUE_AWAKE_TO}시`,
+      dailyCalls: boardQueueDailyCalls(),
+    });
     this.boardQueueTimer = setInterval(async () => {
       if (this.boardQueueBusy) return;
+      // 밤에는 건너뛴다 — 워커 무료 한도가 이 폴러 하나로 43%를 쓰고 있었다.
+      const now = Date.now();
+      if (now - this.boardQueueLast < boardQueueGapMs()) return;
+      this.boardQueueLast = now;
       this.boardQueueBusy = true;
       try {
         const r = await drain(quickUpdate, this.askFromBoard ?? null, undefined,
