@@ -160,9 +160,14 @@ export class PremiumSeatSlack {
       await ack();
       await this.openModal(client, body, 'availability');
     });
-    app.action('premium_my_requests', async ({ ack, body }) => {
+    app.action('premium_my_status', async ({ ack, body, client }) => {
       await ack();
-      void this.showMyRequests(this.userOf(body));
+      void this.openMyStatus(client, body);
+    });
+    // 창 안의 요청 취소. 누른 자리에서 창을 다시 그린다.
+    app.action('premium_request_cancel', async ({ ack, body, action, client }) => {
+      await ack();
+      void this.cancelFromModal(client, body, (action as any).value as string);
     });
 
     app.view('premium_request_submit', async ({ ack, body, view }) => {
@@ -457,7 +462,7 @@ export class PremiumSeatSlack {
       elements: [
         this.button('Premium 요청', 'premium_request_open', 'primary'),
         this.button(this.opts.openToTeam ? '내 상태 변경' : '좌석·상태 고치기', 'premium_availability_open'),
-        this.button('내 요청 보기', 'premium_my_requests'),
+        this.button('내 상태 보기', 'premium_my_status'),
       ],
     });
     if (!this.opts.openToTeam) {
@@ -690,19 +695,94 @@ export class PremiumSeatSlack {
     await this.dm(actor, `${who}${SERVICE_LABEL[service]} ${done.join(' ')}`);
   }
 
-  private async showMyRequests(userId: string): Promise<void> {
-    const model = await this.run('dashboard model', {});
-    const services = model.result?.services ?? {};
-    const mine: string[] = [];
-    for (const [key, view] of Object.entries<any>(services)) {
-      for (const holder of view.premium ?? []) {
-        if (holder.slack_user_id === userId) {
-          const mark = holder.availability === 'TRANSFERABLE' ? '양도 가능' : '유지 필요';
-          mine.push(`${SERVICE_LABEL[key]} · Premium 보유 · ${mark}`);
-        }
-      }
+  /** 「내 상태 보기」 — DM 이 아니라 창으로 띄운다. 누른 사람만 본다. */
+  private async openMyStatus(client: any, body: any): Promise<void> {
+    const user = this.userOf(body);
+    const view = await this.myStatusView(user);
+    try {
+      await client.views.open({ trigger_id: body.trigger_id, view });
+    } catch (error) {
+      this.logger.warn('views.open failed', error);
     }
-    await this.dm(userId, mine.length ? mine.join('\n') : '지금 보유한 Premium 좌석이 없습니다.');
+  }
+
+  /** 창 안에서 요청을 취소하고 그 창을 다시 그린다. */
+  private async cancelFromModal(client: any, body: any, service: string): Promise<void> {
+    const user = this.userOf(body);
+    const out = await this.run('request cancel', { service, slack_user_id: user });
+    const note = out.ok && out.result?.cancelled
+      ? `${SERVICE_SHORT[service] ?? service} 요청을 취소했습니다.`
+      : this.errorText(out, out.result?.reason);
+    if (out.dashboard_dirty) this.markDashboardDirty();
+    try {
+      await client.views.update({
+        view_id: body.view?.id,
+        view: await this.myStatusView(user, note),
+      });
+    } catch (error) {
+      this.logger.warn('views.update failed', error);
+    }
+  }
+
+  private async myStatusView(userId: string, note?: string): Promise<any> {
+    const out = await this.run('my status', { slack_user_id: userId });
+    const blocks: any[] = [];
+
+    if (!out.ok) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: this.errorText(out) } });
+    } else {
+      if (note) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `:white_check_mark: ${note}` }] });
+      const services = out.result?.services ?? {};
+      for (const key of ['CHATGPT', 'CLAUDE']) {
+        const view = services[key];
+        if (!view) continue;
+        blocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: `${SERVICE_ICON[key] ?? ''} *${SERVICE_LABEL[key] ?? key}*\n${this.myLines(view).join('\n')}` },
+        });
+        if (view.request?.status === 'WAITING') {
+          blocks.push({
+            type: 'actions',
+            elements: [this.button('이 요청 취소', 'premium_request_cancel', 'danger', key)],
+          });
+        }
+        blocks.push({ type: 'divider' });
+      }
+      blocks.pop();
+    }
+
+    return {
+      type: 'modal',
+      callback_id: 'premium_my_status',
+      title: { type: 'plain_text', text: '내 상태' },
+      close: { type: 'plain_text', text: '닫기' },
+      blocks: blocks.length ? blocks : [{ type: 'section', text: { type: 'mrkdwn', text: '보여 드릴 것이 없습니다.' } }],
+    };
+  }
+
+  /** 서비스 한 곳의 내 좌석 · 요청 · 진행 중 교환. */
+  private myLines(view: any): string[] {
+    const lines: string[] = [];
+    if (view.tier === 'PREMIUM') {
+      const wish = view.availability === 'TRANSFERABLE' ? `${GIVE_ICON} 양도 가능` : `${KEEP_ICON} 유지 필요`;
+      lines.push(`좌석: Premium  ·  ${wish}`);
+    } else {
+      lines.push(`좌석: ${TIER_LABEL[view.tier] ?? view.tier}`);
+    }
+
+    if (view.request?.status === 'WAITING') {
+      lines.push(`${WAIT_ICON} 요청 대기 중  ·  내 차례 ${view.request.position}번째`);
+    } else if (view.request?.status === 'SWAP_PENDING') {
+      lines.push(`${SWAP_ICON} 요청이 양도자와 이어졌습니다`);
+    } else {
+      lines.push('요청: 없음');
+    }
+
+    if (view.swap) {
+      const role = view.swap.role === 'HOLDER' ? '넘기는 쪽' : '받는 쪽';
+      lines.push(`${SWAP_ICON} ${view.swap.from_name} \u2192 ${view.swap.to_name}  ·  ${role}  ·  ${SWAP_STATE_LABEL[view.swap.state] ?? view.swap.state}`);
+    }
+    return lines;
   }
 
   /**
