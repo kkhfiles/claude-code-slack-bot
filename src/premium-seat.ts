@@ -64,6 +64,15 @@ const SWAP_ICON = '\u{1F504}';   // 바꾸는 중
 const WAIT_ICON = '\u{23F3}';    // 기다리는 사람
 const CLOCK_ICON = '\u{1F553}';
 
+/** 라디오에서 「바꾸지 않음」을 나타내는 값. 슬랙이 빈 문자열을 안 받는다. */
+const KEEP_AS_IS = '__keep__';
+
+const TIER_LABEL: Record<string, string> = {
+  PREMIUM: 'Premium',
+  STANDARD: '스탠다드',
+  NONE: '좌석 없음',
+};
+
 /**
  * 서울 기준 `09/02 16:32`. ko-KR 기본 서식은 `26. 9. 2. 오후 4:32` 로 나와
  * 좁은 범례 줄에서 자리를 많이 먹고 읽기도 나쁘다.
@@ -158,14 +167,21 @@ export class PremiumSeatSlack {
 
     app.view('premium_request_submit', async ({ ack, body, view }) => {
       await ack();
-      const service = this.pickedService(view, 'service');
-      void this.handleRequest(body.user.id, service);
+      void this.handleRequest(body.user.id, {
+        service: this.picked(view, 'service'),
+        target: this.picked(view, 'target') || body.user.id,
+        quiet: this.checked(view, 'quiet'),
+      });
     });
     app.view('premium_availability_submit', async ({ ack, body, view }) => {
       await ack();
-      const service = this.pickedService(view, 'service');
-      const status = this.pickedService(view, 'status');
-      void this.handleAvailability(body.user.id, service, status);
+      void this.handleAvailability(body.user.id, {
+        service: this.picked(view, 'service'),
+        target: this.picked(view, 'target') || body.user.id,
+        tier: this.picked(view, 'tier'),
+        status: this.picked(view, 'status'),
+        quiet: this.checked(view, 'quiet'),
+      });
     });
 
     // 관리자 버튼. 누른 사람이 관리자인지는 파이썬이 다시 본다 — 화면만 믿지 않는다.
@@ -434,19 +450,20 @@ export class PremiumSeatSlack {
     // 내용과 범례 사이의 구분선.
     blocks.push({ type: 'divider' });
 
-    if (this.opts.openToTeam) {
-      blocks.push({
-        type: 'actions',
-        elements: [
-          this.button('Premium 요청', 'premium_request_open', 'primary'),
-          this.button('내 상태 변경', 'premium_availability_open'),
-          this.button('내 요청 보기', 'premium_my_requests'),
-        ],
-      });
-    } else {
+    // 버튼은 늘 보인다. 팀에 열기 전이면 실장이 아닌 사람이 눌렀을 때 안내만 간다 —
+    // 현황판은 방에 하나뿐인 메시지라 보는 사람마다 다르게 그릴 수 없다.
+    blocks.push({
+      type: 'actions',
+      elements: [
+        this.button('Premium 요청', 'premium_request_open', 'primary'),
+        this.button(this.opts.openToTeam ? '내 상태 변경' : '좌석·상태 고치기', 'premium_availability_open'),
+        this.button('내 요청 보기', 'premium_my_requests'),
+      ],
+    });
+    if (!this.opts.openToTeam) {
       blocks.push({
         type: 'context',
-        elements: [{ type: 'mrkdwn', text: '아직 준비 중입니다. 실장이 열면 버튼이 나옵니다.' }],
+        elements: [{ type: 'mrkdwn', text: '아직 준비 중입니다. 지금은 실장만 쓸 수 있습니다.' }],
       });
     }
 
@@ -480,54 +497,54 @@ export class PremiumSeatSlack {
   }
 
   private async openModal(client: any, body: any, kind: 'request' | 'availability'): Promise<void> {
-    if (!this.opts.openToTeam && !this.isManager(this.userOf(body))) {
-      await this.dm(this.userOf(body), '아직 준비 중입니다.');
+    const user = this.userOf(body);
+    const manager = this.isManager(user);
+    if (!this.opts.openToTeam && !manager) {
+      await this.dm(user, '아직 준비 중입니다. 실장이 열면 쓰실 수 있습니다.');
       return;
     }
-    const serviceBlock = {
-      type: 'input',
-      block_id: 'service',
-      label: { type: 'plain_text', text: '서비스' },
-      element: {
-        type: 'radio_buttons',
-        action_id: 'value',
-        options: [
-          { text: { type: 'plain_text', text: 'ChatGPT Business' }, value: 'CHATGPT' },
-          { text: { type: 'plain_text', text: 'Claude Team' }, value: 'CLAUDE' },
-        ],
-      },
+
+    const blocks: any[] = [this.radio('service', '서비스', [
+      { label: 'ChatGPT Business', value: 'CHATGPT' },
+      { label: 'Claude Team', value: 'CLAUDE' },
+    ])];
+
+    // 관리자만 남의 몫을 고를 수 있다. 파이썬이 다시 보므로 여기는 편의일 뿐이다.
+    if (manager) {
+      const roster = await this.roster(user);
+      if (roster.length) blocks.push(this.select('target', '대상', roster));
+    }
+
+    if (kind === 'availability') {
+      if (manager) {
+        blocks.push(this.radio('tier', '좌석 배정', [
+          { label: '바꾸지 않음', value: '' },
+          { label: 'Premium', value: 'PREMIUM' },
+          { label: '스탠다드', value: 'STANDARD' },
+          { label: '좌석 없음', value: 'NONE' },
+        ], true));
+      }
+      blocks.push(this.radio('status', '양도 의사', manager
+        ? [
+            { label: '바꾸지 않음', value: '' },
+            { label: '유지 필요', value: 'REQUIRED' },
+            { label: '양도 가능', value: 'TRANSFERABLE' },
+          ]
+        : [
+            { label: '유지 필요', value: 'REQUIRED' },
+            { label: '양도 가능', value: 'TRANSFERABLE' },
+          ], manager));
+    }
+
+    if (manager) blocks.push(this.quietBlock());
+
+    const view = {
+      type: 'modal',
+      callback_id: kind === 'request' ? 'premium_request_submit' : 'premium_availability_submit',
+      title: { type: 'plain_text', text: kind === 'request' ? 'Premium 요청' : (manager ? '좌석·상태 고치기' : '내 상태 변경') },
+      submit: { type: 'plain_text', text: kind === 'request' ? '요청' : '변경' },
+      blocks,
     };
-    const view =
-      kind === 'request'
-        ? {
-            type: 'modal',
-            callback_id: 'premium_request_submit',
-            title: { type: 'plain_text', text: 'Premium 요청' },
-            submit: { type: 'plain_text', text: '요청' },
-            blocks: [serviceBlock],
-          }
-        : {
-            type: 'modal',
-            callback_id: 'premium_availability_submit',
-            title: { type: 'plain_text', text: '내 상태 변경' },
-            submit: { type: 'plain_text', text: '변경' },
-            blocks: [
-              serviceBlock,
-              {
-                type: 'input',
-                block_id: 'status',
-                label: { type: 'plain_text', text: '변경 상태' },
-                element: {
-                  type: 'radio_buttons',
-                  action_id: 'value',
-                  options: [
-                    { text: { type: 'plain_text', text: '유지 필요' }, value: 'REQUIRED' },
-                    { text: { type: 'plain_text', text: '양도 가능' }, value: 'TRANSFERABLE' },
-                  ],
-                },
-              },
-            ],
-          };
     try {
       await client.views.open({ trigger_id: body.trigger_id, view });
     } catch (error) {
@@ -535,34 +552,142 @@ export class PremiumSeatSlack {
     }
   }
 
+  /** 대상 고르기에 넣을 명단. 부르는 사람을 맨 위에 둔다. */
+  private async roster(self: string): Promise<Array<{ label: string; value: string }>> {
+    const out = await this.run('members list', {});
+    const rows: any[] = out.result?.members ?? [];
+    const seatOf = (m: any) => {
+      const bits = ['CHATGPT', 'CLAUDE']
+        .filter((k) => m.seats?.[k] && m.seats[k] !== 'NONE')
+        .map((k) => `${SERVICE_SHORT[k]} ${m.seats[k] === 'PREMIUM' ? 'Premium' : 'Std'}`);
+      return bits.length ? ` (${bits.join(' · ')})` : '';
+    };
+    return rows
+      .sort((a, b) => (a.slack_user_id === self ? -1 : b.slack_user_id === self ? 1 : 0))
+      .map((m) => ({
+        label: `${m.display_name}${m.slack_user_id === self ? ' · 나' : ''}${seatOf(m)}`.slice(0, 75),
+        value: m.slack_user_id,
+      }));
+  }
+
+  private radio(blockId: string, label: string, options: Array<{ label: string; value: string }>, optional = false): any {
+    return {
+      type: 'input',
+      block_id: blockId,
+      optional,
+      label: { type: 'plain_text', text: label },
+      element: {
+        type: 'radio_buttons',
+        action_id: 'value',
+        options: options.map((o) => ({
+          // 슬랙은 빈 값을 안 받는다. 「바꾸지 않음」은 따로 표시해 두고 읽을 때 지운다.
+          text: { type: 'plain_text', text: o.label },
+          value: o.value || KEEP_AS_IS,
+        })),
+      },
+    };
+  }
+
+  private select(blockId: string, label: string, options: Array<{ label: string; value: string }>): any {
+    return {
+      type: 'input',
+      block_id: blockId,
+      label: { type: 'plain_text', text: label },
+      element: {
+        type: 'static_select',
+        action_id: 'value',
+        options: options.slice(0, 100).map((o) => ({
+          text: { type: 'plain_text', text: o.label },
+          value: o.value,
+        })),
+      },
+    };
+  }
+
+  private quietBlock(): any {
+    return {
+      type: 'input',
+      block_id: 'quiet',
+      optional: true,
+      label: { type: 'plain_text', text: '알림' },
+      element: {
+        type: 'checkboxes',
+        action_id: 'value',
+        options: [{ text: { type: 'plain_text', text: '당사자에게 알리지 않음' }, value: 'quiet' }],
+      },
+    };
+  }
+
   // ------------------------------------------------------------- 처리
-  private async handleRequest(userId: string, service: string): Promise<void> {
-    const out = await this.run('request create', { service, slack_user_id: userId });
-    if (!out.ok) return void this.dm(userId, this.errorText(out));
+  private async handleRequest(
+    actor: string,
+    form: { service: string; target: string; quiet: boolean },
+  ): Promise<void> {
+    const { service, target } = form;
+    const out = await this.run('request create', {
+      service,
+      slack_user_id: target,
+      actor,
+      quiet: form.quiet,
+    });
+    if (!out.ok) return void this.dm(actor, this.errorText(out));
     const r = out.result ?? {};
-    if (!r.created) return void this.dm(userId, this.errorText(out, r.reason));
+    if (!r.created) return void this.dm(actor, this.errorText(out, r.reason));
+
+    const who = target === actor ? '' : `${r.display_name ?? '해당 팀원'} 님의 `;
     const swapped = (out.swaps_created ?? []).length > 0;
     await this.dm(
-      userId,
-      swapped
-        ? `${SERVICE_LABEL[service]} Premium 요청을 넣었습니다. 양도자를 찾았고 실장 승인을 기다립니다.`
-        : `${SERVICE_LABEL[service]} Premium 요청을 넣었습니다. 양도 가능한 좌석이 나오면 알려 드립니다.`,
+      actor,
+      `${who}${SERVICE_LABEL[service]} Premium 요청을 넣었습니다. ` +
+        (swapped ? '양도자를 찾았고 실장 승인을 기다립니다.' : '양도 가능한 좌석이 나오면 알려 드립니다.'),
     );
     if (out.dashboard_dirty) this.markDashboardDirty();
   }
 
-  private async handleAvailability(userId: string, service: string, status: string): Promise<void> {
-    const out = await this.run('availability set', { service, slack_user_id: userId, status });
-    if (!out.ok) return void this.dm(userId, this.errorText(out));
-    const r = out.result ?? {};
-    if (!r.changed) return void this.dm(userId, this.errorText(out, r.reason));
-    const label = status === 'TRANSFERABLE' ? '양도 가능' : '유지 필요';
-    const swapped = (out.swaps_created ?? []).length > 0;
-    await this.dm(
-      userId,
-      `${SERVICE_LABEL[service]} 좌석을 「${label}」로 바꿨습니다.${swapped ? ' 기다리던 분과 이어졌고 실장 승인을 기다립니다.' : ''}`,
-    );
-    if (out.dashboard_dirty) this.markDashboardDirty();
+  /**
+   * 좌석 배정과 양도 의사를 한 창에서 받는다.
+   *
+   * 배정을 먼저 바꾼다 — 스탠다드인 사람을 양도 가능으로 두려는 순서면 실패한다.
+   */
+  private async handleAvailability(
+    actor: string,
+    form: { service: string; target: string; tier: string; status: string; quiet: boolean },
+  ): Promise<void> {
+    const { service, target } = form;
+    const done: string[] = [];
+
+    if (form.tier) {
+      const out = await this.run('seat set', {
+        service,
+        slack_user_id: target,
+        tier: form.tier,
+        actor,
+      });
+      if (!out.ok) return void this.dm(actor, this.errorText(out));
+      done.push(`좌석 배정을 「${TIER_LABEL[form.tier] ?? form.tier}」로 바꿨습니다.`);
+      if (out.dashboard_dirty) this.markDashboardDirty();
+    }
+
+    if (form.status) {
+      const out = await this.run('availability set', {
+        service,
+        slack_user_id: target,
+        status: form.status,
+        actor,
+        quiet: form.quiet,
+      });
+      if (!out.ok) return void this.dm(actor, this.errorText(out));
+      const r = out.result ?? {};
+      if (!r.changed) return void this.dm(actor, this.errorText(out, r.reason));
+      const label = form.status === 'TRANSFERABLE' ? '양도 가능' : '유지 필요';
+      const swapped = (out.swaps_created ?? []).length > 0;
+      done.push(`양도 의사를 「${label}」로 바꿨습니다.` + (swapped ? ' 기다리던 분과 이어졌고 실장 승인을 기다립니다.' : ''));
+      if (out.dashboard_dirty) this.markDashboardDirty();
+    }
+
+    if (!done.length) return void this.dm(actor, '바꿀 것을 고르지 않으셨습니다.');
+    const who = target === actor ? '' : '해당 팀원의 ';
+    await this.dm(actor, `${who}${SERVICE_LABEL[service]} ${done.join(' ')}`);
   }
 
   private async showMyRequests(userId: string): Promise<void> {
@@ -749,8 +874,14 @@ export class PremiumSeatSlack {
     return this.opts.managerUserIds.includes(userId);
   }
 
-  private pickedService(view: any, blockId: string): string {
-    return view?.state?.values?.[blockId]?.value?.selected_option?.value ?? '';
+  /** 라디오·선택 한 칸의 값. 「바꾸지 않음」은 빈 문자열로 돌려준다. */
+  private picked(view: any, blockId: string): string {
+    const value = view?.state?.values?.[blockId]?.value?.selected_option?.value ?? '';
+    return value === KEEP_AS_IS ? '' : value;
+  }
+
+  private checked(view: any, blockId: string): boolean {
+    return (view?.state?.values?.[blockId]?.value?.selected_options ?? []).length > 0;
   }
 
   private errorText(out: Envelope, reason?: string): string {
