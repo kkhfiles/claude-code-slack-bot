@@ -200,7 +200,8 @@ function saveDone(ids: string[]): void {
  */
 export async function drain(apply: Apply, ask: Ask | null, base?: string,
                             note?: Apply | null,
-                            stage?: Apply | null): Promise<DrainResult> {
+                            stage?: Apply | null,
+                            narrow?: Apply | null): Promise<DrainResult> {
   const out: DrainResult = { applied: [], dropped: [], retry: [], lost: [], duplicates: 0 };
   // `pull` 은 「가져간 표시」를 남기므로 읽기가 아니다 — 워커가 POST 만 받는다.
   const { items } = (await call('pull', {}, base)) as { items: QueueItem[] };
@@ -258,6 +259,32 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
       seen.add(item.id);
       saveDone(done);
       ack.push(item.id);
+      // ★ **좁은 길** (2026-09-02) — 업무를 짚은 말은 세션 없이 한 호출로 끝난다.
+      // 모델 차례가 16.6 → 3초라 끝에서 끝까지 23 → 9초다.
+      //
+      // **성공하면 아래를 통째로 건너뛴다** — `stage` 는 세션이 18초 걸려서 둔
+      // 장치이고, 좁은 길은 자기가 로그를 먼저 앉히므로 그 자리가 필요 없다.
+      // 두 번 앉으면 같은 원문이 카드에 두 줄로 남는다.
+      //
+      // **못 받으면 조용히 아래로 떨어진다** — 업무를 안 짚었거나(10%) JSON 을
+      // 못 냈을 때다. 그때는 오늘까지와 완전히 같은 길이라 잃는 것이 없다.
+      if (narrow) {
+        try {
+          const r = await narrow(item.text);
+          if (r.kind === 'ok') {
+            logger.info(`좁은 길로 처리 — ${item.id} ${r.output.slice(0, 120)}`);
+            event('narrow', { ok: true });
+            out.applied.push({ item, output: r.output });
+            continue;
+          }
+          // `failed` 도 세션으로 떨어뜨린다 — 사람 말을 잃는 것보다 두 번 도는 편이 싸다.
+          event('narrow', { ok: false, why: r.kind });
+          logger.info(`좁은 길이 안 받음 (세션으로) — ${item.id} ${r.kind}`);
+        } catch (err) {
+          event('narrow', { ok: false, why: 'threw' });
+          logger.error('좁은 길이 터졌습니다 (세션으로 갑니다)', err);
+        }
+      }
       // **원문을 카드에 먼저 박는다** (2026-08-29). 세션은 17.9초가 걸리고 그동안
       // 판은 아무 일도 없던 것처럼 보인다 — 이 한 번으로 카드가 3초 안에 움직인다.
       //

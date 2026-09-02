@@ -15,7 +15,8 @@ import { isWorkAssistantEnabled, briefNudge, checkinNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
-  offDays, ymd } from './work-assistant';
+  offDays, ymd, narrowTask, narrowCard, narrowApply } from './work-assistant';
+import type { QuickOutcome } from './work-assistant';
 import { boardLabel, boardQueueEnabled, drain } from './board-queue';
 
 /**
@@ -178,6 +179,18 @@ const FOCUS_EFFORT = 'low' as const;
  * 짧아 카드가 이미 아는 것만 말했다.
  */
 const SUMMARY_TIME = '19:30';
+/**
+ * 좁은 길 — 판의 「프롬프트」를 세션 없이 한 호출로 처리한다.
+ *
+ * **판 번호가 여기 한 줄이다.** 사본을 안 만든다 — 만들면 실험 기록과 갈라지고
+ * 둘 중 하나는 반드시 낡는다. 다음 판을 올리는 일 = 이 줄을 고치는 일.
+ *
+ * `BOARD_NARROW=off` 로 끈다. 끄면 오늘까지와 완전히 같은 길(세션)로 돈다.
+ */
+const NARROW_RULES = 'lab/board-prompt/narrow10.md';
+const NARROW_MODEL = 'opus';
+const NARROW_EFFORT = 'low' as const;
+
 const SUMMARY_MODEL = 'sonnet';
 const SUMMARY_EFFORT = 'low' as const;
 /**
@@ -1398,7 +1411,7 @@ export class AssistantScheduler {
       this.boardQueueBusy = true;
       try {
         const r = await drain(quickUpdate, this.askFromBoard ?? null, undefined,
-          noteUpdate, stageUpdate);
+          noteUpdate, stageUpdate, this.narrowFromBoard);
         if (this.boardQueueFailures) {
           this.logger.info(`Board queue recovered (${this.boardQueueFailures}회 실패 뒤)`);
           this.boardQueueFailures = 0;
@@ -1734,6 +1747,65 @@ export class AssistantScheduler {
     }
     return next;
   }
+
+  /**
+   * 좁은 길 한 바퀴 — 재료(파이썬) → 모델 한 번 → 앉히기(파이썬).
+   *
+   * **업무 로직이 여기 없다.** 카드 값을 만드는 것도 앉히는 것도 `tasks.py` 가
+   * 하고, 여기서는 그 둘 사이에 모델을 한 번 끼워 넣는다 — 규칙이 한 곳에 있다.
+   *
+   * 못 받으면 `not-quick` 으로 물러난다. 부르는 쪽이 평소 경로(세션)로 떨어뜨린다.
+   */
+  private narrowFromBoard = async (text: string): Promise<QuickOutcome> => {
+    if (process.env.BOARD_NARROW === 'off') return { kind: 'not-quick' };
+    const root = workAssistantRoot();
+    if (!root) return { kind: 'not-quick' };
+    // 업무를 안 짚은 말(실측 10%)은 대상을 스스로 찾아야 해서 세션 몫이다.
+    const task = narrowTask(text);
+    if (!task) return { kind: 'not-quick', detail: '업무를 안 짚었다' };
+    const rules = path.join(root, NARROW_RULES);
+    if (!fs.existsSync(rules)) {
+      this.logger.error(`좁은 길 규칙이 없습니다 — ${rules}`);
+      return { kind: 'not-quick', detail: '규칙 파일 없음' };
+    }
+    const card = await narrowCard(task);
+    if (!card) return { kind: 'not-quick', detail: `${task} 재료를 못 만듦` };
+
+    const today = new Date();
+    const p = (n: number) => String(n).padStart(2, '0');
+    const day = `${today.getFullYear()}-${p(today.getMonth() + 1)}-${p(today.getDate())}`;
+    // 첫 줄은 말머리(`[진행판] TSK-5 「…」`)라 뺀다 — 규칙이 배운 모양이 본문뿐이다.
+    const body = text.split('\n').slice(1).join('\n').trim() || text.trim();
+    const user = [
+      `오늘은 ${day}`, '',
+      `업무: 「${card.title}」`,
+      `지금 카드 값: ${card.card}`, '',
+      '판 「프롬프트」 칸에 온 말:', body,
+    ].join('\n');
+
+    const result = await this.spawnSession(user, {
+      workingDirectory: root,
+      model: NARROW_MODEL,
+      effort: NARROW_EFFORT,
+      permissionMode: 'default',
+      // **도구가 하나도 없다.** 읽기도 쓰기도 파이썬이 한다.
+      tools: [],
+      allowedTools: [],
+      // 규칙 파일을 안 읽는다 — CLAUDE.md 가 따라 들어오면 좁은 길이 아니게 된다.
+      settingSources: [],
+      appendSystemPrompt: fs.readFileSync(rules, 'utf-8'),
+      env: { ASSISTANT_MODE: 'narrow', CLAUDE_SCHEDULED: '1' },
+      skipMcp: true,
+      noSessionPersistence: true,
+      // 실측 중간값 3~4초 — 상한에 닿으면 세션으로 떨어지는 편이 낫다.
+      maxDurationMs: 90_000,
+      useSdk: true,
+    });
+    this.recordSessionCost('narrow', result);
+    const said = (result.text || '').trim();
+    if (!said) return { kind: 'not-quick', detail: '좁은 길이 아무 말도 안 했다' };
+    return narrowApply(said, task);
+  };
 
   private async executeBriefing(): Promise<SessionResult> {
     const promptPath = path.join(this.promptsDir, 'morning-briefing.md');
