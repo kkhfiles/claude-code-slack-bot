@@ -32,11 +32,14 @@ const check = (name, ok, detail) => {
 const ROOM = 'C_ROOM';
 
 /** 봇 프로필을 임시 자리에 만든다 — `loadProfile` 이 보는 그 경로 그대로. */
-function profileFor(bot, reaction) {
+function profileFor(bot, reaction, tone) {
   const root = path.join(tmp, bot);
   fs.mkdirSync(path.join(root, 'bots', bot), { recursive: true });
   fs.writeFileSync(path.join(root, 'bots', bot, 'config.json'),
-    JSON.stringify({ reaction, interest: ['점심'] }), 'utf-8');
+    JSON.stringify({ reaction, tone, interest: ['점심'] }), 'utf-8');
+  // 말투마다 다른 표시. **봇들이 같이 쓰는 파일**이라 봇 폴더가 아니라 그 위에 둔다.
+  fs.writeFileSync(path.join(root, 'tone_marks.json'),
+    JSON.stringify({ _note: '이 줄은 말투가 아니다', 간신: 'bow', 츤데레: 'flushed' }), 'utf-8');
   return path.join(root, 'turn.py');
 }
 
@@ -52,10 +55,10 @@ function fakeClient(log) {
   };
 }
 
-function make(bot, reaction, reply = '네') {
+function make(bot, reaction, reply = '네', tone = undefined) {
   const log = [];
   const host = new ChatHost({
-    name: bot, botToken: '', appToken: '', python: '', script: profileFor(bot, reaction),
+    name: bot, botToken: '', appToken: '', python: '', script: profileFor(bot, reaction, tone),
     surfaces: ['channel'], channels: [ROOM],
   });
   host['loadProfile']();
@@ -215,7 +218,7 @@ const marks = (log, op) => log.filter((r) => r[0] === op).map((r) => r[2]);
   host['pump'] = async (_c, key, forced) => { pumped.push({ key, forced }); };
 
   host['pending'].set(ROOM, { channel: ROOM, texts: ['소인: 안녕하시옵니까'], reactTs: [],
-    toldBusy: false, hasSibling: true, seen: new Set(['1.1']) });
+    toldBusy: false, hasSibling: true });
   host['drain'](client);
   check('자리가 나면 묻힌 형제 말을 집는다',
     pumped.length === 1 && pumped[0].key === ROOM, pumped);
@@ -227,7 +230,7 @@ const marks = (log, op) => log.filter((r) => r[0] === op).map((r) => r[2]);
   const p2 = [];
   quiet.host['pump'] = async (_c, key, forced) => { p2.push({ key, forced }); };
   quiet.host['pending'].set(ROOM, { channel: ROOM, texts: ['규황: 배고프다'], reactTs: [],
-    toldBusy: false, seen: new Set(['2.2']) });
+    toldBusy: false });
   quiet.host['drain'](quiet.client);
   check('조용히 쌓이던 사람 말은 자리가 났다고 꺼내지 않는다', p2.length === 0, p2);
 }
@@ -253,6 +256,81 @@ const marks = (log, op) => log.filter((r) => r[0] === op).map((r) => r[2]);
   host['enqueue'](ROOM, { channel: ROOM, ts: `greet:${ROOM}`, text: '(인사해라)', react: false });
   await host['pump'](client, ROOM, true);
   check('인사에는 아무것도 안 붙인다', log.length === 0, log);
+}
+
+// --- 말투마다 다른 표시 (2026-09-02) -----------------------------------------------
+// 성격을 갈아입으면 표시도 갈아입어야 한다 — 얼굴만 바뀌고 표시가 그대로면 갈아입은
+// 티가 안 난다. 지금 말투는 **파이썬 쪽이 쓰는 그 파일**에서 읽는다(따로 셈하면 갈린다).
+
+const names = (log, op) => log.filter((r) => r[0] === op).map((r) => r[3]);
+
+/** 그 대화에 저장된 말투를 손으로 놓는다 — turn.py 가 쓰는 그 파일이다. */
+function saveTone(host, key, tone) {
+  const dir = path.join(path.dirname(host['opts'].script),
+    'bots', host['opts'].name, 'data', 'conv');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${key}.json`), JSON.stringify({ tone }), 'utf-8');
+}
+
+{
+  const { host, log, client } = make('tone-default', 'cow', '네', '간신');
+  check('주석 줄(`_`)은 말투로 안 읽는다', host['toneMarks']._note === undefined,
+    host['toneMarks']);
+  host['enqueue'](ROOM, { channel: ROOM, ts: '401.1', text: '규황: <@B> 안녕', react: true });
+  await host['pump'](client, ROOM, true);
+  check('봇 기본 말투의 표시가 붙는다',
+    JSON.stringify(names(log, 'add')) === JSON.stringify(['bow']), log);
+}
+{
+  const { host, log, client } = make('tone-conv', 'cow', '네', '간신');
+  saveTone(host, ROOM, '츤데레');            // 그 방에서 불러서 바꿔 놓은 상태
+  host['enqueue'](ROOM, { channel: ROOM, ts: '402.2', text: '규황: <@B> 안녕', react: true });
+  await host['pump'](client, ROOM, true);
+  check('그 대화에 저장된 말투가 봇 기본값을 이긴다',
+    JSON.stringify(names(log, 'add')) === JSON.stringify(['flushed']), log);
+}
+{
+  const { host, log, client } = make('tone-free', 'cow', '네', '간신');
+  saveTone(host, ROOM, '비 오는 날처럼 나른하게');   // 사람이 지어낸 지시문
+  host['enqueue'](ROOM, { channel: ROOM, ts: '403.3', text: '규황: <@B> 안녕', react: true });
+  await host['pump'](client, ROOM, true);
+  check('목록에 없는 말투는 봇 제 표시로 돌아간다',
+    JSON.stringify(names(log, 'add')) === JSON.stringify(['cow']), log);
+}
+{
+  // **턴 도중에 말투가 바뀌어도 뗄 때는 붙인 것을 뗀다.** 뗄 때 다시 고르면 다른 이름을
+  // 떼려 해서 **붙은 표시가 방에 그대로 남는다** — 이 검사가 지키는 것이 그 짝이다.
+  const { host, log, client } = make('tone-mid', 'cow', '네', '간신');
+  host['runTurn'] = async () => {
+    saveTone(host, ROOM, '츤데레');          // 이 턴에서 사람이 말투를 바꿨다
+    return { reply: '그리 하겠소', error: null };
+  };
+  host['enqueue'](ROOM, { channel: ROOM, ts: '404.4', text: '규황: <@B> 츤데레로', react: true });
+  await host['pump'](client, ROOM, true);
+  check('붙인 표시와 뗀 표시가 같다 (도중에 말투가 바뀌어도)',
+    JSON.stringify(names(log, 'add')) === JSON.stringify(names(log, 'remove')), log);
+}
+
+// **재시작 없이 따라가야 한다.** 말투는 파이썬이 매 턴 파일을 다시 읽어 바로 바뀌는데
+// 표시만 뜰 때 읽은 값을 쥐고 있으면 **얼굴은 바뀌고 표시는 옛것으로 남는다.**
+{
+  const { host, log, client } = make('tone-live', 'cow', '네', '간신');
+  fs.writeFileSync(
+    path.join(path.dirname(host['opts'].script), 'bots', 'tone-live', 'config.json'),
+    JSON.stringify({ reaction: 'cow', tone: '츤데레', interest: ['점심'] }), 'utf-8');
+  host['enqueue'](ROOM, { channel: ROOM, ts: '405.5', text: '규황: <@B> 안녕', react: true });
+  await host['pump'](client, ROOM, true);
+  check('설정의 기본 말투를 고치면 재시작 없이 따라간다',
+    JSON.stringify(names(log, 'add')) === JSON.stringify(['flushed']), log);
+}
+{
+  const { host, log, client } = make('mark-live', 'cow', '네', '간신');
+  fs.writeFileSync(path.join(path.dirname(host['opts'].script), 'tone_marks.json'),
+    JSON.stringify({ 간신: 'moyai' }), 'utf-8');
+  host['enqueue'](ROOM, { channel: ROOM, ts: '406.6', text: '규황: <@B> 안녕', react: true });
+  await host['pump'](client, ROOM, true);
+  check('표시 파일을 고쳐도 재시작 없이 따라간다',
+    JSON.stringify(names(log, 'add')) === JSON.stringify(['moyai']), log);
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });
