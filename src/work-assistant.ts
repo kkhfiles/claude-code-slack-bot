@@ -540,9 +540,17 @@ export async function mailMark(ts: string): Promise<boolean> {
  * 신호가 조용히 사라진다**(2026-08-19 검토에서 잡았다 — 처음 고친 판이 그랬다).
  *
  * 기호로 고른다. 새 경고가 늘어도 여기 손댈 것이 없다.
+ *
+ * **좁은 길이 쓰는 기호 둘을 더 받는다** (2026-09-02) — `❓` 되물음 · `💬` 알림.
+ * 좁은 길은 **세션 자리를 대신하므로 스스로 말해야 한다.** 세션은 자기 방에서
+ * 답했지만 좁은 길에는 그 자리가 없다 — 안 받으면 **되물음이 통째로 사라지고
+ * 그 건은 닫힌다**(실측 81건 중 여섯이 되물음이라 7%다).
  */
 export function boardOutputToTell(output: string): string {
-  return (output || '').split('\n').filter((l) => /[⚠⛔]/.test(l)).join('\n').trim();
+  // ⚠️ **`u` 플래그가 없으면 안 된다.** `💬`(U+1F4AC)는 BMP 밖이라 문자 클래스가
+  // **대리 쌍을 낱개로 쪼갠다** — 앞쪽 `\uD83D` 가 `🗂`(U+1F5C2)와도 맞아
+  // 칸반 링크까지 새어 나갔다(2026-09-02 · `check:args` 가 잡았다).
+  return (output || '').split('\n').filter((l) => /[⚠⛔❓💬]/u.test(l)).join('\n').trim();
 }
 
 export async function isQuietPeriod(): Promise<boolean> {
