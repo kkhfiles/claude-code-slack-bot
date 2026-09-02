@@ -29,6 +29,8 @@ let globalRunning = 0;
 const CONCURRENCY_CAP = 3;
 
 const MAX_MERGED_LINES = 20;
+/** 한 방에서 「이미 집어 갔다」를 기억해 둘 글 수. 넘으면 오래된 것부터 버린다. */
+const TAKEN_MEMORY = 500;
 /**
  * 한 턴을 기다려 주는 한계. turn.py 가 agy 를 90초에 끊으니 보통은 그 위 여유면 된다.
  *
@@ -180,8 +182,6 @@ interface Waiting {
    * 여기서 안 집으면 그 말은 사람이 입을 열 때까지 대기열에 묻힌다.
    */
   hasSibling?: boolean;
-  /** 이미 담은 글의 ts. 훑기가 채널에서 다시 읽어 와도 같은 말을 두 번 안 담게. */
-  seen: Set<string>;
 }
 
 interface TurnResult {
@@ -201,6 +201,17 @@ export class ChatHost {
   private mark = THINKING;
   /** 그 표시가 이 워크스페이스에 없더라 — 한 번만 알린다(장식이라 답은 그대로 나간다). */
   private toldBadMark = false;
+  /**
+   * 말투마다 다른 「생각 중」 표시(`chatbot/tone_marks.json`). **말투를 갈아입으면 표시도
+   * 갈아입는다** — 얼굴만 바뀌고 표시가 그대로면 갈아입은 티가 안 난다.
+   *
+   * 여기 없는 말투(사람이 지어낸 지시문 — 「비 오는 날처럼 나른하게」)는 위 `mark` 로
+   * 돌아간다. 목록에 말투를 더하고 이 파일을 안 채우면 조용히 그렇게 되므로
+   * `chatbot/check_tone_marks.py` 가 두 목록의 차이를 센다.
+   */
+  private toneMarks: Record<string, string> = {};
+  /** 이 봇의 기본 말투(`bots/<이름>/config.json` 의 `tone`). 대화에 저장된 것이 없을 때 쓴다. */
+  private botTone = '';
   /** 쌓인 말을 주기적으로 훑어보는 타이머. */
   private sweeper: NodeJS.Timeout | null = null;
 
@@ -208,6 +219,24 @@ export class ChatHost {
   private active = new Set<string>();
   /** 말했지만 아직 답하지 않은 것, 열쇠별로. */
   private pending = new Map<string, Waiting>();
+  /**
+   * 열쇠마다 **이미 집어 간 글의 ts.**
+   *
+   * **대기열(`pending`)이 아니라 여기 둔다.** 대기열은 턴이 시작할 때 통째로 지워지므로
+   * (`pump` 의 `pending.delete`), 거기에 두면 **지금 답을 만들고 있는 바로 그 말**이
+   * 아무 데도 안 남는다. 그 10~15초 사이에 훑기가 방을 다시 읽으면 봇이 아직 답을 안
+   * 올린 탓에 그 말이 여전히 「답 안 한 글」로 보여 다시 담기고, 턴이 끝나자마자
+   * `pump` 의 반복문이 그걸 집어 **한 번 더 답한다**.
+   *
+   * 실측 2026-09-02 — 소인이 방에서 한 마디에 두 번씩 답했고, 사람이 먼저 알아채고
+   * 물었다. 훑기 쪽에는 이걸 막으려고 둔 검사가 이미 있었는데(「줄이 하나도 안 남았다
+   * = 이미 도는 턴에 들어가 있다」), **그 검사가 여기 기억을 믿고 있었다.**
+   *
+   * 대신 잃는 것 — 턴이 넘어져 방에 아무 말도 안 남은 자리를 훑기가 되집어 주던 길이
+   * 닫힌다. 사람이 부른 턴은 넘어져도 「못 했다」 한 줄이 나가므로 다시 물어볼 수 있고,
+   * 먼저 말 걸려던 턴은 아무도 기다리지 않는다. **두 번 답하는 쪽이 훨씬 나쁘다.**
+   */
+  private taken = new Map<string, Set<string>>();
   /**
    * 방마다 **훑어서 이미 물어본 마지막 글의 시각.**
    *
@@ -346,7 +375,7 @@ export class ChatHost {
   private loadProfile(): void {
     const configPath = path.join(
       path.dirname(this.opts.script), 'bots', this.opts.name, 'config.json');
-    let profile: { interest?: unknown; reaction?: unknown };
+    let profile: { interest?: unknown; reaction?: unknown; tone?: unknown };
     try {
       profile = JSON.parse(fs.readFileSync(configPath, 'utf-8')) ?? {};
     } catch (error) {
@@ -356,12 +385,19 @@ export class ChatHost {
 
     const wanted = typeof profile.reaction === 'string' ? profile.reaction.replace(/:/g, '').trim() : '';
     if (wanted) this.mark = wanted;
+    if (typeof profile.tone === 'string') this.botTone = profile.tone.trim();
+
+    // 말투마다 다른 표시. **뜰 때 읽는 것은 아래 로그에 개수를 찍으려는 것뿐**이고,
+    // 실제로 붙일 때는 `markFor` 가 그때그때 다시 읽는다.
+    this.toneMarks = this.marksNow();
 
     if (!this.servesChannel) return;
     const words = profile.interest;
     if (!Array.isArray(words) || words.length === 0) return;
     const escaped = words.map((w: string) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-    this.logger.info(`관심 낱말 ${escaped.length}개를 읽었습니다 (생각 중 표시 :${this.mark}:)`);
+    const marks = Object.keys(this.toneMarks).length;
+    this.logger.info(`관심 낱말 ${escaped.length}개를 읽었습니다 (생각 중 표시 :${this.mark}:`
+      + `${marks ? ` · 말투별 ${marks}개` : ''}${this.botTone ? ` · 기본 말투 ${this.botTone}` : ''})`);
     this.interest = new RegExp(escaped.join('|'));
   }
 
@@ -861,10 +897,15 @@ export class ChatHost {
     channel: string; text: string; ts: string; threadTs?: string;
     react?: boolean; sibling?: boolean;
   }): void {
+    const seen = this.taken.get(key) ?? new Set<string>();
+    if (seen.has(item.ts)) return;              // 훑기가 다시 읽어 온 같은 말
+    seen.add(item.ts);
+    // Set 은 넣은 순서를 지키므로 맨 앞이 가장 오래된 것이다.
+    while (seen.size > TAKEN_MEMORY) seen.delete(seen.values().next().value as string);
+    this.taken.set(key, seen);
+
     const waiting = this.pending.get(key)
-      ?? { channel: item.channel, texts: [], reactTs: [], toldBusy: false, seen: new Set<string>() };
-    if (waiting.seen.has(item.ts)) return;      // 훑기가 다시 읽어 온 같은 말
-    waiting.seen.add(item.ts);
+      ?? { channel: item.channel, texts: [], reactTs: [], toldBusy: false };
     waiting.channel = item.channel;
     // 인사처럼 **슬랙에 없는 글**은 표시를 붙일 자리가 없다(`greet:` 는 지어낸 열쇠다).
     if (!item.ts.startsWith('greet:')) waiting.lastTs = item.ts;
@@ -938,8 +979,11 @@ export class ChatHost {
         // 부르지 않은 자리는 줄마다 붙이지 않지만 **하나는 붙인다** — 답을 만드는 데
         // 10~20초가 걸리는데 그동안 아무것도 안 보이면 못 들은 것과 구분이 안 된다.
         if (waiting.reactTs.length === 0 && waiting.lastTs) waiting.reactTs.push(waiting.lastTs);
+        // **표시를 여기서 한 번 정해 둔다.** 이 턴에서 말투가 바뀔 수 있는데, 뗄 때 다시
+        // 고르면 붙인 것과 다른 이름을 떼려 해서 **붙은 표시가 그대로 남는다.**
+        const mark = this.markFor(key);
         for (const ts of waiting.reactTs) {
-          await this.react(client, 'add', waiting.channel, ts);
+          await this.react(client, 'add', waiting.channel, ts, mark);
         }
         let result: TurnResult;
         try {
@@ -949,7 +993,7 @@ export class ChatHost {
           result = { reply: '', error: String(error) };
         } finally {
           for (const ts of waiting.reactTs) {
-            await this.react(client, 'remove', waiting.channel, ts);
+            await this.react(client, 'remove', waiting.channel, ts, mark);
           }
         }
 
@@ -1075,15 +1119,66 @@ export class ChatHost {
     }
   }
 
+  /**
+   * 이 대화에 붙일 「생각 중」 표시. **지금 말투에 맞춘다.**
+   *
+   * 말투는 대화마다 다르므로(방에서 불러서 바꾼다) 봇 하나에 표시 하나로는 안 된다.
+   * 지금 말투는 **파이썬 쪽이 쓰는 그 파일에서 그대로 읽는다** — 여기서 따로 셈하면
+   * 두 쪽의 답이 갈리고, 갈렸다는 것을 알려 주는 것이 아무것도 없다.
+   *
+   * 그 파일이 없거나(첫 대화) 목록에 없는 말투(사람이 지어낸 지시문)면 봇 제 표시로 간다.
+   */
+  private markFor(key: string): string {
+    const conv = this.readNear('bots', this.opts.name, 'data', 'conv', `${key}.json`);
+    const cfg = this.readNear('bots', this.opts.name, 'config.json');
+    // 대화에 저장된 말투 → 봇 기본 말투 → 뜰 때 읽어 둔 값 순으로 처음 잡히는 것.
+    const tone = [conv?.tone, cfg?.tone, this.botTone]
+      .find((t) => typeof t === 'string' && t.trim());
+    return this.marksNow()[String(tone ?? '').trim()] || this.mark;
+  }
+
+  /**
+   * 말투별 표시를 **그때그때 읽는다**(`chatbot/tone_marks.json`).
+   *
+   * 뜰 때 읽어 쥐고 있으면 표시를 고쳐도 재시작 전에는 안 따라오는데, 말투 자체는
+   * 파이썬이 매 턴 파일을 다시 읽어 바로 바뀐다 — **얼굴만 바뀌고 표시가 옛것으로
+   * 남는다.** 파일 하나 읽는 값은 10~15초짜리 턴에서 셀 것이 못 된다.
+   *
+   * 못 읽으면 뜰 때 읽어 둔 것을 그대로 쓴다 — 파일이 잠깐 없다고 표시를 잃을 이유가 없다.
+   */
+  private marksNow(): Record<string, string> {
+    const raw = this.readNear('tone_marks.json');
+    if (!raw) return this.toneMarks;
+    const out: Record<string, string> = {};
+    for (const [tone, mark] of Object.entries(raw)) {
+      // `_` 로 시작하는 줄은 사람이 읽는 설명이지 말투가 아니다.
+      if (!tone.startsWith('_') && typeof mark === 'string' && mark.trim()) {
+        out[tone] = mark.replace(/:/g, '').trim();
+      }
+    }
+    return Object.keys(out).length ? out : this.toneMarks;
+  }
+
+  /** 파이썬 쪽 폴더의 작은 JSON 하나. 없거나 깨졌으면 null — 표시는 장식이라 조용히 넘긴다. */
+  private readNear(...parts: string[]): Record<string, unknown> | null {
+    try {
+      return JSON.parse(fs.readFileSync(
+        path.join(path.dirname(this.opts.script), ...parts), 'utf-8')) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   /** 이모지는 장식이다 — 여기서 실패해도 답이 가라앉으면 안 된다. */
   private async react(
     client: App['client'], op: 'add' | 'remove', channel: string, ts: string,
+    mark = this.mark,
   ): Promise<void> {
     try {
       if (op === 'add') {
-        await client.reactions.add({ channel, timestamp: ts, name: this.mark });
+        await client.reactions.add({ channel, timestamp: ts, name: mark });
       } else {
-        await client.reactions.remove({ channel, timestamp: ts, name: this.mark });
+        await client.reactions.remove({ channel, timestamp: ts, name: mark });
       }
     } catch (error) {
       // **이름이 틀린 것만은 크게 알린다.** 나머지(이미 붙음·글이 지워짐)는 흔한 일이라
@@ -1093,8 +1188,8 @@ export class ChatHost {
       if (code === 'invalid_name' && !this.toldBadMark) {
         this.toldBadMark = true;
         this.logger.warn(
-          `:${this.mark}: 라는 이모지가 이 워크스페이스에 없습니다 — 생각 중 표시가 안 뜹니다.`
-          + ` bots/${this.opts.name}/config.json 의 reaction 을 고쳐 주세요`);
+          `:${mark}: 라는 이모지가 이 워크스페이스에 없습니다 — 생각 중 표시가 안 뜹니다.`
+          + ` bots/${this.opts.name}/config.json 의 reaction 이나 chatbot/tone_marks.json 을 고쳐 주세요`);
         return;
       }
       this.logger.debug(`reactions.${op} failed`, error);
