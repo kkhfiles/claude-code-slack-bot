@@ -45,6 +45,42 @@ const SERVICE_ICON: Record<string, string> = {
   CLAUDE: ':sparkles:',
 };
 
+/** 두 열로 나란히 놓으므로 서비스 이름은 짧은 쪽을 쓴다. */
+const SERVICE_SHORT: Record<string, string> = {
+  CHATGPT: 'ChatGPT',
+  CLAUDE: 'Claude',
+};
+
+/**
+ * 좌석 상태 기호는 두 벌이고 몫이 다르다.
+ * 눈금(색)은 몇 석인지 한눈에 세는 몫, 이름 앞 기호는 뜻을 싣는 몫이다.
+ * 범례에서 둘을 한 항목으로 묶어 같은 뜻을 두 번 설명하지 않는다.
+ */
+const KEEP_ICON = '\u{1F512}';   // 자물쇠 · 유지 필요
+const GIVE_ICON = '\u{1F91D}';   // 악수 · 양도 가능
+const KEEP_TICK = '\u{1F7E6}';   // 파란 눈금
+const GIVE_TICK = '\u{1F7E9}';   // 초록 눈금
+const SWAP_ICON = '\u{1F504}';   // 바꾸는 중
+const WAIT_ICON = '\u{23F3}';    // 기다리는 사람
+const CLOCK_ICON = '\u{1F553}';
+
+/**
+ * 서울 기준 `09/02 16:32`. ko-KR 기본 서식은 `26. 9. 2. 오후 4:32` 로 나와
+ * 좁은 범례 줄에서 자리를 많이 먹고 읽기도 나쁘다.
+ */
+function seoulStamp(ms: number): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Seoul',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(ms));
+  const at = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  return `${at('month')}/${at('day')} ${at('hour')}:${at('minute')}`;
+}
+
 const SWAP_STATE_LABEL: Record<string, string> = {
   AWAITING_ADMIN: '실장 승인 대기',
   APPLYING: '실장이 바꾸는 중',
@@ -328,63 +364,76 @@ export class PremiumSeatSlack {
     }
   }
 
+  /**
+   * 현황판 블록. Standard 는 넣지 않는다 — 이 도구가 다루는 것은 Premium 좌석뿐이다.
+   *
+   * 두 서비스를 좌우 두 열로 놓고, 열마다 눈금 · 좌석 수 · 보유자를 쌓는다.
+   * 범례는 화면에 실제로 있는 기호만 설명한다.
+   */
   private dashboardBlocks(model: any): any[] {
     const maxAge = model?.snapshot_max_age_minutes ?? 60;
     const blocks: any[] = [
       { type: 'header', text: { type: 'plain_text', text: '\u{1F3AB} AI Premium 좌석', emoji: true } },
     ];
 
+    const fields: any[] = [];
+    const moving: string[] = [];
+    const waitingLines: string[] = [];
+    const warnings: string[] = [];
+    const seenBy: Array<{ short: string; seen: string }> = [];
+
     for (const key of ['CHATGPT', 'CLAUDE']) {
       const view = model?.services?.[key];
       if (!view) continue;
-      const counts = view.counts ?? {};
+      const short = SERVICE_SHORT[key] ?? key;
       const holders: any[] = view.premium ?? [];
       const waiting: string[] = view.waiting ?? [];
-      const givers = holders.filter((h) => h.availability === 'TRANSFERABLE');
 
-      blocks.push({ type: 'divider' });
-      blocks.push({
-        type: 'section',
-        text: { type: 'mrkdwn', text: `${SERVICE_ICON[key] ?? ''} *${SERVICE_LABEL[key] ?? key}*${view.locked ? '  :warning: 실장 확인 중' : ''}` },
-        fields: [
-          { type: 'mrkdwn', text: `*Premium*\n${counts.premium ?? '?'}명` },
-          { type: 'mrkdwn', text: `*양도 가능*\n${givers.length}명` },
-          { type: 'mrkdwn', text: `*Standard*\n${counts.standard ?? '?'}명` },
-          { type: 'mrkdwn', text: `*기다리는 사람*\n${waiting.length}명` },
-        ],
+      const gauge = holders
+        .map((h) => (h.availability === 'TRANSFERABLE' ? GIVE_TICK : KEEP_TICK))
+        .join('');
+      const names = holders.length
+        ? holders
+            .map((h) => `${h.availability === 'TRANSFERABLE' ? GIVE_ICON : KEEP_ICON} ${h.display_name}`)
+            .join('\n')
+        : '보유자 없음';
+      const lock = view.locked ? '\n:warning: 실장 확인 중' : '';
+      fields.push({
+        type: 'mrkdwn',
+        text: `${SERVICE_ICON[key] ?? ''} *${short}*${lock}\n${gauge}\nPremium *${holders.length}명*\n\n${names}`,
       });
 
-      if (holders.length) {
-        // 한 줄에 둘씩 — 열한 명 규모에서 가장 읽기 좋다.
-        const cells = holders.map((h) => `${h.availability === 'TRANSFERABLE' ? '\u{1F91D}' : '\u{1F512}'} ${h.display_name}`);
-        const rows: string[] = [];
-        for (let i = 0; i < cells.length; i += 2) rows.push(cells.slice(i, i + 2).join('    '));
-        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: rows.join('\n') } });
-      }
-
       if (view.swap) {
-        blocks.push({
-          type: 'section',
-          text: { type: 'mrkdwn', text: `\u{1F504} *${view.swap.from_name} → ${view.swap.to_name}*  ${SWAP_STATE_LABEL[view.swap.state] ?? view.swap.state}` },
-        });
+        moving.push(
+          `${SWAP_ICON} *${short}*  ${view.swap.from_name} \u2192 ${view.swap.to_name}  \u00b7  ` +
+            `${SWAP_STATE_LABEL[view.swap.state] ?? view.swap.state}`,
+        );
       }
       if (waiting.length) {
-        blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `\u{23F3} 기다리는 사람: ${waiting.join(' · ')}` }] });
+        waitingLines.push(`${WAIT_ICON} *${short}*  ${waiting.join(' \u00b7 ')}`);
       }
 
       const observed = view.observed_at ? Date.parse(view.observed_at) : 0;
-      const declared = view.source === 'DECLARED';
-      const stale = !declared && (!observed || (Date.now() - observed) / 60000 >= maxAge);
-      const seen = observed
-        ? new Date(observed).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', dateStyle: 'short', timeStyle: 'short' })
-        : '없음';
-      const notes = [`\u{1F553} ${seen} 기준`];
-      if (stale) notes.push(':warning: 확인 지연');
-      if (view.unknown_email_count) notes.push(`대응표 미등록 ${view.unknown_email_count}명`);
-      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: notes.join('  ·  ') }] });
+      // DECLARED 는 대조할 바깥 정본이 없어 낡을 일이 없다.
+      const stale = view.source !== 'DECLARED' && (!observed || (Date.now() - observed) / 60000 >= maxAge);
+      if (stale) warnings.push(`:warning: *${short}* 확인 지연`);
+      if (view.unknown_email_count) warnings.push(`:warning: *${short}* 대응표 미등록 ${view.unknown_email_count}명`);
+      seenBy.push({ short, seen: observed ? seoulStamp(observed) : '없음' });
     }
 
+    if (fields.length) blocks.push({ type: 'section', fields });
+
+    if (moving.length || waitingLines.length) {
+      blocks.push({ type: 'divider' });
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: [...moving, ...waitingLines].join('\n') } });
+    }
+    if (warnings.length) {
+      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: warnings.join('  \u00b7  ') }] });
+    }
+
+    // 내용과 범례 사이의 구분선.
     blocks.push({ type: 'divider' });
+
     if (this.opts.openToTeam) {
       blocks.push({
         type: 'actions',
@@ -394,17 +443,33 @@ export class PremiumSeatSlack {
           this.button('내 요청 보기', 'premium_my_requests'),
         ],
       });
-      blocks.push({
-        type: 'context',
-        elements: [{ type: 'mrkdwn', text: '\u{1F512} 유지 필요  ·  \u{1F91D} 양도 가능  ·  \u{1F504} 교환 진행 중' }],
-      });
     } else {
       blocks.push({
         type: 'context',
         elements: [{ type: 'mrkdwn', text: '아직 준비 중입니다. 실장이 열면 버튼이 나옵니다.' }],
       });
     }
+
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: this.legend(moving, waitingLines, seenBy) }] });
     return blocks;
+  }
+
+  /** 범례 — 화면에 있는 기호만 설명한다. 좌석 상태 두 항목은 눈금이 늘 쓰므로 항상 넣는다. */
+  private legend(
+    moving: string[],
+    waitingLines: string[],
+    seenBy: Array<{ short: string; seen: string }>,
+  ): string {
+    const items = [`${KEEP_TICK}${KEEP_ICON} 유지 필요`, `${GIVE_TICK}${GIVE_ICON} 양도 가능`];
+    if (moving.length) items.push(`${SWAP_ICON} 바꾸는 중`);
+    if (waitingLines.length) items.push(`${WAIT_ICON} 기다리는 사람`);
+
+    const times = new Set(seenBy.map((x) => x.seen));
+    const when =
+      times.size === 1
+        ? `${[...times][0]} 기준`
+        : seenBy.map((x) => `${x.short} ${x.seen}`).join('  \u00b7  ') + ' 기준';
+    return `${items.join('  \u00b7  ')}\n${CLOCK_ICON} ${when}`;
   }
 
   private button(label: string, actionId: string, style?: 'primary' | 'danger', value?: string): any {
