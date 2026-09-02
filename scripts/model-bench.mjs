@@ -11,7 +11,8 @@
  * 읽기는 진짜로 하고 쓰기는 「무엇을 쓸지」만 찍는다. 그 줄이 채점의 정답지라
  * 파일로도 받아 둔다(`WORK_ASSISTANT_DRY_LOG`).
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync,
+         writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -142,6 +143,16 @@ async function run(model, effort, kase) {
   return out;
 }
 
+// ⚠️ **앞 판을 지우기 전에 옮겨 둔다** (2026-09-02). 그전에는 폴더를 통째로
+// 날려서, 한 모델만 다시 재면 **다른 모델의 원본이 같이 사라졌다** — 실제로
+// 났고(opus 24회분), 폴더 안에 손으로 떠 둔 사본까지 함께 지워졌다.
+// 이 스크립트는 한 벌씩 나눠 돌리는 것이 정상 쓰임이라 그때마다 앞 판을 잃는다.
+const prev = path.join(ROOT, '.bench-prev.json');
+if (existsSync(path.join(OUT, 'result.json'))) {
+  copyFileSync(path.join(OUT, 'result.json'), prev);
+  console.log(`앞 판을 ${path.relative(ROOT, prev)} 로 옮겨 뒀습니다
+`);
+}
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
 const cases = CASES.filter((c) => !ONLY || c.kind === ONLY);
