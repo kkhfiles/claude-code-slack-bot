@@ -40,6 +40,17 @@ const SERVICE_LABEL: Record<string, string> = {
   CLAUDE: 'Claude Team',
 };
 
+const SERVICE_ICON: Record<string, string> = {
+  CHATGPT: ':speech_balloon:',
+  CLAUDE: ':sparkles:',
+};
+
+const SWAP_STATE_LABEL: Record<string, string> = {
+  AWAITING_ADMIN: '실장 승인 대기',
+  APPLYING: '실장이 바꾸는 중',
+  NEEDS_ADMIN: ':warning: 실장 확인 필요',
+};
+
 /** 오류 코드마다 고정 한글 문구. 파이썬 message 를 그대로 노출하지 않는다 (§13.4). */
 const ERROR_TEXT: Record<string, string> = {
   NOT_A_MEMBER: '대응표에 등록되지 않은 사용자입니다. 실장에게 알려 주세요.',
@@ -52,6 +63,24 @@ const ERROR_TEXT: Record<string, string> = {
   SERVICE_LOCKED: '해당 서비스는 실장 확인 중입니다.',
   BAD_REQUEST: '요청을 이해하지 못했습니다.',
   OPERATION_RUNNING: '앞선 요청을 처리하는 중입니다. 잠시 뒤 다시 눌러 주세요.',
+};
+
+const SWAP_ACTION_DONE: Record<string, string> = {
+  start: '양도를 시작했습니다. 관리 화면에서 바꾸신 뒤 「완료했습니다」를 눌러 주세요.',
+  reject: '양도를 취소했습니다. 좌석은 그대로입니다.',
+  complete: '좌석 변경을 반영했습니다.',
+  abort: '이 교환을 멈췄습니다.',
+  verify: '실제 상태를 다시 확인하도록 예약했습니다.',
+};
+
+const SWAP_ACTION_FAILED: Record<string, string> = {
+  NOT_A_MANAGER: '관리자만 누를 수 있습니다.',
+  NOT_STARTABLE: '이미 처리된 교환입니다.',
+  NOT_REJECTABLE: '이미 시작해서 취소할 수 없습니다. 「이 교환 중단」을 쓰세요.',
+  NOT_COMPLETABLE: '이미 처리된 교환입니다.',
+  NOT_ABORTABLE: '멈출 수 있는 상태가 아닙니다.',
+  NEEDS_VERIFY: '실제 상태를 읽어 확인하는 중입니다. 잠시 뒤 결과가 옵니다.',
+  NOT_FOUND: '없는 교환 번호입니다.',
 };
 
 const TIMEOUT_STATE_MS = 10_000;
@@ -103,7 +132,16 @@ export class PremiumSeatSlack {
       void this.handleAvailability(body.user.id, service, status);
     });
 
+    // 관리자 버튼. 누른 사람이 관리자인지는 파이썬이 다시 본다 — 화면만 믿지 않는다.
+    app.action(/^premium_swap_(start|reject|complete|abort|verify)$/, async ({ ack, body, action }) => {
+      await ack();
+      const actionId = (action as any).action_id as string;
+      const swapId = (action as any).value as string;
+      void this.handleSwapAction(actionId.replace('premium_swap_', ''), swapId, body);
+    });
+
     const jobEvery = (this.opts.jobPollSeconds ?? 10) * 1000;
+    this.every(60_000, () => this.pumpNudges());
     this.every(jobEvery, () => this.pumpJobs());
     this.every(60_000, () => this.pumpNotifications());
     this.every(60_000, () => this.scheduleReconciles());
@@ -214,6 +252,12 @@ export class PremiumSeatSlack {
     }
   }
 
+  /** 때가 된 재알림 회차를 만든다. 회차 시각이 고유 키라 두 번 생기지 않는다. */
+  private async pumpNudges(): Promise<void> {
+    const out = await this.run('nudge tick', {});
+    if (out.dashboard_dirty) this.markDashboardDirty();
+  }
+
   /** 대기 중인 알림을 보낸다. 보내기 직전에 아직 보낼 것이 맞는지 다시 본다. */
   private async pumpNotifications(): Promise<void> {
     const claim = await this.run('notification claim', { owner: 'slack', limit: 10 });
@@ -285,39 +329,74 @@ export class PremiumSeatSlack {
   }
 
   private dashboardBlocks(model: any): any[] {
-    const lines: string[] = [];
     const maxAge = model?.snapshot_max_age_minutes ?? 60;
+    const blocks: any[] = [
+      { type: 'header', text: { type: 'plain_text', text: '\u{1F3AB} AI Premium 좌석', emoji: true } },
+    ];
+
     for (const key of ['CHATGPT', 'CLAUDE']) {
       const view = model?.services?.[key];
       if (!view) continue;
       const counts = view.counts ?? {};
-      const transferable = (view.premium ?? []).filter((p: any) => p.availability === 'TRANSFERABLE').length;
-      const head = `*${SERVICE_LABEL[key] ?? key}* · Premium ${counts.premium ?? '?'}명 · 양도 가능 ${transferable}명 · 대기 ${(view.waiting ?? []).length}명${view.locked ? ' · 실장 확인 중' : ''}`;
-      lines.push(head);
-      for (const holder of view.premium ?? []) {
-        const mark = holder.availability === 'TRANSFERABLE' ? '양도 가능' : '유지 필요';
-        lines.push(`• ${holder.display_name}  ${mark}`);
+      const holders: any[] = view.premium ?? [];
+      const waiting: string[] = view.waiting ?? [];
+      const givers = holders.filter((h) => h.availability === 'TRANSFERABLE');
+
+      blocks.push({ type: 'divider' });
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `${SERVICE_ICON[key] ?? ''} *${SERVICE_LABEL[key] ?? key}*${view.locked ? '  :warning: 실장 확인 중' : ''}` },
+        fields: [
+          { type: 'mrkdwn', text: `*Premium*\n${counts.premium ?? '?'}명` },
+          { type: 'mrkdwn', text: `*양도 가능*\n${givers.length}명` },
+          { type: 'mrkdwn', text: `*Standard*\n${counts.standard ?? '?'}명` },
+          { type: 'mrkdwn', text: `*기다리는 사람*\n${waiting.length}명` },
+        ],
+      });
+
+      if (holders.length) {
+        // 한 줄에 둘씩 — 열한 명 규모에서 가장 읽기 좋다.
+        const cells = holders.map((h) => `${h.availability === 'TRANSFERABLE' ? '\u{1F91D}' : '\u{1F512}'} ${h.display_name}`);
+        const rows: string[] = [];
+        for (let i = 0; i < cells.length; i += 2) rows.push(cells.slice(i, i + 2).join('    '));
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: rows.join('\n') } });
       }
-      if ((view.waiting ?? []).length) lines.push(`대기: ${view.waiting.join(' · ')}`);
+
+      if (view.swap) {
+        blocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: `\u{1F504} *${view.swap.from_name} → ${view.swap.to_name}*  ${SWAP_STATE_LABEL[view.swap.state] ?? view.swap.state}` },
+        });
+      }
+      if (waiting.length) {
+        blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `\u{23F3} 기다리는 사람: ${waiting.join(' · ')}` }] });
+      }
+
       const observed = view.observed_at ? Date.parse(view.observed_at) : 0;
-      const stale = !observed || (Date.now() - observed) / 60000 >= maxAge;
-      lines.push(`마지막 확인: ${observed ? new Date(observed).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }) : '없음'}${stale ? ' · 확인 지연' : ''}`);
-      if (view.unknown_email_count) lines.push(`대응표 미등록 ${view.unknown_email_count}명`);
-      lines.push('');
+      const declared = view.source === 'DECLARED';
+      const stale = !declared && (!observed || (Date.now() - observed) / 60000 >= maxAge);
+      const seen = observed
+        ? new Date(observed).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', dateStyle: 'short', timeStyle: 'short' })
+        : '없음';
+      const notes = [`\u{1F553} ${seen} 기준`];
+      if (stale) notes.push(':warning: 확인 지연');
+      if (view.unknown_email_count) notes.push(`대응표 미등록 ${view.unknown_email_count}명`);
+      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: notes.join('  ·  ') }] });
     }
 
-    const blocks: any[] = [
-      { type: 'header', text: { type: 'plain_text', text: 'AI Premium 좌석', emoji: true } },
-      { type: 'section', text: { type: 'mrkdwn', text: lines.join('\n').trim() || '아직 확인된 좌석이 없습니다.' } },
-    ];
+    blocks.push({ type: 'divider' });
     if (this.opts.openToTeam) {
       blocks.push({
         type: 'actions',
         elements: [
-          this.button('Premium 요청', 'premium_request_open'),
+          this.button('Premium 요청', 'premium_request_open', 'primary'),
           this.button('내 상태 변경', 'premium_availability_open'),
           this.button('내 요청 보기', 'premium_my_requests'),
         ],
+      });
+      blocks.push({
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: '\u{1F512} 유지 필요  ·  \u{1F91D} 양도 가능  ·  \u{1F504} 교환 진행 중' }],
       });
     } else {
       blocks.push({
@@ -328,8 +407,11 @@ export class PremiumSeatSlack {
     return blocks;
   }
 
-  private button(label: string, actionId: string): any {
-    return { type: 'button', text: { type: 'plain_text', text: label, emoji: true }, action_id: actionId };
+  private button(label: string, actionId: string, style?: 'primary' | 'danger', value?: string): any {
+    const b: any = { type: 'button', text: { type: 'plain_text', text: label, emoji: true }, action_id: actionId };
+    if (style) b.style = style;
+    if (value) b.value = value;
+    return b;
   }
 
   private async openModal(client: any, body: any, kind: 'request' | 'availability'): Promise<void> {
@@ -433,15 +515,95 @@ export class PremiumSeatSlack {
     await this.dm(userId, mine.length ? mine.join('\n') : '지금 보유한 Premium 좌석이 없습니다.');
   }
 
+  /**
+   * 관리자 버튼 하나를 파이썬에 넘기고, 누른 메시지를 그 자리에서 갱신한다.
+   *
+   * 오래된 버튼은 파이썬이 상태를 보고 거절한다 — 화면이 낡았을 뿐 상태는 안 바뀐다.
+   */
+  private async handleSwapAction(kind: string, swapId: string, body: any): Promise<void> {
+    const actor = this.userOf(body);
+    const command = kind === 'verify' ? 'swap verify' : `swap ${kind}`;
+    const out = await this.run(command, { swap_id: swapId, actor });
+
+    const line = out.ok
+      ? SWAP_ACTION_DONE[kind] ?? '처리했습니다.'
+      : SWAP_ACTION_FAILED[out.error?.code ?? ''] ?? this.errorText(out);
+
+    const channel = body?.channel?.id;
+    const ts = body?.message?.ts;
+    if (channel && ts) {
+      try {
+        await this.app!.client.chat.update({
+          channel,
+          ts,
+          text: line,
+          blocks: [
+            ...(body.message.blocks ?? []).filter((b: any) => b.type !== 'actions'),
+            { type: 'context', elements: [{ type: 'mrkdwn', text: `${out.ok ? ':white_check_mark:' : ':warning:'} ${line}` }] },
+            ...(out.ok ? [] : [this.swapActions(swapId, body.message.blocks)]),
+          ].filter(Boolean),
+        });
+      } catch (error) {
+        this.logger.warn('failed to update the admin message', error);
+      }
+    }
+    if (out.dashboard_dirty) this.markDashboardDirty();
+  }
+
+  /** 실패했으면 버튼을 그대로 살려 둔다 — 다시 누를 수 있어야 한다. */
+  private swapActions(swapId: string, previous: any[]): any {
+    const kept = (previous ?? []).find((b: any) => b.type === 'actions');
+    return kept ?? { type: 'actions', elements: [this.button('실제 상태 다시 확인', 'premium_swap_verify', undefined, swapId)] };
+  }
+
   // ------------------------------------------------------------- 알림 전송
   private async postNotification(row: any): Promise<{ channel?: string; ts?: string } | null> {
     const text = this.notificationText(row);
     if (!text) return null;
+    const blocks: any[] = [{ type: 'section', text: { type: 'mrkdwn', text } }];
+    const buttons = this.notificationButtons(row);
+    if (buttons) blocks.push(buttons);
     const res = await this.app!.client.chat.postMessage({
       channel: row.recipient_slack_id,
       text,
+      blocks,
     });
     return { channel: res.channel as string, ts: res.ts as string };
+  }
+
+  /** 관리자에게 가는 알림에만 버튼을 단다. 팀원 알림은 읽는 것으로 끝난다. */
+  private notificationButtons(row: any): any | null {
+    const id = row.payload?.swap_id;
+    if (!id) return null;
+    switch (row.kind) {
+      case 'SWAP_APPROVAL':
+        return {
+          type: 'actions',
+          elements: [
+            this.button('양도 진행', 'premium_swap_start', 'primary', id),
+            this.button('양도 취소·보유 유지', 'premium_swap_reject', 'danger', id),
+          ],
+        };
+      case 'APPLY_PENDING':
+        return {
+          type: 'actions',
+          elements: [
+            this.button('완료했습니다', 'premium_swap_complete', 'primary', id),
+            this.button('이 교환 중단', 'premium_swap_abort', 'danger', id),
+          ],
+        };
+      case 'SWAP_NEEDS_ADMIN':
+        return {
+          type: 'actions',
+          elements: [
+            this.button('다시 진행', 'premium_swap_start', 'primary', id),
+            this.button('실제 상태 다시 확인', 'premium_swap_verify', undefined, id),
+            this.button('이 교환 중단', 'premium_swap_abort', 'danger', id),
+          ],
+        };
+      default:
+        return null;
+    }
   }
 
   private notificationText(row: any): string {
@@ -458,6 +620,32 @@ export class PremiumSeatSlack {
           '',
           ...this.applySteps(p),
         ].join('\n');
+      case 'APPLY_PENDING':
+        return [
+          `*${svc} Premium 양도 · 바꾸는 중*`,
+          '',
+          `${p.holder?.name} → ${p.recipient?.name}`,
+          `교환 번호: ${p.swap_id}`,
+          '',
+          ...this.applySteps(p),
+          '',
+          '다 바꾸셨으면 아래 「완료했습니다」를 눌러 주세요.',
+        ].join('\n');
+      case 'SWAP_NEEDS_ADMIN':
+        return [
+          `*${svc} Premium 양도 · 확인 필요*`,
+          '',
+          `${p.holder?.name} → ${p.recipient?.name}`,
+          `교환 번호: ${p.swap_id}`,
+          '',
+          '좌석이 중간 상태로 남아 있습니다. 관리 화면을 보고 이어서 바꾸거나 되돌려 주세요.',
+        ].join('\n');
+      case 'APPLY_STARTED':
+        return `${svc} Premium 좌석 변경을 실장이 시작했습니다. 잠시 뒤 반영됩니다.`;
+      case 'SWAP_COMPLETED':
+        return `${svc} Premium 좌석 변경이 끝났습니다. ${p.holder?.name} → ${p.recipient?.name}`;
+      case 'SWAP_REJECTED':
+        return `${svc} Premium 양도가 취소됐습니다. 좌석은 그대로입니다.`;
       case 'MATCHED_HOLDER':
         return `${svc} Premium 좌석을 ${p.recipient?.name} 님에게 넘기는 건으로 이어졌습니다. 추가로 하실 일은 없습니다.`;
       case 'MATCHED_RECIPIENT':
