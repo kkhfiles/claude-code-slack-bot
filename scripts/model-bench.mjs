@@ -95,6 +95,19 @@ const CASES = [
 // MCP 서버는 붙이지 않는다(`skipMcp`) — 재려는 것은 판·업무 갱신이고 그 길은
 // `tasks.py` 하나뿐이라 MCP 가 답을 바꾸지 않는다. 붙이면 실험마다 외부 서버가
 // 깨어나 시간이 그쪽으로 새고, 그 편차가 모델 차이를 덮는다.
+/**
+ * `--rules=<파일>` — 규칙 글을 세션 프롬프트에 얹는다.
+ *
+ * **경로와 규칙을 갈라 재려고 넣었다.** 좁은 길이 전체 세션을 이긴 것이
+ * 「좁아서」인지 「규칙이 있어서」인지 그냥으로는 못 가른다 — 둘이 한꺼번에
+ * 다르기 때문이다. 같은 규칙을 전체 세션에도 얹어 보면 그 몫이 갈린다.
+ */
+const RULES = arg('rules', '');
+// 빈 줄 둘로 띄운 뒤 규칙을 붙인다. **줄바꿈을 배열 join 으로 만든다** —
+// 셸을 거쳐 이 파일을 고치면 역슬래시가 한 겹 벗겨져 문자열이 깨진다(실제로 났다).
+const EXTRA = RULES ? ['', '', readFileSync(RULES, 'utf8')].join('\n') : '';
+if (RULES) console.log(`규칙을 얹었다: ${RULES} (${EXTRA.length}자)`);
+
 const sdk = new SdkHandler({ getServerConfiguration: () => ({}) });
 
 async function run(model, effort, kase) {
@@ -111,7 +124,7 @@ async function run(model, effort, kase) {
       effort,
       permissionMode: 'auto',
       skills: 'all',
-      appendSystemPrompt: SURFACE,
+      appendSystemPrompt: SURFACE + EXTRA,
       noSessionPersistence: true,
       skipMcp: true,
       env: { WORK_ASSISTANT_DRY: '1', WORK_ASSISTANT_DRY_LOG: dryLog },
