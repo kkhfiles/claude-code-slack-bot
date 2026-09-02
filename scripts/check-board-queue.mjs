@@ -351,6 +351,61 @@ await post('act', { text: HEAD + '옛 봇', kind: 'ask' });
 r = await q.drain(apply, ask, BASE, note);
 eq('먼저 박기를 안 넘겨도 그대로 돈다', [asked.length, r.applied.length], [1, 1]);
 
+// --- 좁은 길 (2026-09-02) ------------------------------------------------
+// **성공하면 세션도 먼저 박기도 안 탄다.** 좁은 길이 스스로 로그를 앉히므로
+// 둘 다 돌면 같은 원문이 카드에 두 줄로 남는다 — 화면은 멀쩡해 보인다.
+//
+// **못 받으면 오늘까지와 완전히 같은 길로 떨어진다.** 그 자리가 무너지면
+// 업무를 안 짚은 말(실측 10%)이 통째로 사라진다.
+await clear();
+staged.length = 0;
+const narrowed = [];
+const narrow = async (text) => {
+  narrowed.push(text);
+  if (text.includes('안 짚음')) return { kind: 'not-quick', detail: '업무를 안 짚었다' };
+  if (text.includes('터짐')) throw new Error('좁은 길이 터졌습니다');
+  if (text.includes('망함')) return { kind: 'failed', message: '볼트가 안 열립니다' };
+  return { kind: 'ok', output: 'TSK-9 — 진행 로그 / 소프트 마감=2026-09-11' };
+};
+await post('act', { text: HEAD + '다음 주 금요일에 확인', kind: 'ask' });
+r = await q.drain(apply, ask, BASE, note, stage, narrow);
+eq('**좁은 길이 받으면 세션도 먼저 박기도 안 탄다**',
+   [narrowed.length, asked.length, staged.length, r.applied.length], [1, 0, 0, 1]);
+eq('좁은 길이 낸 말을 그대로 들고 온다', r.applied[0]?.output,
+   'TSK-9 — 진행 로그 / 소프트 마감=2026-09-11');
+eq('좁은 길로 처리한 것도 큐에서 사라진다', (await pending()).length, 0);
+
+await clear();
+narrowed.length = 0;
+staged.length = 0;
+await post('act', { text: HEAD + '업무를 안 짚음', kind: 'ask' });
+r = await q.drain(apply, ask, BASE, note, stage, narrow);
+eq('좁은 길이 안 받으면 세션으로 떨어진다',
+   [narrowed.length, asked.length, staged.length, r.applied.length], [1, 1, 1, 1]);
+
+await clear();
+narrowed.length = 0;
+staged.length = 0;
+await post('act', { text: HEAD + '좁은 길이 터짐', kind: 'ask' });
+r = await q.drain(apply, ask, BASE, note, stage, narrow);
+eq('좁은 길이 터져도 세션으로 간다 — 사람 말을 안 잃는다',
+   [asked.length, r.applied.length, r.lost.length], [1, 1, 0]);
+
+await clear();
+narrowed.length = 0;
+staged.length = 0;
+await post('act', { text: HEAD + '좁은 길이 망함', kind: 'ask' });
+r = await q.drain(apply, ask, BASE, note, stage, narrow);
+eq('좁은 길이 실패해도 세션으로 간다', [asked.length, r.applied.length], [1, 1]);
+
+await clear();
+narrowed.length = 0;
+staged.length = 0;
+await post('act', { text: HEAD + '좁은 길 안 넘김', kind: 'ask' });
+r = await q.drain(apply, ask, BASE, note, stage);
+eq('좁은 길을 안 넘기면 오늘까지와 같은 길',
+   [narrowed.length, asked.length, staged.length], [0, 1, 1]);
+
 await clear();
 fs.rmSync(DONE, { force: true });
 fs.rmSync(EVENTS, { force: true });
@@ -365,6 +420,7 @@ if (fails.length) {
     + '일시 실패 남기기 · 섞인 판 · 복구 후 반영 · 사람 말 넘기기 · 한 번만 시도 · 받을 곳 없음 · '
     + '여러 줄 글 안 묶기 · note 버리기 · note 다시 시도 · note 받을 곳 없음 · '
     + '먼저 박기(같은 원문 · 터져도 세션은 감 · 안 넘겨도 돎) · '
-    + '관찰 기록(건마다 한 줄 · 성공과 실패 둘 다 · UTC 아닌 지역시각))');
+    + '관찰 기록(건마다 한 줄 · 성공과 실패 둘 다 · UTC 아닌 지역시각) · '
+    + '좁은 길(받으면 세션도 먼저 박기도 안 탐 · 안 받으면 세션으로 · 터져도 세션으로 · 실패해도 세션으로 · 안 넘기면 옛 길))');
 }
 stopServer();

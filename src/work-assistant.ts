@@ -775,3 +775,58 @@ async function byFile(cmd: 'quick' | 'note' | 'stage', text: string): Promise<Qu
     try { fs.unlinkSync(file); } catch { /* 이미 없다 */ }
   }
 }
+
+
+/** 판에서 온 말의 말머리에서 업무를 뽑는다. 없으면 좁은 길이 못 받는다. */
+export function narrowTask(text: string): string | null {
+  const head = text.split('\n', 1)[0];
+  const m = /^\[[^\]]*\]\s*(TSK-\d+)\b/.exec(head.trim());
+  return m ? m[1] : null;
+}
+
+/**
+ * 좁은 길에 넣을 재료 — 그 카드가 지금 들고 있는 값.
+ *
+ * **`tasks.py` 가 낸다.** 여기서 앞머리를 읽으면 칸 이름·순서가 두 곳으로
+ * 갈라지고, 순서가 바뀌면 그 프롬프트로 잰 성적이 그대로 안 나온다.
+ */
+export async function narrowCard(
+  task: string,
+): Promise<{ task: string; title: string; card: string } | null> {
+  const { code, stdout } = await runTasks(['narrow', '--card', task], 60_000);
+  if (code !== 0) return null;
+  try {
+    return JSON.parse(stdout.trim().split('\n').pop() || '');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 좁은 길이 낸 JSON 을 앉힌다.
+ *
+ * ⛔ **빈 값은 파이썬 쪽 문이 거른다** — 지운 값은 어디에도 안 남아 되돌리기가
+ * 사람의 기억에 걸린다. 여기서 또 막지 않는다(문이 둘이면 한쪽이 낡는다).
+ *
+ * rc 2 는 「좁은 길이 못 냈다」 — 봇이 평소 경로(세션)로 넘긴다.
+ */
+export async function narrowApply(json: string, task: string): Promise<QuickOutcome> {
+  const root = workAssistantRoot();
+  if (!root) return { kind: 'not-quick' };
+  const file = path.join(os.tmpdir(), `wa-narrow-${randomId()}.json`);
+  try {
+    fs.writeFileSync(file, json, { encoding: 'utf-8' });
+    const { code, stdout, stderr } = await runTasks(
+      ['narrow', '--apply', file, '--task', task], 90_000);
+    if (code === 0) return { kind: 'ok', output: stdout.trim() };
+    if (code === 2) {
+      return { kind: 'not-quick', detail: (stderr || stdout).trim().split('\n').slice(-2).join(' / ') };
+    }
+    return { kind: 'failed', message: (stderr || stdout).trim().slice(0, 300) };
+  } catch (err) {
+    logger.error('narrow apply failed', err);
+    return { kind: 'failed', message: String(err) };
+  } finally {
+    try { fs.unlinkSync(file); } catch { /* 이미 없다 */ }
+  }
+}
