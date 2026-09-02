@@ -65,5 +65,8 @@ coverage/
 .rate-limit-until.json
 
 # 모델 실험 산출물 — 결과는 work-assistant/docs/design.md 에 정리해 둔다
+# ⚠️ `.bench-prev.json` 은 `.bench/` **밖**이라 따로 적어야 한다 — 벤치가
+#    시작할 때 `.bench/` 를 통째로 지우므로 앞 판을 그 안에 못 둔다.
 .bench/
+.bench-prev.json
 .bench-run.log
