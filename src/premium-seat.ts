@@ -133,6 +133,15 @@ const SWAP_ACTION_FAILED: Record<string, string> = {
 };
 
 const TIMEOUT_STATE_MS = 10_000;
+/** 창 제출에 쓰는 짧은 기한. 슬랙이 3초 안에 답을 요구한다. */
+const MODAL_RUN_MS = 2_000;
+const MODAL_DEADLINE_MS = 2_400;
+
+/** 창에 그대로 띄울 처리 결과. */
+interface Outcome {
+  ok: boolean;
+  lines: string[];
+}
 const TIMEOUT_READ_MS = 90_000;
 
 export class PremiumSeatSlack {
@@ -174,13 +183,15 @@ export class PremiumSeatSlack {
       void this.cancelFromModal(client, body, (action as any).value as string);
     });
 
+    // 제출 결과를 그 창에 그대로 보여 준다. 창에서 한 일의 답이 DM 으로 가면
+    // 어디를 봐야 하는지 알 수 없다. 슬랙은 제출 뒤 3초 안에 답해야 하므로
+    // 늦어지면 안내만 띄우고 나머지는 뒤에서 마저 돌린다.
     app.view('premium_request_submit', async ({ ack, body, view }) => {
-      await ack();
-      void this.handleRequest(body.user.id, this.picked(view, 'service'));
+      const work = this.handleRequest(body.user.id, this.picked(view, 'service'));
+      await ack(await this.resultAck('Premium 요청', work));
     });
     app.view('premium_availability_submit', async ({ ack, body, view }) => {
-      await ack();
-      void this.handleAvailability(body.user.id, {
+      const work = this.handleAvailability(body.user.id, {
         service: this.picked(view, 'service'),
         target: this.picked(view, 'target') || body.user.id,
         tier: this.picked(view, 'tier'),
@@ -188,6 +199,7 @@ export class PremiumSeatSlack {
         request: this.picked(view, 'request'),
         quiet: this.checked(view, 'quiet'),
       });
+      await ack(await this.resultAck('좌석·상태 고치기', work));
     });
 
     // 관리자 버튼. 누른 사람이 관리자인지는 파이썬이 다시 본다 — 화면만 믿지 않는다.
@@ -509,7 +521,9 @@ export class PremiumSeatSlack {
     const user = this.userOf(body);
     const manager = this.isManager(user);
     if (!this.opts.openToTeam && !manager) {
-      await this.dm(user, '아직 준비 중입니다. 실장이 열면 쓰실 수 있습니다.');
+      // 누른 그 방에서 그 사람에게만 보이는 쪽지로 답한다 — DM 으로 보내면
+      // 버튼을 누른 곳과 답이 오는 곳이 갈린다.
+      await this.onlyYou(body, '아직 준비 중입니다. 실장이 열면 쓰실 수 있습니다.');
       return;
     }
 
@@ -641,97 +655,111 @@ export class PremiumSeatSlack {
 
   // ------------------------------------------------------------- 처리
   /** 「Premium 요청」 — 늘 본인 몫이다. */
-  private async handleRequest(userId: string, service: string): Promise<void> {
-    const out = await this.run('request create', { service, slack_user_id: userId });
-    if (!out.ok) return void this.dm(userId, this.errorText(out));
-    const r = out.result ?? {};
-    if (!r.created) return void this.dm(userId, this.errorText(out, r.reason));
+  /**
+   * 제출 결과를 창으로 돌려준다.
+   *
+   * 슬랙은 `view_submission` 에 3초 안에 답하라고 요구한다. 파이썬 호출은 한 번에
+   * 0.1초쯤이라 보통 넉넉하지만, 늦어질 때 아무 답도 못 하면 창에 슬랙의 기본
+   * 오류가 뜬다. 그래서 기한을 두고, 넘기면 안내 화면을 띄운 뒤 나머지는 계속 돌린다.
+   */
+  private async resultAck(title: string, work: Promise<Outcome>): Promise<any> {
+    const late: Outcome = { ok: true, lines: ['처리하고 있습니다. 현황판이 곧 바뀝니다.'] };
+    const outcome = await Promise.race([
+      work,
+      new Promise<Outcome>((resolve) => setTimeout(() => resolve(late), MODAL_DEADLINE_MS)),
+    ]);
+    return { response_action: 'update', view: this.noticeView(title, outcome) };
+  }
 
-    const swapped = (out.swaps_created ?? []).length > 0;
-    await this.dm(
-      userId,
-      `${SERVICE_LABEL[service]} Premium 요청을 넣었습니다. ` +
-        (swapped ? '양도자를 찾았고 실장 승인을 기다립니다.' : '양도 가능한 좌석이 나오면 알려 드립니다.'),
-    );
+  private noticeView(title: string, outcome: Outcome): any {
+    const mark = outcome.ok ? ':white_check_mark:' : ':warning:';
+    return {
+      type: 'modal',
+      callback_id: 'premium_notice',
+      title: { type: 'plain_text', text: title },
+      close: { type: 'plain_text', text: '닫기' },
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `${mark} ${outcome.lines.join('\n')}` } },
+      ],
+    };
+  }
+
+  /** 「Premium 요청」 — 늘 본인 몫이다. */
+  private async handleRequest(userId: string, service: string): Promise<Outcome> {
+    const out = await this.run('request create', { service, slack_user_id: userId }, MODAL_RUN_MS);
+    if (!out.ok) return { ok: false, lines: [this.errorText(out)] };
+    const r = out.result ?? {};
+    if (!r.created) return { ok: false, lines: [this.errorText(out, r.reason)] };
+
     if (out.dashboard_dirty) this.markDashboardDirty();
+    const swapped = (out.swaps_created ?? []).length > 0;
+    return {
+      ok: true,
+      lines: [
+        `*${SERVICE_LABEL[service]}* Premium 요청을 넣었습니다.`,
+        swapped ? '양도자를 찾았고 실장 승인을 기다립니다.' : '양도 가능한 좌석이 나오면 알려 드립니다.',
+      ],
+    };
   }
 
   /**
-   * 좌석 배정과 양도 의사를 한 창에서 받는다.
+   * 좌석 배정 · 요청 · 양도 의사를 한 창에서 받는다.
    *
-   * 배정을 먼저 바꾼다 — 스탠다드인 사람을 양도 가능으로 두려는 순서면 실패한다.
+   * 요청 취소 → 좌석 배정 → 요청 넣기 → 양도 의사 차례다. 대기 요청이 교환까지
+   * 잡아 두었으면 먼저 닫아야 좌석 배정이 안 막히고, 좌석을 준 뒤라야 대신 넣는
+   * 요청이 `NO_SEAT` 에 안 걸리며, 스탠다드인 사람은 양도 가능으로 못 둔다.
    */
   private async handleAvailability(
     actor: string,
     form: { service: string; target: string; tier: string; status: string; request: string; quiet: boolean },
-  ): Promise<void> {
+  ): Promise<Outcome> {
     const { service, target } = form;
     const done: string[] = [];
+    const fail = (out: Envelope, reason?: string): Outcome => ({
+      ok: false,
+      lines: done.length ? [...done, `:warning: ${this.errorText(out, reason)}`] : [this.errorText(out, reason)],
+    });
 
-    // 요청 취소를 맨 먼저 한다. 대기 중인 요청이 교환까지 잡아 두었으면 그 교환도
-    // 함께 닫혀, 뒤따르는 좌석 배정이 「진행 중인 교환」에 막히지 않는다.
     if (form.request === 'CANCEL') {
-      const out = await this.run('request cancel', {
-        service,
-        slack_user_id: target,
-        actor,
-        quiet: form.quiet,
-      });
-      if (!out.ok) return void this.dm(actor, this.errorText(out));
+      const out = await this.run('request cancel', { service, slack_user_id: target, actor, quiet: form.quiet }, MODAL_RUN_MS);
+      if (!out.ok) return fail(out);
       const r = out.result ?? {};
-      if (!r.cancelled) return void this.dm(actor, this.errorText(out, r.reason));
+      if (!r.cancelled) return fail(out, r.reason);
       done.push('요청을 취소했습니다.');
       if (out.dashboard_dirty) this.markDashboardDirty();
     }
 
     if (form.tier) {
-      const out2 = await this.run('seat set', {
-        service,
-        slack_user_id: target,
-        tier: form.tier,
-        actor,
-      });
-      if (!out2.ok) return void this.dm(actor, this.errorText(out2));
+      const out = await this.run('seat set', { service, slack_user_id: target, tier: form.tier, actor }, MODAL_RUN_MS);
+      if (!out.ok) return fail(out);
       done.push(`좌석 배정을 「${TIER_LABEL[form.tier] ?? form.tier}」로 바꿨습니다.`);
-      if (out2.dashboard_dirty) this.markDashboardDirty();
+      if (out.dashboard_dirty) this.markDashboardDirty();
     }
 
-    // 좌석을 준 뒤라야 요청이 NO_SEAT 에 안 걸린다.
     if (form.request === 'CREATE') {
-      const out3 = await this.run('request create', {
-        service,
-        slack_user_id: target,
-        actor,
-        quiet: form.quiet,
-      });
-      if (!out3.ok) return void this.dm(actor, this.errorText(out3));
-      const r = out3.result ?? {};
-      if (!r.created) return void this.dm(actor, this.errorText(out3, r.reason));
-      const swapped = (out3.swaps_created ?? []).length > 0;
+      const out = await this.run('request create', { service, slack_user_id: target, actor, quiet: form.quiet }, MODAL_RUN_MS);
+      if (!out.ok) return fail(out);
+      const r = out.result ?? {};
+      if (!r.created) return fail(out, r.reason);
+      const swapped = (out.swaps_created ?? []).length > 0;
       done.push('요청을 대신 넣었습니다.' + (swapped ? ' 양도자를 찾았고 승인을 기다립니다.' : ''));
-      if (out3.dashboard_dirty) this.markDashboardDirty();
+      if (out.dashboard_dirty) this.markDashboardDirty();
     }
 
     if (form.status) {
-      const out = await this.run('availability set', {
-        service,
-        slack_user_id: target,
-        status: form.status,
-        actor,
-        quiet: form.quiet,
-      });
-      if (!out.ok) return void this.dm(actor, this.errorText(out));
+      const out = await this.run('availability set', { service, slack_user_id: target, status: form.status, actor, quiet: form.quiet }, MODAL_RUN_MS);
+      if (!out.ok) return fail(out);
       const r = out.result ?? {};
-      if (!r.changed) return void this.dm(actor, this.errorText(out, r.reason));
+      if (!r.changed) return fail(out, r.reason);
       const label = form.status === 'TRANSFERABLE' ? '양도 가능' : '유지 필요';
       const swapped = (out.swaps_created ?? []).length > 0;
       done.push(`양도 의사를 「${label}」로 바꿨습니다.` + (swapped ? ' 기다리던 분과 이어졌고 실장 승인을 기다립니다.' : ''));
       if (out.dashboard_dirty) this.markDashboardDirty();
     }
 
-    if (!done.length) return void this.dm(actor, '바꿀 것을 고르지 않으셨습니다.');
+    if (!done.length) return { ok: false, lines: ['바꿀 것을 하나도 고르지 않으셨습니다.'] };
     const who = target === actor ? '' : '해당 팀원의 ';
-    await this.dm(actor, `${who}${SERVICE_LABEL[service]} ${done.join(' ')}`);
+    return { ok: true, lines: [`${who}*${SERVICE_LABEL[service]}*`, ...done] };
   }
 
   /** 「내 상태 보기」 — DM 이 아니라 창으로 띄운다. 누른 사람만 본다. */
@@ -1006,6 +1034,20 @@ export class PremiumSeatSlack {
   private errorText(out: Envelope, reason?: string): string {
     const code = reason ?? out.error?.code ?? '';
     return ERROR_TEXT[code] ?? '처리하지 못했습니다. 실장에게 알려 주세요.';
+  }
+
+  /** 누른 그 방에서 그 사람에게만 보이는 쪽지. 방이 없으면 DM 으로 물러선다. */
+  private async onlyYou(body: any, text: string): Promise<void> {
+    const channel = body?.channel?.id ?? this.opts.channelId;
+    const user = this.userOf(body);
+    if (!this.app || !user) return;
+    try {
+      await this.app.client.chat.postEphemeral({ channel, user, text });
+      return;
+    } catch (error) {
+      this.logger.warn('postEphemeral failed; falling back to a DM', error);
+    }
+    await this.dm(user, text);
   }
 
   /** `chat.postMessage` 에 사용자 ID 를 그대로 넘긴다 — `conversations.open` 을 쓰지 않는다. */
