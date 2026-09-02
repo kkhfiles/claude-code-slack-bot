@@ -27,6 +27,7 @@ import { ChatHost } from './chat-host';
 import { LetterRelay } from './letter-relay';
 import { LetterBooking } from './letter-booking';
 import { LetterBoost } from './letter-boost';
+import { PremiumSeatSlack } from './premium-seat';
 import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
@@ -313,6 +314,9 @@ export class SlackHandler {
   private lunchPoller: LunchPoller | null = null;
   private lunchButtons: LunchButtons | null = null;
 
+  // AI Premium 좌석 관리. 소인 앱의 연결에 얹혀 간다 — 자기 소켓을 열지 않는다.
+  private premiumSeat: PremiumSeatSlack | null = null;
+
   // agy 대화 계층 (봇마다 자기 슬랙 앱 · 자기 소켓 연결)
   private chatHosts: ChatHost[] = [];
 
@@ -368,6 +372,24 @@ export class SlackHandler {
           config.lunchBot.appToken,
         );
       }
+    }
+
+    // 좌석 기능. 채널과 관리자가 없으면 세우지 않는다 — 승인 경로가 없는 채로
+    // 현황판만 뜨면 요청이 갈 곳이 없다.
+    if (config.premiumSeat.enabled
+        && config.premiumSeat.channelId
+        && config.premiumSeat.managerUserIds.length
+        && config.premiumSeat.workerDir) {
+      this.premiumSeat = new PremiumSeatSlack({
+        python: config.premiumSeat.python,
+        workerDir: config.premiumSeat.workerDir,
+        channelId: config.premiumSeat.channelId,
+        managerUserIds: config.premiumSeat.managerUserIds,
+        openToTeam: config.premiumSeat.open,
+        jobPollSeconds: config.premiumSeat.jobPollSeconds,
+      });
+    } else if (config.premiumSeat.enabled) {
+      this.logger.warn('Premium seat feature is on but not configured; staying closed');
     }
 
     // 대화 봇들 — 토큰과 turn.py 경로가 다 있을 때만 켠다. 하나라도 없으면 꺼진 채로 둔다.
@@ -451,6 +473,9 @@ export class SlackHandler {
       const token = readLunchBotToken(config.lunchBot.script);
       if (token) {
         const buttons = this.lunchButtons;
+        // 좌석 기능도 이 앱에 얹는다. 소켓을 두 번 열면 슬랙이 이벤트를 한쪽에만
+        // 보내고, 버튼 절반이 흔적 없이 사라진다(위 주석과 같은 이유).
+        const premium = this.premiumSeat;
         this.chatHosts.push(new ChatHost({
           name: 'lunch',
           botToken: token,
@@ -468,7 +493,14 @@ export class SlackHandler {
           managerUserId: config.letter.managerUserId,
           botTalk,
           buttIn: config.chat.buttIn.enabled ? config.chat.buttIn : null,
-          attach: buttons ? (app) => buttons.register(app) : undefined,
+          // **둘 중 하나라도 켜져 있으면 붙인다.** 점심 버튼 존재만 보고 정하면,
+          // 버튼을 끈 날 좌석 기능이 오류도 로그도 없이 등록되지 않는다.
+          attach: (buttons || premium)
+            ? (app) => {
+                buttons?.register(app);
+                premium?.register(app);
+              }
+            : undefined,
         }));
         // 대화 호스트가 버튼을 들고 가므로 자기 연결은 열지 않는다.
         this.lunchButtons = null;

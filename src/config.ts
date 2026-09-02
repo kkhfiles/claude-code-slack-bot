@@ -198,6 +198,26 @@ export const config = {
       open: process.env.LETTER_1ON1_OPEN === '1',
     },
   },
+  // AI Premium 좌석 관리. 화면과 타이머만 여기 있고, 상태·매칭·판정은 전부
+  // 파이썬 도메인(work-assistant/chatbot/premium_seat_manager)이 한다.
+  // **좌석을 바꾸는 경로는 없다** — 실제 변경은 실장이 관리 화면에서 직접 한다.
+  premiumSeat: {
+    // **기본은 닫힘.** 켜도 팀원 버튼은 따로 열어야 한다(open).
+    enabled: process.env.PREMIUM_SEAT_ENABLED === '1',
+    // 현황판은 켠 순간부터 뜨지만, 요청·상태 변경 버튼은 이 값이 1 이라야 나온다.
+    // 만들어 둔 것과 실원에게 연 것은 다른 일이다.
+    open: process.env.PREMIUM_SEAT_OPEN === '1',
+    channelId: process.env.PREMIUM_SEAT_CHANNEL_ID || '',
+    // 승인 권한. 쉼표로 여럿. 비면 기능이 서지 않는다 — 승인 경로가 없다.
+    managerUserIds: (process.env.PREMIUM_SEAT_MANAGER_USER_IDS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    python: process.env.PREMIUM_SEAT_PYTHON || process.env.CHATBOT_PYTHON || 'python',
+    // `python -m premium_seat_manager.cli` 를 부를 작업 폴더.
+    workerDir: process.env.PREMIUM_SEAT_WORKER_DIR || '',
+    jobPollSeconds: parseInt(process.env.PREMIUM_SEAT_JOB_POLL_SECONDS || '10', 10),
+  },
 };
 
 export function validateConfig() {
