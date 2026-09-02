@@ -10,7 +10,7 @@ import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
-import { isWorkAssistantEnabled, briefShort, briefNudge, checkinNudge, quickUpdate,
+import { isWorkAssistantEnabled, briefNudge, checkinNudge, quickUpdate,
   noteUpdate, stageUpdate, summaryCandidates, summaryApply,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone,
@@ -519,13 +519,10 @@ export class AssistantScheduler {
     if (!this.config?.briefing.enabled) {
       return { text: 'Briefing is disabled in config.', hasReports: false };
     }
-    // 업무 조회를 브리핑 세션과 **동시에** 시작한다 (workBriefBlock 주석 참조).
-    const work = this.workBriefBlock();
     const result = await this.executeBriefing();
     this.recordSessionCost('briefing', result);
     return {
-      text: result.text + await work +
-        this.formatErrorReport() + this.formatCostLine(),
+      text: result.text + this.formatErrorReport() + this.formatCostLine(),
       hasReports: this.hasUnreadReports(),
     };
   }
@@ -855,26 +852,17 @@ export class AssistantScheduler {
 
   // --- 업무 (work-assistant) ---
 
-  /**
-   * 브리핑 꼬리에 붙일 업무 요약. **절대 던지지 않는다** — 업무 조회가 실패했다고
-   * 날씨·일정·보고서까지 사라지면 안 된다.
+  /*
+   * 브리핑 꼬리의 업무 조망은 2026-09-02 에 뺐다(사용자 결정).
    *
-   * **브리핑 세션과 동시에 시작한다**(호출자가 `await` 를 미룬다). 브리핑이 끝난
-   * 뒤에 부르면 노션 왕복이 「세션 종료」와 「메시지 발송」 사이에 끼어 그 창만큼
-   * 브리핑 전체를 잃을 위험이 커진다 — 2026-08-06 에 실제로 브리핑 완료 1 초 뒤
-   * 봇이 재시작해 그 창에 걸렸다. 세션이 수십 초 걸리므로 동시에 돌리면 추가
-   * 지연이 0 이다.
+   * 아침 브리핑이 길어 읽히지 않는 것이 원인이고, 그중 업무 블록이 8 줄로 가장
+   * 컸다. 조망은 Dispatch 판이 늘 최신으로 들고 있고(refreshBoardIfChanged),
+   * 급한 것은 08:55 넛지가 따로 민다 — 슬랙 아침 메시지가 그것을 또 나를 이유가
+   * 없다. `briefShort()` 도 함께 지웠다(이 호출이 유일한 소비처였다).
+   *
+   * 되살릴 일이 생기면 브리핑 본문에 붙이지 말고 별도 메시지로 보낼 것. 붙이면
+   * 브리핑이 다시 그만큼 길어진다.
    */
-  private async workBriefBlock(): Promise<string> {
-    if (!isWorkAssistantEnabled()) return '';
-    try {
-      const text = await briefShort();
-      return text ? `\n\n${text}` : '';
-    } catch (error) {
-      this.logger.warn('Work brief failed', error);
-      return '\n\n⚠️ 업무 요약을 못 불러왔습니다 — 세션에서 `brief` 로 확인하세요.';
-    }
-  }
 
   /**
    * 08:55 업무 넛지 — 09:00 데일리 미팅 직전 1회.
@@ -1496,7 +1484,6 @@ export class AssistantScheduler {
       }
 
       try {
-        const work = this.workBriefBlock();   // 세션과 동시에 시작
         const result = await this.executeBriefing();
         this.recordSessionCost('briefing', result);
 
@@ -1508,8 +1495,8 @@ export class AssistantScheduler {
           this.logger.warn('Briefing hit rate limit');
           await this.sendMessage('⏳ 브리핑 실행 중 rate limit 도달. 다음 업무일에 재시도합니다.').catch(() => {});
         } else {
-          // Append work summary + error report + cost stats line
-          await this.sendMessage(result.text + await work +
+          // Append error report + cost stats line
+          await this.sendMessage(result.text +
             this.formatErrorReport() + this.formatCostLine());
 
           // If reports exist, add a button to view them
@@ -1577,10 +1564,9 @@ export class AssistantScheduler {
 
     this.logger.info('Catch-up briefing: missed today, running now');
     try {
-      const work = this.workBriefBlock();   // 세션과 동시에 시작
       const result = await this.executeBriefing();
       this.recordSessionCost('briefing', result);
-      await this.sendMessage(result.text + await work +
+      await this.sendMessage(result.text +
         this.formatErrorReport() + this.formatCostLine());
 
       if (this.hasUnreadReports()) {
