@@ -108,6 +108,10 @@ const ERROR_TEXT: Record<string, string> = {
   SERVICE_LOCKED: '해당 서비스는 실장 확인 중입니다.',
   BAD_REQUEST: '요청을 이해하지 못했습니다.',
   OPERATION_RUNNING: '앞선 요청을 처리하는 중입니다. 잠시 뒤 다시 눌러 주세요.',
+  NOT_A_MANAGER: '실장만 할 수 있는 일입니다.',
+  NO_SEAT: '이 서비스에 좌석이 없어 Premium 교환 대상이 아닙니다. 실장에게 스탠다드 좌석을 먼저 요청해 주세요.',
+  SOURCE_DECLARED: '이 서비스는 실장이 직접 반영합니다. 따로 확인할 것이 없습니다.',
+  SOURCE_UNAVAILABLE: '아직 준비되지 않은 방식입니다. 실장에게 알려 주세요.',
 };
 
 const SWAP_ACTION_DONE: Record<string, string> = {
@@ -185,6 +189,7 @@ export class PremiumSeatSlack {
         target: this.picked(view, 'target') || body.user.id,
         tier: this.picked(view, 'tier'),
         status: this.picked(view, 'status'),
+        request: this.picked(view, 'request'),
         quiet: this.checked(view, 'quiet'),
       });
     });
@@ -343,6 +348,9 @@ export class PremiumSeatSlack {
     const services = model.result?.services ?? {};
     const maxAge = model.result?.snapshot_max_age_minutes ?? 60;
     for (const [service, view] of Object.entries<any>(services)) {
+      // DECLARED 는 바깥을 안 읽는다. 그런데도 예약하면 30분마다 작업이 서고
+      // 돌자마자 SOURCE_DECLARED 로 실패한다 — 실측으로 실패 6건이 쌓여 있었다.
+      if (view.source === 'DECLARED') continue;
       const observed = view.observed_at ? Date.parse(view.observed_at) : 0;
       const ageMin = observed ? (Date.now() - observed) / 60000 : Number.POSITIVE_INFINITY;
       if (ageMin >= maxAge) await this.run('reconcile enqueue', { service });
@@ -529,6 +537,12 @@ export class PremiumSeatSlack {
           { label: '좌석 없음', value: 'NONE' },
         ], true));
       }
+      if (manager) {
+        blocks.push(this.radio('request', '요청', [
+          { label: '바꾸지 않음', value: '' },
+          { label: '이 사람의 요청 취소', value: 'CANCEL' },
+        ], true));
+      }
       blocks.push(this.radio('status', '양도 의사', manager
         ? [
             { label: '바꾸지 않음', value: '' },
@@ -576,6 +590,12 @@ export class PremiumSeatSlack {
   }
 
   private radio(blockId: string, label: string, options: Array<{ label: string; value: string }>, optional = false): any {
+    // 슬랙은 빈 값을 안 받는다. 「바꾸지 않음」은 따로 표시해 두고 읽을 때 지운다.
+    const choices = options.map((o) => ({
+      text: { type: 'plain_text', text: o.label },
+      value: o.value || KEEP_AS_IS,
+    }));
+    const keep = choices.find((c) => c.value === KEEP_AS_IS);
     return {
       type: 'input',
       block_id: blockId,
@@ -584,16 +604,19 @@ export class PremiumSeatSlack {
       element: {
         type: 'radio_buttons',
         action_id: 'value',
-        options: options.map((o) => ({
-          // 슬랙은 빈 값을 안 받는다. 「바꾸지 않음」은 따로 표시해 두고 읽을 때 지운다.
-          text: { type: 'plain_text', text: o.label },
-          value: o.value || KEEP_AS_IS,
-        })),
+        options: choices,
+        // 「바꾸지 않음」이 있으면 그것을 미리 골라 둔다 — 안 그러면 아무것도 안
+        // 골라진 채로 열려 무엇이 기본인지 안 보인다.
+        ...(keep ? { initial_option: keep } : {}),
       },
     };
   }
 
   private select(blockId: string, label: string, options: Array<{ label: string; value: string }>): any {
+    const picks = options.slice(0, 100).map((o) => ({
+      text: { type: 'plain_text', text: o.label },
+      value: o.value,
+    }));
     return {
       type: 'input',
       block_id: blockId,
@@ -601,10 +624,9 @@ export class PremiumSeatSlack {
       element: {
         type: 'static_select',
         action_id: 'value',
-        options: options.slice(0, 100).map((o) => ({
-          text: { type: 'plain_text', text: o.label },
-          value: o.value,
-        })),
+        options: picks,
+        // 본인을 미리 골라 둔다 — 대상은 필수인데 기본이 없으면 매번 찾아 눌러야 한다.
+        ...(picks.length ? { initial_option: picks[0] } : {}),
       },
     };
   }
@@ -656,10 +678,26 @@ export class PremiumSeatSlack {
    */
   private async handleAvailability(
     actor: string,
-    form: { service: string; target: string; tier: string; status: string; quiet: boolean },
+    form: { service: string; target: string; tier: string; status: string; request: string; quiet: boolean },
   ): Promise<void> {
     const { service, target } = form;
     const done: string[] = [];
+
+    // 요청 취소를 맨 먼저 한다. 대기 중인 요청이 교환까지 잡아 두었으면 그 교환도
+    // 함께 닫혀, 뒤따르는 좌석 배정이 「진행 중인 교환」에 막히지 않는다.
+    if (form.request === 'CANCEL') {
+      const out = await this.run('request cancel', {
+        service,
+        slack_user_id: target,
+        actor,
+        quiet: form.quiet,
+      });
+      if (!out.ok) return void this.dm(actor, this.errorText(out));
+      const r = out.result ?? {};
+      if (!r.cancelled) return void this.dm(actor, this.errorText(out, r.reason));
+      done.push('요청을 취소했습니다.');
+      if (out.dashboard_dirty) this.markDashboardDirty();
+    }
 
     if (form.tier) {
       const out = await this.run('seat set', {
