@@ -176,11 +176,7 @@ export class PremiumSeatSlack {
 
     app.view('premium_request_submit', async ({ ack, body, view }) => {
       await ack();
-      void this.handleRequest(body.user.id, {
-        service: this.picked(view, 'service'),
-        target: this.picked(view, 'target') || body.user.id,
-        quiet: this.checked(view, 'quiet'),
-      });
+      void this.handleRequest(body.user.id, this.picked(view, 'service'));
     });
     app.view('premium_availability_submit', async ({ ack, body, view }) => {
       await ack();
@@ -522,24 +518,22 @@ export class PremiumSeatSlack {
       { label: 'Claude Team', value: 'CLAUDE' },
     ])];
 
-    // 관리자만 남의 몫을 고를 수 있다. 파이썬이 다시 보므로 여기는 편의일 뿐이다.
-    if (manager) {
-      const roster = await this.roster(user);
-      if (roster.length) blocks.push(this.select('target', '대상', roster));
-    }
-
+    // 「Premium 요청」은 누구에게나 서비스 한 칸이다 — 남을 대신 넣는 일은
+    // 「좌석·상태 고치기」 한 곳에 모았다. 요청은 1인칭 행위라 대상을 물으면
+    // 자기 요청을 넣는 사람에게까지 군더더기가 붙는다.
     if (kind === 'availability') {
       if (manager) {
+        const roster = await this.roster(user);
+        if (roster.length) blocks.push(this.select('target', '대상', roster));
         blocks.push(this.radio('tier', '좌석 배정', [
           { label: '바꾸지 않음', value: '' },
           { label: 'Premium', value: 'PREMIUM' },
           { label: '스탠다드', value: 'STANDARD' },
           { label: '좌석 없음', value: 'NONE' },
         ], true));
-      }
-      if (manager) {
         blocks.push(this.radio('request', '요청', [
           { label: '바꾸지 않음', value: '' },
+          { label: '이 사람 대신 요청 넣기', value: 'CREATE' },
           { label: '이 사람의 요청 취소', value: 'CANCEL' },
         ], true));
       }
@@ -555,7 +549,7 @@ export class PremiumSeatSlack {
           ], manager));
     }
 
-    if (manager) blocks.push(this.quietBlock());
+    if (manager && kind === 'availability') blocks.push(this.quietBlock());
 
     const view = {
       type: 'modal',
@@ -646,26 +640,17 @@ export class PremiumSeatSlack {
   }
 
   // ------------------------------------------------------------- 처리
-  private async handleRequest(
-    actor: string,
-    form: { service: string; target: string; quiet: boolean },
-  ): Promise<void> {
-    const { service, target } = form;
-    const out = await this.run('request create', {
-      service,
-      slack_user_id: target,
-      actor,
-      quiet: form.quiet,
-    });
-    if (!out.ok) return void this.dm(actor, this.errorText(out));
+  /** 「Premium 요청」 — 늘 본인 몫이다. */
+  private async handleRequest(userId: string, service: string): Promise<void> {
+    const out = await this.run('request create', { service, slack_user_id: userId });
+    if (!out.ok) return void this.dm(userId, this.errorText(out));
     const r = out.result ?? {};
-    if (!r.created) return void this.dm(actor, this.errorText(out, r.reason));
+    if (!r.created) return void this.dm(userId, this.errorText(out, r.reason));
 
-    const who = target === actor ? '' : `${r.display_name ?? '해당 팀원'} 님의 `;
     const swapped = (out.swaps_created ?? []).length > 0;
     await this.dm(
-      actor,
-      `${who}${SERVICE_LABEL[service]} Premium 요청을 넣었습니다. ` +
+      userId,
+      `${SERVICE_LABEL[service]} Premium 요청을 넣었습니다. ` +
         (swapped ? '양도자를 찾았고 실장 승인을 기다립니다.' : '양도 가능한 좌석이 나오면 알려 드립니다.'),
     );
     if (out.dashboard_dirty) this.markDashboardDirty();
@@ -700,15 +685,31 @@ export class PremiumSeatSlack {
     }
 
     if (form.tier) {
-      const out = await this.run('seat set', {
+      const out2 = await this.run('seat set', {
         service,
         slack_user_id: target,
         tier: form.tier,
         actor,
       });
-      if (!out.ok) return void this.dm(actor, this.errorText(out));
+      if (!out2.ok) return void this.dm(actor, this.errorText(out2));
       done.push(`좌석 배정을 「${TIER_LABEL[form.tier] ?? form.tier}」로 바꿨습니다.`);
-      if (out.dashboard_dirty) this.markDashboardDirty();
+      if (out2.dashboard_dirty) this.markDashboardDirty();
+    }
+
+    // 좌석을 준 뒤라야 요청이 NO_SEAT 에 안 걸린다.
+    if (form.request === 'CREATE') {
+      const out3 = await this.run('request create', {
+        service,
+        slack_user_id: target,
+        actor,
+        quiet: form.quiet,
+      });
+      if (!out3.ok) return void this.dm(actor, this.errorText(out3));
+      const r = out3.result ?? {};
+      if (!r.created) return void this.dm(actor, this.errorText(out3, r.reason));
+      const swapped = (out3.swaps_created ?? []).length > 0;
+      done.push('요청을 대신 넣었습니다.' + (swapped ? ' 양도자를 찾았고 승인을 기다립니다.' : ''));
+      if (out3.dashboard_dirty) this.markDashboardDirty();
     }
 
     if (form.status) {
