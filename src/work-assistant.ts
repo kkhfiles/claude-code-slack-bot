@@ -253,18 +253,11 @@ function runTasks(
   });
 }
 
-/**
- * 슬랙용 짧은 업무 요약. 인자에 사용자 입력이 들어가지 않으므로 CLI 로 부른다.
- * 노션 왕복이 있어 몇 초 걸린다.
+/*
+ * `briefShort()` (`tasks.py brief --short`) 는 2026-09-02 에 지웠다.
+ * 유일한 소비처가 아침 브리핑 꼬리였고 그 블록을 뺐다(assistant-scheduler.ts
+ * 「업무 (work-assistant)」 주석 참조). 조망은 Dispatch 판이 들고 있다.
  */
-export async function briefShort(): Promise<string> {
-  const { code, stdout, stderr } = await runTasks(['brief', '--short'], 60_000);
-  if (code !== 0) {
-    throw new Error(`tasks.py brief --short 실패 (rc=${code}): ` +
-      (stderr || stdout).trim().split('\n').slice(-3).join('\n'));
-  }
-  return stdout.trim();
-}
 
 /**
  * 08:55 넛지 본문. 급한 근거가 없으면 **빈 문자열** — 그러면 보내지 않는다.
