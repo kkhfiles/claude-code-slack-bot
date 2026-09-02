@@ -10,7 +10,7 @@ import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
 import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
-import { isWorkAssistantEnabled, briefNudge, checkinNudge, quickUpdate,
+import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   noteUpdate, stageUpdate, summaryCandidates, summaryApply,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone,
@@ -907,10 +907,19 @@ export class AssistantScheduler {
           } else {
             this.logger.info('Skipping work nudge (nothing urgent)');
           }
-          // **진행을 걷어들이는 자리는 체크인 하나뿐이다.** 급한 것 넛지와 같은
-          // 시각에 붙여 슬롯을 늘리지 않는다 — 물을 게 없으면 알아서 빈다.
-          const ask = await checkinNudge(false);
-          if (ask) await this.sendMessage(ask);
+          // ⛔ **아침 체크인을 여기서 걷었다** (2026-09-02 사용자) — 넛지와
+          // 합쳐 두 메시지 30줄이었고 「결국 안 읽게 된다」가 그 근거다.
+          // 체크인 본문만 16줄이었다(어제 손댄 것 17건 + 접힌 11건).
+          //
+          // **판이 그 일을 이미 하고 있다** — 판 「프롬프트」로 온 갱신 42건
+          // 대 체크인 물음 7건(관찰 기록 2026-09-02). 같은 근거로 오후
+          // 체크인과 슬랙 첫 대화 체크인을 2026-08-26 에 이미 걷었고,
+          // 이것이 마지막이다.
+          //
+          // **되살리려면** `tasks.py checkin --nudge --once --surface slack
+          // --slack` 을 불러 빈 출력이 아니면 보낸다(이 커밋에서 지운
+          // `checkinNudge` 가 그것이었다). 터미널 쪽 훅은 그대로 살아
+          // 있다 — 사람이 세션을 연 것이라 밀려오는 알림이 아니다.
         }
       } catch (error) {
         // **실패는 알린다.** 넛지는 "급한 게 없으면 침묵" 이라, 조회가 깨져서 못 온

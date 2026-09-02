@@ -657,34 +657,6 @@ export async function checkinNow(): Promise<string> {
 }
 
 /**
- * **미는 체크인.** 정해진 시각에 봇이 먼저 묻는다 — 물을 게 없거나, 오늘 이미
- * 답을 받았거나, 「조용히」 기간이면 **빈 문자열**이다. 판정은 전부 `tasks.py`
- * 가 한다(봇에 규칙을 복제하지 않는다).
- *
- * 오전은 저장된 질문(어제 것, 파일만 읽어 즉시), 오후는 다시 고른 질문(오늘 것,
- * 노션 왕복). **같은 질문을 두 번 밀지 않는다** — 묻는 대상이 다르다.
- *
- * 실패는 조용히 넘긴다. 이 자리는 "물을 게 없으면 침묵" 이라 시끄럽게 만들면
- * 침묵과 구분이 안 되는데, 같은 시각의 넛지(`briefNudge`)가 실패를 알린다.
- */
-export async function checkinNudge(afternoon: boolean): Promise<string> {
-  const args = afternoon
-    ? ['checkin', '--nudge', '--now', '--surface', 'slack', '--slack']
-    : ['checkin', '--nudge', '--once', '--surface', 'slack', '--slack'];
-  try {
-    const { code, stdout, stderr } = await runTasks(args, afternoon ? 60_000 : 20_000);
-    if (code !== 0) {
-      logger.error(`tasks.py checkin --nudge 실패 (rc=${code})`, (stderr || stdout).trim());
-      return '';
-    }
-    return stdout.trim();
-  } catch (err) {
-    logger.error('checkin --nudge failed', err);
-    return '';
-  }
-}
-
-/**
  * 화면에 떠 있는 체크인의 번호 대응표. 없으면 빈 문자열.
  *
  * **질문은 봇이 세션 없이 내고 답은 세션이 받는다.** 그 사이에 번호의 뜻을
