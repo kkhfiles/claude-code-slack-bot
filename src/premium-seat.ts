@@ -601,7 +601,9 @@ export class PremiumSeatSlack {
     seenBy: Array<{ short: string; seen: string; declared: boolean }>,
   ): string {
     const items = [`${KEEP_TICK}${KEEP_ICON} 유지 필요`, `${GIVE_TICK}${GIVE_ICON} 양도 가능`];
-    if (moving.length) items.push(`${SWAP_ICON} 바꾸는 중`);
+    // 승인 대기·보류도 이 기호로 뜬다. 「바꾸는 중」이라고 적으면
+    // 아무것도 안 바뀐 교환까지 움직이는 것처럼 읽힌다.
+    if (moving.length) items.push(`${SWAP_ICON} 좌석 교환`);
     if (waitingLines.length) items.push(`${WAIT_ICON} 기다리는 사람`);
 
     // DECLARED 는 바깥을 읽지 않는다. 그때 이 시각은 「언제 확인했나」가 아니라
@@ -1126,9 +1128,10 @@ export class PremiumSeatSlack {
     const command = kind === 'verify' ? 'swap verify' : `swap ${kind}`;
     const out = await this.run(command, { swap_id: swapId, actor });
 
+    const reason = out.error?.code ?? (out as any).result?.reason ?? '';
     const line = out.ok
       ? SWAP_ACTION_DONE[kind] ?? '처리했습니다.'
-      : SWAP_ACTION_FAILED[out.error?.code ?? ''] ?? this.errorText(out);
+      : SWAP_ACTION_FAILED[reason] ?? this.errorText(out);
 
     const channel = body?.channel?.id;
     const ts = body?.message?.ts;
@@ -1168,6 +1171,8 @@ export class PremiumSeatSlack {
       return (previous ?? []).find((b: any) => b.type === 'actions') ?? null;
     }
     switch (state) {
+      // 아직 좌석을 안 건드린 상태다. 멈출 것이 없어 「이 교환 중단」은 안 단다 —
+      // 파이썬도 이 두 상태에서는 중단을 거절한다.
       case 'AWAITING_ADMIN':
       case 'HELD':
         return {
@@ -1175,7 +1180,6 @@ export class PremiumSeatSlack {
           elements: [
             this.button('양도 진행', 'premium_swap_start', 'primary', swapId),
             this.button('나중에', 'premium_swap_hold', undefined, swapId),
-            this.button('이 교환 중단', 'premium_swap_abort', 'danger', swapId),
           ],
         };
       case 'APPLYING':
@@ -1344,7 +1348,9 @@ export class PremiumSeatSlack {
   }
 
   private errorText(out: Envelope, reason?: string): string {
-    const code = reason ?? out.error?.code ?? '';
+    // 막힌 이유는 두 곳에 실려 온다. 예외는 error.code 로, 「안 바꿨다」는
+    // 거절은 result.reason 으로 온다. 뒤쪽을 안 보면 안내가 늘 뭉뚱그려진다.
+    const code = reason ?? out.error?.code ?? (out as any).result?.reason ?? '';
     return ERROR_TEXT[code] ?? '처리하지 못했습니다. 실장에게 알려 주세요.';
   }
 
