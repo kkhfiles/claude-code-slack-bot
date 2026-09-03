@@ -15,7 +15,7 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
-  offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex } from './work-assistant';
+  offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexSession } from './work-assistant';
 import type { QuickOutcome } from './work-assistant';
 import { boardLabel, boardQueueEnabled, drain, event as recordEvent } from './board-queue';
 
@@ -1035,7 +1035,7 @@ export class AssistantScheduler {
     const body = items
       .map((i) => `=== ${i.id} ===\n${i.material}`)
       .join('\n\n');
-    const result = await this.spawnSession(body, {
+    const result = await this.spawnOrFallback('카드 요약',body, {
       workingDirectory: root,
       model: SUMMARY_MODEL,
       effort: SUMMARY_EFFORT,
@@ -1366,7 +1366,7 @@ export class AssistantScheduler {
     // 사는 곳이라, 그대로 두면 `bin/tasks.py` 가 없어 매시간 조용히 실패한다.
     const root = workAssistantRoot();
     if (!root) return;
-    const result = await this.spawnSession(fs.readFileSync(promptPath, 'utf-8'), {
+    const result = await this.spawnOrFallback('지금 집중할 것',fs.readFileSync(promptPath, 'utf-8'), {
       workingDirectory: root,
       model: FOCUS_MODEL,
       effort: FOCUS_EFFORT,
@@ -1859,6 +1859,73 @@ export class AssistantScheduler {
     return narrowApply(said, task);
   };
 
+  /**
+   * **예약 세션 한 번 — 1차 Agent SDK · 못 하면 codex** (2026-09-03).
+   *
+   * 좁은 길과 달리 여기는 **두 번 하기 위험이 있다.** 세션이 도구를 여러 번
+   * 돌리므로 중간에 죽으면 이미 쓴 것이 있을 수 있고, 같은 프롬프트를 다시
+   * 돌리면 그 일이 두 번 일어난다.
+   *
+   * **문은 `toolCalls` 다** — 하나라도 돌렸으면 폴백을 안 한다.
+   *   - 던졌다 → 스트림을 열기 전이라 아무것도 안 돌았다 · 안전
+   *   - 도구 0회로 실패 → 부작용이 없다 · 안전
+   *   - 도구 1회 이상 뒤 실패 → **안 한다.** 무엇이 얼마나 됐는지 모른다
+   *
+   * ⚠️ **`toolCalls` 를 못 읽는 회차는 안 한 것으로 치지 않는다** — 값이 없으면
+   * (`undefined`) 셋째 갈래로 본다. 모르는 것을 0 으로 읽으면 그 회차가 두 번 돈다.
+   */
+  private async spawnOrFallback(
+    label: string, prompt: string, opts: SpawnOpts,
+  ): Promise<SessionResult> {
+    let result: SessionResult | null = null;
+    let why = '';
+    try {
+      result = await this.spawnSession(prompt, opts);
+      const said = (result.text || '').trim();
+      if (result.isError || result.rateLimited) {
+        why = result.rateLimited ? 'rate-limited' : (result.subtype || 'error');
+      } else if (!said) {
+        why = 'empty';
+      } else {
+        return result;
+      }
+    } catch (err) {
+      // 구독 만료·인증 실패는 여기로 온다 — 스트림을 열기 전이라 아무것도 안 돌았다.
+      why = 'threw';
+      this.logger.warn(`${label} 1차(Agent SDK)가 터졌습니다`, err);
+    }
+
+    // ⚠️ **이어받는 회차는 폴백을 안 한다** — 그때 프롬프트는 `'continue'` 한
+    // 낱말이고 앞선 대화는 Claude 쪽 세션에만 있다. codex 에게 넘기면 문맥 없이
+    // 「계속하라」는 말만 받는다.
+    if (opts.resumeSessionId) {
+      this.logger.warn(`${label} 폴백 안 함 — 이어받는 회차라 문맥이 저쪽에만 있음`);
+      recordEvent('session-fallback', { label, why, skipped: 'resume' });
+      return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
+    }
+
+    const ran = result ? result.toolCalls : 0;
+    if (ran !== 0) {
+      // 모르는 것(`undefined`)도 여기로 온다 — 0 으로 읽으면 두 번 돈다.
+      this.logger.warn(`${label} 폴백 안 함 — 도구를 ${ran ?? '몇 번인지 모르게'} 돌린 뒤 실패`);
+      recordEvent('session-fallback', { label, why, skipped: 'tools-ran', toolCalls: ran ?? null });
+      return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
+    }
+
+    const said = await codexSession(prompt, {
+      workingDirectory: opts.workingDirectory,
+      appendSystemPrompt: opts.appendSystemPrompt,
+      timeoutMs: opts.maxDurationMs,
+    });
+    recordEvent('session-fallback', { label, why, ok: !!said });
+    if (said) {
+      this.logger.warn(`${label} 1차가 못 해서(${why}) codex 로 처리했습니다`);
+      return { text: said, costUsd: 0, sessionId: '', subtype: 'success', isError: false, toolCalls: 0 };
+    }
+    this.logger.warn(`${label} 1차·폴백 둘 다 못 했습니다(${why})`);
+    return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
+  }
+
   private async executeBriefing(): Promise<SessionResult> {
     const promptPath = path.join(this.promptsDir, 'morning-briefing.md');
     let prompt = fs.readFileSync(promptPath, 'utf-8');
@@ -1906,7 +1973,7 @@ export class AssistantScheduler {
     }
 
     const useSdk = shouldUseSdk('briefing');
-    const result = await this.spawnSession(prompt, {
+    const result = await this.spawnOrFallback('아침 브리핑',prompt, {
       workingDirectory: this.workingDir,
       model: 'claude-haiku-4-5-20251001',
       permissionMode: 'default',
@@ -2379,7 +2446,7 @@ export class AssistantScheduler {
     // 산출물 백스톱의 기준선 — **이 시각 이후에 쓰인 파일만** 이 세션의 성과다.
     const startedAtMs = Date.now();
 
-    const result = await this.spawnSession(
+    const result = await this.spawnOrFallback('분석',
       resumeSessionId ? 'continue' : prompt,
       {
         workingDirectory: this.workingDir,
