@@ -1281,10 +1281,6 @@ export class PremiumSeatSlack {
         ].join('\n');
       case 'SWAP_COMPLETED':
         return `${svc} Premium 좌석 변경이 끝났습니다. ${p.holder?.name} → ${p.recipient?.name}`;
-      case 'SWAP_REJECTED':
-        return `${svc} Premium 양도가 취소됐습니다. 좌석은 그대로입니다.`;
-      case 'MATCHED_RECIPIENT':
-        return `${svc} Premium 좌석을 ${p.holder?.name} 님이 양도해 주기로 했습니다. 실장 승인을 기다립니다.`;
       default:
         return '';
     }
