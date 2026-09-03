@@ -67,6 +67,11 @@ const CLOCK_ICON = '\u{1F553}';
 /** 라디오에서 「바꾸지 않음」을 나타내는 값. 슬랙이 빈 문자열을 안 받는다. */
 const KEEP_AS_IS = '__keep__';
 
+const SELF_TITLE: Record<string, string> = {
+  request: 'Premium 요청',
+  availability: '내 상태 변경',
+};
+
 const TIER_LABEL: Record<string, string> = {
   PREMIUM: 'Premium',
   STANDARD: '스탠다드',
@@ -671,55 +676,122 @@ export class PremiumSeatSlack {
       return;
     }
 
-    const blocks: any[] = [this.radio('service', '서비스', [
-      { label: 'ChatGPT Business', value: 'CHATGPT' },
-      { label: 'Claude Team', value: 'CLAUDE' },
-    ])];
-
-    // 「내 상태 변경」은 실장이 열어도 양도 의사 하나뿐이다 — 내 좌석 이야기와
-    // 남의 좌석을 고치는 이야기를 한 창에 섞으면 둘 다 읽기 나빠진다.
-    if (kind === 'availability') {
-      blocks.push(this.radio('status', '내 Premium 좌석', [
-        { label: '유지 필요', value: 'REQUIRED' },
-        { label: '양도 가능', value: 'TRANSFERABLE' },
-      ]));
-    }
-
-    if (kind === 'admin') {
-      const roster = await this.roster(user);
-      if (roster.length) blocks.push(this.select('target', '대상', roster));
-      blocks.push(this.radio('tier', '좌석 배정', [
-        { label: '바꾸지 않음', value: '' },
-        { label: 'Premium', value: 'PREMIUM' },
-        { label: '스탠다드', value: 'STANDARD' },
-        { label: '좌석 없음', value: 'NONE' },
-      ], true));
-      blocks.push(this.radio('request', '요청', [
-        { label: '바꾸지 않음', value: '' },
-        { label: '이 사람 대신 요청 넣기', value: 'CREATE' },
-        { label: '이 사람의 요청 취소', value: 'CANCEL' },
-      ], true));
-      blocks.push(this.radio('status', '양도 의사', [
-        { label: '바꾸지 않음', value: '' },
-        { label: '유지 필요', value: 'REQUIRED' },
-        { label: '양도 가능', value: 'TRANSFERABLE' },
-      ], true));
-      blocks.push(this.quietBlock());
-    }
-
-    const title = { request: 'Premium 요청', availability: '내 상태 변경', admin: '좌석·상태 고치기' }[kind];
-    const view = {
-      type: 'modal',
-      callback_id: `premium_${kind === 'admin' ? 'admin' : kind}_submit`,
-      title: { type: 'plain_text', text: title },
-      submit: { type: 'plain_text', text: kind === 'request' ? '요청' : '변경' },
-      blocks,
-    };
+    const view = kind === 'admin' ? await this.adminView(user) : await this.selfView(user, kind);
     try {
       await client.views.open({ trigger_id: body.trigger_id, view });
     } catch (error) {
       this.logger.warn('views.open failed', error);
     }
+  }
+
+  /**
+   * 내 요청 · 내 상태 창. 그 사람의 실제 좌석을 보고 짓는다.
+   *
+   * 할 수 없는 일을 물어본 뒤 제출에서 거절하면, 사람은 무엇이 잘못됐는지 모른 채
+   * 창을 두 번 연다. 고를 것이 하나면 묻지 않고, 없으면 왜 없는지 적는다.
+   */
+  private async selfView(userId: string, kind: 'request' | 'availability'): Promise<any> {
+    const out = await this.run('my status', { slack_user_id: userId }, MODAL_RUN_MS);
+    if (!out.ok) return this.noticeView(SELF_TITLE[kind], { ok: false, lines: [this.errorText(out)] });
+    const services = out.result?.services ?? {};
+
+    const usable: string[] = [];
+    const reasons: string[] = [];
+    for (const key of ['CHATGPT', 'CLAUDE']) {
+      const view = services[key];
+      if (!view) continue;
+      const name = SERVICE_LABEL[key] ?? key;
+      if (kind === 'availability') {
+        if (view.tier === 'PREMIUM') usable.push(key);
+        else reasons.push(`*${name}* — Premium 좌석이 없습니다`);
+      } else {
+        if (view.request) reasons.push(`*${name}* — 이미 요청이 들어가 있습니다`);
+        else if (view.tier === 'PREMIUM') reasons.push(`*${name}* — 이미 Premium 을 쓰고 계십니다`);
+        else if (view.tier !== 'STANDARD') reasons.push(`*${name}* — 좌석이 없어 교환 대상이 아닙니다`);
+        else usable.push(key);
+      }
+    }
+
+    if (!usable.length) {
+      const tail = kind === 'availability'
+        ? ['', 'Premium 좌석이 생기면 여기서 양도 의사를 바꾸실 수 있습니다.']
+        : ['', '좌석이 없으시면 실장에게 스탠다드 좌석을 먼저 요청해 주세요.'];
+      return this.noticeView(SELF_TITLE[kind], { ok: false, lines: [...reasons, ...tail] });
+    }
+
+    const blocks: any[] = [];
+    if (usable.length === 1) {
+      // 고를 것이 하나뿐이면 묻지 않는다. 무엇에 대한 창인지만 적는다.
+      const key = usable[0];
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `${SERVICE_ICON[key] ?? ''} *${SERVICE_LABEL[key] ?? key}*` },
+      });
+    } else {
+      blocks.push(this.radio('service', '서비스', usable.map((key) => ({
+        label: SERVICE_LABEL[key] ?? key,
+        value: key,
+      }))));
+    }
+
+    if (kind === 'availability') {
+      const current = usable.length === 1 ? services[usable[0]]?.availability : null;
+      blocks.push(this.radio('status', '내 Premium 좌석', [
+        { label: '유지 필요', value: 'REQUIRED' },
+        { label: '양도 가능', value: 'TRANSFERABLE' },
+      ], false, current === 'TRANSFERABLE' ? 'TRANSFERABLE' : current === 'REQUIRED' ? 'REQUIRED' : undefined));
+    } else {
+      blocks.push({
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: '양도 가능한 좌석이 나오면 순서대로 이어 드립니다.' }],
+      });
+    }
+    if (reasons.length) {
+      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: reasons.join('  ·  ') }] });
+    }
+
+    return {
+      type: 'modal',
+      callback_id: `premium_${kind}_submit`,
+      // 서비스를 안 물었을 때 어느 서비스인지는 여기 실어 보낸다.
+      private_metadata: usable.length === 1 ? usable[0] : '',
+      title: { type: 'plain_text', text: SELF_TITLE[kind] },
+      submit: { type: 'plain_text', text: kind === 'request' ? '요청' : '변경' },
+      blocks,
+    };
+  }
+
+  private async adminView(user: string): Promise<any> {
+    const blocks: any[] = [this.radio('service', '서비스', [
+      { label: 'ChatGPT Business', value: 'CHATGPT' },
+      { label: 'Claude Team', value: 'CLAUDE' },
+    ])];
+    const roster = await this.roster(user);
+    if (roster.length) blocks.push(this.select('target', '대상', roster));
+    blocks.push(this.radio('tier', '좌석 배정', [
+      { label: '바꾸지 않음', value: '' },
+      { label: 'Premium', value: 'PREMIUM' },
+      { label: '스탠다드', value: 'STANDARD' },
+      { label: '좌석 없음', value: 'NONE' },
+    ], true));
+    blocks.push(this.radio('request', '요청', [
+      { label: '바꾸지 않음', value: '' },
+      { label: '이 사람 대신 요청 넣기', value: 'CREATE' },
+      { label: '이 사람의 요청 취소', value: 'CANCEL' },
+    ], true));
+    blocks.push(this.radio('status', '양도 의사', [
+      { label: '바꾸지 않음', value: '' },
+      { label: '유지 필요', value: 'REQUIRED' },
+      { label: '양도 가능', value: 'TRANSFERABLE' },
+    ], true));
+    blocks.push(this.quietBlock());
+    return {
+      type: 'modal',
+      callback_id: 'premium_admin_submit',
+      title: { type: 'plain_text', text: '좌석·상태 고치기' },
+      submit: { type: 'plain_text', text: '변경' },
+      blocks,
+    };
   }
 
   /** 대상 고르기에 넣을 명단. 부르는 사람을 맨 위에 둔다. */
@@ -740,13 +812,19 @@ export class PremiumSeatSlack {
       }));
   }
 
-  private radio(blockId: string, label: string, options: Array<{ label: string; value: string }>, optional = false): any {
+  private radio(
+    blockId: string,
+    label: string,
+    options: Array<{ label: string; value: string }>,
+    optional = false,
+    initial?: string,
+  ): any {
     // 슬랙은 빈 값을 안 받는다. 「바꾸지 않음」은 따로 표시해 두고 읽을 때 지운다.
     const choices = options.map((o) => ({
       text: { type: 'plain_text', text: o.label },
       value: o.value || KEEP_AS_IS,
     }));
-    const keep = choices.find((c) => c.value === KEEP_AS_IS);
+    const keep = choices.find((c) => c.value === (initial ?? KEEP_AS_IS));
     return {
       type: 'input',
       block_id: blockId,
@@ -1167,7 +1245,10 @@ export class PremiumSeatSlack {
   /** 라디오·선택 한 칸의 값. 「바꾸지 않음」은 빈 문자열로 돌려준다. */
   private picked(view: any, blockId: string): string {
     const value = view?.state?.values?.[blockId]?.value?.selected_option?.value ?? '';
-    return value === KEEP_AS_IS ? '' : value;
+    if (value === KEEP_AS_IS) return '';
+    // 고를 것이 하나뿐이라 안 물어본 서비스는 창에 실어 보냈다.
+    if (!value && blockId === 'service') return view?.private_metadata ?? '';
+    return value;
   }
 
   private checked(view: any, blockId: string): boolean {
