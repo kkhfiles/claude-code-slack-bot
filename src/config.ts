@@ -217,6 +217,10 @@ export const config = {
     // `python -m premium_seat_manager.cli` 를 부를 작업 폴더.
     workerDir: process.env.PREMIUM_SEAT_WORKER_DIR || '',
     jobPollSeconds: parseInt(process.env.PREMIUM_SEAT_JOB_POLL_SECONDS || '10', 10),
+    // 시험용. 슬랙 사용자 ID 하나를 넣으면 팀원에게 갈 DM 이 전부 그 사람에게
+    // 간다 — 안 보내는 것이 아니라 돌리는 것이라, 동료가 받을 글을 그대로 본다.
+    // **비워 두는 것이 운영값이다.**
+    dmRedirectTo: (process.env.PREMIUM_SEAT_DM_REDIRECT || '').trim(),
   },
 };
 
