@@ -810,3 +810,131 @@ export async function narrowApply(json: string, task: string): Promise<QuickOutc
     try { fs.unlinkSync(file); } catch { /* 이미 없다 */ }
   }
 }
+
+
+// ---------------------------------------------------------------- 좁은 길 폴백
+//
+// **Agent SDK 를 못 쓸 때 같은 일을 대신 한다** (2026-09-03). 좁은 길은
+// 「글 → JSON → 결정론이 반영」이라 **엔진을 갈아 끼워도 반영은 마지막에 한
+// 번뿐이다** — 세션 경로와 달리 두 번 하기 위험이 없다.
+//
+// 실측(판 프롬프트 81건 · 프롬프트 11판 · 운영이 실제로 바꾼 칸과 대조):
+//   Agent SDK opus-5   값칸 63~66% · 중앙 3.0~3.2초  (같은 프롬프트 두 판의 폭)
+//   codex gpt-5.6-sol  값칸 64%    · 중앙 9.5초
+// 그 폭 안이라 **나아진 것도 나빠진 것도 아니고 같은 일을 한다.** 틀린 값은
+// 오히려 적고(8 대 10·11) 대신 빈칸을 더 남긴다 — 「틀린 값이 카드에 앉으면
+// 아무도 안 고친다」는 이 판의 규칙에서 그쪽이 안전한 실패다.
+//
+// ⚠️ **사고 깊이를 올리지 않는다** — high 는 값칸이 그대로고 1.8배 느렸다.
+// ⚠️ **폴백이 실제로 필요한 빈도는 낮다** — 로그 7개월(2026-02-11~09-03)에
+//    `SDK query 실패` 0건 · rate_limit 5건 · Overloaded 6건. 자주 쓰려고 둔 것이
+//    아니라 **터지면 전부 멈추기 때문에** 둔다.
+
+/** 폴백 엔진. 값을 바꾸려면 여기 한 줄 — 잰 것은 `sol` · `low` 다. */
+const NARROW_CODEX_MODEL = process.env.BOARD_NARROW_CODEX_MODEL || 'gpt-5.6-sol';
+const NARROW_CODEX_EFFORT = process.env.BOARD_NARROW_CODEX_EFFORT || 'low';
+
+/**
+ * 마지막 답의 모양을 codex 에게 강제한다.
+ *
+ * SDK 쪽은 프롬프트로만 시키는데 여기는 문이 하나 더 있다 — 재는 자리에서는
+ * 유리한 조건이지만, **실제로 쓸 때는 이 문이 있는 편이 맞다**(파싱이 안 깨진다).
+ */
+const NARROW_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['log', 'sets', 'ask', 'say'],
+  properties: {
+    log: { type: ['string', 'null'] },
+    sets: { type: ['object', 'null'], additionalProperties: { type: ['string', 'null'] } },
+    ask: { type: ['string', 'null'] },
+    say: { type: ['string', 'null'] },
+  },
+};
+
+/**
+ * 좁은 길을 codex 로 한 번. 못 하면 **빈 글자**를 돌려준다 — 부르는 쪽이
+ * 오늘까지와 같은 길(세션)로 떨어뜨린다.
+ *
+ * ⚠️ **여기서 던지지 않는다.** 폴백이 터져서 본 경로까지 막으면 안 되므로
+ * 무엇이 나든 빈 글자로 물러난다.
+ *
+ * `BOARD_NARROW_FALLBACK=off` 로 끈다.
+ */
+export async function narrowCodex(
+  system: string, user: string, timeoutMs = 90_000,
+): Promise<string> {
+  if (process.env.BOARD_NARROW_FALLBACK === 'off') return '';
+  const id = randomId();
+  const pf = path.join(os.tmpdir(), `wa-cx-${id}.txt`);
+  const sf = path.join(os.tmpdir(), `wa-cx-${id}.schema.json`);
+  const of = path.join(os.tmpdir(), `wa-cx-${id}.out.txt`);
+  try {
+    // 시스템 프롬프트를 앞에 이어 붙인다 — `codex exec` 에 그 칸이 따로 없다.
+    fs.writeFileSync(pf, `${system}\n\n----\n\n${user}`, 'utf-8');
+    fs.writeFileSync(sf, JSON.stringify(NARROW_SCHEMA), 'utf-8');
+    const args = [
+      'exec', '--ephemeral', '--skip-git-repo-check',
+      // 읽기 전용 — 이 호출은 파일을 건드릴 일이 없다. 쓰는 것은 파이썬이 한다.
+      '-s', 'read-only', '--color', 'never',
+      // 이 저장소를 작업 뿌리로 주지 않는다 — 규칙은 위 `system` 이 다 들고 있고,
+      // 주면 `CLAUDE.md` 가 따라 들어와 좁은 길이 아니게 된다.
+      '-C', os.tmpdir(),
+      '-m', NARROW_CODEX_MODEL,
+      '-c', `model_reasoning_effort=${NARROW_CODEX_EFFORT}`,
+      '--output-schema', sf, '-o', of, '-',
+    ];
+    const code = await runCodex(args, pf, timeoutMs);
+    if (code !== 0) {
+      logger.warn(`좁은 길 폴백(codex) rc ${code}`);
+      return '';
+    }
+    return fs.existsSync(of) ? fs.readFileSync(of, 'utf-8').trim() : '';
+  } catch (err) {
+    logger.warn('좁은 길 폴백(codex)이 터졌습니다 — 세션으로 갑니다', err);
+    return '';
+  } finally {
+    for (const f of [pf, sf, of]) {
+      try { fs.unlinkSync(f); } catch { /* 이미 없다 */ }
+    }
+  }
+}
+
+/**
+ * `codex` 를 띄우고 rc 만 돌려준다. 답은 `-o` 파일로 받는다.
+ *
+ * ⚠️ **인자를 셸에 그대로 넘기지 않는다** — `shell:true` 는 공백에서 인자를
+ * 쪼갠다(이 레포가 한 번 겪었다). `runTasks` 와 같은 따옴표 함수를 쓴다.
+ */
+function runCodex(args: string[], stdinFile: string, timeoutMs: number): Promise<number> {
+  const useShell = process.platform === 'win32';
+  const argv = useShell ? args.map(quoteForShell) : args;
+  return new Promise((resolve) => {
+    // 실행체 이름을 바꿀 수 있게 둔다 — **검사가 없는 이름을 넣어**
+    // 「폴백이 터져도 빈손으로 물러나나」를 실제로 재려면 이 문이 필요하다.
+    const bin = process.env.BOARD_NARROW_CODEX_BIN || 'codex';
+    const proc = spawn(bin, argv, {
+      stdio: [fs.openSync(stdinFile, 'r'), 'ignore', 'pipe'],
+      shell: useShell,
+      env: { ...process.env },
+      windowsHide: true,
+    });
+    let err = '';
+    proc.stderr?.on('data', (c: Buffer) => { err += c.toString('utf-8'); });
+    const killTimer = setTimeout(() => {
+      try {
+        if (process.platform === 'win32' && proc.pid) {
+          execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+        } else {
+          proc.kill('SIGKILL');
+        }
+      } catch { /* 이미 끝난 프로세스 */ }
+    }, timeoutMs);
+    proc.on('error', () => { clearTimeout(killTimer); resolve(-1); });
+    proc.on('close', (code) => {
+      clearTimeout(killTimer);
+      if (code !== 0 && err) logger.warn(`codex stderr: ${err.slice(0, 300)}`);
+      resolve(code ?? -1);
+    });
+  });
+}
