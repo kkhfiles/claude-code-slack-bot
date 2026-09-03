@@ -97,6 +97,7 @@ function seoulStamp(ms: number): string {
 
 const SWAP_STATE_LABEL: Record<string, string> = {
   AWAITING_ADMIN: '실장 승인 대기',
+  HELD: '실장 보류 중',
   APPLYING: '실장이 바꾸는 중',
   NEEDS_ADMIN: ':warning: 실장 확인 필요',
 };
@@ -121,7 +122,7 @@ const ERROR_TEXT: Record<string, string> = {
 
 const SWAP_ACTION_DONE: Record<string, string> = {
   start: '양도를 시작했습니다. 관리 화면에서 바꾸신 뒤 「완료했습니다」를 눌러 주세요.',
-  reject: '양도를 취소했습니다. 좌석은 그대로입니다.',
+  hold: '보류했습니다. 좌석도 양도 의사도 그대로입니다. 나중에 다시 알려 드립니다.',
   complete: '좌석 변경을 반영했습니다.',
   abort: '이 교환을 멈췄습니다.',
   verify: '실제 상태를 다시 확인하도록 예약했습니다.',
@@ -130,7 +131,7 @@ const SWAP_ACTION_DONE: Record<string, string> = {
 const SWAP_ACTION_FAILED: Record<string, string> = {
   NOT_A_MANAGER: '관리자만 누를 수 있습니다.',
   NOT_STARTABLE: '이미 처리된 교환입니다.',
-  NOT_REJECTABLE: '이미 시작해서 취소할 수 없습니다. 「이 교환 중단」을 쓰세요.',
+  NOT_HOLDABLE: '이미 시작한 교환입니다. 「이 교환 중단」을 쓰세요.',
   NOT_COMPLETABLE: '이미 처리된 교환입니다.',
   NOT_ABORTABLE: '멈출 수 있는 상태가 아닙니다.',
   NEEDS_VERIFY: '실제 상태를 읽어 확인하는 중입니다. 잠시 뒤 결과가 옵니다.',
@@ -242,7 +243,7 @@ export class PremiumSeatSlack {
     });
 
     // 관리자 버튼. 누른 사람이 관리자인지는 파이썬이 다시 본다 — 화면만 믿지 않는다.
-    app.action(/^premium_swap_(start|reject|complete|abort|verify)$/, async ({ ack, body, action }) => {
+    app.action(/^premium_swap_(start|hold|complete|abort|verify)$/, async ({ ack, body, action }) => {
       await ack();
       const actionId = (action as any).action_id as string;
       const swapId = (action as any).value as string;
@@ -1166,11 +1167,13 @@ export class PremiumSeatSlack {
     }
     switch (state) {
       case 'AWAITING_ADMIN':
+      case 'HELD':
         return {
           type: 'actions',
           elements: [
             this.button('양도 진행', 'premium_swap_start', 'primary', swapId),
-            this.button('양도 취소·보유 유지', 'premium_swap_reject', 'danger', swapId),
+            this.button('나중에', 'premium_swap_hold', undefined, swapId),
+            this.button('이 교환 중단', 'premium_swap_abort', 'danger', swapId),
           ],
         };
       case 'APPLYING':
@@ -1220,7 +1223,7 @@ export class PremiumSeatSlack {
           type: 'actions',
           elements: [
             this.button('양도 진행', 'premium_swap_start', 'primary', id),
-            this.button('양도 취소·보유 유지', 'premium_swap_reject', 'danger', id),
+            this.button('나중에', 'premium_swap_hold', undefined, id),
           ],
         };
       case 'APPLY_PENDING':
