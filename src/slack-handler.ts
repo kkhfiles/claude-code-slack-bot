@@ -387,6 +387,7 @@ export class SlackHandler {
         managerUserIds: config.premiumSeat.managerUserIds,
         openToTeam: config.premiumSeat.open,
         jobPollSeconds: config.premiumSeat.jobPollSeconds,
+        dmRedirectTo: config.premiumSeat.dmRedirectTo,
       });
     } else if (config.premiumSeat.enabled) {
       this.logger.warn('Premium seat feature is on but not configured; staying closed');

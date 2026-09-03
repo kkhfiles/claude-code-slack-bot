@@ -21,6 +21,8 @@ export interface PremiumSeatOptions {
   /** 파이썬에 넘길 환경변수. 설정 정본은 이쪽이 아니라 프로세스 환경이다. */
   env?: NodeJS.ProcessEnv;
   jobPollSeconds?: number;
+  /** 시험용. 채우면 팀원 DM 이 전부 이 사람에게 간다. 운영에서는 비운다. */
+  dmRedirectTo?: string;
 }
 
 interface Envelope {
@@ -1205,8 +1207,18 @@ export class PremiumSeatSlack {
     const blocks: any[] = [{ type: 'section', text: { type: 'mrkdwn', text } }];
     const buttons = this.notificationButtons(row);
     if (buttons) blocks.push(buttons);
+
+    // 시험 중에는 동료 대신 실장이 받는다. 원래 받을 사람을 머리에 적어 둔다.
+    const to = this.opts.dmRedirectTo || row.recipient_slack_id;
+    if (to !== row.recipient_slack_id) {
+      blocks.unshift({
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: `\u{1F9EA} 시험 — 원래 받을 사람 <@${row.recipient_slack_id}>` }],
+      });
+    }
+
     const res = await this.app!.client.chat.postMessage({
-      channel: row.recipient_slack_id,
+      channel: to,
       text,
       blocks,
     });
