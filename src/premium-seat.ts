@@ -132,6 +132,14 @@ const SWAP_ACTION_FAILED: Record<string, string> = {
   NOT_FOUND: '없는 교환 번호입니다.',
 };
 
+/** 요청 알림 글을 닫을 때 남기는 한 줄. 요청 상태마다 다르다. */
+const ANNOUNCE_CLOSED: Record<string, string> = {
+  SWAP_PENDING: '양도해 주실 분을 찾았습니다. 실장이 좌석을 바꿉니다.',
+  COMPLETED: '좌석 변경이 끝났습니다.',
+  CANCELLED: '요청이 취소됐습니다.',
+  GONE: '이 요청은 사라졌습니다.',
+};
+
 const TIMEOUT_STATE_MS = 10_000;
 /** 창 제출에 쓰는 짧은 기한. 슬랙이 3초 안에 답을 요구한다. */
 const MODAL_RUN_MS = 2_000;
@@ -173,6 +181,17 @@ export class PremiumSeatSlack {
       await ack();
       await this.openModal(client, body, 'availability');
     });
+    // 실장 전용 창은 더보기 메뉴에 둔다. 버튼 줄에 같이 놓으면 팀원 셋에게
+    // 자기가 못 쓰는 버튼이 하나 늘어난다.
+    app.action('premium_more', async ({ ack, body, client }) => {
+      await ack();
+      await this.openModal(client, body, 'admin');
+    });
+    // 알림 글의 한 번 누르기 — 누른 사람 자신을 양도 가능으로 바꾼다.
+    app.action('premium_offer', async ({ ack, body, action }) => {
+      await ack();
+      void this.offerSeat(body, (action as any).value as string);
+    });
     app.action('premium_my_status', async ({ ack, body, client }) => {
       await ack();
       void this.openMyStatus(client, body);
@@ -191,6 +210,18 @@ export class PremiumSeatSlack {
       await ack(await this.resultAck('Premium 요청', work));
     });
     app.view('premium_availability_submit', async ({ ack, body, view }) => {
+      // 내 상태 변경은 양도 의사 하나뿐이다.
+      const work = this.handleAvailability(body.user.id, {
+        service: this.picked(view, 'service'),
+        target: body.user.id,
+        tier: '',
+        status: this.picked(view, 'status'),
+        request: '',
+        quiet: false,
+      });
+      await ack(await this.resultAck('내 상태 변경', work));
+    });
+    app.view('premium_admin_submit', async ({ ack, body, view }) => {
       const work = this.handleAvailability(body.user.id, {
         service: this.picked(view, 'service'),
         target: this.picked(view, 'target') || body.user.id,
@@ -214,6 +245,7 @@ export class PremiumSeatSlack {
     this.every(60_000, () => this.pumpNudges());
     this.every(jobEvery, () => this.pumpJobs());
     this.every(60_000, () => this.pumpNotifications());
+    this.every(60_000, () => this.syncAnnouncements());
     this.every(60_000, () => this.scheduleReconciles());
 
     this.logger.info('Premium seat feature attached (sharing the chat connection)');
@@ -372,6 +404,7 @@ export class PremiumSeatSlack {
     this.dashboardPending = setTimeout(() => {
       this.dashboardPending = null;
       void this.refreshDashboard();
+      void this.syncAnnouncements();
     }, 2000);
     this.dashboardPending.unref?.();
   }
@@ -477,8 +510,13 @@ export class PremiumSeatSlack {
       type: 'actions',
       elements: [
         this.button('Premium 요청', 'premium_request_open', 'primary'),
-        this.button(this.opts.openToTeam ? '내 상태 변경' : '좌석·상태 고치기', 'premium_availability_open'),
+        this.button('내 상태 변경', 'premium_availability_open'),
         this.button('내 상태 보기', 'premium_my_status'),
+        {
+          type: 'overflow',
+          action_id: 'premium_more',
+          options: [{ text: { type: 'plain_text', text: '좌석·상태 고치기 (실장)' }, value: 'admin' }],
+        },
       ],
     });
     if (!this.opts.openToTeam) {
@@ -514,6 +552,104 @@ export class PremiumSeatSlack {
     return `${items.join('  \u00b7  ')}\n${CLOCK_ICON} ${head} ${when}`;
   }
 
+  // --------------------------------------------------------- 요청 알림 글
+  /**
+   * 기다리는 사람이 생겼다는 사실을 방에 새 글로 알린다.
+   *
+   * 현황판은 같은 메시지를 고쳐 쓰므로 알림이 안 울리고, 방을 안 보는 사람에게는
+   * 아무 일도 안 일어난 것과 같다. 요청 한 건에 글 한 건만 올리고, 그 요청이
+   * 끝나면 같은 글을 닫는다 — 「기다립니다」가 남아 있는 것이 제일 나쁘다.
+   */
+  private async syncAnnouncements(): Promise<void> {
+    if (!this.app) return;
+    const out = await this.run('announce pending', {});
+    if (!out.ok) return;
+
+    for (const item of out.result?.to_post ?? []) {
+      try {
+        const posted = await this.app.client.chat.postMessage({
+          channel: this.opts.channelId,
+          text: `${SERVICE_LABEL[item.service] ?? item.service} Premium 좌석을 기다리는 분이 있습니다`,
+          blocks: this.announceBlocks(item),
+        });
+        if (posted.ts) {
+          await this.run('announce placed', {
+            request_id: item.request_id,
+            channel: this.opts.channelId,
+            ts: posted.ts,
+          });
+        }
+      } catch (error) {
+        this.logger.warn('announce post failed', error);
+      }
+    }
+
+    for (const item of out.result?.to_close ?? []) {
+      if (item.channel && item.ts) {
+        const line = ANNOUNCE_CLOSED[item.status] ?? '이 요청은 끝났습니다.';
+        try {
+          await this.app.client.chat.update({
+            channel: item.channel,
+            ts: item.ts,
+            text: line,
+            blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: `:white_check_mark: ${line}` }] }],
+          });
+        } catch (error) {
+          this.logger.warn('announce close failed', error);
+        }
+      }
+      await this.run('announce closed', { request_id: item.request_id });
+    }
+  }
+
+  private announceBlocks(item: any): any[] {
+    const holders: any[] = item.holders ?? [];
+    const now = holders.length
+      ? holders
+          .map((h) => `${h.availability === 'TRANSFERABLE' ? GIVE_ICON : KEEP_ICON} ${h.display_name}`)
+          .join('  ')
+      : '없음';
+    return [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text:
+            `:raising_hand: *${SERVICE_LABEL[item.service] ?? item.service} Premium 좌석을 기다립니다*\n` +
+            `${item.requester_name} 님\n\n지금 쓰고 계신 분: ${now}`,
+        },
+      },
+      {
+        type: 'actions',
+        elements: [this.button('제 좌석 양보하겠습니다', 'premium_offer', 'primary', item.service)],
+      },
+      {
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: '누르면 「양도 가능」으로 바뀝니다. 실제 좌석은 실장이 확인한 뒤 바꿉니다.' }],
+      },
+    ];
+  }
+
+  /** 알림 글의 한 번 누르기. 누른 사람이 그 서비스 Premium 보유자라야 한다. */
+  private async offerSeat(body: any, service: string): Promise<void> {
+    const user = this.userOf(body);
+    const out = await this.run('availability set', {
+      service,
+      slack_user_id: user,
+      status: 'TRANSFERABLE',
+    });
+    if (!out.ok) return void this.onlyYou(body, this.errorText(out));
+    const r = out.result ?? {};
+    if (!r.changed) return void this.onlyYou(body, this.errorText(out, r.reason));
+    const swapped = (out.swaps_created ?? []).length > 0;
+    await this.onlyYou(
+      body,
+      `고맙습니다. ${SERVICE_LABEL[service] ?? service} 좌석을 「양도 가능」으로 바꿨습니다.` +
+        (swapped ? ' 기다리던 분과 이어졌고 실장이 확인합니다.' : ''),
+    );
+    if (out.dashboard_dirty) this.markDashboardDirty();
+  }
+
   private button(label: string, actionId: string, style?: 'primary' | 'danger', value?: string): any {
     const b: any = { type: 'button', text: { type: 'plain_text', text: label, emoji: true }, action_id: actionId };
     if (style) b.style = style;
@@ -521,9 +657,13 @@ export class PremiumSeatSlack {
     return b;
   }
 
-  private async openModal(client: any, body: any, kind: 'request' | 'availability'): Promise<void> {
+  private async openModal(client: any, body: any, kind: 'request' | 'availability' | 'admin'): Promise<void> {
     const user = this.userOf(body);
     const manager = this.isManager(user);
+    if (kind === 'admin' && !manager) {
+      await this.onlyYou(body, '「좌석·상태 고치기」는 실장만 쓸 수 있습니다.');
+      return;
+    }
     if (!this.opts.openToTeam && !manager) {
       // 누른 그 방에서 그 사람에게만 보이는 쪽지로 답한다 — DM 으로 보내면
       // 버튼을 누른 곳과 답이 오는 곳이 갈린다.
@@ -536,43 +676,42 @@ export class PremiumSeatSlack {
       { label: 'Claude Team', value: 'CLAUDE' },
     ])];
 
-    // 「Premium 요청」은 누구에게나 서비스 한 칸이다 — 남을 대신 넣는 일은
-    // 「좌석·상태 고치기」 한 곳에 모았다. 요청은 1인칭 행위라 대상을 물으면
-    // 자기 요청을 넣는 사람에게까지 군더더기가 붙는다.
+    // 「내 상태 변경」은 실장이 열어도 양도 의사 하나뿐이다 — 내 좌석 이야기와
+    // 남의 좌석을 고치는 이야기를 한 창에 섞으면 둘 다 읽기 나빠진다.
     if (kind === 'availability') {
-      if (manager) {
-        const roster = await this.roster(user);
-        if (roster.length) blocks.push(this.select('target', '대상', roster));
-        blocks.push(this.radio('tier', '좌석 배정', [
-          { label: '바꾸지 않음', value: '' },
-          { label: 'Premium', value: 'PREMIUM' },
-          { label: '스탠다드', value: 'STANDARD' },
-          { label: '좌석 없음', value: 'NONE' },
-        ], true));
-        blocks.push(this.radio('request', '요청', [
-          { label: '바꾸지 않음', value: '' },
-          { label: '이 사람 대신 요청 넣기', value: 'CREATE' },
-          { label: '이 사람의 요청 취소', value: 'CANCEL' },
-        ], true));
-      }
-      blocks.push(this.radio('status', '양도 의사', manager
-        ? [
-            { label: '바꾸지 않음', value: '' },
-            { label: '유지 필요', value: 'REQUIRED' },
-            { label: '양도 가능', value: 'TRANSFERABLE' },
-          ]
-        : [
-            { label: '유지 필요', value: 'REQUIRED' },
-            { label: '양도 가능', value: 'TRANSFERABLE' },
-          ], manager));
+      blocks.push(this.radio('status', '내 Premium 좌석', [
+        { label: '유지 필요', value: 'REQUIRED' },
+        { label: '양도 가능', value: 'TRANSFERABLE' },
+      ]));
     }
 
-    if (manager && kind === 'availability') blocks.push(this.quietBlock());
+    if (kind === 'admin') {
+      const roster = await this.roster(user);
+      if (roster.length) blocks.push(this.select('target', '대상', roster));
+      blocks.push(this.radio('tier', '좌석 배정', [
+        { label: '바꾸지 않음', value: '' },
+        { label: 'Premium', value: 'PREMIUM' },
+        { label: '스탠다드', value: 'STANDARD' },
+        { label: '좌석 없음', value: 'NONE' },
+      ], true));
+      blocks.push(this.radio('request', '요청', [
+        { label: '바꾸지 않음', value: '' },
+        { label: '이 사람 대신 요청 넣기', value: 'CREATE' },
+        { label: '이 사람의 요청 취소', value: 'CANCEL' },
+      ], true));
+      blocks.push(this.radio('status', '양도 의사', [
+        { label: '바꾸지 않음', value: '' },
+        { label: '유지 필요', value: 'REQUIRED' },
+        { label: '양도 가능', value: 'TRANSFERABLE' },
+      ], true));
+      blocks.push(this.quietBlock());
+    }
 
+    const title = { request: 'Premium 요청', availability: '내 상태 변경', admin: '좌석·상태 고치기' }[kind];
     const view = {
       type: 'modal',
-      callback_id: kind === 'request' ? 'premium_request_submit' : 'premium_availability_submit',
-      title: { type: 'plain_text', text: kind === 'request' ? 'Premium 요청' : (manager ? '좌석·상태 고치기' : '내 상태 변경') },
+      callback_id: `premium_${kind === 'admin' ? 'admin' : kind}_submit`,
+      title: { type: 'plain_text', text: title },
       submit: { type: 'plain_text', text: kind === 'request' ? '요청' : '변경' },
       blocks,
     };
