@@ -182,6 +182,12 @@ interface Waiting {
    * 여기서 안 집으면 그 말은 사람이 입을 열 때까지 대기열에 묻힌다.
    */
   hasSibling?: boolean;
+  /**
+   * 이 묶음에서 **말한 사람들.** 설정을 말로 바꾸는 길이 실장만 열리는데, 방에서는
+   * 한 턴이 여러 사람의 말을 합친 것일 수 있다. 「실장도 끼어 있으니 실장」으로 보면
+   * **다른 분의 청이 실장 이름으로 먹는다** — 그래서 전원이 실장일 때만 실장으로 넘긴다.
+   */
+  users?: Set<string>;
 }
 
 interface TurnResult {
@@ -522,7 +528,7 @@ export class ChatHost {
       await this.bypassToManager(client, user, channel, text);
       return;
     }
-    this.enqueue(user, { channel, text, ts });
+    this.enqueue(user, { channel, text, ts, user });
     // 표시는 **턴이 시작할 때** 붙는다(`pump`) — 붙이는 곳과 떼는 곳이 갈려 있으면
     // 한쪽 길이 늘어날 때마다 안 떼지는 자리가 하나씩 생긴다.
     this.kick(client, user, channel, true);
@@ -678,6 +684,7 @@ export class ChatHost {
       // 그런 자리에서는 `pump` 가 **가장 새 글 하나에만** 붙인다.
       react: called,
       sibling: fromSibling,
+      user,
     });
 
     if (called) {
@@ -862,6 +869,7 @@ export class ChatHost {
       this.enqueue(channel, {
         channel, ts: m.ts as string,
         text: `${name || user}: ${(m.text as string).trim()}`,
+        user,
         react: mine(m),    // 부른 글에만 표시를 단다. 나머지는 `pump` 가 하나만 붙인다
       });
     }
@@ -895,7 +903,7 @@ export class ChatHost {
    */
   private enqueue(key: string, item: {
     channel: string; text: string; ts: string; threadTs?: string;
-    react?: boolean; sibling?: boolean;
+    react?: boolean; sibling?: boolean; user?: string;
   }): void {
     const seen = this.taken.get(key) ?? new Set<string>();
     if (seen.has(item.ts)) return;              // 훑기가 다시 읽어 온 같은 말
@@ -916,6 +924,10 @@ export class ChatHost {
     waiting.texts.push(item.text);
     if (item.react !== false) waiting.reactTs.push(item.ts);
     if (item.sibling) waiting.hasSibling = true;
+    // **누가 말했는지 모아 둔다.** 설정을 말로 바꾸는 길이 실장만 열리는데, 방에서는
+    // 한 턴이 여러 사람의 말을 합친 것일 수 있다. 그때 「실장도 끼어 있으니 실장」으로
+    // 보면 **다른 분의 청이 실장 이름으로 먹는다.** 판단은 pump 에서 하고 여기서는 모으기만.
+    (waiting.users ??= new Set<string>()).add(item.user || '');
     this.pending.set(key, waiting);
   }
 
@@ -987,7 +999,8 @@ export class ChatHost {
         }
         let result: TurnResult;
         try {
-          result = await this.runTurn(key, await this.displayName(client, key), merged, !forced);
+          result = await this.runTurn(key, await this.displayName(client, key), merged, !forced,
+                                      this.isManagerTurn(waiting.users));
         } catch (error) {
           this.logger.warn('Turn crashed', error);
           result = { reply: '', error: String(error) };
@@ -1059,13 +1072,29 @@ export class ChatHost {
     return name;
   }
 
-  private runTurn(key: string, name: string, text: string, decide: boolean): Promise<TurnResult> {
+  /**
+   * 이 묶음을 **실장 본인이 한 말로 볼 수 있나.**
+   *
+   * 예전에는 `key === managerUserId` 로 봤는데, 그러면 **방에서는 영영 거짓**이다 —
+   * 방의 열쇠는 채널 ID(`C…`)라 사람 ID 와 같을 수가 없다. 1:1 에서만 맞는 판정이었다.
+   *
+   * 방에서는 한 턴이 여러 사람의 말을 합친 것일 수 있으므로 **전원이 실장일 때만** 참이다.
+   * 한 명이라도 다른 사람(또는 형제 봇)이 섞이면 거짓 — 그 청이 실장 이름으로 먹으면 안 된다.
+   */
+  private isManagerTurn(users?: Set<string>): boolean {
+    const id = this.opts.managerUserId;
+    if (!id || !users || users.size === 0) return false;
+    return [...users].every((u) => u === id);
+  }
+
+  private runTurn(key: string, name: string, text: string, decide: boolean,
+                  manager: boolean): Promise<TurnResult> {
     const payload = JSON.stringify({
       bot: this.opts.name,
       key,
       user: key.startsWith('U') ? key : '',
       user_name: name,
-      role: key === this.opts.managerUserId ? 'manager' : 'member',
+      role: manager ? 'manager' : 'member',
       // 같은 봇이 DM 과 채널을 다 받으므로 **어느 자리인지 알려준다.** 둘의 태도가
       // 달라야 하는데(DM 은 조심스럽게, 채널은 앞장서서) 프롬프트가 그걸 모르면
       // 한쪽에 맞춘 성격이 다른 쪽에서 어긋난다.
