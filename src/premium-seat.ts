@@ -137,14 +137,6 @@ const SWAP_ACTION_FAILED: Record<string, string> = {
   NOT_FOUND: '없는 교환 번호입니다.',
 };
 
-/** 요청 알림 글을 닫을 때 남기는 한 줄. 요청 상태마다 다르다. */
-const ANNOUNCE_CLOSED: Record<string, string> = {
-  SWAP_PENDING: '양도해 주실 분을 찾았습니다. 실장이 좌석을 바꿉니다.',
-  COMPLETED: '좌석 변경이 끝났습니다.',
-  CANCELLED: '요청이 취소됐습니다.',
-  GONE: '이 요청은 사라졌습니다.',
-};
-
 const TIMEOUT_STATE_MS = 10_000;
 /** 창 제출에 쓰는 짧은 기한. 슬랙이 3초 안에 답을 요구한다. */
 const MODAL_RUN_MS = 2_000;
@@ -165,6 +157,7 @@ export class PremiumSeatSlack {
   private registered = false;
   private jobBusy = false;
   private dashboardPending: NodeJS.Timeout | null = null;
+  private notifyPending: NodeJS.Timeout | null = null;
 
   constructor(private opts: PremiumSeatOptions) {}
 
@@ -196,6 +189,10 @@ export class PremiumSeatSlack {
     app.action('premium_offer', async ({ ack, body, action }) => {
       await ack();
       void this.offerSeat(body, (action as any).value as string);
+    });
+    app.action('premium_cancel_mine', async ({ ack, body }) => {
+      await ack();
+      void this.cancelMine(body);
     });
     app.action('premium_my_status', async ({ ack, body, client }) => {
       await ack();
@@ -261,6 +258,7 @@ export class PremiumSeatSlack {
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
     if (this.dashboardPending) clearTimeout(this.dashboardPending);
+    if (this.notifyPending) clearTimeout(this.notifyPending);
     for (const child of this.children) {
       try {
         child.kill();
@@ -403,7 +401,23 @@ export class PremiumSeatSlack {
   }
 
   // ------------------------------------------------------------- 화면
+  /**
+   * 줄 세운 알림을 곧바로 보낸다.
+   *
+   * 60초 타이머만 믿으면 승인 요청이 최대 1분 뒤에 뜬다. 사람이 방금 누른 일의
+   * 결과가 1분 뒤에 오면 고장 난 것처럼 보인다. 짧게 모았다가 한 번 보낸다.
+   */
+  private kickNotifications(): void {
+    if (this.notifyPending) return;
+    this.notifyPending = setTimeout(() => {
+      this.notifyPending = null;
+      void this.pumpNotifications();
+    }, 400);
+    this.notifyPending.unref?.();
+  }
+
   private markDashboardDirty(): void {
+    this.kickNotifications();
     // 2초 동안 여러 신호를 모아 한 번만 갱신한다 (§18.3).
     if (this.dashboardPending) return;
     this.dashboardPending = setTimeout(() => {
@@ -414,29 +428,50 @@ export class PremiumSeatSlack {
     this.dashboardPending.unref?.();
   }
 
-  async refreshDashboard(): Promise<void> {
-    if (!this.app) return;
+  /**
+   * 현황판을 다시 그린다.
+   *
+   * `bump` 면 같은 자리를 고치지 않고 방 맨 아래에 새로 올린 뒤 옛 메시지를 지운다.
+   * 고치기만 하면 알림이 안 울리고, 아래에 다른 글이 쌓이면 현황판이 위로 밀려
+   * 스크롤해야 보인다. 기다리는 사람이 생겼을 때만 옮긴다 — 매번 옮기면 그게 소음이다.
+   */
+  async refreshDashboard(bump = false): Promise<{ channel: string; ts: string } | null> {
+    if (!this.app) return null;
     const model = await this.run('dashboard model', {});
-    if (!model.ok) return;
+    if (!model.ok) return null;
     const blocks = this.dashboardBlocks(model.result);
     const text = 'AI Premium 좌석 현황';
     const saved = model.result?.message;
     const channel = this.opts.channelId;
 
-    try {
-      if (saved?.ts) {
+    if (!bump && saved?.ts) {
+      try {
         await this.app.client.chat.update({ channel: saved.channel ?? channel, ts: saved.ts, text, blocks });
-        return;
+        return { channel: saved.channel ?? channel, ts: saved.ts };
+      } catch (error) {
+        this.logger.warn('dashboard update failed; posting a new one', error);
       }
-    } catch (error) {
-      this.logger.warn('dashboard update failed; posting a new one', error);
     }
+
+    let posted;
     try {
-      const posted = await this.app.client.chat.postMessage({ channel, text, blocks });
-      if (posted.ts) await this.run('dashboard placed', { channel, ts: posted.ts });
+      posted = await this.app.client.chat.postMessage({ channel, text, blocks });
     } catch (error) {
       this.logger.warn('dashboard post failed', error);
+      return null;
     }
+    if (!posted?.ts) return null;
+    await this.run('dashboard placed', { channel, ts: posted.ts });
+
+    // 옛 현황판을 지운다. 남겨 두면 갱신 안 되는 현황판이 둘이 된다.
+    if (saved?.ts && saved.ts !== posted.ts) {
+      try {
+        await this.app.client.chat.delete({ channel: saved.channel ?? channel, ts: saved.ts });
+      } catch (error) {
+        this.logger.warn('old dashboard delete failed', error);
+      }
+    }
+    return { channel, ts: posted.ts as string };
   }
 
   /**
@@ -454,6 +489,7 @@ export class PremiumSeatSlack {
     const fields: any[] = [];
     const moving: string[] = [];
     const waitingLines: string[] = [];
+    const waitingServices: string[] = [];
     const warnings: string[] = [];
     const seenBy: Array<{ short: string; seen: string; declared: boolean }> = [];
 
@@ -485,7 +521,8 @@ export class PremiumSeatSlack {
         );
       }
       if (waiting.length) {
-        waitingLines.push(`${WAIT_ICON} *${short}*  ${waiting.join(' \u00b7 ')}`);
+        waitingLines.push(`${WAIT_ICON} *${short}*  ${waiting.join(' \u00b7 ')} 님이 기다립니다`);
+        waitingServices.push(key);
       }
 
       const observed = view.observed_at ? Date.parse(view.observed_at) : 0;
@@ -501,6 +538,19 @@ export class PremiumSeatSlack {
     if (moving.length || waitingLines.length) {
       blocks.push({ type: 'divider' });
       blocks.push({ type: 'section', text: { type: 'mrkdwn', text: [...moving, ...waitingLines].join('\n') } });
+    }
+    if (waitingServices.length) {
+      // 기다리는 사람이 있을 때만 나온다. 양보는 보유자가, 취소는 요청한 사람이 누른다.
+      const elements = waitingServices.map((key) =>
+        this.button(
+          waitingServices.length > 1 ? `${SERVICE_SHORT[key]} 좌석 양보` : '제 좌석 양보하겠습니다',
+          'premium_offer',
+          'primary',
+          key,
+        ),
+      );
+      elements.push(this.button('내 요청 취소', 'premium_cancel_mine'));
+      blocks.push({ type: 'actions', elements });
     }
     if (warnings.length) {
       blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: warnings.join('  \u00b7  ') }] });
@@ -557,82 +607,60 @@ export class PremiumSeatSlack {
     return `${items.join('  \u00b7  ')}\n${CLOCK_ICON} ${head} ${when}`;
   }
 
-  // --------------------------------------------------------- 요청 알림 글
+  // --------------------------------------------------------- 기다리는 사람
   /**
-   * 기다리는 사람이 생겼다는 사실을 방에 새 글로 알린다.
+   * 기다리는 사람이 새로 생겼으면 현황판을 방 맨 아래로 옮긴다.
    *
-   * 현황판은 같은 메시지를 고쳐 쓰므로 알림이 안 울리고, 방을 안 보는 사람에게는
-   * 아무 일도 안 일어난 것과 같다. 요청 한 건에 글 한 건만 올리고, 그 요청이
-   * 끝나면 같은 글을 닫는다 — 「기다립니다」가 남아 있는 것이 제일 나쁘다.
+   * 현황판은 같은 메시지를 고쳐 쓰므로 알림이 안 울린다. 방을 안 보는 사람에게는
+   * 아무 일도 안 일어난 것과 같아서, 그 사실만은 한 번 떠 줘야 한다. 요청 한 건에
+   * 한 번만 옮긴다 — 이미 옮긴 요청은 다시 옮기지 않는다.
    */
   private async syncAnnouncements(): Promise<void> {
     if (!this.app) return;
     const out = await this.run('announce pending', {});
     if (!out.ok) return;
 
-    for (const item of out.result?.to_post ?? []) {
-      try {
-        const posted = await this.app.client.chat.postMessage({
-          channel: this.opts.channelId,
-          text: `${SERVICE_LABEL[item.service] ?? item.service} Premium 좌석을 기다리는 분이 있습니다`,
-          blocks: this.announceBlocks(item),
-        });
-        if (posted.ts) {
-          await this.run('announce placed', {
-            request_id: item.request_id,
-            channel: this.opts.channelId,
-            ts: posted.ts,
-          });
-        }
-      } catch (error) {
-        this.logger.warn('announce post failed', error);
-      }
+    for (const item of out.result?.to_close ?? []) {
+      await this.run('announce closed', { request_id: item.request_id });
     }
 
-    for (const item of out.result?.to_close ?? []) {
-      if (item.channel && item.ts) {
-        const line = ANNOUNCE_CLOSED[item.status] ?? '이 요청은 끝났습니다.';
-        try {
-          await this.app.client.chat.update({
-            channel: item.channel,
-            ts: item.ts,
-            text: line,
-            blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: `:white_check_mark: ${line}` }] }],
-          });
-        } catch (error) {
-          this.logger.warn('announce close failed', error);
-        }
-      }
-      await this.run('announce closed', { request_id: item.request_id });
+    const fresh = out.result?.to_post ?? [];
+    if (!fresh.length) return;
+    const placed = await this.refreshDashboard(true);
+    if (!placed) return;
+    for (const item of fresh) {
+      await this.run('announce placed', {
+        request_id: item.request_id,
+        channel: placed.channel,
+        ts: placed.ts,
+      });
     }
   }
 
-  private announceBlocks(item: any): any[] {
-    const holders: any[] = item.holders ?? [];
-    const now = holders.length
-      ? holders
-          .map((h) => `${h.availability === 'TRANSFERABLE' ? GIVE_ICON : KEEP_ICON} ${h.display_name}`)
-          .join('  ')
-      : '없음';
-    return [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text:
-            `:raising_hand: *${SERVICE_LABEL[item.service] ?? item.service} Premium 좌석을 기다립니다*\n` +
-            `${item.requester_name} 님\n\n지금 쓰고 계신 분: ${now}`,
-        },
-      },
-      {
-        type: 'actions',
-        elements: [this.button('제 좌석 양보하겠습니다', 'premium_offer', 'primary', item.service)],
-      },
-      {
-        type: 'context',
-        elements: [{ type: 'mrkdwn', text: '누르면 「양도 가능」으로 바뀝니다. 실제 좌석은 실장이 확인한 뒤 바꿉니다.' }],
-      },
-    ];
+  /**
+   * 현황판의 「내 요청 취소」. 누른 사람의 대기 요청을 찾아 지운다.
+   *
+   * 서비스를 안 묻는다 — 대기 요청이 하나면 그것이고, 없거나 둘이면 그렇다고 알린다.
+   */
+  private async cancelMine(body: any): Promise<void> {
+    const user = this.userOf(body);
+    const mine = await this.run('my status', { slack_user_id: user });
+    if (!mine.ok) return void this.onlyYou(body, this.errorText(mine));
+    const services = mine.result?.services ?? {};
+    const waiting = Object.keys(services).filter((k) => services[k]?.request?.status === 'WAITING');
+
+    if (!waiting.length) return void this.onlyYou(body, '취소할 요청이 없습니다.');
+    if (waiting.length > 1) {
+      return void this.onlyYou(body, '요청이 두 건입니다. 「내 상태 보기」에서 골라 취소해 주세요.');
+    }
+
+    const service = waiting[0];
+    const out = await this.run('request cancel', { service, slack_user_id: user });
+    if (!out.ok) return void this.onlyYou(body, this.errorText(out));
+    const r = out.result ?? {};
+    if (!r.cancelled) return void this.onlyYou(body, this.errorText(out, r.reason));
+    await this.onlyYou(body, `${SERVICE_LABEL[service] ?? service} Premium 요청을 취소했습니다.`);
+    if (out.dashboard_dirty) this.markDashboardDirty();
   }
 
   /** 알림 글의 한 번 누르기. 누른 사람이 그 서비스 Premium 보유자라야 한다. */
@@ -1090,6 +1118,12 @@ export class PremiumSeatSlack {
     const channel = body?.channel?.id;
     const ts = body?.message?.ts;
     if (channel && ts) {
+      // 성공했으면 다음에 눌러야 할 버튼을 그 자리에 둔다. 「완료했습니다를 눌러
+      // 주세요」라고 적어 놓고 그 버튼이 재알림으로 올 때까지 없으면, 사람은
+      // 없는 버튼을 찾는다. 실패했으면 방금 그 버튼을 살려 다시 누르게 한다.
+      const next = out.ok
+        ? this.swapActions(swapId, out.entity?.state)
+        : this.swapActions(swapId, undefined, body.message.blocks);
       try {
         await this.app!.client.chat.update({
           channel,
@@ -1098,7 +1132,7 @@ export class PremiumSeatSlack {
           blocks: [
             ...(body.message.blocks ?? []).filter((b: any) => b.type !== 'actions'),
             { type: 'context', elements: [{ type: 'mrkdwn', text: `${out.ok ? ':white_check_mark:' : ':warning:'} ${line}` }] },
-            ...(out.ok ? [] : [this.swapActions(swapId, body.message.blocks)]),
+            ...(next ? [next] : []),
           ].filter(Boolean),
         });
       } catch (error) {
@@ -1108,10 +1142,45 @@ export class PremiumSeatSlack {
     if (out.dashboard_dirty) this.markDashboardDirty();
   }
 
-  /** 실패했으면 버튼을 그대로 살려 둔다 — 다시 누를 수 있어야 한다. */
-  private swapActions(swapId: string, previous: any[]): any {
-    const kept = (previous ?? []).find((b: any) => b.type === 'actions');
-    return kept ?? { type: 'actions', elements: [this.button('실제 상태 다시 확인', 'premium_swap_verify', undefined, swapId)] };
+  /**
+   * 그 교환 상태에서 다음에 누를 수 있는 버튼.
+   *
+   * 끝난 교환에는 아무것도 안 단다. `previous` 는 실패했을 때 방금 누른 버튼을
+   * 그대로 살리는 데 쓴다 — 화면이 낡았을 뿐 다시 누르면 되는 경우가 있다.
+   */
+  private swapActions(swapId: string, state?: string, previous?: any[]): any | null {
+    if (previous) {
+      return (previous ?? []).find((b: any) => b.type === 'actions') ?? null;
+    }
+    switch (state) {
+      case 'AWAITING_ADMIN':
+        return {
+          type: 'actions',
+          elements: [
+            this.button('양도 진행', 'premium_swap_start', 'primary', swapId),
+            this.button('양도 취소·보유 유지', 'premium_swap_reject', 'danger', swapId),
+          ],
+        };
+      case 'APPLYING':
+        return {
+          type: 'actions',
+          elements: [
+            this.button('완료했습니다', 'premium_swap_complete', 'primary', swapId),
+            this.button('이 교환 중단', 'premium_swap_abort', 'danger', swapId),
+          ],
+        };
+      case 'NEEDS_ADMIN':
+        return {
+          type: 'actions',
+          elements: [
+            this.button('다시 진행', 'premium_swap_start', 'primary', swapId),
+            this.button('실제 상태 다시 확인', 'premium_swap_verify', undefined, swapId),
+            this.button('이 교환 중단', 'premium_swap_abort', 'danger', swapId),
+          ],
+        };
+      default:
+        return null;
+    }
   }
 
   // ------------------------------------------------------------- 알림 전송
