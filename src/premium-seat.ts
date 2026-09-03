@@ -417,7 +417,7 @@ export class PremiumSeatSlack {
     const moving: string[] = [];
     const waitingLines: string[] = [];
     const warnings: string[] = [];
-    const seenBy: Array<{ short: string; seen: string }> = [];
+    const seenBy: Array<{ short: string; seen: string; declared: boolean }> = [];
 
     for (const key of ['CHATGPT', 'CLAUDE']) {
       const view = model?.services?.[key];
@@ -455,7 +455,7 @@ export class PremiumSeatSlack {
       const stale = view.source !== 'DECLARED' && (!observed || (Date.now() - observed) / 60000 >= maxAge);
       if (stale) warnings.push(`:warning: *${short}* 확인 지연`);
       if (view.unknown_email_count) warnings.push(`:warning: *${short}* 대응표 미등록 ${view.unknown_email_count}명`);
-      seenBy.push({ short, seen: observed ? seoulStamp(observed) : '없음' });
+      seenBy.push({ short, seen: observed ? seoulStamp(observed) : '없음', declared: view.source === 'DECLARED' });
     }
 
     if (fields.length) blocks.push({ type: 'section', fields });
@@ -496,18 +496,22 @@ export class PremiumSeatSlack {
   private legend(
     moving: string[],
     waitingLines: string[],
-    seenBy: Array<{ short: string; seen: string }>,
+    seenBy: Array<{ short: string; seen: string; declared: boolean }>,
   ): string {
     const items = [`${KEEP_TICK}${KEEP_ICON} 유지 필요`, `${GIVE_TICK}${GIVE_ICON} 양도 가능`];
     if (moving.length) items.push(`${SWAP_ICON} 바꾸는 중`);
     if (waitingLines.length) items.push(`${WAIT_ICON} 기다리는 사람`);
 
+    // DECLARED 는 바깥을 읽지 않는다. 그때 이 시각은 「언제 확인했나」가 아니라
+    // 「좌석이 마지막으로 바뀐 때」다 — 「기준」이라고만 적으면 요청만 오간 날에도
+    // 화면이 낡은 것처럼 읽힌다.
+    const head = seenBy.every((x) => x.declared) ? '좌석 마지막 변경' : '확인';
     const times = new Set(seenBy.map((x) => x.seen));
     const when =
       times.size === 1
-        ? `${[...times][0]} 기준`
-        : seenBy.map((x) => `${x.short} ${x.seen}`).join('  \u00b7  ') + ' 기준';
-    return `${items.join('  \u00b7  ')}\n${CLOCK_ICON} ${when}`;
+        ? `${[...times][0]}`
+        : seenBy.map((x) => `${x.short} ${x.seen}`).join('  \u00b7  ');
+    return `${items.join('  \u00b7  ')}\n${CLOCK_ICON} ${head} ${when}`;
   }
 
   private button(label: string, actionId: string, style?: 'primary' | 'danger', value?: string): any {
