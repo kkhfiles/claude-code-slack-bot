@@ -15,7 +15,7 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
-  offDays, ymd, narrowTask, narrowCard, narrowApply } from './work-assistant';
+  offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex } from './work-assistant';
 import type { QuickOutcome } from './work-assistant';
 import { boardLabel, boardQueueEnabled, drain } from './board-queue';
 
@@ -1779,6 +1779,8 @@ export class AssistantScheduler {
     }
     const card = await narrowCard(task);
     if (!card) return { kind: 'not-quick', detail: `${task} 재료를 못 만듦` };
+    // 두 엔진이 **같은 규칙**을 받아야 한다 — 한쪽만 고치면 폴백이 다른 일을 한다.
+    const rulesText = fs.readFileSync(rules, 'utf-8');
 
     const today = new Date();
     const p = (n: number) => String(n).padStart(2, '0');
@@ -1792,6 +1794,7 @@ export class AssistantScheduler {
       '판 「프롬프트」 칸에 온 말:', body,
     ].join('\n');
 
+    let said = '';
     const result = await this.spawnSession(user, {
       workingDirectory: root,
       model: NARROW_MODEL,
@@ -1802,7 +1805,7 @@ export class AssistantScheduler {
       allowedTools: [],
       // 규칙 파일을 안 읽는다 — CLAUDE.md 가 따라 들어오면 좁은 길이 아니게 된다.
       settingSources: [],
-      appendSystemPrompt: fs.readFileSync(rules, 'utf-8'),
+      appendSystemPrompt: rulesText,
       env: { ASSISTANT_MODE: 'narrow', CLAUDE_SCHEDULED: '1' },
       skipMcp: true,
       noSessionPersistence: true,
@@ -1811,7 +1814,22 @@ export class AssistantScheduler {
       useSdk: true,
     });
     this.recordSessionCost('narrow', result);
-    const said = (result.text || '').trim();
+    said = (result.text || '').trim();
+
+    // ★ **폴백 한 칸** (2026-09-03) — 1차가 빈손이면 codex 가 같은 일을 한다.
+    //
+    // **빈손일 때만 간다.** 말은 나왔는데 그 JSON 을 파이썬이 거절한 것이면
+    // 내용 문제라 엔진을 갈아 끼워도 같은 답이 온다 — 그때는 오늘까지와 같이
+    // 세션으로 떨어지는 편이 맞다. 여기서 또 부르면 돈과 시간만 두 배가 된다.
+    //
+    // **두 번 하기 위험이 없다** — 좁은 길은 「글 → JSON → 파이썬이 반영」이라
+    // 반영은 아래 `narrowApply` 한 번뿐이다. 세션 경로에 같은 사다리를 놓으려면
+    // 되돌리기 문이 따로 필요하다(도구를 여러 번 돌려 중간에 죽을 수 있다).
+    if (!said) {
+      said = await narrowCodex(rulesText, user);
+      if (said) this.logger.warn('좁은 길 1차가 빈손이라 codex 로 처리했습니다');
+    }
+
     if (!said) return { kind: 'not-quick', detail: '좁은 길이 아무 말도 안 했다' };
     return narrowApply(said, task);
   };
