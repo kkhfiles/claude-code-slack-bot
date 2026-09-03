@@ -938,3 +938,61 @@ function runCodex(args: string[], stdinFile: string, timeoutMs: number): Promise
     });
   });
 }
+
+
+/**
+ * **주 작업용 폴백** — 예약 세션을 codex 로 한 번 돌린다 (2026-09-03).
+ *
+ * `narrowCodex` 와 다른 점 둘.
+ *   - **도구를 쓴다.** 좁은 길은 읽기도 쓰기도 파이썬이 하지만 예약 작업은
+ *     세션이 스스로 `bin/tasks.py` 를 돌린다 — 그래서 `workspace-write` 다.
+ *   - **답의 모양을 강제하지 않는다.** 산출물이 사람이 읽을 글이라 스키마가 없다.
+ *
+ * **규칙을 codex 가 스스로 읽는다** — `~/.codex/config.toml` 의
+ * `project_doc_fallback_filenames = ["CLAUDE.md"]` 와 `~/.codex/skills` 투영이
+ * 이미 있어, 작업 디렉터리만 주면 같은 규칙·같은 스킬로 돈다.
+ * ⚠️ **그 파일이 `project_doc_max_bytes` 를 넘으면 조용히 잘린다** — 지금
+ * 110,583자 대 131,072자(84%)다. 넘기 시작하면 이 폴백이 반쪽 규칙으로 돈다.
+ *
+ * 못 하면 **빈 글자**를 돌려준다 — 부르는 쪽이 오늘까지와 같이 물러난다.
+ * `SESSION_FALLBACK=off` 로 끈다.
+ */
+export async function codexSession(
+  prompt: string,
+  opts: { workingDirectory: string; appendSystemPrompt?: string; timeoutMs?: number },
+): Promise<string> {
+  if (process.env.SESSION_FALLBACK === 'off') return '';
+  const id = randomId();
+  const pf = path.join(os.tmpdir(), `wa-cs-${id}.txt`);
+  const of = path.join(os.tmpdir(), `wa-cs-${id}.out.txt`);
+  try {
+    const head = opts.appendSystemPrompt ? `${opts.appendSystemPrompt}\n\n----\n\n` : '';
+    fs.writeFileSync(pf, head + prompt, 'utf-8');
+    const args = [
+      'exec', '--ephemeral', '--skip-git-repo-check',
+      // 작업 디렉터리 안에는 쓴다 — 예약 작업이 볼트와 판을 건드린다.
+      '-s', 'workspace-write',
+      // 승인을 사람에게 묻지 않는다 — 아무도 안 보는 시각에 도는 길이라
+      // 물으면 그대로 멈춘다.
+      '--approve-for-me',
+      '--color', 'never',
+      '-C', opts.workingDirectory,
+      '-m', NARROW_CODEX_MODEL,
+      '-c', `model_reasoning_effort=${NARROW_CODEX_EFFORT}`,
+      '-o', of, '-',
+    ];
+    const code = await runCodex(args, pf, opts.timeoutMs ?? 600_000);
+    if (code !== 0) {
+      logger.warn(`주 작업 폴백(codex) rc ${code}`);
+      return '';
+    }
+    return fs.existsSync(of) ? fs.readFileSync(of, 'utf-8').trim() : '';
+  } catch (err) {
+    logger.warn('주 작업 폴백(codex)이 터졌습니다 — 물러납니다', err);
+    return '';
+  } finally {
+    for (const f of [pf, of]) {
+      try { fs.unlinkSync(f); } catch { /* 이미 없다 */ }
+    }
+  }
+}
