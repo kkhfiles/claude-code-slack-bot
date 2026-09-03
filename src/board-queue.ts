@@ -51,7 +51,7 @@ const EVENTS_FILE = process.env.WORK_EVENTS_FILE
  * ⚠️ **계측이 반영을 막으면 안 된다** — 막는 순간 그 계측은 꺼야 하는 것이 되고,
  * 꺼진 계측은 없는 것과 같다. 그래서 무엇이 터져도 삼킨다.
  */
-function event(kind: string, extra: Record<string, unknown> = {}): void {
+export function event(kind: string, extra: Record<string, unknown> = {}): void {
   try {
     const d = new Date();
     const p = (n: number) => String(n).padStart(2, '0');
