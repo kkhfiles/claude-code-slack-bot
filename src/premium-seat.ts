@@ -69,10 +69,7 @@ const CLOCK_ICON = '\u{1F553}';
 /** 라디오에서 「바꾸지 않음」을 나타내는 값. 슬랙이 빈 문자열을 안 받는다. */
 const KEEP_AS_IS = '__keep__';
 
-const SELF_TITLE: Record<string, string> = {
-  request: 'Premium 요청',
-  availability: '내 상태 변경',
-};
+const SELF_TITLE = 'Premium 요청';
 
 const TIER_LABEL: Record<string, string> = {
   PREMIUM: 'Premium',
@@ -184,10 +181,6 @@ export class PremiumSeatSlack {
       await ack();
       await this.openModal(client, body, 'request');
     });
-    app.action('premium_availability_open', async ({ ack, body, client }) => {
-      await ack();
-      await this.openModal(client, body, 'availability');
-    });
     // 실장 전용 창은 더보기 메뉴에 둔다. 버튼 줄에 같이 놓으면 팀원 셋에게
     // 자기가 못 쓰는 버튼이 하나 늘어난다.
     app.action('premium_more', async ({ ack, body, client }) => {
@@ -198,10 +191,6 @@ export class PremiumSeatSlack {
     app.action('premium_offer', async ({ ack, body, action }) => {
       await ack();
       void this.offerSeat(body, (action as any).value as string);
-    });
-    app.action('premium_cancel_mine', async ({ ack, body }) => {
-      await ack();
-      void this.cancelMine(body);
     });
     app.action('premium_my_status', async ({ ack, body, client }) => {
       await ack();
@@ -220,17 +209,8 @@ export class PremiumSeatSlack {
       const work = this.handleRequest(body.user.id, this.picked(view, 'service'));
       await ack(await this.resultAck('Premium 요청', work, body.user.id));
     });
-    app.view('premium_availability_submit', async ({ ack, body, view }) => {
-      // 내 상태 변경은 양도 의사 하나뿐이다.
-      const work = this.handleAvailability(body.user.id, {
-        service: this.picked(view, 'service'),
-        target: body.user.id,
-        tier: '',
-        status: this.picked(view, 'status'),
-        request: '',
-        quiet: false,
-      });
-      await ack(await this.resultAck('내 상태 변경', work, body.user.id));
+    app.view('premium_my_status', async ({ ack, body, view }) => {
+      await ack(await this.resultAck('내 상태', this.saveWishes(body.user.id, view), body.user.id));
     });
     app.view('premium_admin_submit', async ({ ack, body, view }) => {
       const work = this.handleAvailability(body.user.id, {
@@ -549,17 +529,21 @@ export class PremiumSeatSlack {
       blocks.push({ type: 'section', text: { type: 'mrkdwn', text: [...moving, ...waitingLines].join('\n') } });
     }
     if (waitingServices.length) {
-      // 기다리는 사람이 있을 때만 나온다. 양보는 보유자가, 취소는 요청한 사람이 누른다.
-      const elements = waitingServices.map((key) =>
-        this.button(
-          waitingServices.length > 1 ? `${SERVICE_SHORT[key]} 좌석 양보` : '제 좌석 양보하겠습니다',
-          'premium_offer',
-          'primary',
-          key,
+      // 기다리는 사람이 있을 때만 나온다. 방 전체에 던지는 부탁이라 여기 둔다.
+      // 요청한 사람 한 명만 쓰는 취소는 「내 상태」 창 안에 있다 — 현황판은 방에
+      // 하나뿐인 메시지라 보는 사람마다 다르게 그릴 수 없고, 한 사람용 버튼을
+      // 열 명에게 보이면 그것이 소음이다.
+      blocks.push({
+        type: 'actions',
+        elements: waitingServices.map((key) =>
+          this.button(
+            waitingServices.length > 1 ? `${SERVICE_SHORT[key]} 좌석 양보` : '제 좌석 양보하겠습니다',
+            'premium_offer',
+            'primary',
+            key,
+          ),
         ),
-      );
-      elements.push(this.button('내 요청 취소', 'premium_cancel_mine'));
-      blocks.push({ type: 'actions', elements });
+      });
     }
     if (warnings.length) {
       blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: warnings.join('  \u00b7  ') }] });
@@ -574,8 +558,9 @@ export class PremiumSeatSlack {
       type: 'actions',
       elements: [
         this.button('Premium 요청', 'premium_request_open', 'primary'),
-        this.button('내 상태 변경', 'premium_availability_open'),
-        this.button('내 상태 보기', 'premium_my_status'),
+        // 보기와 바꾸기를 한 창으로 합쳤다. Premium 좌석이 있으면 그 창에서
+        // 바로 양도 의사를 고르고, 요청이 있으면 거기서 취소한다.
+        this.button('내 상태', 'premium_my_status'),
         {
           type: 'overflow',
           action_id: 'premium_more',
@@ -648,32 +633,6 @@ export class PremiumSeatSlack {
     }
   }
 
-  /**
-   * 현황판의 「내 요청 취소」. 누른 사람의 대기 요청을 찾아 지운다.
-   *
-   * 서비스를 안 묻는다 — 대기 요청이 하나면 그것이고, 없거나 둘이면 그렇다고 알린다.
-   */
-  private async cancelMine(body: any): Promise<void> {
-    const user = this.userOf(body);
-    const mine = await this.run('my status', { slack_user_id: user });
-    if (!mine.ok) return void this.onlyYou(body, this.errorText(mine));
-    const services = mine.result?.services ?? {};
-    const waiting = Object.keys(services).filter((k) => services[k]?.request?.status === 'WAITING');
-
-    if (!waiting.length) return void this.onlyYou(body, '취소할 요청이 없습니다.');
-    if (waiting.length > 1) {
-      return void this.onlyYou(body, '요청이 두 건입니다. 「내 상태 보기」에서 골라 취소해 주세요.');
-    }
-
-    const service = waiting[0];
-    const out = await this.run('request cancel', { service, slack_user_id: user });
-    if (!out.ok) return void this.onlyYou(body, this.errorText(out));
-    const r = out.result ?? {};
-    if (!r.cancelled) return void this.onlyYou(body, this.errorText(out, r.reason));
-    await this.onlyYou(body, `${SERVICE_LABEL[service] ?? service} Premium 요청을 취소했습니다.`);
-    if (out.dashboard_dirty) this.markDashboardDirty();
-  }
-
   /** 알림 글의 한 번 누르기. 누른 사람이 그 서비스 Premium 보유자라야 한다. */
   private async offerSeat(body: any, service: string): Promise<void> {
     const user = this.userOf(body);
@@ -701,7 +660,7 @@ export class PremiumSeatSlack {
     return b;
   }
 
-  private async openModal(client: any, body: any, kind: 'request' | 'availability' | 'admin'): Promise<void> {
+  private async openModal(client: any, body: any, kind: 'request' | 'admin'): Promise<void> {
     const user = this.userOf(body);
     const manager = this.isManager(user);
     if (kind === 'admin' && !manager) {
@@ -715,7 +674,7 @@ export class PremiumSeatSlack {
       return;
     }
 
-    const view = kind === 'admin' ? await this.adminView(user) : await this.selfView(user, kind);
+    const view = kind === 'admin' ? await this.adminView(user) : await this.requestView(user);
     try {
       await client.views.open({ trigger_id: body.trigger_id, view });
     } catch (error) {
@@ -724,14 +683,14 @@ export class PremiumSeatSlack {
   }
 
   /**
-   * 내 요청 · 내 상태 창. 그 사람의 실제 좌석을 보고 짓는다.
+   * 「Premium 요청」 창. 그 사람의 실제 좌석을 보고 짓는다.
    *
    * 할 수 없는 일을 물어본 뒤 제출에서 거절하면, 사람은 무엇이 잘못됐는지 모른 채
    * 창을 두 번 연다. 고를 것이 하나면 묻지 않고, 없으면 왜 없는지 적는다.
    */
-  private async selfView(userId: string, kind: 'request' | 'availability'): Promise<any> {
+  private async requestView(userId: string): Promise<any> {
     const out = await this.run('my status', { slack_user_id: userId }, MODAL_RUN_MS);
-    if (!out.ok) return this.noticeView(SELF_TITLE[kind], { ok: false, lines: [this.errorText(out)] });
+    if (!out.ok) return this.noticeView(SELF_TITLE, { ok: false, lines: [this.errorText(out)] });
     const services = out.result?.services ?? {};
 
     const usable: string[] = [];
@@ -740,22 +699,17 @@ export class PremiumSeatSlack {
       const view = services[key];
       if (!view) continue;
       const name = SERVICE_LABEL[key] ?? key;
-      if (kind === 'availability') {
-        if (view.tier === 'PREMIUM') usable.push(key);
-        else reasons.push(`*${name}* — Premium 좌석이 없습니다`);
-      } else {
-        if (view.request) reasons.push(`*${name}* — 이미 요청이 들어가 있습니다`);
-        else if (view.tier === 'PREMIUM') reasons.push(`*${name}* — 이미 Premium 을 쓰고 계십니다`);
-        else if (view.tier !== 'STANDARD') reasons.push(`*${name}* — 좌석이 없어 교환 대상이 아닙니다`);
-        else usable.push(key);
-      }
+      if (view.request) reasons.push(`*${name}* — 이미 요청이 들어가 있습니다`);
+      else if (view.tier === 'PREMIUM') reasons.push(`*${name}* — 이미 Premium 을 쓰고 계십니다`);
+      else if (view.tier !== 'STANDARD') reasons.push(`*${name}* — 좌석이 없어 교환 대상이 아닙니다`);
+      else usable.push(key);
     }
 
     if (!usable.length) {
-      const tail = kind === 'availability'
-        ? ['', 'Premium 좌석이 생기면 여기서 양도 의사를 바꾸실 수 있습니다.']
-        : ['', '좌석이 없으시면 실장에게 스탠다드 좌석을 먼저 요청해 주세요.'];
-      return this.noticeView(SELF_TITLE[kind], { ok: false, lines: [...reasons, ...tail] });
+      return this.noticeView(SELF_TITLE, {
+        ok: false,
+        lines: [...reasons, '', '좌석이 없으시면 실장에게 스탠다드 좌석을 먼저 요청해 주세요.'],
+      });
     }
 
     const blocks: any[] = [];
@@ -773,29 +727,21 @@ export class PremiumSeatSlack {
       }))));
     }
 
-    if (kind === 'availability') {
-      const current = usable.length === 1 ? services[usable[0]]?.availability : null;
-      blocks.push(this.radio('status', '내 Premium 좌석', [
-        { label: '유지 필요', value: 'REQUIRED' },
-        { label: '양도 가능', value: 'TRANSFERABLE' },
-      ], false, current === 'TRANSFERABLE' ? 'TRANSFERABLE' : current === 'REQUIRED' ? 'REQUIRED' : undefined));
-    } else {
-      blocks.push({
-        type: 'context',
-        elements: [{ type: 'mrkdwn', text: '양도 가능한 좌석이 나오면 순서대로 이어 드립니다.' }],
-      });
-    }
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: '양도 가능한 좌석이 나오면 순서대로 이어 드립니다.' }],
+    });
     if (reasons.length) {
       blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: reasons.join('  ·  ') }] });
     }
 
     return {
       type: 'modal',
-      callback_id: `premium_${kind}_submit`,
+      callback_id: 'premium_request_submit',
       // 서비스를 안 물었을 때 어느 서비스인지는 여기 실어 보낸다.
       private_metadata: usable.length === 1 ? usable[0] : '',
-      title: { type: 'plain_text', text: SELF_TITLE[kind] },
-      submit: { type: 'plain_text', text: kind === 'request' ? '요청' : '변경' },
+      title: { type: 'plain_text', text: SELF_TITLE },
+      submit: { type: 'plain_text', text: '요청' },
       blocks,
     };
   }
@@ -964,6 +910,8 @@ export class PremiumSeatSlack {
       lines: [
         `*${SERVICE_LABEL[service]}* Premium 요청을 넣었습니다.`,
         swapped ? '양도자를 찾았고 실장 승인을 기다립니다.' : '양도 가능한 좌석이 나오면 알려 드립니다.',
+        // 취소 버튼을 현황판에서 뺐으니 어디에 있는지는 여기서 알려 준다.
+        '취소하시려면 현황판의 「내 상태」를 눌러 주세요.',
       ],
     };
   }
@@ -1028,7 +976,7 @@ export class PremiumSeatSlack {
     return { ok: true, lines: [`${who}*${SERVICE_LABEL[service]}*`, ...done] };
   }
 
-  /** 「내 상태 보기」 — DM 이 아니라 창으로 띄운다. 누른 사람만 본다. */
+  /** 「내 상태」 — DM 이 아니라 창으로 띄운다. 누른 사람만 본다. */
   private async openMyStatus(client: any, body: any): Promise<void> {
     const user = this.userOf(body);
     const view = await this.myStatusView(user);
@@ -1057,9 +1005,19 @@ export class PremiumSeatSlack {
     }
   }
 
+  /**
+   * 「내 상태」 — 보는 것과 바꾸는 것을 한 창에서 한다.
+   *
+   * Premium 좌석이 있으면 그 서비스마다 양도 의사 라디오가 붙고, 기다리는 요청이
+   * 있으면 취소 버튼이 붙는다. 바꿀 것이 하나도 없는 사람에게는 제출 단추 없이
+   * 읽는 창으로만 뜬다 — 못 하는 일을 버튼으로 보여 주지 않는다.
+   */
   private async myStatusView(userId: string, note?: string): Promise<any> {
     const out = await this.run('my status', { slack_user_id: userId });
     const blocks: any[] = [];
+    // 제출 때 「무엇이 바뀌었나」를 가리려면 열 때의 값이 필요하다. 안 바뀐 것까지
+    // 다시 쓰면 기록만 늘고 「마지막 변경」 시각이 흔들린다.
+    const before: Record<string, string> = {};
 
     if (!out.ok) {
       blocks.push({ type: 'section', text: { type: 'mrkdwn', text: this.errorText(out) } });
@@ -1073,6 +1031,15 @@ export class PremiumSeatSlack {
           type: 'section',
           text: { type: 'mrkdwn', text: `${SERVICE_ICON[key] ?? ''} *${SERVICE_LABEL[key] ?? key}*\n${this.myLines(view).join('\n')}` },
         });
+        // 교환이 걸려 있는 좌석은 못 바꾼다 — 라디오를 띄우면 눌러 놓고 거절당한다.
+        if (view.tier === 'PREMIUM' && !view.swap) {
+          const now = view.availability === 'TRANSFERABLE' ? 'TRANSFERABLE' : 'REQUIRED';
+          before[key] = now;
+          blocks.push(this.radio(`wish:${key}`, '양도 의사', [
+            { label: `${KEEP_ICON} 유지 필요`, value: 'REQUIRED' },
+            { label: `${GIVE_ICON} 양도 가능`, value: 'TRANSFERABLE' },
+          ], false, now));
+        }
         if (view.request?.status === 'WAITING') {
           blocks.push({
             type: 'actions',
@@ -1084,13 +1051,45 @@ export class PremiumSeatSlack {
       blocks.pop();
     }
 
+    const changeable = Object.keys(before).length > 0;
     return {
       type: 'modal',
       callback_id: 'premium_my_status',
+      private_metadata: JSON.stringify(before),
       title: { type: 'plain_text', text: '내 상태' },
+      ...(changeable ? { submit: { type: 'plain_text', text: '저장' } } : {}),
       close: { type: 'plain_text', text: '닫기' },
       blocks: blocks.length ? blocks : [{ type: 'section', text: { type: 'mrkdwn', text: '보여 드릴 것이 없습니다.' } }],
     };
+  }
+
+  /** 「내 상태」 창의 저장. 열었을 때와 달라진 좌석만 바꾼다. */
+  private async saveWishes(userId: string, view: any): Promise<Outcome> {
+    let before: Record<string, string> = {};
+    try {
+      before = JSON.parse(view?.private_metadata || '{}');
+    } catch {
+      before = {};
+    }
+
+    const done: string[] = [];
+    for (const [key, was] of Object.entries(before)) {
+      const now = view?.state?.values?.[`wish:${key}`]?.value?.selected_option?.value ?? '';
+      if (!now || now === was) continue;
+      const out = await this.run('availability set', { service: key, slack_user_id: userId, status: now });
+      const r = out.result ?? {};
+      if (!out.ok || !r.changed) {
+        return { ok: false, lines: [...done, `:warning: ${this.errorText(out, r.reason)}`] };
+      }
+      if (out.dashboard_dirty) this.markDashboardDirty();
+      const label = now === 'TRANSFERABLE' ? '양도 가능' : '유지 필요';
+      const swapped = (out.swaps_created ?? []).length > 0;
+      done.push(`*${SERVICE_LABEL[key] ?? key}* 좌석을 「${label}」로 바꿨습니다.`
+        + (swapped ? ' 기다리던 분과 이어졌고 실장이 확인합니다.' : ''));
+    }
+
+    if (!done.length) return { ok: true, lines: ['바뀐 것이 없습니다.'] };
+    return { ok: true, lines: done };
   }
 
   /** 서비스 한 곳의 내 좌석 · 요청 · 진행 중 교환. */
