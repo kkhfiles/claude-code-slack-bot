@@ -17,7 +17,7 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
   offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex } from './work-assistant';
 import type { QuickOutcome } from './work-assistant';
-import { boardLabel, boardQueueEnabled, drain } from './board-queue';
+import { boardLabel, boardQueueEnabled, drain, event as recordEvent } from './board-queue';
 
 /**
  * 업무 넛지 시각. 09:00 데일리 미팅 직전이라는 것이 이 값의 전부다 —
@@ -1795,26 +1795,47 @@ export class AssistantScheduler {
     ].join('\n');
 
     let said = '';
-    const result = await this.spawnSession(user, {
-      workingDirectory: root,
-      model: NARROW_MODEL,
-      effort: NARROW_EFFORT,
-      permissionMode: 'default',
-      // **도구가 하나도 없다.** 읽기도 쓰기도 파이썬이 한다.
-      tools: [],
-      allowedTools: [],
-      // 규칙 파일을 안 읽는다 — CLAUDE.md 가 따라 들어오면 좁은 길이 아니게 된다.
-      settingSources: [],
-      appendSystemPrompt: rulesText,
-      env: { ASSISTANT_MODE: 'narrow', CLAUDE_SCHEDULED: '1' },
-      skipMcp: true,
-      noSessionPersistence: true,
-      // 실측 중간값 3~4초 — 상한에 닿으면 세션으로 떨어지는 편이 낫다.
-      maxDurationMs: 90_000,
-      useSdk: true,
-    });
-    this.recordSessionCost('narrow', result);
-    said = (result.text || '').trim();
+    // 왜 1차가 못 했나 — 관찰 기록에 그대로 실어 보낸다.
+    let why = '';
+    try {
+      const result = await this.spawnSession(user, {
+        workingDirectory: root,
+        model: NARROW_MODEL,
+        effort: NARROW_EFFORT,
+        permissionMode: 'default',
+        // **도구가 하나도 없다.** 읽기도 쓰기도 파이썬이 한다.
+        tools: [],
+        allowedTools: [],
+        // 규칙 파일을 안 읽는다 — CLAUDE.md 가 따라 들어오면 좁은 길이 아니게 된다.
+        settingSources: [],
+        appendSystemPrompt: rulesText,
+        env: { ASSISTANT_MODE: 'narrow', CLAUDE_SCHEDULED: '1' },
+        skipMcp: true,
+        noSessionPersistence: true,
+        // 실측 중간값 3~4초 — 상한에 닿으면 세션으로 떨어지는 편이 낫다.
+        maxDurationMs: 90_000,
+        useSdk: true,
+      });
+      this.recordSessionCost('narrow', result);
+      said = (result.text || '').trim();
+      // **답이 있어도 오류 표시가 붙었으면 안 믿는다** — 한도에 걸리거나 중간에
+      // 끊긴 회차가 **부분 응답**을 들고 올 수 있고, 그것을 성공으로 읽으면
+      // 반쪽짜리 판단이 카드에 앉는다. 폴백 한 번이 그보다 싸다.
+      if (result.isError || result.rateLimited) {
+        why = result.rateLimited ? 'rate-limited' : (result.subtype || 'error');
+        said = '';
+      } else if (!said) {
+        why = 'empty';
+      }
+    } catch (err) {
+      // ★ **여기가 이 폴백의 진짜 방아쇠다.** 구독 만료·인증 실패는 스트림에
+      // 오류를 실어 보내는 것이 아니라 **토큰을 가져오다 던진다**
+      // (`runAssistantSession` 이 `getAccessToken()` 을 먼저 부른다).
+      // 감싸지 않으면 그 길로 새어 폴백을 통째로 건너뛴다 — 정작 필요한
+      // 그날에만 안 도는 장치가 된다.
+      why = 'threw';
+      this.logger.warn('좁은 길 1차(Agent SDK)가 터졌습니다 — codex 로 갑니다', err);
+    }
 
     // ★ **폴백 한 칸** (2026-09-03) — 1차가 빈손이면 codex 가 같은 일을 한다.
     //
@@ -1827,7 +1848,11 @@ export class AssistantScheduler {
     // 되돌리기 문이 따로 필요하다(도구를 여러 번 돌려 중간에 죽을 수 있다).
     if (!said) {
       said = await narrowCodex(rulesText, user);
-      if (said) this.logger.warn('좁은 길 1차가 빈손이라 codex 로 처리했습니다');
+      // **센다.** 얼마나 도는지를 로그로만 알 수 있으면 아무도 안 센다 —
+      // 이 레포에서 무시되는지·도는지를 세는 것은 `tasks.py events` 다.
+      recordEvent('narrow-fallback', { why, ok: !!said });
+      if (said) this.logger.warn(`좁은 길 1차가 못 해서(${why}) codex 로 처리했습니다`);
+      else this.logger.warn(`좁은 길 1차·폴백 둘 다 빈손(${why}) — 세션으로 갑니다`);
     }
 
     if (!said) return { kind: 'not-quick', detail: '좁은 길이 아무 말도 안 했다' };
