@@ -28,7 +28,7 @@ export interface PremiumSeatOptions {
 interface Envelope {
   ok: boolean;
   operation_id?: string | null;
-  entity?: { type?: string; id?: string; state?: string };
+  entity?: { type?: string; id?: string; state?: string; service?: string; auto_execute?: boolean };
   result?: any;
   applied?: any;
   jobs_created?: string[];
@@ -1175,19 +1175,23 @@ export class PremiumSeatSlack {
     const command = kind === 'verify' ? 'swap verify' : `swap ${kind}`;
     const out = await this.run(command, { swap_id: swapId, actor });
 
+    const isAuto = Boolean(out.entity?.auto_execute ?? (out as any).result?.auto_execute);
     const reason = out.error?.code ?? (out as any).result?.reason ?? '';
-    const line = out.ok
+    let line = out.ok
       ? SWAP_ACTION_DONE[kind] ?? '처리했습니다.'
       : SWAP_ACTION_FAILED[reason] ?? this.errorText(out);
+
+    if (out.ok && kind === 'start' && isAuto) {
+      line = '소인, 브라우저에서 좌석을 자동으로 교환하고 있사옵니다. 잠시만 기다려 주시옵소서 (약 30~60초 소요).';
+    }
 
     const channel = body?.channel?.id;
     const ts = body?.message?.ts;
     if (channel && ts) {
-      // 성공했으면 다음에 눌러야 할 버튼을 그 자리에 둔다. 「완료했습니다를 눌러
-      // 주세요」라고 적어 놓고 그 버튼이 재알림으로 올 때까지 없으면, 사람은
-      // 없는 버튼을 찾는다. 실패했으면 방금 그 버튼을 살려 다시 누르게 한다.
+      // 성공했으면 다음에 눌러야 할 버튼을 그 자리에 둔다.
+      // 자동 실행(isAuto) 중일 때는 브라우저가 직접 완료하므로 [완료했습니다] 버튼을 두지 않는다.
       const next = out.ok
-        ? this.swapActions(swapId, out.entity?.state)
+        ? this.swapActions(swapId, out.entity?.state, undefined, isAuto)
         : this.swapActions(swapId, undefined, body.message.blocks);
       try {
         await this.app!.client.chat.update({
@@ -1213,7 +1217,7 @@ export class PremiumSeatSlack {
    * 끝난 교환에는 아무것도 안 단다. `previous` 는 실패했을 때 방금 누른 버튼을
    * 그대로 살리는 데 쓴다 — 화면이 낡았을 뿐 다시 누르면 되는 경우가 있다.
    */
-  private swapActions(swapId: string, state?: string, previous?: any[]): any | null {
+  private swapActions(swapId: string, state?: string, previous?: any[], isAuto = false): any | null {
     if (previous) {
       return (previous ?? []).find((b: any) => b.type === 'actions') ?? null;
     }
@@ -1230,6 +1234,10 @@ export class PremiumSeatSlack {
           ],
         };
       case 'APPLYING':
+        if (isAuto) {
+          // 자동 교환 모드에서는 사람이 [완료했습니다]를 누를 필요가 없으므로 버튼을 비워둔다.
+          return null;
+        }
         return {
           type: 'actions',
           elements: [
