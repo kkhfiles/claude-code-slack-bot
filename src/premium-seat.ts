@@ -155,6 +155,7 @@ interface Outcome {
   lines: string[];
 }
 const TIMEOUT_READ_MS = 90_000;
+const TIMEOUT_SWAP_MS = 300_000;
 
 export class PremiumSeatSlack {
   private logger = new Logger('PremiumSeat');
@@ -337,7 +338,8 @@ export class PremiumSeatSlack {
       const claim = await this.run('job claim', { owner: 'slack' });
       const job = claim.result?.claimed;
       if (!job) return;
-      const out = await this.run('job run', { job_id: job.id, lease_token: job.lease_token }, TIMEOUT_READ_MS);
+      const timeout = job.kind === 'EXECUTE_SWAP' ? TIMEOUT_SWAP_MS : TIMEOUT_READ_MS;
+      const out = await this.run('job run', { job_id: job.id, lease_token: job.lease_token }, timeout);
       if (!out.ok) {
         this.logger.warn(`job run failed (${job.service})`, out.error);
       }
