@@ -210,7 +210,7 @@ export class PremiumSeatSlack {
       await ack(await this.resultAck('Premium 요청', work, body.user.id));
     });
     app.view('premium_my_status', async ({ ack, body, view }) => {
-      await ack(await this.resultAck('내 상태', this.saveWishes(body.user.id, view), body.user.id));
+      await ack(await this.resultAck('내 상태 확인 및 변경', this.saveWishes(body.user.id, view), body.user.id));
     });
     app.view('premium_admin_submit', async ({ ack, body, view }) => {
       const work = this.handleAvailability(body.user.id, {
@@ -530,7 +530,7 @@ export class PremiumSeatSlack {
     }
     if (waitingServices.length) {
       // 기다리는 사람이 있을 때만 나온다. 방 전체에 던지는 부탁이라 여기 둔다.
-      // 요청한 사람 한 명만 쓰는 취소는 「내 상태」 창 안에 있다 — 현황판은 방에
+      // 요청한 사람 한 명만 쓰는 취소는 「내 상태 확인 및 변경」 창 안에 있다 — 현황판은 방에
       // 하나뿐인 메시지라 보는 사람마다 다르게 그릴 수 없고, 한 사람용 버튼을
       // 열 명에게 보이면 그것이 소음이다.
       blocks.push({
@@ -560,7 +560,7 @@ export class PremiumSeatSlack {
         this.button('Premium 요청', 'premium_request_open', 'primary'),
         // 보기와 바꾸기를 한 창으로 합쳤다. Premium 좌석이 있으면 그 창에서
         // 바로 양도 의사를 고르고, 요청이 있으면 거기서 취소한다.
-        this.button('내 상태', 'premium_my_status'),
+        this.button('내 상태 확인 및 변경', 'premium_my_status'),
         {
           type: 'overflow',
           action_id: 'premium_more',
@@ -911,7 +911,7 @@ export class PremiumSeatSlack {
         `*${SERVICE_LABEL[service]}* Premium 요청을 넣었습니다.`,
         swapped ? '양도자를 찾았고 실장 승인을 기다립니다.' : '양도 가능한 좌석이 나오면 알려 드립니다.',
         // 취소 버튼을 현황판에서 뺐으니 어디에 있는지는 여기서 알려 준다.
-        '취소하시려면 현황판의 「내 상태」를 눌러 주세요.',
+        '취소하시려면 현황판의 「내 상태 확인 및 변경」을 눌러 주세요.',
       ],
     };
   }
@@ -976,7 +976,7 @@ export class PremiumSeatSlack {
     return { ok: true, lines: [`${who}*${SERVICE_LABEL[service]}*`, ...done] };
   }
 
-  /** 「내 상태」 — DM 이 아니라 창으로 띄운다. 누른 사람만 본다. */
+  /** 「내 상태 확인 및 변경」 — DM 이 아니라 창으로 띄운다. 누른 사람만 본다. */
   private async openMyStatus(client: any, body: any): Promise<void> {
     const user = this.userOf(body);
     const view = await this.myStatusView(user);
@@ -1006,7 +1006,7 @@ export class PremiumSeatSlack {
   }
 
   /**
-   * 「내 상태」 — 보는 것과 바꾸는 것을 한 창에서 한다.
+   * 「내 상태 확인 및 변경」 — 보는 것과 바꾸는 것을 한 창에서 한다.
    *
    * Premium 좌석이 있으면 그 서비스마다 양도 의사 라디오가 붙고, 기다리는 요청이
    * 있으면 취소 버튼이 붙는다. 바꿀 것이 하나도 없는 사람에게는 제출 단추 없이
@@ -1056,14 +1056,14 @@ export class PremiumSeatSlack {
       type: 'modal',
       callback_id: 'premium_my_status',
       private_metadata: JSON.stringify(before),
-      title: { type: 'plain_text', text: '내 상태' },
+      title: { type: 'plain_text', text: '내 상태 확인 및 변경' },
       ...(changeable ? { submit: { type: 'plain_text', text: '저장' } } : {}),
       close: { type: 'plain_text', text: '닫기' },
       blocks: blocks.length ? blocks : [{ type: 'section', text: { type: 'mrkdwn', text: '보여 드릴 것이 없습니다.' } }],
     };
   }
 
-  /** 「내 상태」 창의 저장. 열었을 때와 달라진 좌석만 바꾼다. */
+  /** 「내 상태 확인 및 변경」 창의 저장. 열었을 때와 달라진 좌석만 바꾼다. */
   private async saveWishes(userId: string, view: any): Promise<Outcome> {
     let before: Record<string, string> = {};
     try {
