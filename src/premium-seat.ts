@@ -166,6 +166,9 @@ export class PremiumSeatSlack {
   private jobBusy = false;
   private dashboardPending: NodeJS.Timeout | null = null;
   private notifyPending: NodeJS.Timeout | null = null;
+  private notifiedExpiredServices = new Set<string>();
+  private loginBusy = new Set<string>();
+  private lastSessionCheckAt = 0;
 
   constructor(private opts: PremiumSeatOptions) {}
 
@@ -185,9 +188,31 @@ export class PremiumSeatSlack {
     });
     // 실장 전용 창은 더보기 메뉴에 둔다. 버튼 줄에 같이 놓으면 팀원 셋에게
     // 자기가 못 쓰는 버튼이 하나 늘어난다.
-    app.action('premium_more', async ({ ack, body, client }) => {
+    app.action('premium_more', async ({ ack, body, client, action }) => {
       await ack();
-      await this.openModal(client, body, 'admin');
+      const val = (action as any)?.selected_option?.value;
+      if (val === 'check_session') {
+        const user = this.userOf(body);
+        if (!this.isManager(user)) {
+          await this.onlyYou(body, '실장만 쓸 수 있습니다.');
+          return;
+        }
+        await this.onlyYou(body, '소인, 관리자 세션 상태를 점검하고 있사옵니다. 잠시 후 DM으로 결과를 올리겠사옵니다.');
+        void this.checkSessionsAndNotify(user);
+      } else {
+        await this.openModal(client, body, 'admin');
+      }
+    });
+    // 관리자 브라우저 원클릭 로그인
+    app.action('premium_open_login_browser', async ({ ack, body, action }) => {
+      await ack();
+      const service = (action as any)?.value as string;
+      const user = this.userOf(body);
+      if (!this.isManager(user)) {
+        await this.onlyYou(body, '관리자만 로그인 창을 열 수 있습니다.');
+        return;
+      }
+      void this.launchInteractiveLogin(service, body);
     });
     // 알림 글의 한 번 누르기 — 누른 사람 자신을 양도 가능으로 바꾼다.
     app.action('premium_offer', async ({ ack, body, action }) => {
@@ -240,6 +265,11 @@ export class PremiumSeatSlack {
     this.every(60_000, () => this.pumpNotifications());
     this.every(60_000, () => this.syncAnnouncements());
     this.every(60_000, () => this.scheduleReconciles());
+    // 06:00~18:00 사이 2시간 간격 세션 점검
+    this.every(600_000, () => this.pumpSessionCheck());
+    setTimeout(() => {
+      void this.pumpSessionCheck();
+    }, 60_000).unref?.();
 
     this.logger.info('Premium seat feature attached (sharing the chat connection)');
     void this.refreshDashboard();
@@ -567,7 +597,10 @@ export class PremiumSeatSlack {
         {
           type: 'overflow',
           action_id: 'premium_more',
-          options: [{ text: { type: 'plain_text', text: '좌석·상태 고치기 (실장)' }, value: 'admin' }],
+          options: [
+            { text: { type: 'plain_text', text: '좌석·상태 고치기 (실장)' }, value: 'admin' },
+            { text: { type: 'plain_text', text: '관리자 세션 점검 (실장)' }, value: 'check_session' },
+          ],
         },
       ],
     });
@@ -1414,6 +1447,297 @@ export class PremiumSeatSlack {
     } catch (error) {
       this.logger.warn(`DM to ${userId} failed`, error);
     }
+  }
+
+  /** 사용자 ID 로 1:1 DM 방을 열어 블록 메시지를 보낸다. */
+  private async dmBlocks(userId: string, text: string, blocks: any[]): Promise<{ channel?: string; ts?: string } | null> {
+    if (!this.app || !userId) return null;
+    try {
+      let channelId = userId;
+      if (userId.startsWith('U') || userId.startsWith('W')) {
+        const im = await this.app.client.conversations.open({ users: userId });
+        if (im.channel?.id) channelId = im.channel.id;
+      }
+      const res = await this.app.client.chat.postMessage({ channel: channelId, text, blocks });
+      return { channel: res.channel as string, ts: res.ts as string };
+    } catch (error) {
+      this.logger.warn(`DM blocks to ${userId} failed`, error);
+      return null;
+    }
+  }
+
+  private seoulHour(): number {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Seoul',
+      hour: 'numeric',
+      hour12: false,
+    }).formatToParts(new Date());
+    const h = parts.find((p) => p.type === 'hour')?.value ?? '0';
+    return parseInt(h, 10);
+  }
+
+  /** 06:00~18:00 사이 2시간 간격으로 세션을 점검한다. */
+  private async pumpSessionCheck(): Promise<void> {
+    const hour = this.seoulHour();
+    if (hour < 6 || hour > 18) return;
+    const now = Date.now();
+    // 2시간(110분 오차 고려) 간격
+    if (now - this.lastSessionCheckAt < 110 * 60 * 1000) return;
+    this.lastSessionCheckAt = now;
+    await this.checkSessionsAndNotify();
+  }
+
+  /**
+   * 세션 상태를 확인하고 만료 시 실장님 DM으로 버튼을 포함한 알림을 발송한다.
+   * manualUserId가 주어지면(수동 점검) 항상 상세 결과를 해당 사용자에게 회신한다.
+   */
+  private async checkSessionsAndNotify(manualUserId?: string): Promise<void> {
+    const managerId = manualUserId || this.opts.managerUserIds[0];
+    if (!managerId) return;
+
+    const results: Record<string, { alive: boolean; reason?: string }> = {};
+    for (const svc of ['CHATGPT', 'CLAUDE']) {
+      try {
+        const out = await this.run('session check', { service: svc }, 30_000);
+        const alive = Boolean(out.result?.alive);
+        results[svc] = {
+          alive,
+          reason: out.result?.reason ?? out.error?.message,
+        };
+      } catch (err) {
+        results[svc] = { alive: false, reason: String(err) };
+      }
+    }
+
+    if (manualUserId) {
+      const lines = [
+        '소인 여쭙사옵니다. 관리자 세션 상태를 점검하여 보고 올립니다.',
+        '',
+      ];
+      const buttons: any[] = [];
+      for (const svc of ['CHATGPT', 'CLAUDE']) {
+        const info = results[svc];
+        const name = SERVICE_LABEL[svc] ?? svc;
+        if (info?.alive) {
+          lines.push(`• :white_check_mark: *${name}*: 정상 연결 중`);
+          this.notifiedExpiredServices.delete(svc);
+        } else {
+          lines.push(`• :warning: *${name}*: 세션 만료 (로그인 필요)`);
+          this.notifiedExpiredServices.add(svc);
+          buttons.push(
+            this.button(
+              `🖥️ ${SERVICE_SHORT[svc] ?? svc} 로그인 창 열기`,
+              'premium_open_login_browser',
+              'primary',
+              svc,
+            ),
+          );
+        }
+      }
+
+      const blocks: any[] = [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: lines.join('\n'),
+          },
+        },
+      ];
+      if (buttons.length) {
+        blocks.push({
+          type: 'context',
+          elements: [
+            {
+              type: 'mrkdwn',
+              text: '관리자 세션이 만료되면 자동 좌석 교환이 대기 상태에 머물게 되옵니다.\n호스트 PC에서 로그인을 진행하시려면 아래 버튼을 눌러 주시옵소서.',
+            },
+          ],
+        });
+        blocks.push({
+          type: 'actions',
+          elements: buttons,
+        });
+      }
+      await this.dmBlocks(manualUserId, lines.join('\n'), blocks);
+      return;
+    }
+
+    // 2시간 주기 자동 점검
+    for (const svc of ['CHATGPT', 'CLAUDE']) {
+      const info = results[svc];
+      const name = SERVICE_LABEL[svc] ?? svc;
+      if (!info?.alive) {
+        if (!this.notifiedExpiredServices.has(svc)) {
+          this.notifiedExpiredServices.add(svc);
+          const text = `소인 여쭙사옵니다. :warning: *${name}* 관리자 세션이 만료되었사옵니다.\n관리자 로그인이 갱신되지 않으면 자동 좌석 교환 작업이 대기 상태에 머물게 되옵니다.\n\n호스트 PC에서 관리자 로그인을 진행하시겠사옵니까?`;
+          const blocks = [
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text },
+            },
+            {
+              type: 'actions',
+              elements: [
+                this.button(
+                  `🖥️ ${SERVICE_SHORT[svc] ?? svc} 로그인 창 열기`,
+                  'premium_open_login_browser',
+                  'primary',
+                  svc,
+                ),
+              ],
+            },
+          ];
+          await this.dmBlocks(managerId, text, blocks);
+        }
+      } else {
+        if (this.notifiedExpiredServices.has(svc)) {
+          this.notifiedExpiredServices.delete(svc);
+          await this.dm(
+            managerId,
+            `소인 여쭙사옵니다. :white_check_mark: *${name}* 관리자 세션이 정상 복구되었음을 확인하였사옵니다.`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * 실장님이 버튼을 눌렀을 때 호스트 PC 화면에 대화형 브라우저를 띄워 로그인을 대기한다.
+   */
+  private async launchInteractiveLogin(service: string, body: any): Promise<void> {
+    const serviceLabel = SERVICE_LABEL[service] ?? service;
+    const serviceShort = SERVICE_SHORT[service] ?? service;
+    const channel = body?.channel?.id;
+    const ts = body?.message?.ts;
+    const user = this.userOf(body);
+
+    if (this.loginBusy.has(service)) {
+      await this.onlyYou(body, `이미 호스트 PC에 *${serviceLabel}* 로그인 창이 열려 있사옵니다.`);
+      return;
+    }
+    this.loginBusy.add(service);
+
+    // 낙관적 UI 갱신: 중복 클릭 방지 및 상태 안내
+    if (channel && ts) {
+      try {
+        await this.app!.client.chat.update({
+          channel,
+          ts,
+          text: `⏳ 소인, 호스트 PC에 *${serviceLabel}* 로그인 창을 띄웠사옵니다...`,
+          blocks: [
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: `⏳ 소인, 호스트 PC에 *${serviceLabel}* 로그인 창을 띄웠사옵니다.\n화면에 브라우저가 뜨면 관리자 계정으로 로그인을 완료해 주시옵소서.\n\n_(로그인 후 회원 목록 표가 감지되면 자동으로 창이 닫히고 완료 보고를 올리겠사옵니다)_`,
+              },
+            },
+          ],
+        });
+      } catch (err) {
+        this.logger.warn('Failed to update message optimistically', err);
+      }
+    }
+
+    // 대화형 브라우저 기동 (windowsHide: false, 타임아웃 10분)
+    const child = spawn(
+      this.opts.python,
+      ['-X', 'utf8', '-m', 'premium_seat_manager.interactive_login', service, '600'],
+      {
+        cwd: this.opts.workerDir,
+        env: { ...process.env, ...this.opts.env, PYTHONIOENCODING: 'utf-8' },
+        windowsHide: false,
+      },
+    );
+    this.children.add(child);
+
+    let stderr = '';
+    child.stderr.on('data', (c) => {
+      stderr += c.toString();
+    });
+
+    const timeout = setTimeout(() => {
+      this.logger.warn(`interactive login for ${service} timed out after 600s`);
+      try {
+        child.kill();
+      } catch {}
+    }, 600_000);
+
+    child.on('close', async (code) => {
+      clearTimeout(timeout);
+      this.children.delete(child);
+      this.loginBusy.delete(service);
+
+      if (code === 0) {
+        this.notifiedExpiredServices.delete(service);
+        const doneText = `🎉 소인, *${serviceLabel}* 관리자 로그인이 확인되어 세션을 정상 갱신하였사옵니다!`;
+        if (channel && ts) {
+          try {
+            await this.app!.client.chat.update({
+              channel,
+              ts,
+              text: doneText,
+              blocks: [
+                {
+                  type: 'section',
+                  text: {
+                    type: 'mrkdwn',
+                    text: doneText,
+                  },
+                },
+              ],
+            });
+          } catch (err) {
+            this.logger.warn('Failed to update success message', err);
+            await this.dm(user, doneText);
+          }
+        } else {
+          await this.dm(user, doneText);
+        }
+        // 대기 중인 큐가 있으면 즉시 진행
+        void this.pumpJobs();
+        this.markDashboardDirty();
+      } else {
+        this.logger.warn(`interactive login for ${service} exited with code ${code}`, { stderr: stderr.trim() });
+        const failText = `⚠️ 소인, *${serviceLabel}* 로그인 창이 완료되지 못하고 닫혔거나 제한 시간(10분)이 초과되었사옵니다.\n다시 진행하시려면 아래 버튼을 눌러 주시옵소서.`;
+        const retryBlocks = [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: failText,
+            },
+          },
+          {
+            type: 'actions',
+            elements: [
+              this.button(
+                `🖥️ ${serviceShort} 로그인 창 열기`,
+                'premium_open_login_browser',
+                'primary',
+                service,
+              ),
+            ],
+          },
+        ];
+        if (channel && ts) {
+          try {
+            await this.app!.client.chat.update({
+              channel,
+              ts,
+              text: failText,
+              blocks: retryBlocks,
+            });
+          } catch (err) {
+            this.logger.warn('Failed to update failure message', err);
+            await this.dmBlocks(user, failText, retryBlocks);
+          }
+        } else {
+          await this.dmBlocks(user, failText, retryBlocks);
+        }
+      }
+    });
   }
 }
 
