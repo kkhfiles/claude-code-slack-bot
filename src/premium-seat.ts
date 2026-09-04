@@ -1235,8 +1235,18 @@ export class PremiumSeatSlack {
       });
     }
 
+    let targetChannel = to;
+    if (to.startsWith('U') || to.startsWith('W')) {
+      try {
+        const im = await this.app!.client.conversations.open({ users: to });
+        if (im.channel?.id) targetChannel = im.channel.id;
+      } catch (err) {
+        this.logger.warn(`conversations.open failed for ${to}`, err);
+      }
+    }
+
     const res = await this.app!.client.chat.postMessage({
-      channel: to,
+      channel: targetChannel,
       text,
       blocks,
     });
@@ -1303,15 +1313,24 @@ export class PremiumSeatSlack {
           '',
           '다 바꾸셨으면 아래 「완료했습니다」를 눌러 주세요.',
         ].join('\n');
-      case 'SWAP_NEEDS_ADMIN':
-        return [
+      case 'SWAP_NEEDS_ADMIN': {
+        const lines = [
           `*${svc} Premium 양도 · 확인 필요*`,
           '',
           `${p.holder?.name} → ${p.recipient?.name}`,
           `교환 번호: ${p.swap_id}`,
           '',
-          '좌석이 중간 상태로 남아 있습니다. 관리 화면을 보고 이어서 바꾸거나 되돌려 주세요.',
-        ].join('\n');
+        ];
+        if (p.error_detail || p.error_code) {
+          lines.push(`오류: \`${p.error_code ?? 'FAILED'}\``);
+          if (p.error_detail) {
+            lines.push(`> ${p.error_detail}`);
+          }
+          lines.push('');
+        }
+        lines.push('좌석이 중간 상태로 남아 있습니다. 관리 화면을 보고 이어서 바꾸거나 되돌려 주세요.');
+        return lines.join('\n');
+      }
       case 'SWAP_COMPLETED':
         return `${svc} Premium 좌석 변경이 끝났습니다. ${p.holder?.name} → ${p.recipient?.name}`;
       default:
@@ -1382,11 +1401,16 @@ export class PremiumSeatSlack {
     await this.dm(user, text);
   }
 
-  /** `chat.postMessage` 에 사용자 ID 를 그대로 넘긴다 — `conversations.open` 을 쓰지 않는다. */
+  /** 사용자 ID 로 1:1 DM 방을 열어 메시지를 보낸다. */
   private async dm(userId: string, text: string): Promise<void> {
     if (!this.app || !userId) return;
     try {
-      await this.app.client.chat.postMessage({ channel: userId, text });
+      let channelId = userId;
+      if (userId.startsWith('U') || userId.startsWith('W')) {
+        const im = await this.app.client.conversations.open({ users: userId });
+        if (im.channel?.id) channelId = im.channel.id;
+      }
+      await this.app.client.chat.postMessage({ channel: channelId, text });
     } catch (error) {
       this.logger.warn(`DM to ${userId} failed`, error);
     }
