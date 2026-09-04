@@ -941,6 +941,36 @@ function runCodex(args: string[], stdinFile: string, timeoutMs: number): Promise
 
 
 /**
+ * 예약 세션 폴백이 **작업 디렉터리 밖에서** 써야 하는 곳.
+ *
+ * 셋뿐이고 다 업무 비서 설정에서 나온다 — 손으로 적으면 설정을 옮겼을 때
+ * 조용히 낡는다. 없는 곳은 안 넘긴다(codex 가 없는 경로에 걸려 죽는다).
+ *
+ * **내보내는 이유는 검사가 세기 위해서다** — 여기가 비면 폴백이 도는 것처럼
+ * 보이면서 `tasks.py` 마다 넘어진다.
+ */
+export function codexWritableDirs(): string[] {
+  const out: string[] = [];
+  const add = (d?: string | null) => {
+    if (d && fs.existsSync(d) && !out.includes(d)) out.push(d);
+  };
+  // 상태 파일 — `tasks.py` 의 `STATE` 와 같은 규칙으로 찾는다.
+  add(process.env.WORK_ASSISTANT_STATE
+    || path.join(os.homedir(), '.claude', 'state'));
+  const root = workAssistantRoot();
+  if (root) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf-8'));
+      add(cfg.vault_dir);            // 업무 md 가 사는 곳
+      add(cfg.board_publish_dir);    // 쓰기 뒤 판을 올리는 곳
+    } catch {
+      // 설정을 못 읽어도 상태 폴더만으로 돈다 — 여기서 멈추지 않는다.
+    }
+  }
+  return out;
+}
+
+/**
  * **주 작업용 폴백** — 예약 세션을 codex 로 한 번 돌린다 (2026-09-03).
  *
  * `narrowCodex` 와 다른 점 둘.
@@ -970,10 +1000,18 @@ export async function codexSession(
     fs.writeFileSync(pf, head + prompt, 'utf-8');
     const args = [
       'exec', '--ephemeral', '--skip-git-repo-check',
-      // 작업 디렉터리 안에는 쓴다 — 예약 작업이 볼트와 판을 건드린다.
-      '-s', 'workspace-write',
+      // **작업 디렉터리 밖에도 쓸 곳이 있다.** codex 모래상자는 그 밖을 막는데,
+      // `tasks.py` 는 `find` 조차 상태 파일을 쓴다(`analyze()` 가 체크인 스냅숏을
+      // 남긴다) — 안 열어 주면 `PermissionError` 로 넘어진다(2026-09-04 실측).
+      // 볼트와 판 배포 폴더도 같은 이유로 연다.
+      ...codexWritableDirs().flatMap((d) => ['--add-dir', d]),
       // 승인을 사람에게 묻지 않는다 — 아무도 안 보는 시각에 도는 길이라
       // 물으면 그대로 멈춘다.
+      //
+      // ⚠️ ** 를 같이 주면 안 된다** — codex 가 `--sandbox 는 --approve-for-me
+      // 와 같이 못 쓴다` 로 rc 2 를 내며 **매번 죽는다**(2026-09-04 실측).
+      // 이 깃발이 이미 workspace-write 로 돈다(도움말: 「using the
+      // workspace-write sandbox」)라 따로 줄 필요가 없다.
       '--approve-for-me',
       '--color', 'never',
       '-C', opts.workingDirectory,

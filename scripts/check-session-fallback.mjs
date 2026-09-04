@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fails = [];
+const notes = [];
 const eq = (label, got, want) => {
   if (JSON.stringify(got) !== JSON.stringify(want)) {
     fails.push(`${label}\n    받음 ${JSON.stringify(got)}\n    기대 ${JSON.stringify(want)}`);
@@ -117,12 +118,50 @@ delete process.env.BOARD_NARROW_CODEX_BIN;
 delete process.env.WORK_EVENTS_FILE;
 try { fs.unlinkSync(evFile); } catch { /* 없으면 그만 */ }
 
+// ── 실행체가 이 깃발 묶음을 받아 주나 (모델은 안 부른다) ──────
+//
+// **빈 입력을 준다** — codex 는 인자를 먼저 검증하므로, 깃발이 어긋나면
+// rc 2 로 「cannot be used with」 를 내고 **모델을 안 부른다.** 정상이면
+// 「No prompt provided via stdin」(rc 1)에서 멈춘다.
+//
+// 이 검사가 없어서 `-s workspace-write` 와 `--approve-for-me` 를 같이 준 판이
+// **매번 rc 2 로 죽는 채로** 나갔다(2026-09-04). 앞선 검사는 없는 실행체로
+// 「실패하면 빈손」만 봤지 **성공 경로를 한 번도 안 봤다.**
+{
+  const { spawnSync } = await import('node:child_process');
+  const { codexWritableDirs } = await import('../dist/work-assistant.js');
+  const dirs = codexWritableDirs();
+  // 여기가 비면 폴백이 도는 것처럼 보이면서 `tasks.py` 마다 넘어진다 —
+  // `analyze()` 가 상태 파일을 쓰기 때문이다.
+  ok(`작업 디렉터리 밖에 쓸 곳을 찾는다 (${dirs.length}곳)`, dirs.length >= 1);
+
+  const flags = [
+    'exec', '--ephemeral', '--skip-git-repo-check',
+    ...dirs.flatMap((d) => ['--add-dir', d]),
+    '--approve-for-me', '--color', 'never',
+    '-C', os.tmpdir(), '-m', 'gpt-5.6-sol',
+    '-c', 'model_reasoning_effort=low', '-',
+  ];
+  const r = spawnSync('codex', flags, {
+    input: '', encoding: 'utf-8', shell: process.platform === 'win32', timeout: 30_000,
+  });
+  const err = `${r.stderr || ''}${r.stdout || ''}`;
+  if (r.error && r.error.code === 'ENOENT') {
+    notes.push('codex 가 없어 깃발 검증을 못 했다 — 통과가 아니라 안 본 것');
+  } else {
+    const first = err.trim().split('\n')[0];
+    ok(`깃발이 서로 안 부딪힌다 (rc ${r.status} · ${first})`,
+       !/cannot be used with|unexpected argument|invalid value/i.test(err));
+  }
+}
+
 // ── 소스: 예약 세션이 폴백을 안 거치고 새는 곳이 없나 ─────────
 const src = fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8');
 const direct = [...src.matchAll(/await this\.spawnSession\(/g)].length;
 // 둘만 정상이다 — 좁은 길(제 폴백이 따로 있다)과 `spawnOrFallback` 자기 자신.
 eq('폴백을 안 거치는 직접 호출은 둘뿐 (좁은 길 · 폴백 자신)', direct, 2);
 
+if (notes.length) console.log('\n⚠️  ' + notes.join('\n⚠️  '));
 if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
