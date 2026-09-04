@@ -114,6 +114,7 @@ const ERROR_TEXT: Record<string, string> = {
   BAD_REQUEST: '요청을 이해하지 못했습니다.',
   OPERATION_RUNNING: '앞선 요청을 처리하는 중입니다. 잠시 뒤 다시 눌러 주세요.',
   NOT_A_MANAGER: '실장만 할 수 있는 일입니다.',
+  NOT_OPEN: '아직 준비 중입니다. 실장이 열면 쓰실 수 있습니다.',
   NO_SEAT: '이 서비스에 좌석이 없어 Premium 교환 대상이 아닙니다. 실장에게 스탠다드 좌석을 먼저 요청해 주세요.',
   SOURCE_DECLARED: '이 서비스는 실장이 직접 반영합니다. 따로 확인할 것이 없습니다.',
   SOURCE_UNAVAILABLE: '아직 준비되지 않은 방식입니다. 실장에게 알려 주세요.',
@@ -635,6 +636,7 @@ export class PremiumSeatSlack {
 
   /** 알림 글의 한 번 누르기. 누른 사람이 그 서비스 Premium 보유자라야 한다. */
   private async offerSeat(body: any, service: string): Promise<void> {
+    if (!(await this.openToMe(body))) return;
     const user = this.userOf(body);
     const out = await this.run('availability set', {
       service,
@@ -660,6 +662,20 @@ export class PremiumSeatSlack {
     return b;
   }
 
+  /**
+   * 팀에 열기 전이면 실장 말고는 못 쓴다.
+   *
+   * 현황판은 방에 하나뿐이라 버튼을 감출 수 없으니, 누른 뒤에 여기서 막는다.
+   * 좌석을 건드리는 길은 전부 이 문을 지난다 — 창 열기든 한 번 누르기든.
+   */
+  private async openToMe(body: any): Promise<boolean> {
+    if (this.opts.openToTeam || this.isManager(this.userOf(body))) return true;
+    // 누른 그 방에서 그 사람에게만 보이는 쪽지로 답한다 — DM 으로 보내면
+    // 버튼을 누른 곳과 답이 오는 곳이 갈린다.
+    await this.onlyYou(body, '아직 준비 중입니다. 실장이 열면 쓰실 수 있습니다.');
+    return false;
+  }
+
   private async openModal(client: any, body: any, kind: 'request' | 'admin'): Promise<void> {
     const user = this.userOf(body);
     const manager = this.isManager(user);
@@ -667,12 +683,7 @@ export class PremiumSeatSlack {
       await this.onlyYou(body, '「좌석·상태 고치기」는 실장만 쓸 수 있습니다.');
       return;
     }
-    if (!this.opts.openToTeam && !manager) {
-      // 누른 그 방에서 그 사람에게만 보이는 쪽지로 답한다 — DM 으로 보내면
-      // 버튼을 누른 곳과 답이 오는 곳이 갈린다.
-      await this.onlyYou(body, '아직 준비 중입니다. 실장이 열면 쓰실 수 있습니다.');
-      return;
-    }
+    if (!(await this.openToMe(body))) return;
 
     const view = kind === 'admin' ? await this.adminView(user) : await this.requestView(user);
     try {
@@ -978,6 +989,8 @@ export class PremiumSeatSlack {
 
   /** 「내 상태 확인 및 변경」 — DM 이 아니라 창으로 띄운다. 누른 사람만 본다. */
   private async openMyStatus(client: any, body: any): Promise<void> {
+    // 읽기만 하던 창이 이제 양도 의사도 바꾼다 — 열기 전에는 실장만 쓴다.
+    if (!(await this.openToMe(body))) return;
     const user = this.userOf(body);
     const view = await this.myStatusView(user);
     try {
@@ -1035,7 +1048,7 @@ export class PremiumSeatSlack {
         if (view.tier === 'PREMIUM' && !view.swap) {
           const now = view.availability === 'TRANSFERABLE' ? 'TRANSFERABLE' : 'REQUIRED';
           before[key] = now;
-          blocks.push(this.radio(`wish:${key}`, '양도 의사', [
+          blocks.push(this.radio(`wish_${key}`, '양도 의사', [
             { label: `${KEEP_ICON} 유지 필요`, value: 'REQUIRED' },
             { label: `${GIVE_ICON} 양도 가능`, value: 'TRANSFERABLE' },
           ], false, now));
@@ -1074,7 +1087,7 @@ export class PremiumSeatSlack {
 
     const done: string[] = [];
     for (const [key, was] of Object.entries(before)) {
-      const now = view?.state?.values?.[`wish:${key}`]?.value?.selected_option?.value ?? '';
+      const now = view?.state?.values?.[`wish_${key}`]?.value?.selected_option?.value ?? '';
       if (!now || now === was) continue;
       const out = await this.run('availability set', { service: key, slack_user_id: userId, status: now });
       const r = out.result ?? {};
