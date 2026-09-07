@@ -1416,11 +1416,13 @@ export class AssistantScheduler {
    */
   private tellContact = async (c: ContactItem): Promise<boolean> => {
     const who = [c.name, c.org].filter(Boolean).join(' · ') || '이름 안 적음';
-    const how = c.reply || '연락처 안 적음';
+    // 워커가 메일 모양을 이미 봤으므로 빈 값은 여기 못 온다. 그래도 옛 문의가
+    // 큐에 남아 있을 수 있어 없는 경우를 지운 값으로 두지 않는다.
+    const how = c.reply || '메일 안 적음 (옛 문의)';
     const body = c.text.split('```').join('ˋˋˋ');
     try {
       await this.sendMessage(
-        `✉️ 문의 온 것 — ${who}` + '\n' + `연락처: ${how}` + '\n' + '\n'
+        `✉️ 문의 온 것 — ${who}` + '\n' + `메일: ${how}` + '\n' + '\n'
         + '```' + '\n' + body + '\n' + '```',
       );
       return true;
