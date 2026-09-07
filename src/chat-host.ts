@@ -257,7 +257,8 @@ export class ChatHost {
   private sweptUpTo = new Map<string, number>();
   /** 방마다 봇끼리 이어 온 횟수. **사람이 한 마디 하면 처음으로 돌아간다.** */
   private botTurns = new Map<string, number>();
-  /** 사람이 그만하라고 한 방. 봇끼리만 막고 사람에게는 그대로 답한다. */
+  /** 사람이 그만하라고 한 방. 봇끼리 오가는 것과 먼저 끼어드는 것을 막는다 —
+   *  부르면 그대로 답한다. 「다시 해」·「계속해」로 풀린다. */
   private hushed = new Set<string>();
   /** 채널에서 우리가 마지막으로 입을 연 시각·횟수. */
   private lastSpoke = new Map<string, number>();
@@ -718,10 +719,17 @@ export class ChatHost {
     return this.withinLimits(channel);
   }
 
-  /** 낱말과 무관한 굴레만. 훑기도 같은 굴레를 쓴다 — 길이 둘이어도 한도는 하나다. */
+  /**
+   * 낱말과 무관한 굴레만. 훑기도 같은 굴레를 쓴다 — 길이 둘이어도 한도는 하나다.
+   *
+   * **「그만」도 여기서 문다.** 먼저 끼어드는 길이 둘(낱말·훑기)이라 한쪽에만 걸면
+   * 다른 쪽으로 그대로 샌다. 부름(멘션)은 두 부르는 곳 모두 `called` 로 이 함수를
+   * 건너뛰므로, 그만하라고 해도 **부르면 답한다** — 멈추는 것은 먼저 나서는 것뿐이다.
+   */
   private withinLimits(channel: string): boolean {
     const rule = this.opts.buttIn;
     if (!rule || this.active.has(channel)) return false;
+    if (this.hushed.has(channel)) return false;
     const since = Date.now() - (this.lastSpoke.get(channel) ?? 0);
     if (since < rule.quietMinutes * 60 * 1000) return false;
     const day = new Date().toISOString().slice(0, 10);

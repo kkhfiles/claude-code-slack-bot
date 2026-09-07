@@ -119,8 +119,14 @@ export const config = {
       // 점심원정대 방에서는 **더 말해도 된다**(실장 지시). 이 방은 점심 이야기를 하러
       // 모인 자리라 봇이 그 이야기의 주인이다 — 조용한 것이 예의가 아니라 불친절이다.
       // 낄 자리를 가리는 일은 굴레가 아니라 판단 지침(turn.py 의 DECIDE_NOTE)이 한다.
-      quietMinutes: parseInt(process.env.LUNCH_CHAT_QUIET_MIN || '3', 10),
-      dailyCap: parseInt(process.env.LUNCH_CHAT_DAILY_CAP || '20', 10),
+      //
+      // **2026-09-07 에 커피챗 방과 같은 값으로 풀었다**(실장 지시: 「그만해 라고 하기
+      // 전까지는 자연스럽게 대화에 참여」). 뜸(3분)과 하루 상한(20회)이 대화 도중에
+      // 봇을 끊어 놓고 있었다 — 사람이 이어 말하는데 봇만 3분을 기다리면 그 대화는
+      // 이미 지나가 있다. 말이 많아지는 것을 막는 일은 **사람이 「그만」이라고 하면
+      // 멈추는 것**(`hushed`)으로 옮겼다.
+      quietMinutes: parseInt(process.env.LUNCH_CHAT_QUIET_MIN || '0', 10),
+      dailyCap: parseInt(process.env.LUNCH_CHAT_DAILY_CAP || '100', 10),
       // **낱말로는 못 잡는 자리**를 위한 길. 「애가 됐네」처럼 앞 글을 가리키는 말은
       // 어떤 낱말 목록으로도 못 잡는데, 정작 그런 자리가 봇이 껴야 할 자리다.
       //
