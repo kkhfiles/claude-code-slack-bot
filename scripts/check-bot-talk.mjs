@@ -90,6 +90,21 @@ h4['humanSpoke'](ROOM, '점심 뭐 먹지');
 check('멈춘 뒤에도 사람 말은 셈에 안 걸린다 (봇끼리만 막는다)',
   h4['hushed'].has(ROOM) && h4['botTurns'].get(ROOM) === undefined);
 
+// --- 「그만」은 먼저 끼어드는 것도 멈춘다 -----------------------------------------
+// 봇끼리만 막던 것을 넓혔다(2026-09-07). 먼저 끼어드는 길이 둘(낱말·훑기)이라
+// 세는 자리 한 곳에서 물려야 한쪽으로 안 샌다.
+const h5 = new ChatHost({
+  name: 'check', botToken: '', appToken: '', python: '', script: '',
+  surfaces: ['channel'], channels: [ROOM],
+  buttIn: { quietMinutes: 0, dailyCap: 100, sweepMinutes: 0 },
+});
+check('그만하기 전에는 먼저 끼어든다', h5['withinLimits'](ROOM) === true);
+h5['humanSpoke'](ROOM, '이제 그만');
+check('그만하라면 먼저 끼어드는 것도 멈춘다', h5['withinLimits'](ROOM) === false);
+h5['humanSpoke'](ROOM, '다시 얘기해');
+check('다시 하라면 풀린다 (재시작해야 풀리면 안 된다)',
+  h5['withinLimits'](ROOM) === true);
+
 // --- 기록이 진짜 자리로 새지 않았나 ---------------------------------------------
 check('검사가 진짜 활동 기록을 안 건드렸다',
   fs.readdirSync(tmp).every((f) => f === '읽기전.md' || f.startsWith('check-')),
