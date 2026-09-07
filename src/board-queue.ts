@@ -79,6 +79,29 @@ export interface QueueItem {
   taken?: number;
 }
 
+/**
+ * 밖에서 온 문의 한 건. **판 큐와 다른 칸(`inbox`)에 담긴다.**
+ *
+ * ⚠️ **이 글은 `quick`·`ask` 로 안 간다.** 그리로 보내면 밖에서 온 사람의 글이
+ * 내 업무를 고치고 세션을 띄운다 — 그것을 막는 것이 이 갈래를 따로 둔 이유다.
+ * 여기서 할 수 있는 일은 **사람에게 보여 주는 것** 하나뿐이다.
+ */
+export interface ContactItem {
+  id: string;
+  name: string;
+  org: string;
+  reply: string;
+  text: string;
+  ts: number;
+  taken?: number;
+}
+
+/**
+ * 문의를 사람에게 보여 주는 쪽. **참을 내야 지운다** — 거짓이면 큐에 남아
+ * 다음 판에 다시 온다. 밖에서 온 사람의 글은 다시 만들 수 없다.
+ */
+export type Deliver = (item: ContactItem) => Promise<boolean>;
+
 /** `quick` 을 부르는 쪽. 봇은 실제 구현을, 검사는 가짜를 넘긴다. */
 export type Apply = (text: string) =>
   Promise<{ kind: 'ok'; output: string }
@@ -104,6 +127,8 @@ export interface DrainResult {
   lost: QueueItem[];
   /** 이미 반영해 둔 것을 다시 만난 횟수(중복 방지가 실제로 일한 증거) */
   duplicates: number;
+  /** 사람에게 보여 준 문의 */
+  contacts: ContactItem[];
 }
 
 function readJson<T>(file: string, fallback: T): T {
@@ -201,20 +226,57 @@ function saveDone(ids: string[]): void {
 export async function drain(apply: Apply, ask: Ask | null, base?: string,
                             note?: Apply | null,
                             stage?: Apply | null,
-                            narrow?: Apply | null): Promise<DrainResult> {
-  const out: DrainResult = { applied: [], dropped: [], retry: [], lost: [], duplicates: 0 };
+                            narrow?: Apply | null,
+                            deliver?: Deliver | null): Promise<DrainResult> {
+  const out: DrainResult = {
+    applied: [], dropped: [], retry: [], lost: [], duplicates: 0, contacts: [],
+  };
   // `pull` 은 「가져간 표시」를 남기므로 읽기가 아니다 — 워커가 POST 만 받는다.
-  const { items } = (await call('pull', {}, base)) as { items: QueueItem[] };
-  if (!items.length) return out;
+  // **문의는 같은 응답에 실려 온다** — 따로 부르면 워커 호출이 두 배가 되는데
+  // 이 폴러 하나가 이미 무료 한도의 43%를 쓴다.
+  const pulled = (await call('pull', {}, base)) as
+    { items: QueueItem[]; contacts?: ContactItem[] };
+  const items = pulled.items ?? [];
+  const mail = pulled.contacts ?? [];
+  if (!items.length && !mail.length) return out;
+
+  const done = loadDone();
+  const seen = new Set(done);
+  const ack: string[] = [];
+
+  // ---------- 문의 ----------
+  //
+  // ⚠️ **`quick`·`ask` 로 안 보낸다.** 밖에서 온 사람의 글이라 그리로 가면 남이
+  // 내 업무를 고치고 세션을 띄운다. 여기서 하는 일은 슬랙에 한 줄 적는 것뿐이다.
+  for (const c of mail) {
+    if (seen.has(c.id)) { out.duplicates += 1; ack.push(c.id); continue; }
+    // 보여 줄 곳이 없으면 **큐에 남긴다** — 밖에서 온 글은 다시 만들 수 없다.
+    if (!deliver) continue;
+    let shown = false;
+    try {
+      shown = await deliver(c);
+    } catch (err) {
+      logger.warn(`문의를 못 넘겼습니다 — ${c.id} · ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // **참일 때만 지운다.** 슬랙이 한 번 튀었다고 남의 문의를 버리지 않는다.
+    if (!shown) continue;
+    done.push(c.id);
+    seen.add(c.id);
+    saveDone(done);
+    ack.push(c.id);
+    logger.info(`문의 전달 — ${c.id}`);
+    out.contacts.push(c);
+  }
+
+  if (!items.length) {
+    if (ack.length) await call('ack', { ids: ack }, base);
+    return out;
+  }
   // **가져갔다는 사실을 남긴다.** 이게 없으면 「누른 것이 큐에 안 들어갔다」와
   // 「들어갔는데 여기서 사라졌다」를 나중에 못 가른다 — 2026-08-18 에 그래서
   // 원인을 못 짚었다. 성공은 DM 으로만 알렸고 로그는 비어 있었다.
   logger.info(`큐에서 ${items.length}건 가져옴: ` +
     items.map((i) => `${i.id}(${i.kind || 'quick'}) ${i.text}`).join(' | '));
-
-  const done = loadDone();
-  const seen = new Set(done);
-  const ack: string[] = [];
   /** 짧은 문법은 모았다 한 번에 보낸다 — 아래 「한 번에 묶는 이유」 참조. */
   const quicks: QueueItem[] = [];
   /** 여러 줄 글. **모으지 않는다** — 아래 `note` 갈래의 주석 참조. */

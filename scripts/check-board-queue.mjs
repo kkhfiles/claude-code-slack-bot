@@ -76,7 +76,12 @@ if (!(await alive())) {
     process.exit(1);
   }
   console.log(`판 dev 서버를 띄웁니다 (포트 ${PORT}) — 끝나면 내립니다`);
-  server = spawn('npm', ['run', 'dev', '--', '--port', String(PORT)], {
+  // **저장 상태를 검사 전용 폴더에 둔다.** 기본 자리를 쓰면 다른 검사가 남긴
+  // 상태를 물려받는다 — 문의 한도(한 시간에 IP 당 다섯 건)를 시험한 뒤 여기가
+  // 429 를 받았다(2026-09-07). 순서에 따라 결과가 달라지는 검사는 거짓말을 한다.
+  const state = path.join(os.tmpdir(), `board-check-${process.pid}`);
+  server = spawn('npm',
+    ['run', 'dev', '--', '--port', String(PORT), '--persist-to', state], {
     cwd: boardDir,
     shell: true,
     stdio: 'ignore',
@@ -122,6 +127,8 @@ const post = (op, body) => fetch(`${BASE}/api/${op}`, {
   body: JSON.stringify(body),
 }).then((r) => r.json());
 const pending = () => fetch(`${BASE}/api/pending`).then((r) => r.json()).then((j) => j.items);
+/** 문의함에 남은 것. `pull` 이 판 큐와 같은 응답에 실어 준다. */
+const pendingContacts = () => post('pull', {}).then((j) => j.contacts ?? []);
 
 /**
  * 문자열로 결과를 정한다 — 「ok…」 성공 · 「nq…」 문법 아님 · 「fail…」 일시 실패.
@@ -164,7 +171,9 @@ const note = async (text) => {
 
 async function clear() {
   const items = await pending();
-  if (items.length) await post('ack', { ids: items.map((i) => i.id) });
+  const mail = await post('pull', {}).then((j) => j.contacts ?? []);
+  const ids = [...items.map((i) => i.id), ...mail.map((i) => i.id)];
+  if (ids.length) await post('ack', { ids });
   fs.rmSync(DONE, { force: true });
   applied.length = 0;
   asked.length = 0;
@@ -174,7 +183,7 @@ async function clear() {
 // 1. 빈 큐
 await clear();
 eq('빈 큐면 아무 일도 없다', await q.drain(apply, ask, BASE),
-   { applied: [], dropped: [], retry: [], lost: [], duplicates: 0 });
+   { applied: [], dropped: [], retry: [], lost: [], duplicates: 0, contacts: [] });
 eq('빈 큐면 부르지도 않는다', applied.length, 0);
 
 // 2. 반영하고 지운다
@@ -411,6 +420,56 @@ fs.rmSync(DONE, { force: true });
 fs.rmSync(EVENTS, { force: true });
 
 // **`process.exit` 대신 `exitCode`** — 여기서 즉시 나가면 뒷정리를 건너뛴다.
+// ---------- 문의 ----------
+//
+// **판 큐와 다른 칸이다.** 밖에서 온 사람의 글이라 `quick`·`ask` 로 새면 남이
+// 내 업무를 고치고 세션이 돈다 — 그 하나가 이 갈래를 따로 만든 이유다.
+const askContact = (body) => fetch(`${BASE}/contact`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify(body),
+}).then((r) => r.status);
+
+{
+  await clear();
+  const mail = { name: '홍길동', org: '어느 회사', reply: 'a@b.co', text: '데모 보고 문의드립니다' };
+  eq('문의를 받는다', await askContact(mail), 200);
+
+  // 넘길 곳이 없으면 큐에 남는다 — 밖에서 온 글은 다시 만들 수 없다.
+  let r = await q.drain(apply, ask, BASE);
+  eq('넘길 곳이 없으면 그대로 둔다', r.contacts.length, 0);
+  eq('넘길 곳이 없어도 quick 은 안 부른다', applied.length, 0);
+  eq('넘길 곳이 없어도 ask 는 안 부른다', asked.length, 0);
+
+  // 실패하면 지우지 않는다 — 슬랙이 한 번 튀었다고 남의 문의를 버리지 않는다.
+  const shown = [];
+  r = await q.drain(apply, ask, BASE, null, null, null, async () => false);
+  eq('못 넘기면 안 지운다', r.contacts.length, 0);
+  eq('못 넘긴 것은 큐에 남는다', (await pendingContacts()).length, 1);
+
+  // 넘기면 지운다.
+  r = await q.drain(apply, ask, BASE, null, null, null,
+    async (c) => { shown.push(c); return true; });
+  eq('넘기면 결과에 뜬다', r.contacts.length, 1);
+  eq('받은 칸이 그대로', [shown[0].name, shown[0].org, shown[0].reply, shown[0].text].join('|'),
+     [mail.name, mail.org, mail.reply, mail.text].join('|'));
+  // ★ **이 셋이 이 갈래를 만든 이유다.**
+  eq('문의가 quick 으로 안 샌다', applied.length, 0);
+  eq('문의가 ask 로 안 샌다', asked.length, 0);
+  eq('문의가 note 로 안 샌다', noted.length, 0);
+  eq('넘긴 것은 큐에서 빠진다', (await pendingContacts()).length, 0);
+
+  // 두 번 넘기지 않는다 — 같은 것이 다시 와도 사람에게 두 번 안 뜬다.
+  await askContact(mail);
+  const seen2 = [];
+  await q.drain(apply, ask, BASE, null, null, null,
+    async (c) => { seen2.push(c); return true; });
+  const again = [];
+  await q.drain(apply, ask, BASE, null, null, null,
+    async (c) => { again.push(c); return true; });
+  eq('같은 문의를 두 번 안 보여 준다', [seen2.length, again.length].join('/'), '1/0');
+}
+
 if (fails.length) {
   console.log(`실패 ${fails.length}건\n`);
   for (const f of fails) console.log('  ✗ ' + f);
@@ -421,6 +480,7 @@ if (fails.length) {
     + '여러 줄 글 안 묶기 · note 버리기 · note 다시 시도 · note 받을 곳 없음 · '
     + '먼저 박기(같은 원문 · 터져도 세션은 감 · 안 넘겨도 돎) · '
     + '관찰 기록(건마다 한 줄 · 성공과 실패 둘 다 · UTC 아닌 지역시각) · '
-    + '좁은 길(받으면 세션도 먼저 박기도 안 탐 · 안 받으면 세션으로 · 터져도 세션으로 · 실패해도 세션으로 · 안 넘기면 옛 길))');
+    + '좁은 길(받으면 세션도 먼저 박기도 안 탐 · 안 받으면 세션으로 · 터져도 세션으로 · 실패해도 세션으로 · 안 넘기면 옛 길) · '
+    + '문의(quick·ask·note 로 안 샘 · 못 넘기면 안 지움 · 두 번 안 보여 줌))');
 }
 stopServer();

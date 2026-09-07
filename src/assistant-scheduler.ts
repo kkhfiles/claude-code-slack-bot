@@ -18,6 +18,7 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexSession } from './work-assistant';
 import type { QuickOutcome } from './work-assistant';
 import { boardLabel, boardQueueEnabled, drain, event as recordEvent } from './board-queue';
+import type { ContactItem } from './board-queue';
 
 /**
  * 업무 넛지 시각. 09:00 데일리 미팅 직전이라는 것이 이 값의 전부다 —
@@ -1400,6 +1401,37 @@ export class AssistantScheduler {
     });
   }
 
+  /**
+   * **밖에서 온 문의를 DM 한 줄로 보여 준다.**
+   *
+   * 여기서 하는 일은 보여 주는 것 하나다. 이 글은 밖에서 온 사람이 썼다 —
+   * `quick`·`ask` 로 넘기면 남이 내 업무를 고치고 내 돈으로 모델을 부른다.
+   * 담기는 칸부터 판 큐와 다르고, 여기서도 해석하지 않는다.
+   *
+   * 글자를 그대로 붙이지 않는다. 밖에서 온 글이라 슬랙 문법이 섞여 있으면 화면이
+   * 엉킨다 — 코드 블록에 넣어 글자 그대로 보인다. 코드 블록을 닫는 글자가 본문에
+   * 들어 있으면 그것만 비슷한 모양으로 바꾼다.
+   *
+   * **참을 내야 큐에서 지워진다** — 슬랙이 한 번 튀면 다음 판에 다시 온다.
+   */
+  private tellContact = async (c: ContactItem): Promise<boolean> => {
+    const who = [c.name, c.org].filter(Boolean).join(' · ') || '이름 안 적음';
+    const how = c.reply || '연락처 안 적음';
+    const body = c.text.split('```').join('ˋˋˋ');
+    try {
+      await this.sendMessage(
+        `✉️ 문의 온 것 — ${who}` + '\n' + `연락처: ${how}` + '\n' + '\n'
+        + '```' + '\n' + body + '\n' + '```',
+      );
+      return true;
+    } catch (error) {
+      this.logger.warn('문의를 슬랙에 못 적었습니다', {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  };
+
   private startBoardQueuePoller(): void {
     if (!boardQueueEnabled()) {
       this.logger.info('Board queue poller off (주소나 열쇠 없음)');
@@ -1420,7 +1452,7 @@ export class AssistantScheduler {
       this.boardQueueBusy = true;
       try {
         const r = await drain(quickUpdate, this.askFromBoard ?? null, undefined,
-          noteUpdate, stageUpdate, this.narrowFromBoard);
+          noteUpdate, stageUpdate, this.narrowFromBoard, this.tellContact);
         if (this.boardQueueFailures) {
           this.logger.info(`Board queue recovered (${this.boardQueueFailures}회 실패 뒤)`);
           this.boardQueueFailures = 0;
@@ -1444,6 +1476,9 @@ export class AssistantScheduler {
         }
         if (r.applied.length) {
           this.logger.info(`판에서 누른 것 ${r.applied.length}건 반영`);
+        }
+        if (r.contacts.length) {
+          this.logger.info(`문의 ${r.contacts.length}건 전달`);
         }
         for (const item of r.dropped) {
           // **원인을 좁혀 말하지 않는다.** rc 2 는 「업무를 못 찾음」과 「형식이
