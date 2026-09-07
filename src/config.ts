@@ -4,6 +4,15 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// 훑기 주기가 분에서 초로 바뀌었다(2026-09-07). 옛 이름이 남아 있으면 조용히 무시되는
+// 것이 아니라 **뜰 때 알린다** — 끄려던 훑기가 안 꺼진 채 도는 것이 가장 나쁘다.
+for (const old of ['LUNCH_CHAT_SWEEP_MIN', 'LETTER_CHAT_SWEEP_MIN']) {
+  if (process.env[old]) {
+    // eslint-disable-next-line no-console
+    console.warn(`[config] ${old} 은 이제 안 봅니다 — ${old.replace('_MIN', '_SEC')} 로 바꾸세요 (단위: 초)`);
+  }
+}
+
 export const config = {
   slack: {
     botToken: process.env.SLACK_BOT_TOKEN!,
@@ -112,7 +121,7 @@ export const config = {
     },
     // 점심원정대 채널에서 **먼저 말 걸기**. 낄 자리인지 판단하는 길이 둘이다 —
     // 낱말이 걸리면 그 자리에서 바로(`interest`), 안 걸려도 몇 분마다 쌓인 말을
-    // 통째로 보고 한 번 더(`sweepMinutes`). 나머지는 수다스러움을 막는 굴레다 —
+    // 통째로 보고 한 번 더(`sweepSeconds`). 나머지는 수다스러움을 막는 굴레다 —
     // 말 많은 봇은 곧 아무도 안 읽는다.
     buttIn: {
       enabled: process.env.LUNCH_CHAT_BUTT_IN !== '0',
@@ -133,7 +142,7 @@ export const config = {
       // 1분마다 봐도 모델 호출이 분당 한 번이 되지는 않는다 — 훑을 때 쌓인 말을
       // **비우고** 가므로, 묻는 횟수는 타이머가 아니라 **사람이 말한 횟수**에 묶인다.
       // 아무도 말이 없으면 0회다. 0 으로 두면 이 길을 끈다.
-      sweepMinutes: parseInt(process.env.LUNCH_CHAT_SWEEP_MIN || '1', 10),
+      sweepSeconds: parseInt(process.env.LUNCH_CHAT_SWEEP_SEC || '30', 10),
     },
   },
   // 레터 — 1on1 예약·피드백 전달 창구(개인 DM).
@@ -171,7 +180,7 @@ export const config = {
       enabled: process.env.LETTER_CHAT_BUTT_IN !== '0',
       quietMinutes: parseInt(process.env.LETTER_CHAT_QUIET_MIN || '0', 10),
       dailyCap: parseInt(process.env.LETTER_CHAT_DAILY_CAP || '100', 10),
-      sweepMinutes: parseInt(process.env.LETTER_CHAT_SWEEP_MIN || '1', 10),
+      sweepSeconds: parseInt(process.env.LETTER_CHAT_SWEEP_SEC || '30', 10),
     },
     // 방에 들어간 직후 **한 번만** 인사한다. 인사말은 고정 문구가 아니라 그 자리에서
     // 지어낸다 — 인물처럼 굴어야 하는 봇이 붙박이 문장으로 등장하면 거기서 다 들킨다.
