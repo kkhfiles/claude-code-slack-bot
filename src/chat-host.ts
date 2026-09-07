@@ -257,9 +257,21 @@ export class ChatHost {
   private sweptUpTo = new Map<string, number>();
   /** 방마다 봇끼리 이어 온 횟수. **사람이 한 마디 하면 처음으로 돌아간다.** */
   private botTurns = new Map<string, number>();
-  /** 사람이 그만하라고 한 방. 봇끼리 오가는 것과 먼저 끼어드는 것을 막는다 —
-   *  부르면 그대로 답한다. 「다시 해」·「계속해」로 풀린다. */
+  /**
+   * 사람이 그만하라고 한 방 — **봇끼리 오가는 것**을 막는다. 지나가는 말도 듣는다:
+   * 봇 둘이 주고받기 시작하면 누구든 한마디로 끊을 수 있어야 하는 안전 밸브다.
+   */
   private hushed = new Set<string>();
+  /**
+   * **부른 턴에** 그만하라고 한 방 — 먼저 끼어드는 것까지 멈춘다. 부르면 그대로 답한다.
+   *
+   * **왜 부른 턴만인가.** 낱말은 「그만큼 맛있었어요」·「오늘 그만 먹을래」에도 걸린다.
+   * 봇끼리 대화를 끊는 데 쓸 때는 오탐이 나도 손해가 없었지만, 이것으로 봇을 재우면
+   * 아무도 청한 적 없는데 봇이 조용해지고 **사람 눈에는 고장으로 보인다.** 말투를
+   * 말로 바꾸는 길이 부른 턴만 듣는 것과 같은 이유다. 푸는 것은 느슨하게 듣는다 —
+   * 잘못 재워졌을 때 부르지 않고도 깨울 수 있어야 한다.
+   */
+  private buttInHushed = new Set<string>();
   /** 채널에서 우리가 마지막으로 입을 연 시각·횟수. */
   private lastSpoke = new Map<string, number>();
   private spokenToday = new Map<string, { day: string; count: number }>();
@@ -515,8 +527,16 @@ export class ChatHost {
         this.hushed.add(channel);
         this.logger.info(`봇끼리 대화를 멈춥니다 (${channel})`);
       }
+      // **먼저 끼어들기까지 멈추는 것은 부른 턴에서만.** 지나가는 말에 걸리면
+      // 청한 적 없는 사람들에게 봇이 제멋대로 조용해진 것으로 보인다.
+      if (this.isCalled(text) && !this.buttInHushed.has(channel)) {
+        this.buttInHushed.add(channel);
+        this.logger.info(`먼저 말 걸기를 멈춥니다 (${channel}) — 부르면 답합니다`);
+      }
     } else if (UNHUSH.test(text)) {
+      // 푸는 것은 부르지 않아도 듣는다 — 잘못 재워졌을 때 깨울 길이 있어야 한다.
       this.hushed.delete(channel);
+      this.buttInHushed.delete(channel);
     }
   }
 
@@ -595,7 +615,7 @@ export class ChatHost {
   ): Promise<void> {
     // `selfUserId` 가 빈 문자열일 수 있어 **불린으로 굳힌다** — 아래에서 이 값이 알릴지
     // 말지를 가르므로, 빈 문자열이 그대로 흐르면 기록에 `""` 가 찍히고 판정도 흐려진다.
-    const called = Boolean(this.selfUserId && text.includes(`<@${this.selfUserId}>`));
+    const called = this.isCalled(text);
     if (called) {
       try {
         await client.chat.postEphemeral({
@@ -652,7 +672,7 @@ export class ChatHost {
     client: App['client'], user: string, channel: string, ts: string,
     threadTs: string | undefined, text: string, fromSibling = false,
   ): Promise<void> {
-    const called = text.includes(`<@${this.selfUserId}>`);
+    const called = this.isCalled(text);
     // **바로 반응할 자리에서만 담는다.** 나머지는 훑기가 채널에서 직접 읽어 온다 —
     // 여기서 다 쌓아 두면 재시작 한 번에 통째로 사라지고, 소켓이 흘린 말은 애초에
     // 담기지도 않는다. 둘 다 실제로 겪었다.
@@ -713,6 +733,11 @@ export class ChatHost {
     return (this.opts.quietRooms ?? []).includes(channel);
   }
 
+  /** 나를 부른 글인가. **판정은 여기 한 곳** — 세 곳에 흩어져 있었고 하나는 조건이 달랐다. */
+  private isCalled(text: string): boolean {
+    return Boolean(this.selfUserId && text.includes(`<@${this.selfUserId}>`));
+  }
+
   private shouldButtIn(channel: string, text: string): boolean {
     if (this.isQuiet(channel)) return false;
     if (this.interest && !this.interest.test(text)) return false;
@@ -722,14 +747,14 @@ export class ChatHost {
   /**
    * 낱말과 무관한 굴레만. 훑기도 같은 굴레를 쓴다 — 길이 둘이어도 한도는 하나다.
    *
-   * **「그만」도 여기서 문다.** 먼저 끼어드는 길이 둘(낱말·훑기)이라 한쪽에만 걸면
-   * 다른 쪽으로 그대로 샌다. 부름(멘션)은 두 부르는 곳 모두 `called` 로 이 함수를
+   * **「그만」(부른 턴)도 여기서 문다.** 먼저 끼어드는 길이 둘(낱말·훑기)이라 한쪽에만
+   * 걸면 다른 쪽으로 그대로 샌다. 부름(멘션)은 두 부르는 곳 모두 `called` 로 이 함수를
    * 건너뛰므로, 그만하라고 해도 **부르면 답한다** — 멈추는 것은 먼저 나서는 것뿐이다.
    */
   private withinLimits(channel: string): boolean {
     const rule = this.opts.buttIn;
     if (!rule || this.active.has(channel)) return false;
-    if (this.hushed.has(channel)) return false;
+    if (this.buttInHushed.has(channel)) return false;
     const since = Date.now() - (this.lastSpoke.get(channel) ?? 0);
     if (since < rule.quietMinutes * 60 * 1000) return false;
     const day = new Date().toISOString().slice(0, 10);
