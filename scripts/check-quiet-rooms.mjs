@@ -9,7 +9,7 @@
  *   - 너무 열리면: 사람들끼리 하는 말에 끼어들어 **알림 방이 잡담 방이 된다.** 이건
  *     슬랙을 열어 보기 전에는 아무도 모른다.
  *
- * 길이 둘이라(살아 있는 이벤트·1분마다 훑기) **한쪽만 막으면 다른 쪽으로 샌다.**
+ * 길이 둘이라(살아 있는 이벤트·주기적 훑기) **한쪽만 막으면 다른 쪽으로 샌다.**
  * 그래서 둘 다 잰다.
  */
 import './lib/fresh-dist.mjs';
@@ -209,6 +209,58 @@ function withDm() {
   // 초대 기록을 찾으러 간다. 실제로 그 문구 때문에 헛걸음이 났다.
   check('알림이 「들어가 있다」고 단정하지 않는다',
     !String(dms[0]?.text ?? '').includes('들어가 있습니다'), dms[0]?.text);
+}
+
+// --- 방을 통째로 부르는 말 ---------------------------------------------------------
+// 2026-09-07: 「얘들아」에 두 봇이 다 조용했다. 이름을 부른 것도 아니고 낱말 목록에도
+// 없어서 **그 자리에서는 아무 일도 안 일어났고**, 훑기를 기다렸다가 「사람들끼리 주고받는
+// 인사」로 넘겼다. 33분 뒤 다시 부르고서야 답했다.
+//
+// 그래서 부름말은 **봇 설정이 아니라 공용 층**에 둔다 — 이건 그 봇의 주제가 아니라
+// 「나를 불렀나」이고, 봇마다 적어 두면 새 봇에서 조용히 빠진다.
+{
+  const { host, kicked } = make();
+  await host['onChannelMessage'](client, 'U1', LOUD, '20.1', undefined, '얘들아', false);
+  check('부름말은 낱말 목록에 없어도 걸린다 (「얘들아」)',
+    kicked.length === 1, { kicked });
+}
+{
+  const { host, kicked } = make();
+  await host['onChannelMessage'](client, 'U1', LOUD, '20.2', undefined, '다들 뭐해요', false);
+  check('다른 부름말도 걸린다 (「다들」)', kicked.length === 1, { kicked });
+}
+{
+  // **걸린다는 것은 「답한다」가 아니라 「기다리지 않는다」다.** 낄지 말지는 그대로
+  // 모델이 정한다 — 부름말이 판단을 건너뛰면 그 방은 아무 말에나 답하는 방이 된다.
+  const { host, kicked } = make();
+  await host['onChannelMessage'](client, 'U1', LOUD, '20.3', undefined, '얘들아', false);
+  check('부름말은 판단을 건너뛰지 않는다 (강제 아님)',
+    kicked[0]?.[1] === false, { kicked });
+}
+{
+  const { host, kicked } = make();
+  await host['onChannelMessage'](client, 'U1', LOUD, '20.4', undefined, '오늘 날씨 좋네', false);
+  check('상관없는 말은 그대로 안 걸린다 (부름말이 문을 통째로 열면 안 된다)',
+    kicked.length === 0, { kicked });
+}
+{
+  // 조용한 방(식단 알림 방)은 부름말로도 안 열린다 — 거기서 열리는 것은 멘션뿐이다.
+  const { host, kicked } = make();
+  await host['onChannelMessage'](client, 'U1', QUIET, '20.5', undefined, '얘들아', false);
+  check('조용한 방은 부름말로 안 열린다 (알림 방이 잡담 방이 되면 안 된다)',
+    kicked.length === 0, { kicked });
+}
+{
+  // **부름말은 굴레 앞이 아니라 뒤에 선다.** 앞에 세우면 「그만」도 하루 한도도
+  // 통째로 건너뛴다 — 재워 놓은 방에서 「얘들아」 한마디에 다시 깨어난다.
+  const { host, kicked } = make();
+  host['humanSpoke'](LOUD, `<@${ME}> 그만`);
+  await host['onChannelMessage'](client, 'U1', LOUD, '20.6', undefined, '얘들아', false);
+  check('그만하라고 한 방에서는 부름말이 와도 안 끼어든다 (굴레보다 앞서면 안 된다)',
+    kicked.length === 0, { kicked });
+  // 그래도 **부르면 답한다** — 멈추는 것은 먼저 나서는 것뿐이다.
+  await host['onChannelMessage'](client, 'U1', LOUD, '20.7', undefined, `<@${ME}> 얘들아`, false);
+  check('재워 둔 방에서도 부르면 답한다', kicked.length === 1, { kicked });
 }
 
 console.log(`\n통과 ${pass} / 실패 ${fails.length}`);

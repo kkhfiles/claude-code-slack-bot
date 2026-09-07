@@ -61,6 +61,20 @@ const BYPASS_TEXT = '말씀 잘 받았어요. 실장님께 그대로 전해 드�
 const NOT_YET_AGAIN_MS = 10 * 60 * 1000;
 
 /**
+ * **방에 있는 봇들을 통째로 부르는 말.** 봇마다 다를 이유가 없어서 여기 둔다 —
+ * 이건 그 봇의 주제(`interest`)가 아니라 「나를 불렀나」이고, 봇 설정에 하나씩
+ * 적어 두면 새로 만든 봇에서 조용히 빠진다.
+ *
+ * 왜 필요한가(2026-09-07 실측): 「얘들아」에 두 봇이 다 조용했다. 이름을 부른 것도
+ * 아니고 아무 낱말에도 안 걸려서 **1분짜리 훑기를 기다렸고**, 그 훑기는 「사람들끼리
+ * 주고받는 인사」로 보고 넘겼다. 33분 뒤 「얘들아?????」에야 답했다.
+ *
+ * 여기 걸리면 **그 자리에서** 판단으로 넘어간다 — 답하기로 정해 주는 것이 아니라
+ * 기다리지 않게 해 주는 것뿐이고, 낄지 말지는 그대로 모델이 정한다.
+ */
+const CALL_WORDS = /얘들아|애들아|얘들|봇들|너희|니들|느그|다들|여러분|모두들/;
+
+/**
  * 채널에서 **먼저** 말을 걸 조건.
  *
  * 양이 아니라 **내용**으로 거른다. "새 말이 N개 쌓이면"으로 재면 "뭐 맛있는 거 없나?"
@@ -70,7 +84,7 @@ const NOT_YET_AGAIN_MS = 10 * 60 * 1000;
  * 판단하는 길은 둘이다.
  *
  *   낱말(`interest`)  걸리면 **그 자리에서** 바로 — 싸고 빠르다
- *   훑기(`sweepMinutes`)  몇 분마다 **쌓인 말을 통째로** 모델에게 보여 주고 물어본다
+ *   훑기(`sweepSeconds`)  몇 초마다 **쌓인 말을 통째로** 모델에게 보여 주고 물어본다
  *
  * 훑기가 필요한 이유: 「애가 됐네」·「신분이 내시인가요」처럼 **앞 글을 가리키는 말**은
  * 어떤 낱말 목록으로도 못 잡는데, 정작 그런 자리가 봇이 껴야 할 자리다(실측: 안 부른
@@ -82,7 +96,7 @@ const NOT_YET_AGAIN_MS = 10 * 60 * 1000;
 export interface ButtInRule {
   quietMinutes: number;   // 마지막으로 입을 연 지 이만큼은 조용히
   dailyCap: number;       // 하루 이만큼까지만
-  sweepMinutes?: number;  // 이만큼마다 쌓인 말을 통째로 보고 낄지 다시 본다 (0=끔)
+  sweepSeconds?: number;  // 이만큼마다 쌓인 말을 통째로 보고 낄지 다시 본다 (0=끔)
 }
 
 export interface BotTalkRule {
@@ -363,21 +377,21 @@ export class ChatHost {
       } catch (error) {
         this.logger.warn('auth.test failed — mentions will not be recognised', error);
       }
-      const every = this.opts.buttIn?.sweepMinutes ?? 0;
+      const every = this.opts.buttIn?.sweepSeconds ?? 0;
       if (this.servesChannel && this.opts.buttIn && every > 0) {
         // **비동기라 try/catch 로는 못 잡는다** — 채널을 읽어 오는 사이에 나는 실패는
         // 되돌아온 약속(promise)에 담겨 오므로 거기서 받아야 타이머가 안 죽는다.
         this.sweeper = setInterval(() => {
           void this.sweep().catch((error) =>
             this.logger.warn('훑어보다 넘어졌습니다', error));
-        }, every * 60 * 1000);
+        }, every * 1000);
         this.sweeper.unref?.();
       }
       const where: string[] = [];
       if (this.servesDm) where.push(`DM ${this.opts.allowUsers?.length ?? 0}명 허용`);
       if (this.servesChannel) {
         where.push(`채널 ${this.opts.channels?.length ?? 0}곳, 먼저 말 걸기 ${
-          this.opts.buttIn ? `on · ${every > 0 ? `${every}분마다 훑어봄` : '낱말만'}` : 'off'}`);
+          this.opts.buttIn ? `on · ${every > 0 ? `${every}초마다 훑어봄` : '낱말만'}` : 'off'}`);
       }
       // **연결 수를 같이 찍는다** — 자리가 둘인데 연결도 둘이면 그게 사고다.
       this.logger.info(`listening (연결 1개 · ${where.join(' + ') || '자리 없음'})`);
@@ -740,7 +754,8 @@ export class ChatHost {
 
   private shouldButtIn(channel: string, text: string): boolean {
     if (this.isQuiet(channel)) return false;
-    if (this.interest && !this.interest.test(text)) return false;
+    // 부름말은 봇 설정과 무관하게 늘 걸린다 — 낱말 목록이 비어 있어도 마찬가지다.
+    if (this.interest && !this.interest.test(text) && !CALL_WORDS.test(text)) return false;
     return this.withinLimits(channel);
   }
 
