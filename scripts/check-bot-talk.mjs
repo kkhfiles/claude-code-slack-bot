@@ -98,12 +98,30 @@ const h5 = new ChatHost({
   surfaces: ['channel'], channels: [ROOM],
   buttIn: { quietMinutes: 0, dailyCap: 100, sweepMinutes: 0 },
 });
+h5['selfUserId'] = 'UBOT';
 check('그만하기 전에는 먼저 끼어든다', h5['withinLimits'](ROOM) === true);
-h5['humanSpoke'](ROOM, '이제 그만');
-check('그만하라면 먼저 끼어드는 것도 멈춘다', h5['withinLimits'](ROOM) === false);
-h5['humanSpoke'](ROOM, '다시 얘기해');
-check('다시 하라면 풀린다 (재시작해야 풀리면 안 된다)',
+
+// **지나가는 말은 안 듣는다.** 낱말은 「그만큼 맛있었어요」·「오늘 그만 먹을래」에도
+// 걸린다. 봇끼리 대화를 끊는 데는 오탐이 나도 손해가 없지만, 이것으로 봇을 재우면
+// 아무도 청한 적 없는데 조용해지고 사람 눈에는 고장으로 보인다.
+h5['humanSpoke'](ROOM, '어제 그만큼 시켰는데 남았어');
+check('지나가는 말에는 안 멈춘다 (부르지 않은 「그만」)',
   h5['withinLimits'](ROOM) === true);
+h5['humanSpoke'](ROOM, '오늘은 그만 먹을래');
+check('점심 이야기에도 안 멈춘다', h5['withinLimits'](ROOM) === true);
+
+h5['humanSpoke'](ROOM, '<@UBOT> 이제 그만');
+check('부른 턴에 그만하라면 먼저 끼어드는 것을 멈춘다',
+  h5['withinLimits'](ROOM) === false);
+h5['humanSpoke'](ROOM, '다시 얘기해');
+check('푸는 것은 부르지 않아도 된다 (잘못 재워졌을 때 깨울 길이 있어야 한다)',
+  h5['withinLimits'](ROOM) === true);
+
+// 봇끼리 멈추는 쪽은 그대로 느슨하다 — 봇 둘이 주고받을 때 누구든 한마디로 끊는다.
+const h6 = make({ softTurns: 10, hardTurns: 20 });
+h6['humanSpoke'](ROOM, '그만');
+check('봇끼리 멈추기는 부르지 않아도 듣는다 (안전 밸브)',
+  h6['botTalkTurn'](ROOM, '한마디') === null);
 
 // --- 기록이 진짜 자리로 새지 않았나 ---------------------------------------------
 check('검사가 진짜 활동 기록을 안 건드렸다',
