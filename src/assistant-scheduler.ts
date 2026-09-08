@@ -1953,6 +1953,9 @@ export class AssistantScheduler {
       workingDirectory: opts.workingDirectory,
       appendSystemPrompt: opts.appendSystemPrompt,
       timeoutMs: opts.maxDurationMs,
+      // **1차와 같은 깊이로 돈다** — 폴백이 얕게 돌면 「돌긴 돌았는데 쓸 게 없는」
+      // 산출물이 나오고, 그건 실패보다 알아채기 어렵다(2026-09-08).
+      effort: opts.effort,
     });
     recordEvent('session-fallback', { label, why, ok: !!said });
     if (said) {
@@ -2010,9 +2013,13 @@ export class AssistantScheduler {
     }
 
     const useSdk = shouldUseSdk('briefing');
+    // **haiku 를 걷어냈다**(2026-09-08 사용자). 정기 작업의 바닥은 sonnet+low 다.
+    // haiku 4.5 는 `effort` 자체를 안 받아 깊이 손잡이가 없었고, 브리핑은 하루
+    // 한 번이라 등급을 올려도 값 차이가 거의 없다.
     const result = await this.spawnOrFallback('아침 브리핑',prompt, {
       workingDirectory: this.workingDir,
-      model: 'claude-haiku-4-5-20251001',
+      model: 'sonnet',
+      effort: 'low',
       permissionMode: 'default',
       allowedTools,
       noSessionPersistence: true,
@@ -2473,12 +2480,19 @@ export class AssistantScheduler {
       ?? defaults.maxDurationMinutes ?? 60;
 
     const useSdk = shouldUseSdk(`analysis:${type}`);
-    // Pin model explicitly so future SDK default changes can't silently promote
-    // analyses to Opus (which would burn the $100/mo credit fast).
-    // Override per-type via config.analysis.types[type].model or ANALYSIS_MODEL env.
+    // **별칭으로 박는다** — `sonnet`·`opus` 는 세대가 바뀌어도 그 등급에 머문다.
+    // 원래 취지(SDK 기본값이 조용히 Opus 로 올라가는 것 차단)는 그대로 지키면서
+    // 세대만 따라간다. 앞서 박혀 있던 `claude-sonnet-4-6` 은 Sonnet 5 보다 낡은
+    // 데다 $3/$15 로 **50% 더 비쌌다**(Sonnet 5 는 $2/$10 · 2026-09-08).
+    //
+    // 등급은 `config.analysis.types[type].model`·`.effort` 로 종마다 정한다.
+    // 폭은 sonnet+low ~ opus+xhigh 이고 haiku 는 쓰지 않는다(2026-09-08 사용자).
     const analysisModel = (typeConfig as any)?.model
       ?? process.env.ANALYSIS_MODEL
-      ?? 'claude-sonnet-4-6';
+      ?? 'sonnet';
+    const analysisEffort = ((typeConfig as any)?.effort
+      ?? process.env.ANALYSIS_EFFORT
+      ?? 'low') as 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
     // 산출물 백스톱의 기준선 — **이 시각 이후에 쓰인 파일만** 이 세션의 성과다.
     const startedAtMs = Date.now();
@@ -2496,9 +2510,12 @@ export class AssistantScheduler {
         skipMcp: true,
         maxDurationMs: maxDurationMinutes * 60_000,
         useSdk,
-        // 주간 분석은 깊게 읽고 쓰는 자리라 기본값 'high' 를 그대로 쓴다. 앞서
-        // 여기 걸려 있던 `thinkingBudgetTokens: 5000` 은 적응형 사고를 끄는
-        // 구형 경로였다 — 깊게 하려던 설정이 오히려 얕게 묶고 있었다(2026-08-06).
+        // **종마다 다르게 준다** — 예전에는 안 넘겨 전부 기본값 'high' 로 돌았다.
+        // 기계 산출물에 판단만 얹는 종은 그게 과하고, 웹을 훑어 판단까지 내는
+        // 종은 모자랐다. 앞서 여기 걸려 있던 `thinkingBudgetTokens: 5000` 은
+        // 적응형 사고를 끄는 구형 경로였다 — 깊게 하려던 설정이 오히려 얕게
+        // 묶고 있었다(2026-08-06).
+        effort: analysisEffort,
       },
     );
 
@@ -2553,12 +2570,20 @@ export class AssistantScheduler {
   }
 
   /**
-   * agy(외부 모델)로 위임할 분석 type 여부.
-   * 기본: ai-practice, competitors (외부 정보 수집 — WebSearch 의존).
-   * ANALYSIS_AGY_TYPES env로 override (콤마 구분).
+   * agy(외부 모델)로 위임할 분석 type 여부. **기본은 아무것도 안 보낸다.**
+   *
+   * 예전 기본값은 `ai-practice,competitors` 였고 사유는 「Agent SDK $100 크레딧
+   * 풀 보존」이었다. 그 크레딧 정책은 2026-06-22 에 번복돼 시행되지 않았으므로
+   * 사유가 없어졌다. 게다가 agy 가 주는 Claude 는 4.6 세대뿐이라 그 경로에는
+   * 최신 모델이 아예 없다.
+   *
+   * 실제로 품질 대가를 치렀다 — 2026-09-05 경쟁도구 보고서가 벤더 원문에 없는
+   * 제품명(「Open JSON Interfaces」)을 지어냈고, 그 산출물은 노션으로 발행된다.
+   *
+   * 되돌리려면 `ANALYSIS_AGY_TYPES=ai-practice,competitors` (콤마 구분).
    */
   private shouldUseAgy(type: string): boolean {
-    const raw = process.env.ANALYSIS_AGY_TYPES ?? 'ai-practice,competitors';
+    const raw = process.env.ANALYSIS_AGY_TYPES ?? '';
     return raw.split(',').map(s => s.trim()).filter(Boolean).includes(type);
   }
 
