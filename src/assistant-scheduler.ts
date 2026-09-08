@@ -1719,6 +1719,81 @@ export class AssistantScheduler {
   }
 
   /**
+   * 결정론 러너를 세션보다 **먼저** 띄우는 분석 종과 그 사이클.
+   *
+   * 여기 없는 종은 프롬프트가 스스로 러너를 띄운다(주간 archive-sync·product-docs·
+   * kg-regression). 그쪽은 아직 이 실패를 안 냈으므로 옮기지 않았다.
+   */
+  private static readonly PIPELINE_CYCLE_BY_TYPE: Record<string, string> = {
+    'data-sync': 'midnight',
+    'data-sync-noon': 'noon',
+  };
+
+  /**
+   * 데일리 파이프라인 러너를 detach 로 띄운다 — **세션이 뜨기 전에**.
+   *
+   * 프롬프트가 §3 에서 러너를 띄우도록 시키는 구조였고, 그것이 두 번 깨졌다.
+   * 09-03 은 세션이 §3 을 건너뛰고 전날 기록으로 가짜 보고서를 냈고, 09-09 는 세션이
+   * 9초 만에 도구 호출 0회로 되물으며 끝났다. **두 번 다 `subtype: success` 로
+   * 기록됐다.** 그때마다 promote·발행 두 벌이 통째로 빠졌다.
+   *
+   * 09-03 처방은 프롬프트 문구였다. 같은 함정에 두 번 걸렸으므로 글이 아니라 기계로
+   * 옮긴다 — 기동은 스케줄러가 하고, 세션은 폴링·판단·보고서만 맡는다. 세션이 무슨
+   * 짓을 하든 데이터 작업은 이미 트리 밖에서 돌고 있다.
+   *
+   * 이중 기동은 러너 쪽 `--detach` 가드가 막는다(`daily_pipeline_run._already_launched`).
+   * 그래서 프롬프트의 `--detach` 호출을 지우지 않아도 안전하고, 재시도 회차에서 다시
+   * 불러도 무해하다. Best-effort — 던지지 않는다(기동 실패도 세션은 돌아야 한다).
+   */
+  private launchPipelineRunner(type: string, cycle: string): Promise<void> {
+    return new Promise((resolve) => {
+      const proc = spawn(
+        'python',
+        ['-X', 'utf8', '-m', 'mycelium.batch.daily_pipeline_run',
+          '--cycle', cycle, '--detach'],
+        {
+          cwd: this.workingDir,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          shell: process.platform === 'win32',
+          env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
+          windowsHide: true,
+        },
+      );
+      let stdout = '';
+      let stderr = '';
+      proc.stdout?.on('data', (c: Buffer) => { stdout += c.toString('utf-8'); });
+      proc.stderr?.on('data', (c: Buffer) => { stderr += c.toString('utf-8'); });
+      // 이 명령은 자식을 띄우고 바로 돌아온다 — 오래 걸릴 일이 없다.
+      const killTimer = setTimeout(() => {
+        try {
+          if (process.platform === 'win32' && proc.pid) {
+            execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+          } else {
+            proc.kill('SIGKILL');
+          }
+        } catch {}
+      }, 60_000);
+      proc.on('error', (err) => {
+        clearTimeout(killTimer);
+        this.logger.error('Pipeline runner spawn error', err);
+        resolve();
+      });
+      proc.on('close', (code) => {
+        clearTimeout(killTimer);
+        const out = (stdout.trim() || stderr.trim());
+        this.logger.info('Pipeline runner pre-launched', {
+          type,
+          cycle,
+          code: code ?? -1,
+          // 「detach 실행 pid=」면 이번에 띄운 것이고 「띄우지 않는다」면 이미 떠 있던 것이다.
+          out: out.slice(0, 300),
+        });
+        resolve();
+      });
+    });
+  }
+
+  /**
    * Ping Daou to reset its server-side idle timer, keeping the operator's session alive.
    * Reuses groupware_daily's --keepalive mode (session_alive() + alert upsert, no fetch/worker),
    * run from the claude-workflow repo root (this.workingDir). Best-effort — never throws.
@@ -2496,6 +2571,14 @@ export class AssistantScheduler {
     const analysisEffort = ((typeConfig as any)?.effort
       ?? process.env.ANALYSIS_EFFORT
       ?? 'low') as 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+    // **러너 기동을 세션에 맡기지 않는다.** 세션이 뜨기 전에 여기서 띄운다 —
+    // 근거와 경위는 `launchPipelineRunner` 주석. 재시도 회차에서도 그대로 부른다
+    // (러너 가드가 「이미 진행 중」이면 안 띄우므로, 첫 회차가 못 띄웠을 때만 뜬다).
+    const pipelineCycle = AssistantScheduler.PIPELINE_CYCLE_BY_TYPE[type];
+    if (pipelineCycle) {
+      await this.launchPipelineRunner(type, pipelineCycle);
+    }
 
     // 산출물 백스톱의 기준선 — **이 시각 이후에 쓰인 파일만** 이 세션의 성과다.
     const startedAtMs = Date.now();
