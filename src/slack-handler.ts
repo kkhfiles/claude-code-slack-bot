@@ -2511,6 +2511,12 @@ export class SlackHandler {
       if (typeFilter && !dir.includes(typeFilter)) continue;
       for (const fname of fs.readdirSync(subdir)) {
         if (!fname.endsWith('.md') || fname === '.gitkeep' || fname === 'README.md') continue;
+        // **날짜 없는 상시 파일은 아카이브 대상이 아니다**(competitors/summary.md 등).
+        // 파이썬 쪽 `auto_archive_reports.py` 는 `has_date` 를 요구하는데 이 버튼에만
+        // 그 조건이 빠져 있었다. 2026-09-08 09:01 에 일괄 버튼이 summary.md 를
+        // dated 보고서 6개와 함께 옮겼고, 그대로 뒀으면 다음 월간 회차가 종합본을
+        // 못 읽고 처음부터 다시 만들며 `notion_page_id` 를 잃을 뻔했다.
+        if (!/\d{4}-\d{2}-\d{2}/.test(fname)) continue;
         const relPath = `${dir}/${fname}`;
         if (scope === 'clean') {
           const m = manifest!.get(relPath);
