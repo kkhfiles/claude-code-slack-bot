@@ -830,9 +830,21 @@ export async function narrowApply(json: string, task: string): Promise<QuickOutc
 //    `SDK query 실패` 0건 · rate_limit 5건 · Overloaded 6건. 자주 쓰려고 둔 것이
 //    아니라 **터지면 전부 멈추기 때문에** 둔다.
 
-/** 폴백 엔진. 값을 바꾸려면 여기 한 줄 — 잰 것은 `sol` · `low` 다. */
+/** 좁은 길 폴백 엔진. 값을 바꾸려면 여기 한 줄 — 잰 것은 `sol` · `low` 다. */
 const NARROW_CODEX_MODEL = process.env.BOARD_NARROW_CODEX_MODEL || 'gpt-5.6-sol';
 const NARROW_CODEX_EFFORT = process.env.BOARD_NARROW_CODEX_EFFORT || 'low';
+
+/**
+ * 주 작업 폴백 엔진 — **좁은 길과 상수를 나눠 둔다.**
+ *
+ * 좁은 길은 판을 재는 실험이라 `sol`·`low` 가 그 실험의 조건이다. 여기서 같이
+ * 쓰면 주 작업 쪽 사정으로 실험 조건이 바뀌어 앞뒤 회차를 못 비교한다.
+ *
+ * 등급 대응은 **Opus 5 ↔ GPT-5.6 Sol** 이고 effort 는 부르는 쪽 값을 그대로
+ * 받는다(2026-09-08 사용자). 정기 작업에 Astra·Fable 급은 쓰지 않는다.
+ */
+const SESSION_CODEX_MODEL = process.env.SESSION_FALLBACK_CODEX_MODEL || 'gpt-5.6-sol';
+const SESSION_CODEX_EFFORT = process.env.SESSION_FALLBACK_CODEX_EFFORT || 'low';
 
 /**
  * 마지막 답의 모양을 codex 에게 강제한다.
@@ -989,7 +1001,14 @@ export function codexWritableDirs(): string[] {
  */
 export async function codexSession(
   prompt: string,
-  opts: { workingDirectory: string; appendSystemPrompt?: string; timeoutMs?: number },
+  opts: {
+    workingDirectory: string;
+    appendSystemPrompt?: string;
+    timeoutMs?: number;
+    /** 1차가 쓰던 것과 같은 깊이로 돈다. 생략하면 `SESSION_CODEX_EFFORT`. */
+    effort?: string;
+    model?: string;
+  },
 ): Promise<string> {
   if (process.env.SESSION_FALLBACK === 'off') return '';
   const id = randomId();
@@ -1015,8 +1034,8 @@ export async function codexSession(
       '--approve-for-me',
       '--color', 'never',
       '-C', opts.workingDirectory,
-      '-m', NARROW_CODEX_MODEL,
-      '-c', `model_reasoning_effort=${NARROW_CODEX_EFFORT}`,
+      '-m', opts.model ?? SESSION_CODEX_MODEL,
+      '-c', `model_reasoning_effort=${opts.effort ?? SESSION_CODEX_EFFORT}`,
       '-o', of, '-',
     ];
     const code = await runCodex(args, pf, opts.timeoutMs ?? 600_000);
