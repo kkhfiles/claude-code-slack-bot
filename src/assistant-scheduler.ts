@@ -2172,6 +2172,9 @@ export class AssistantScheduler {
    * 소비자는 「보고서가 안 나왔다」와 「원래 오늘 안 도는 타입이다」를 구분할 수 없다.
    * 비용 원장은 대안이 못 된다 — agy 백엔드로 도는 타입은 Claude 세션 비용이 0이라
    * 원장에 흔적이 아예 없다(2026-08-18 실측: competitors는 단 한 번도 없음).
+   * ⚠️ 그 예시는 이제 옛일이다 — 2026-09-08 부터 agy 위임 기본값이 비어 있어
+   * competitors 도 Claude 로 돈다. **근거는 그대로다**: `ANALYSIS_AGY_TYPES` 로
+   * 언제든 다시 agy 로 보낼 수 있어 원장은 여전히 구멍 뚫린 신호원이다.
    *
    * plan 1줄 + 타입별 outcome 1줄 append. 그룹 도중 죽어도 「계획 N vs 기록 M」으로
    * 중단이 드러난다 — rate limit이 그룹 전체를 break하는 경로가 정확히 그 모양이라,

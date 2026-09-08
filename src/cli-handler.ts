@@ -327,6 +327,12 @@ export class CliHandler {
     resumeSessionId?: string;
     continueLastSession?: boolean;
     model?: string;
+    /**
+     * 사고 깊이. **SDK 경로와 짝을 맞춰 둔다** — 예전에는 여기 칸이 없어
+     * `SLACKBOT_FORCE_CLI=1` 로 내려가는 순간 종별 등급이 통째로 사라졌고,
+     * 에러도 로그도 없이 전부 기본값으로 돌았다(2026-09-08).
+     */
+    effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
     permissionMode?: 'default' | 'safe' | 'trust' | 'plan' | 'auto';
     allowedTools?: string[];
@@ -358,6 +364,9 @@ export class CliHandler {
 
     // Model
     if (opts.model) args.push('--model', opts.model);
+
+    // Effort — SDK 경로의 `effort` 와 같은 값이 CLI 로도 간다.
+    if (opts.effort) args.push('--effort', opts.effort);
 
     // Budget limit
     if (opts.maxBudgetUsd) args.push('--max-budget-usd', String(opts.maxBudgetUsd));
