@@ -2906,7 +2906,7 @@ export class SlackHandler {
 
     const proc = opts.useSdk
       ? this.sdkHandler.runQuery(prompt, { ...commonOpts, effort: opts.effort })
-      : this.cliHandler.runQuery(prompt, commonOpts);
+      : this.cliHandler.runQuery(prompt, { ...commonOpts, effort: opts.effort });
 
     this.logger.info('Assistant session started', { via: opts.useSdk ? 'sdk' : 'cli' });
 
