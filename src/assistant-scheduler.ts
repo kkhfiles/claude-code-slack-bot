@@ -1723,6 +1723,12 @@ export class AssistantScheduler {
    *
    * 여기 없는 종은 프롬프트가 스스로 러너를 띄운다(주간 archive-sync·product-docs·
    * kg-regression). 그쪽은 아직 이 실패를 안 냈으므로 옮기지 않았다.
+   *
+   * ⚠️ **주간 종을 여기 추가하려면 가드를 먼저 넣어라.** 그 셋은 공통부
+   * `mycelium/batch/_detached_runner.py` 의 `spawn_detached` 를 쓰는데 거기엔 이중 기동
+   * 가드가 없다(부르는 쪽이 하나라 아직 필요 없었다). 가드 없이 이 표에 넣으면 프롬프트의
+   * 두 번째 호출이 「완주한다」는 거짓 성공 메시지를 세션에 주고 그 회차의 부팅 로그를
+   * 지운다 — `daily_pipeline_run._already_launched` 가 막는 바로 그 둘이다.
    */
   private static readonly PIPELINE_CYCLE_BY_TYPE: Record<string, string> = {
     'data-sync': 'midnight',
