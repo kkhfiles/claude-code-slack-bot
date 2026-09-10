@@ -1271,8 +1271,24 @@ export class ChatHost {
     }
   }
 
-  private runTurn(key: string, name: string, text: string, decide: boolean,
-                  manager: boolean): Promise<TurnResult> {
+  /**
+   * 한 턴. 상주 프로세스로 보내고, **그것이 내려간 순간과 겹쳤으면 한 번 다시 보낸다.**
+   *
+   * turn.py 는 조용해지면 스스로 내려간다(데몬 정책 — 워커 하나가 177MB라 조용할 때
+   * 붙들고 있을 이유가 없다). 그 내려가는 찰나에 말이 오면 우리가 쓴 요청이 죽는
+   * 파이프로 들어가 답이 안 온다. **재시도가 없으면 그 한 마디가 조용히 날아간다** —
+   * 사람은 봇이 왜 대답을 안 했는지 알 길이 없다.
+   */
+  private async runTurn(key: string, name: string, text: string, decide: boolean,
+                        manager: boolean): Promise<TurnResult> {
+    const first = await this.runTurnResident(key, name, text, decide, manager);
+    if (!first.error || !/turn\.py 종료/.test(first.error)) return first;
+    this.logger.info('상주 turn.py 가 내려가 있었다 — 한 번 다시 보낸다');
+    return this.runTurnResident(key, name, text, decide, manager);
+  }
+
+  private runTurnResident(key: string, name: string, text: string, decide: boolean,
+                          manager: boolean): Promise<TurnResult> {
     const body = this.turnBody(key, name, text, decide, manager);
     const child = this.ensureTurnProc();
     if (!child || !child.stdin) return this.runTurnOnce(body);

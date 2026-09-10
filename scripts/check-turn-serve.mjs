@@ -95,14 +95,41 @@ spawned[0].say({ id: 'ghost', reply: 'x' });
 spawned[0].stdout.emit('data', '[turn] 사람이 읽을 로그\n');
 ok('모르는 id 와 JSON 아닌 줄을 흘린다', true);
 
-// ── ③ 프로세스가 죽으면 기다리던 것에 실패를 알린다 ──────────────────────────
-const p3 = host.runTurn('U3', '병', '살아 있나', false, false);
-spawned[0].die(9);
-const r3 = await p3;
-ok('죽으면 기다리던 요청에 실패를 알린다', Boolean(r3.error), JSON.stringify(r3));
-ok('죽은 뒤 다음 요청은 새 프로세스를 띄운다',
-   (() => { host.runTurn('U4', '정', '또', false, false); return spawned.length === 2; })(),
-   `띄운 수 ${spawned.length}`);
+// ── ③ 내려간 찰나에 겹친 말은 재시도로 살린다 ────────────────────────────────
+// turn.py 는 조용해지면 스스로 내려간다(데몬 정책). 그 찰나에 말이 오면 답이 안 오고,
+// **재시도가 없으면 그 한 마디가 조용히 날아간다.** 그래서 재는 것은 「실패를 알렸나」가
+// 아니라 **「사람이 답을 받았나」**다 — 그것이 이 장치를 넣은 이유다.
+const tick = () => new Promise((r) => setImmediate(r));
+const answer = (child, reply) => {
+  const rid = JSON.parse(child.lines[child.lines.length - 1]).id;
+  child.say({ id: rid, reply, speak: true });
+};
+
+{
+  const before = spawned.length;
+  const p = host.runTurn('U3', '병', '내려간 찰나에 온 말', false, false);
+  await tick();
+  spawned[spawned.length - 1].die(0);      // 방금 요청을 받은 프로세스가 내려간다
+  await tick();
+  ok('내려간 뒤 재시도가 새 프로세스를 띄운다', spawned.length === before + 1,
+     `띄운 수 ${spawned.length - before}`);
+  answer(spawned[spawned.length - 1], '다시 보내서 받은 답');
+  const out = await p;
+  ok('죽어도 재시도로 답을 받아 낸다', out.reply === '다시 보내서 받은 답',
+     JSON.stringify(out));
+}
+
+// 두 번 연속 죽으면 **매달리지 않고** 실패로 끝난다 — 재시도는 한 번뿐이다.
+{
+  const p = host.runTurn('U4', '정', '두 번 죽는 자리', false, false);
+  await tick();
+  spawned[spawned.length - 1].die(9);      // 1차 — 재시도가 붙는다
+  await tick();
+  spawned[spawned.length - 1].die(9);      // 2차 — 여기서 끝난다
+  const out = await p;
+  ok('두 번 연속 죽으면 매달리지 않고 실패로 끝난다',
+     Boolean(out.error) && out.reply === '', JSON.stringify(out));
+}
 
 // ── ④ 못 띄우면 예전 단발로 내려간다 ────────────────────────────────────────
 cp.spawn = () => { throw new Error('띄우기 실패(시험이 일부러)'); };
@@ -121,5 +148,8 @@ if (fails.length) {
   for (const f of fails) console.error(`  - ${f}`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 상주 turn.py (프로세스 하나 · id 대응 · 죽음 통보 · 단발 폴백)');
+  console.log('통과 — 상주 turn.py (프로세스 하나 · id 대응 · 죽음 통보 · 재시도 · 단발 폴백)');
 }
+// **여기서 끊어 준다.** 답을 못 준 요청이 하나라도 남으면 240초 타이머가 살아 있어
+// 이 검사가 그만큼 매달리고, `npm test` 가 통째로 그만큼 길어진다(실측 8분).
+process.exit(process.exitCode ?? 0);
