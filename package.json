@@ -32,7 +32,8 @@
     "check:double": "node scripts/check-double-answer.mjs",
     "check:manager": "node scripts/check-manager-turn.mjs",
     "check:narrow": "node scripts/check-narrow-fallback.mjs",
-    "check:sessionfb": "node scripts/check-session-fallback.mjs"
+    "check:sessionfb": "node scripts/check-session-fallback.mjs",
+    "check:turnserve": "node scripts/check-turn-serve.mjs"
   },
   "keywords": [],
   "author": "",
