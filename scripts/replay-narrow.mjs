@@ -58,7 +58,9 @@ function labExtras() {
   return grab('CONTRACT') + grab('EXAMPLES') + grab('EXTRA4');
 }
 
-const append = EXTRAS ? rulesText + labExtras() : rulesText;
+// 한 번만 읽어 둔다 — 사례마다 다시 읽으면 도중에 파일이 바뀌면 두 갈래가 달라진다.
+const APPEND_PLAIN = rulesText;
+const APPEND_EXTRAS = rulesText + labExtras();
 
 // ── 운영과 같은 옵션 (`assistant-scheduler.narrowFromBoard`) ────────────────
 // 이 덩어리를 고칠 때는 그쪽도 같이 본다. 한쪽만 고치면 정렬이 조용히 풀린다.
@@ -70,7 +72,6 @@ const NARROW_OPTS = {
   tools: [],
   allowedTools: [],
   settingSources: [],
-  appendSystemPrompt: append,
   skipMcp: true,
   noSessionPersistence: true,
   maxDurationMs: 90_000,
@@ -126,10 +127,24 @@ const picked = N ? cases.slice(0, N) : cases;
 const handler = new SdkHandler(new McpManager());
 const rows = [];
 
-console.log(`재생할 것 ${picked.length}건 · 규칙 ${RULES}`
-  + ` · ${EXTRAS ? '계약·예시 실음' : '운영 모양(판만)'} → ${OUT}`);
+/**
+ * ★ **짝 비교 (`--paired`)** — 두 갈래를 **같은 사례에서** 돌린다.
+ *
+ * 총점만 견주면 판별 차이를 못 가른다(앞선 측정에서 같은 프롬프트 두 벌이 42%와
+ * 46%로 갈렸다). 판단은 **엇갈린 사례 수**로 해야 하고, 그러려면 사례마다 두
+ * 갈래의 정오가 짝으로 있어야 한다.
+ *
+ * **순서를 사례마다 번갈아 둔다** — 한 갈래를 늘 먼저 돌리면 캐시 상태·서버 조건이
+ * 그 갈래에 유리하게 쏠린다. 갈래별로 파일을 갈라 두면 `grade2.py` 를 그대로 쓴다.
+ */
+const PAIRED = process.argv.includes('--paired');
+const rowsB = [];
 
-for (const [idx, k] of picked.entries()) {
+console.log(`재생할 것 ${picked.length}건 · 규칙 ${RULES}`
+  + ` · ${PAIRED ? '짝 비교 — 판만 대 판+계약·예시'
+    : (EXTRAS ? '계약·예시 실음' : '운영 모양(판만)')} → ${OUT}`);
+
+async function once(k, useExtras) {
   const t0 = Date.now();
   let text = '';
   let usage = null;
@@ -138,7 +153,11 @@ for (const [idx, k] of picked.entries()) {
   let isError = false;
   let turns = 0;
   try {
-    const proc = handler.runQuery(userText(k), { ...NARROW_OPTS, env: scrubbedEnv() });
+    const proc = handler.runQuery(userText(k), {
+      ...NARROW_OPTS,
+      appendSystemPrompt: useExtras ? APPEND_EXTRAS : APPEND_PLAIN,
+      env: scrubbedEnv(),
+    });
     for await (const ev of proc) {
       if (ev.type === 'assistant') {
         turns += 1;
@@ -164,22 +183,54 @@ for (const [idx, k] of picked.entries()) {
     + (usage?.cache_read_input_tokens ?? 0);
   const ms = Date.now() - t0;
   const got = isError ? null : parseLoose(text);
-  rows.push({
-    ...k, shape: EXTRAS ? 'prod+extras' : 'prod', ms, got,
+  return {
+    ...k, shape: useExtras ? 'prod+extras' : 'prod', ms, got,
     cost, in_tok: inTok, usage, subtype, turns, raw: text.slice(0, 4000),
-  });
-  console.log(`  ${String(idx + 1).padStart(2)}/${picked.length} ${(k.task || '?').padEnd(8)}`
-    + ` ${(ms / 1000).toFixed(1)}s 입력 ${inTok.toLocaleString().padStart(7)}`
-    + ` $${cost.toFixed(4)} ${got ? '○' : '✗'}`);
+  };
+}
+
+const med = (xs) => xs.slice().sort((a, b) => a - b)[Math.floor(xs.length / 2)] ?? 0;
+
+function line(idx, tag, r) {
+  console.log(`  ${String(idx + 1).padStart(2)}/${picked.length} ${tag}`
+    + ` ${(r.task || '?').padEnd(8)} ${(r.ms / 1000).toFixed(1)}s`
+    + ` 입력 ${r.in_tok.toLocaleString().padStart(7)}`
+    + ` $${r.cost.toFixed(4)} ${r.got ? '○' : '✗'}`);
+}
+
+for (const [idx, k] of picked.entries()) {
+  if (!PAIRED) {
+    const r = await once(k, EXTRAS);
+    rows.push(r);
+    line(idx, EXTRAS ? 'B' : 'A', r);
+    continue;
+  }
+  // 순서를 사례마다 번갈아 — 한 갈래가 늘 먼저 돌면 그쪽에 조건이 쏠린다.
+  const extrasFirst = idx % 2 === 1;
+  const first = await once(k, extrasFirst);
+  const second = await once(k, !extrasFirst);
+  for (const r of [first, second]) (r.shape === 'prod' ? rows : rowsB).push(r);
+  line(idx, extrasFirst ? 'B' : 'A', first);
+  line(idx, extrasFirst ? 'A' : 'B', second);
 }
 
 if (!existsSync(TMP)) mkdirSync(TMP, { recursive: true });
-writeFileSync(path.join(TMP, OUT), rows.map((r) => JSON.stringify(r)).join(NL) + NL, 'utf-8');
 
-const ok = rows.filter((r) => r.got).length;
-const med = (xs) => xs.slice().sort((a, b) => a - b)[Math.floor(xs.length / 2)] ?? 0;
+function save(name, rs) {
+  if (!rs.length) return;
+  writeFileSync(path.join(TMP, name), rs.map((r) => JSON.stringify(r)).join(NL) + NL, 'utf-8');
+  const ok = rs.filter((r) => r.got).length;
+  console.log(`남김 ${name} (${rs.length}건) · JSON 성공 ${ok}/${rs.length}`
+    + ` · 회당 총 입력 중앙 ${med(rs.map((r) => r.in_tok)).toLocaleString()}`
+    + ` · 값 중앙 $${med(rs.map((r) => r.cost)).toFixed(4)}`);
+}
+
 console.log('');
-console.log(`남김 ${OUT} (${rows.length}건) · JSON 성공 ${ok}/${rows.length}`
-  + ` · 회당 총 입력 중앙 ${med(rows.map((r) => r.in_tok)).toLocaleString()}`
-  + ` · 값 중앙 $${med(rows.map((r) => r.cost)).toFixed(4)}`);
+if (PAIRED) {
+  save(OUT, rows);
+  save(OUT.replace('.jsonl', '-extras.jsonl'), rowsB);
+  console.log('짝 비교 채점 — grade2.py 를 파일마다 돌리고 사례별 정오는 pair_compare.py 로 본다');
+} else {
+  save(OUT, rows);
+}
 console.log('운영 실측 대조 — 총 입력 9,241 (33회 중앙 · 최소 9,151 · 최대 9,600) · 값 $0.10');

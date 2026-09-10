@@ -33,7 +33,8 @@
     "check:manager": "node scripts/check-manager-turn.mjs",
     "check:narrow": "node scripts/check-narrow-fallback.mjs",
     "check:sessionfb": "node scripts/check-session-fallback.mjs",
-    "check:turnserve": "node scripts/check-turn-serve.mjs"
+    "check:turnserve": "node scripts/check-turn-serve.mjs",
+    "check:replaynarrow": "node scripts/check-replay-narrow.mjs"
   },
   "keywords": [],
   "author": "",
