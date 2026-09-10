@@ -140,11 +140,29 @@ const rows = [];
 const PAIRED = process.argv.includes('--paired');
 const rowsB = [];
 
-console.log(`재생할 것 ${picked.length}건 · 규칙 ${RULES}`
-  + ` · ${PAIRED ? '짝 비교 — 판만 대 판+계약·예시'
-    : (EXTRAS ? '계약·예시 실음' : '운영 모양(판만)')} → ${OUT}`);
+/**
+ * ★ **여러 판 견주기 (`--arms a.md,b.md,...`)** — 판별 순위를 **한 환경에서** 다시 낸다.
+ *
+ * ⛔ **옛 판 점수와 새 판 점수를 섞어 견주면 안 된다** — 환경이 갈리면 그 차이가
+ *    판 차이로 읽힌다. 순위를 보려면 **모든 판을 같은 조건에서 다시** 돌려야 한다.
+ *    (2026-09-10 검토 지적. 옛 자료는 정답의 값칸 수도 달라 견줄 수 없다.)
+ *
+ * 순서는 사례마다 한 칸씩 돌린다 — 한 판이 늘 첫 번째면 그 판에만 캐시가 식은
+ * 회차가 몰린다. 판별로 파일을 갈라 두어 `grade2.py`·`pair_compare.py` 를 그대로 쓴다.
+ */
+const ARMS = (arg('--arms', '') || '').split(',').map((s) => s.trim()).filter(Boolean);
+const armRules = new Map();
+for (const a of ARMS) armRules.set(a, readFileSync(path.join(ROOT, a), 'utf-8'));
+const armRows = new Map(ARMS.map((a) => [a, []]));
+const armName = (a) => path.basename(a, '.md');
 
-async function once(k, useExtras) {
+console.log(`재생할 것 ${picked.length}건 · `
+  + (ARMS.length
+    ? `판 ${ARMS.length}갈래 견주기 — ${ARMS.map(armName).join(' · ')}`
+    : `규칙 ${RULES} · ${PAIRED ? '짝 비교 — 판만 대 판+계약·예시'
+      : (EXTRAS ? '계약·예시 실음' : '운영 모양(판만)')} → ${OUT}`));
+
+async function once(k, useExtras, override) {
   const t0 = Date.now();
   let text = '';
   let usage = null;
@@ -155,7 +173,7 @@ async function once(k, useExtras) {
   try {
     const proc = handler.runQuery(userText(k), {
       ...NARROW_OPTS,
-      appendSystemPrompt: useExtras ? APPEND_EXTRAS : APPEND_PLAIN,
+      appendSystemPrompt: override ?? (useExtras ? APPEND_EXTRAS : APPEND_PLAIN),
       env: scrubbedEnv(),
     });
     for await (const ev of proc) {
@@ -184,8 +202,8 @@ async function once(k, useExtras) {
   const ms = Date.now() - t0;
   const got = isError ? null : parseLoose(text);
   return {
-    ...k, shape: useExtras ? 'prod+extras' : 'prod', ms, got,
-    cost, in_tok: inTok, usage, subtype, turns, raw: text.slice(0, 4000),
+    ...k, shape: override !== undefined ? 'arm' : (useExtras ? 'prod+extras' : 'prod'),
+    ms, got, cost, in_tok: inTok, usage, subtype, turns, raw: text.slice(0, 4000),
   };
 }
 
@@ -199,6 +217,17 @@ function line(idx, tag, r) {
 }
 
 for (const [idx, k] of picked.entries()) {
+  if (ARMS.length) {
+    // 순서를 사례마다 한 칸 돌린다 — 첫 번째 판에만 식은 회차가 몰리지 않게.
+    const order = ARMS.map((_, i) => ARMS[(i + idx) % ARMS.length]);
+    for (const a of order) {
+      const r = await once(k, false, armRules.get(a));
+      r.shape = armName(a);
+      armRows.get(a).push(r);
+      line(idx, armName(a).padEnd(9), r);
+    }
+    continue;
+  }
   if (!PAIRED) {
     const r = await once(k, EXTRAS);
     rows.push(r);
@@ -226,7 +255,10 @@ function save(name, rs) {
 }
 
 console.log('');
-if (PAIRED) {
+if (ARMS.length) {
+  for (const a of ARMS) save(OUT.replace('.jsonl', `-${armName(a)}.jsonl`), armRows.get(a));
+  console.log('판별 순위 — pair_compare.py 로 판을 둘씩 맞대고 엇갈린 사례로 판정한다');
+} else if (PAIRED) {
   save(OUT, rows);
   save(OUT.replace('.jsonl', '-extras.jsonl'), rowsB);
   console.log('짝 비교 채점 — grade2.py 를 파일마다 돌리고 사례별 정오는 pair_compare.py 로 본다');
