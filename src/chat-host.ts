@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import type { ChildProcessWithoutNullStreams } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { App } from '@slack/bolt';
@@ -438,6 +439,22 @@ export class ChatHost {
     if (this.sweeper) {
       clearInterval(this.sweeper);
       this.sweeper = null;
+    }
+    // 상주 turn.py 를 내린다 — 안 내리면 그 아래 agy 워커(하나에 177MB)가 남는다.
+    // 트리째 죽인다: turn.py 만 죽이면 그 자식인 agy 가 고아로 남을 수 있다.
+    const child = this.turnProc;
+    this.turnProc = null;
+    if (child && child.exitCode === null) {
+      try {
+        child.stdin?.end();
+        if (process.platform === 'win32' && child.pid) {
+          spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+        } else {
+          child.kill();
+        }
+      } catch (error) {
+        this.logger.warn('상주 turn.py 종료 실패', error);
+      }
     }
     if (!this.app) return;
     try {
@@ -1135,9 +1152,12 @@ export class ChatHost {
     return [...users].every((u) => u === id);
   }
 
-  private runTurn(key: string, name: string, text: string, decide: boolean,
-                  manager: boolean): Promise<TurnResult> {
-    const payload = JSON.stringify({
+  /**
+   * 한 턴의 요청 몸통. 상주 경로와 단발 경로가 **같은 것을 보내야** 하므로 한 곳에서 만든다.
+   */
+  private turnBody(key: string, name: string, text: string, decide: boolean,
+                   manager: boolean): Record<string, unknown> {
+    return {
       bot: this.opts.name,
       key,
       user: key.startsWith('U') ? key : '',
@@ -1149,14 +1169,157 @@ export class ChatHost {
       where: this.isDmKey(key) ? 'dm' : 'channel',
       decide,
       text,
-    });
+    };
+  }
 
-    return new Promise<TurnResult>((resolve) => {
-      const child = spawn(this.opts.python, ['-X', 'utf8', this.opts.script], {
+  /**
+   * 상주 `turn.py` 를 띄워 두고 말이 올 때마다 한 줄 써 넣는다.
+   *
+   * **예전에는 말마다 프로세스를 띄웠다.** 그러면 turn.py 가 부르는 agy 도 매 턴 새로
+   * 뜨고 그 기동이 5초다(실측 n=9 · 중앙값 5.0 · 모델과 무관한 CLI 인증·핸드셰이크).
+   * 한 번 띄워 두면 turn.py 가 대화별 agy 워커를 들고 있어 그 5초가 사라진다 —
+   * 3턴 대화 실측 **10.9초 대 37.3초**.
+   *
+   * ⚠️ **turn.py 는 한 번에 하나씩 처리한다.** 같은 봇에 동시에 온 말은 줄을 선다.
+   *    같은 대화의 턴은 원래 줄을 서야 하고(앞 턴을 기억해야 한다), 봇이 다르면
+   *    프로세스가 달라 여전히 나란히 돈다.
+   * ⚠️ **상주가 실패해도 답은 나가야 한다** — 띄우기·쓰기가 막히면 예전처럼 한 번만
+   *    쓰는 프로세스로 내려간다(`runTurnOnce`). 사람은 봇이 왜 조용한지 알 길이 없다.
+   */
+  private turnProc: ChildProcessWithoutNullStreams | null = null;
+  private turnBuf = '';
+  private turnSeq = 0;
+  private readonly turnPending = new Map<string, {
+    resolve: (result: TurnResult) => void;
+    timer: NodeJS.Timeout;
+  }>();
+
+  private ensureTurnProc(): ChildProcessWithoutNullStreams | null {
+    const live = this.turnProc;
+    if (live && !live.killed && live.exitCode === null && live.signalCode === null) {
+      return live;
+    }
+    try {
+      const child = spawn(this.opts.python, ['-X', 'utf8', this.opts.script, '--serve'], {
         cwd: path.dirname(this.opts.script),
         env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
         windowsHide: true,
       });
+      this.turnProc = child;
+      this.turnBuf = '';
+
+      child.stdout.setEncoding('utf-8');
+      child.stdout.on('data', (chunk: string) => this.onTurnData(chunk));
+      child.stderr.setEncoding('utf-8');
+      child.stderr.on('data', (chunk: string) => {
+        const line = chunk.trim();
+        if (line) this.logger.debug('turn.py', { line: line.slice(-500) });
+      });
+
+      // 프로세스가 죽으면 **기다리던 것 전부에 실패를 알린다** — 안 그러면 슬랙 쪽이
+      // 영원히 매달리고, 그 대화는 다시 말을 걸어도 「생각 중」에서 안 벗어난다.
+      const bury = (why: string) => {
+        if (this.turnProc === child) this.turnProc = null;
+        for (const [id, waiting] of [...this.turnPending]) {
+          clearTimeout(waiting.timer);
+          this.turnPending.delete(id);
+          waiting.resolve({ reply: '', error: `turn.py 종료 (${why})` });
+        }
+      };
+      child.on('error', (error) => {
+        this.logger.warn('상주 turn.py 오류', error);
+        bury(error.message);
+      });
+      child.on('close', (code, signal) => bury(`code=${code} signal=${signal}`));
+      return child;
+    } catch (error) {
+      this.logger.warn('상주 turn.py 를 못 띄웠다 — 단발로 내려간다', error);
+      this.turnProc = null;
+      return null;
+    }
+  }
+
+  private onTurnData(chunk: string): void {
+    this.turnBuf += chunk;
+    // 한 줄이 비정상으로 길면 버린다 — 동기가 깨진 채 무한히 쌓이는 것을 막는다.
+    if (this.turnBuf.length > 4 * 1024 * 1024) {
+      this.logger.warn('turn.py 출력이 너무 길다 — 버퍼를 버린다', { size: this.turnBuf.length });
+      this.turnBuf = '';
+      return;
+    }
+    for (;;) {
+      const nl = this.turnBuf.indexOf('\n');
+      if (nl < 0) break;
+      const line = this.turnBuf.slice(0, nl).trim();
+      this.turnBuf = this.turnBuf.slice(nl + 1);
+      if (!line.startsWith('{')) continue;
+      let out: TurnResult & { id?: string };
+      try {
+        out = JSON.parse(line) as TurnResult & { id?: string };
+      } catch {
+        this.logger.warn('turn.py 응답 파싱 실패', { line: line.slice(0, 300) });
+        continue;
+      }
+      const id = out.id;
+      if (!id) continue;
+      const waiting = this.turnPending.get(id);
+      // 시간을 넘겨 이미 포기한 요청의 답 — 늦게 온 것은 그냥 버린다.
+      if (!waiting) continue;
+      clearTimeout(waiting.timer);
+      this.turnPending.delete(id);
+      waiting.resolve(out);
+    }
+  }
+
+  private runTurn(key: string, name: string, text: string, decide: boolean,
+                  manager: boolean): Promise<TurnResult> {
+    const body = this.turnBody(key, name, text, decide, manager);
+    const child = this.ensureTurnProc();
+    if (!child || !child.stdin) return this.runTurnOnce(body);
+
+    const id = `t${++this.turnSeq}`;
+    // **줄 하나가 요청 하나다.** `JSON.stringify` 가 줄바꿈을 escape 하므로 그대로 쓴다.
+    const line = `${JSON.stringify({ id, ...body })}\n`;
+    return new Promise<TurnResult>((resolve) => {
+      const timer = setTimeout(() => {
+        this.turnPending.delete(id);
+        // **프로세스를 죽이지 않는다** — 뒤에 줄 선 요청까지 같이 잃는다. 늦게 오는
+        // 답은 위에서 id 가 안 맞아 버려진다.
+        resolve({ reply: '', error: `turn.py 응답 없음 (${TURN_TIMEOUT_MS / 1000}초)` });
+      }, TURN_TIMEOUT_MS);
+      this.turnPending.set(id, { resolve, timer });
+      child.stdin!.write(line, 'utf-8', (error) => {
+        if (!error) return;
+        clearTimeout(timer);
+        this.turnPending.delete(id);
+        this.logger.warn('상주 turn.py 쓰기 실패 — 단발로 내려간다', error);
+        void this.runTurnOnce(body).then(resolve);
+      });
+    });
+  }
+
+  /**
+   * 예전 경로 — 한 번 쓰고 끝나는 프로세스. 상주가 막혔을 때의 안전망.
+   *
+   * ⚠️ **여기서 던지면 안 된다.** 이 함수는 안전망이라, 거부(reject)로 끝나면 부르는
+   * 쪽이 `TurnResult` 를 못 받고 그 대화는 다시 말을 걸어도 「생각 중」에서 안 벗어난다.
+   * `spawn` 은 보통 `error` 이벤트로 알리지만 **동기로 던지기도 한다**(인자가 틀렸거나
+   * 열 수 있는 핸들이 없을 때). 그래서 감싼다.
+   */
+  private runTurnOnce(body: Record<string, unknown>): Promise<TurnResult> {
+    const payload = JSON.stringify(body);
+    return new Promise<TurnResult>((resolve) => {
+      let child: ChildProcessWithoutNullStreams;
+      try {
+        child = spawn(this.opts.python, ['-X', 'utf8', this.opts.script], {
+          cwd: path.dirname(this.opts.script),
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+          windowsHide: true,
+        });
+      } catch (error) {
+        resolve({ reply: '', error: `spawn 실패: ${(error as Error).message}` });
+        return;
+      }
 
       let stdout = '';
       let stderr = '';
