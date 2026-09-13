@@ -1281,6 +1281,14 @@ export class ChatHost {
    */
   private async runTurn(key: string, name: string, text: string, decide: boolean,
                         manager: boolean): Promise<TurnResult> {
+    // ⛔ **`CHATBOT_SERVE=off` 로 상주를 끈다** (2026-09-14 추가). 켤 때 이 문을 안
+    //    만들어서 되돌리려면 코드를 고쳐야 했다 — 이 저장소는 위험한 기본값에 문을
+    //    달아 두는데(`BOARD_NARROW=off` · `ANALYSIS_AGY_TYPES` ·
+    //    `BOARD_NARROW_FALLBACK=off`) 여기만 빠져 있었다.
+    //    끄면 말 한 번에 프로세스 하나인 예전 길로 돈다(agy 기동 5초를 매 턴 문다).
+    if (process.env.CHATBOT_SERVE === 'off') {
+      return this.runTurnOnce(this.turnBody(key, name, text, decide, manager));
+    }
     const first = await this.runTurnResident(key, name, text, decide, manager);
     if (!first.error || !/turn\.py 종료/.test(first.error)) return first;
     this.logger.info('상주 turn.py 가 내려가 있었다 — 한 번 다시 보낸다');

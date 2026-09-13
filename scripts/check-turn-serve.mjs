@@ -141,6 +141,34 @@ const r5 = await host2.runTurn('U5', '무', '안녕', false, false);
 ok('상주를 못 띄우면 단발로 내려가 실패를 JSON 으로 돌려준다',
    Boolean(r5.error) && r5.reply === '', JSON.stringify(r5));
 
+// ── ⑥ `CHATBOT_SERVE=off` 가 상주를 끄는가 ───────────────────────────────────
+//
+// **켤 때 이 문을 안 만들어서 되돌리려면 코드를 고쳐야 했다**(2026-09-14 추가).
+// 문을 달았으면 실제로 막는지도 같이 본다 — 막는 시늉만 하는 문은 없느니만 못하다.
+// ④ 가 `cp.spawn` 을 던지게 바꿔 두었으므로 가짜를 다시 세운다 — 안 세우면 이 시험이
+// 앞 시험의 고장을 물려받아 「0개 띄움」으로 잘못 걸린다.
+cp.spawn = (cmd, args) => {
+  const child = new FakeChild(args ?? []);
+  spawned.push(child);
+  return child;
+};
+const before = spawned.length;
+process.env.CHATBOT_SERVE = 'off';
+const host3 = new ChatHost({
+  name: 'zz', python: 'python', script: 'C:/nowhere/turn.py',
+  surfaces: ['dm'], managerUserId: 'UMGR',
+});
+const p6 = host3.runTurn('U6', '기', '안녕', false, false);
+const born = spawned.slice(before);
+ok('끄면 프로세스를 하나만 띄운다', born.length === 1, `띄운 수 ${born.length}`);
+ok('끄면 --serve 를 안 붙인다',
+   born.length === 1 && !born[0].args.includes('--serve'),
+   JSON.stringify(born[0]?.args));
+// 단발 경로는 프로세스가 닫힐 때 답을 읽는다 — 빈 답을 흘리고 닫아 준다.
+born[0]?.die(0);
+await p6;
+delete process.env.CHATBOT_SERVE;
+
 cp.spawn = realSpawn;
 
 if (fails.length) {
@@ -148,7 +176,8 @@ if (fails.length) {
   for (const f of fails) console.error(`  - ${f}`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 상주 turn.py (프로세스 하나 · id 대응 · 죽음 통보 · 재시도 · 단발 폴백)');
+  console.log('통과 — 상주 turn.py (프로세스 하나 · id 대응 · 죽음 통보 · 재시도 · 단발 폴백'
+    + ' · CHATBOT_SERVE=off 로 끄기)');
 }
 // **여기서 끊어 준다.** 답을 못 준 요청이 하나라도 남으면 240초 타이머가 살아 있어
 // 이 검사가 그만큼 매달리고, `npm test` 가 통째로 그만큼 길어진다(실측 8분).
