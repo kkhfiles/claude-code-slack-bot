@@ -1395,8 +1395,14 @@ export class ChatHost {
   private markFor(key: string): string {
     const conv = this.readNear('bots', this.opts.name, 'data', 'conv', `${key}.json`);
     const cfg = this.readNear('bots', this.opts.name, 'config.json');
-    // 대화에 저장된 말투 → 봇 기본 말투 → 뜰 때 읽어 둔 값 순으로 처음 잡히는 것.
-    const tone = [conv?.tone, cfg?.tone, this.botTone]
+    // 대화에 저장된 말투 → **이 방에 적어 둔 말투** → 봇 기본 말투 → 뜰 때 읽어 둔 값
+    // 순으로 처음 잡히는 것. 차례는 파이썬(`turn.py` 의 tone 계산)과 같아야 한다 —
+    // 방 말투를 여기서 빼먹었더니 시험 방에서 **말은 새 말투로 나가는데 표시만 옛
+    // 말투로 떴다.** 두 쪽이 갈려도 알려 주는 것이 없어 눈으로 봐야 안다.
+    // `readNear` 는 무엇이 들었는지 모르는 JSON 을 준다. 방 묶음만 꺼내 쓰므로 꼴을
+    // 여기서 한 번 밝힌다.
+    const rooms = (cfg?.rooms ?? {}) as Record<string, { tone?: unknown } | undefined>;
+    const tone = [conv?.tone, rooms[key]?.tone, cfg?.tone, this.botTone]
       .find((t) => typeof t === 'string' && t.trim());
     return this.marksNow()[String(tone ?? '').trim()] || this.mark;
   }
