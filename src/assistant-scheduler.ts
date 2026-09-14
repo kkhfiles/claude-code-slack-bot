@@ -311,6 +311,8 @@ export interface AssistantConfig {
 export interface AnalysisRunResult {
   rateLimited: boolean;
   timedOut: boolean;
+  /** 세션이 도구 0회로 두 번 다 되묻고 끝남 — 산출물 없음. `completed` 로 적지 않는다. */
+  noOutput?: boolean;
   sessionId?: string;
   costUsd: number;
   resetsAt?: number;
@@ -1719,24 +1721,29 @@ export class AssistantScheduler {
   }
 
   /**
-   * 결정론 러너를 세션보다 **먼저** 띄우는 분석 종과 그 사이클.
+   * 결정론 러너를 세션보다 **먼저** 띄우는 분석 종 — 무엇을 어디서 띄우나.
    *
-   * 여기 없는 종은 프롬프트가 스스로 러너를 띄운다(주간 archive-sync·product-docs·
-   * kg-regression). 그쪽은 아직 이 실패를 안 냈으므로 옮기지 않았다.
+   * 데일리 둘은 `daily_pipeline_run`(레포 루트에서 `-m mycelium.batch…`), 주간 셋은
+   * `_detached_runner` 공통부를 쓰는 러너(`mycelium/` 에서 `-m batch.…`)라 cwd 가 다르다.
    *
-   * ⚠️ **주간 종을 여기 추가하려면 가드를 먼저 넣어라.** 그 셋은 공통부
-   * `mycelium/batch/_detached_runner.py` 의 `spawn_detached` 를 쓰는데 거기엔 이중 기동
-   * 가드가 없다(부르는 쪽이 하나라 아직 필요 없었다). 가드 없이 이 표에 넣으면 프롬프트의
-   * 두 번째 호출이 「완주한다」는 거짓 성공 메시지를 세션에 주고 그 회차의 부팅 로그를
-   * 지운다 — `daily_pipeline_run._already_launched` 가 막는 바로 그 둘이다.
+   * 주간 셋은 2026-09-09 에 「아직 이 실패를 안 냈으므로」 빼 두었는데, 09-12 토요일에
+   * archive-sync·product-docs 가 같은 모양으로 갔다(7초 · 도구 0회 · 되묻고 종료 ·
+   * `completed` 기록). 이중 기동 가드는 `_detached_runner.Runner.already_launched` 로
+   * 먼저 넣었다(2026-09-14) — 가드 없이 이 표에 넣으면 프롬프트의 두 번째 호출이
+   * 「완주한다」는 거짓 성공 메시지를 세션에 주고 그 회차의 부팅 로그를 지운다.
+   *
+   * 여기 없는 종은 러너가 없는 종이다(세션이 직접 돌린다).
    */
-  private static readonly PIPELINE_CYCLE_BY_TYPE: Record<string, string> = {
-    'data-sync': 'midnight',
-    'data-sync-noon': 'noon',
+  private static readonly RUNNER_PRELAUNCH_BY_TYPE: Record<string, { argv: string[]; cwdSub?: string }> = {
+    'data-sync': { argv: ['-m', 'mycelium.batch.daily_pipeline_run', '--cycle', 'midnight', '--detach'] },
+    'data-sync-noon': { argv: ['-m', 'mycelium.batch.daily_pipeline_run', '--cycle', 'noon', '--detach'] },
+    'product-docs-sync': { argv: ['-m', 'batch.product_docs_weekly_sync', '--detach'], cwdSub: 'mycelium' },
+    'archive-sync': { argv: ['-m', 'batch.archive_weekly_sync', '--detach'], cwdSub: 'mycelium' },
+    'kg-regression': { argv: ['-m', 'batch.kg_regression_weekly', '--detach'], cwdSub: 'mycelium' },
   };
 
   /**
-   * 데일리 파이프라인 러너를 detach 로 띄운다 — **세션이 뜨기 전에**.
+   * 결정론 러너를 detach 로 띄운다 — **세션이 뜨기 전에**.
    *
    * 프롬프트가 §3 에서 러너를 띄우도록 시키는 구조였고, 그것이 두 번 깨졌다.
    * 09-03 은 세션이 §3 을 건너뛰고 전날 기록으로 가짜 보고서를 냈고, 09-09 는 세션이
@@ -1747,18 +1754,18 @@ export class AssistantScheduler {
    * 옮긴다 — 기동은 스케줄러가 하고, 세션은 폴링·판단·보고서만 맡는다. 세션이 무슨
    * 짓을 하든 데이터 작업은 이미 트리 밖에서 돌고 있다.
    *
-   * 이중 기동은 러너 쪽 `--detach` 가드가 막는다(`daily_pipeline_run._already_launched`).
-   * 그래서 프롬프트의 `--detach` 호출을 지우지 않아도 안전하고, 재시도 회차에서 다시
-   * 불러도 무해하다. Best-effort — 던지지 않는다(기동 실패도 세션은 돌아야 한다).
+   * 이중 기동은 러너 쪽 `--detach` 가드가 막는다(`daily_pipeline_run._already_launched` ·
+   * `_detached_runner.Runner.already_launched`). 그래서 프롬프트의 `--detach` 호출을
+   * 지우지 않아도 안전하고, 재시도 회차에서 다시 불러도 무해하다. Best-effort —
+   * 던지지 않는다(기동 실패도 세션은 돌아야 한다).
    */
-  private launchPipelineRunner(type: string, cycle: string): Promise<void> {
+  private launchPipelineRunner(type: string, spec: { argv: string[]; cwdSub?: string }): Promise<void> {
     return new Promise((resolve) => {
       const proc = spawn(
         'python',
-        ['-X', 'utf8', '-m', 'mycelium.batch.daily_pipeline_run',
-          '--cycle', cycle, '--detach'],
+        ['-X', 'utf8', ...spec.argv],
         {
-          cwd: this.workingDir,
+          cwd: spec.cwdSub ? path.join(this.workingDir, spec.cwdSub) : this.workingDir,
           stdio: ['ignore', 'pipe', 'pipe'],
           shell: process.platform === 'win32',
           env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
@@ -1789,7 +1796,7 @@ export class AssistantScheduler {
         const out = (stdout.trim() || stderr.trim());
         this.logger.info('Pipeline runner pre-launched', {
           type,
-          cycle,
+          argv: spec.argv.join(' '),
           code: code ?? -1,
           // 「detach 실행 pid=」면 이번에 띄운 것이고 「띄우지 않는다」면 이미 떠 있던 것이다.
           out: out.slice(0, 300),
@@ -2287,6 +2294,8 @@ export class AssistantScheduler {
     const completedTypes: string[] = [];
     const skippedTypes: { type: string; reason: string }[] = [];
     const timedOutTypes: string[] = [];
+    /** 세션이 두 번 다 되묻고 끝나 산출물이 없는 타입 — 종료 메시지에 그대로 적는다. */
+    const noOutputTypes: string[] = [];
     // `sessionId` 가 있으면 그 세션을 이어받고(리미트에 걸린 당사자), 없으면 새로
     // 돌린다(중단 때문에 **아예 못 돈** 뒤쪽 타입). 둘을 한 큐에 담아야 중단과
     // 재개가 대칭이 된다 — 예전에는 당사자만 큐에 들어가서, 뒤쪽 타입은 재시도
@@ -2378,6 +2387,16 @@ export class AssistantScheduler {
             break; // Stop remaining types in this group (rate limit affects all)
           }
 
+          if (result.noOutput) {
+            // 되묻고 두 번 끝난 회차 — 「완료」가 아니다. 다음 타입으로 넘어간다
+            // (리미트가 아니라 그룹을 끊을 이유가 없다).
+            noOutputTypes.push(type);
+            this.appendAnalysisJournal(schedule, {
+              kind: 'outcome', type, outcome: 'no-output', sessionId: result.sessionId,
+            });
+            break;
+          }
+
           succeeded = true;
           completedTypes.push(type);
           this.appendAnalysisJournal(schedule, { kind: 'outcome', type, outcome: 'completed' });
@@ -2413,6 +2432,9 @@ export class AssistantScheduler {
     const parts = [`📊 ${label} 완료: ${completedTypes.join(', ') || '(없음)'}`];
     if (timedOutTypes.length > 0) {
       parts.push(`⏱️ 타임아웃: ${timedOutTypes.join(', ')}`);
+    }
+    if (noOutputTypes.length > 0) {
+      parts.push(`🫥 산출물 없음(세션이 되묻고 끝남): ${noOutputTypes.join(', ')}`);
     }
     if (skippedTypes.length > 0) {
       parts.push(`⏭️ cadence 스킵: ${skippedTypes.map(s => s.type).join(', ')}`);
@@ -2460,7 +2482,10 @@ export class AssistantScheduler {
           try {
             this.logger.info(`Retrying analysis: ${type}`, { sessionId });
             const r = await this.runSingleAnalysis(type, sessionId);
-            const outcome = r.rateLimited ? 'rate_limited' : r.timedOut ? 'timeout' : 'completed';
+            const outcome = r.rateLimited ? 'rate_limited'
+              : r.timedOut ? 'timeout'
+              : r.noOutput ? 'no-output'
+              : 'completed';
             (outcome === 'completed' ? done : failed).push(type);
             this.appendAnalysisJournal(schedule, {
               kind: 'outcome', type, outcome, viaRetry: true, sessionId: r.sessionId,
@@ -2538,9 +2563,37 @@ export class AssistantScheduler {
     return null;
   }
 
+  /**
+   * 예약 세션에 붙는 시스템 프롬프트 한 줄 — **사람이 없다는 것을 모델에게 말한다.**
+   *
+   * 2026-09-08 분석 모델이 Sonnet 4.6 → Sonnet 5 로 바뀐 뒤 첫 토요일(09-12)에 13종 중
+   * 5종이 일을 못 마쳤다. 둘은 프롬프트를 설명문으로 읽고 「what would you like me to
+   * do?」로 되물으며 7초 만에 끝났고(도구 0회), 하나는 Edit 가 거부되자 Write 로 안
+   * 넘어가고 사용자에게 물었고, 하나는 외부 요인(다우 세션 만료)에 막히자 보고서 없이
+   * 끝났다. **전부 `subtype: success`.** 09-09 자정(#35)과 같은 유형이다.
+   *
+   * 제목+설명문으로 시작하는 프롬프트에서만 났고 명령문으로 시작하는 프롬프트는 전부
+   * 정상이었다 — 그러나 같은 모양이라도 통과한 것이 있어 확률적이다. 프롬프트마다
+   * 첫 줄을 고치는 대신 여기서 한 번에 말한다. 되묻는 것 자체를 막는 층이고, 그래도
+   * 되물으면 `runSingleAnalysis` 의 도구 0회 재시도가 받는다.
+   */
+  private static readonly SCHEDULED_SESSION_DIRECTIVE = [
+    '이 세션은 사람이 없는 예약 실행이다. 프롬프트는 설명이 아니라 지금 수행할 절차다.',
+    '되묻지 않는다 — 질문으로 끝내면 이 회차는 산출물 없이 사라진다.',
+    '도구 호출이 거부되면 허용된 다른 도구(Write·Bash)로 같은 결과를 낸다.',
+    '외부 요인(세션 만료·자격증명 등)으로 막히면 막힌 단계와 사유를 보고서에 적고 끝낸다 — 보고서 없이 끝내지 않는다.',
+  ].join(' ');
+
+  /**
+   * 도구 0회로 끝난 회차에 다시 주는 머리말. 본문은 같은 프롬프트다.
+   */
+  private static readonly NUDGE_PREAMBLE =
+    '[지시] 아래는 지금 실행할 절차다. 되묻지 말고 첫 단계부터 수행한다.\n\n';
+
   private async runSingleAnalysis(
     type: string,
     resumeSessionId?: string,
+    nudged = false,
   ): Promise<AnalysisRunResult> {
     const promptPath = path.join(this.promptsDir, `analysis-${type}.md`);
     if (!fs.existsSync(promptPath)) {
@@ -2555,7 +2608,8 @@ export class AssistantScheduler {
       return this.runAgyAnalysis(type, promptPath);
     }
 
-    const prompt = fs.readFileSync(promptPath, 'utf-8');
+    const prompt = (nudged ? AssistantScheduler.NUDGE_PREAMBLE : '')
+      + fs.readFileSync(promptPath, 'utf-8');
     const defaults = this.config!.analysis.defaults;
     const typeConfig = this.config!.analysis.types[type];
     const allowedTools = typeConfig?.allowedTools ?? defaults.allowedTools;
@@ -2581,9 +2635,9 @@ export class AssistantScheduler {
     // **러너 기동을 세션에 맡기지 않는다.** 세션이 뜨기 전에 여기서 띄운다 —
     // 근거와 경위는 `launchPipelineRunner` 주석. 재시도 회차에서도 그대로 부른다
     // (러너 가드가 「이미 진행 중」이면 안 띄우므로, 첫 회차가 못 띄웠을 때만 뜬다).
-    const pipelineCycle = AssistantScheduler.PIPELINE_CYCLE_BY_TYPE[type];
-    if (pipelineCycle) {
-      await this.launchPipelineRunner(type, pipelineCycle);
+    const prelaunch = AssistantScheduler.RUNNER_PRELAUNCH_BY_TYPE[type];
+    if (prelaunch) {
+      await this.launchPipelineRunner(type, prelaunch);
     }
 
     // 산출물 백스톱의 기준선 — **이 시각 이후에 쓰인 파일만** 이 세션의 성과다.
@@ -2596,7 +2650,8 @@ export class AssistantScheduler {
         model: analysisModel,
         permissionMode: 'default',
         allowedTools,
-        appendSystemPrompt: `CRITICAL: ${writablePaths.join(', ')} 디렉토리에만 새 파일 생성/수정. 그 외 파일 수정/삭제 금지.`,
+        appendSystemPrompt: `CRITICAL: ${writablePaths.join(', ')} 디렉토리에만 새 파일 생성/수정. 그 외 파일 수정/삭제 금지.\n`
+          + AssistantScheduler.SCHEDULED_SESSION_DIRECTIVE,
         env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1' },
         resumeSessionId,
         skipMcp: true,
@@ -2625,6 +2680,33 @@ export class AssistantScheduler {
     // Timeout detection
     if (result.subtype === 'error_timeout') {
       return { rateLimited: false, timedOut: true, sessionId: result.sessionId, costUsd: result.costUsd };
+    }
+
+    // **되묻고 끝난 회차 — 도구 0회 + 보고서 없음.** 2026-09-12 archive-sync·product-docs
+    // 가 7초 만에 「what would you like me to do?」로 끝났고 `completed` 로 기록됐다.
+    // 도구를 하나도 안 돌렸으니 부작용이 없다 — 머리말을 붙여 **새 세션으로 한 번** 다시
+    // 돌린다. `toolCalls` 를 못 읽는 회차(`undefined`)는 0 으로 읽지 않는다(모르는 것을
+    // 0 으로 읽으면 두 번 돈다 — `spawnOrFallback` 과 같은 규칙). 보고서 검사는 codex
+    // 폴백(`toolCalls: 0` 으로 돌아온다)이 이미 보고서를 남긴 경우를 거른다.
+    // 이어받는 회차는 안 한다 — 그 프롬프트는 `'continue'` 한 낱말이다.
+    if (!resumeSessionId && result.toolCalls === 0 && !result.isError
+        && !this.reportWrittenSince(type, startedAtMs)) {
+      if (!nudged) {
+        this.logger.warn('분석 세션이 도구 0회로 끝났다(되물음) — 머리말 붙여 1회 재시도', {
+          type, subtype: result.subtype, textPreview: result.text?.substring(0, 200),
+        });
+        recordEvent('analysis-askback', { type, retried: true });
+        return this.runSingleAnalysis(type, undefined, true);
+      }
+      // 두 번째도 빈손 — 성공으로 적지 않는다. 저널의 `no-output` 이 M12 보다 하루 먼저
+      // 「이 회차는 아무것도 안 했다」를 말해 준다.
+      this.logger.error('분석 세션이 재시도에서도 도구 0회로 끝났다 — no-output', { type });
+      recordEvent('analysis-askback', { type, retried: false });
+      errorCollector.add('AssistantScheduler', `분석 산출물 없음 (${type}): 세션이 두 번 다 되묻고 끝남`);
+      return {
+        rateLimited: false, timedOut: false, noOutput: true,
+        sessionId: result.sessionId, costUsd: result.costUsd,
+      };
     }
 
     // Rate limit / session limit detection
