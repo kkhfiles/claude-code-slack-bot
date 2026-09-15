@@ -15,7 +15,7 @@ node_modules/
 
 # Bot local state (per-installation, not sensitive)
 .working-dirs.json
-.session-state.json
+.session-state*.json
 .schedule-config.json
 .assistant-costs.json
 .calendar-cache.json
@@ -23,7 +23,10 @@ node_modules/
 .calendar-muted-events.json
 
 # Cross-session task files (may contain PII like channel IDs)
+# ⚠️ 이름을 하나만 적으면 변형이 빠져나간다 — `.session-state.pre-sdk.json` 이
+#    그렇게 추적돼 실제 사용자·대화방 아이디가 공개로 나갔다(2026-09-15).
 TASKS.md
+TASKS*.md
 
 # Bot runtime files
 bot.pid
