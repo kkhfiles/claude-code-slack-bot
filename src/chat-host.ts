@@ -210,6 +210,12 @@ interface TurnResult {
   speak?: boolean;
   error: string | null;
   elapsed_s?: number;
+  /**
+   * 파이썬이 **대화를 버리고 새로 열었다**는 표시(`turn.py` 의 `_reopen`). agy 가 이어
+   * 붙인 대화를 거부하면 그 대화는 영영 ERROR 라 새로 연다 — 그때 앞 이야기를 잃으므로
+   * 실장에게 알린다. 평소 턴에는 이 칸이 없다.
+   */
+  reopened?: { from?: string; why?: string; ok?: boolean };
 }
 
 export class ChatHost {
@@ -298,6 +304,13 @@ export class ChatHost {
   private toldMuteBot = new Set<string>();
   /** **허락 안 한 방**인데 불려 간 곳. 주인에게 방마다 한 번만 알린다. */
   private toldStranger = new Set<string>();
+  /**
+   * 대화를 새로 열었다고 실장에게 마지막으로 알린 시각. **봇마다 한 시간에 한 번** —
+   * 상류가 한 시간 내내 나쁘면 방마다 턴마다 DM 이 오고, 그러면 아무도 안 읽는다.
+   * 그동안 몇 번 더 났는지는 세어 두었다가 다음 알림에 얹는다.
+   */
+  private reopenToldAt = 0;
+  private reopenHeld = 0;
   /** 이미 인사한 방. 들어왔다 나갔다 해도 한 살림에 한 번만 인사한다. */
   private greeted = new Set<string>();
   private names = new Map<string, string>();
@@ -584,6 +597,49 @@ export class ChatHost {
     // 표시는 **턴이 시작할 때** 붙는다(`pump`) — 붙이는 곳과 떼는 곳이 갈려 있으면
     // 한쪽 길이 늘어날 때마다 안 떼지는 자리가 하나씩 생긴다.
     this.kick(client, user, channel, true);
+  }
+
+  /**
+   * 파이썬이 **대화를 버리고 새로 열었다** — 실장에게 한 줄 알린다.
+   *
+   * 2026-09-15 저녁 agy 가 이어 붙인 대화를 거부해 소인 7턴·커피콩 3턴이 조용히
+   * 침묵했고, 다음 날 사람이 말을 걸어 보고서야 알았다. 이제 파이썬이 그 자리에서 새
+   * 대화로 답하지만 **앞 이야기를 잃는 일**이라 사람이 알아야 한다. 자주 나면 상류가
+   * 나쁘다는 신호이기도 하다.
+   *
+   * **봇마다 한 시간에 한 번만 보낸다.** 그 사이 난 것은 세어 두었다가 다음 알림에 얹는다.
+   * 실장 ID 가 없으면 로그만 남긴다 — 알림 못 보내는 것이 답을 막으면 안 된다.
+   */
+  private async tellReopened(
+    client: App['client'], key: string, channel: string,
+    re: { from?: string; why?: string; ok?: boolean },
+  ): Promise<void> {
+    const line = `대화를 새로 열었습니다 (${key} · 옛 대화 ${(re.from || '?').slice(0, 8)} · `
+      + `${re.ok ? '새 대화로 답함' : '새 대화도 실패'}) — ${(re.why || '').slice(0, 120)}`;
+    this.logger.warn(`[reopened] ${line}`);
+    const manager = this.opts.managerUserId;
+    if (!manager) return;
+    const now = Date.now();
+    if (now - this.reopenToldAt < 60 * 60 * 1000) {
+      this.reopenHeld += 1;
+      return;
+    }
+    const held = this.reopenHeld;
+    this.reopenToldAt = now;
+    this.reopenHeld = 0;
+    try {
+      const im = await client.conversations.open({ users: manager });
+      if (!im.channel?.id) return;
+      await client.chat.postMessage({
+        channel: im.channel.id,
+        text: `:recycle: *${this.opts.name}* 이(가) <#${channel}> 에서 ${line}\n`
+          + (held ? `_(지난 한 시간 동안 ${held}번 더 있었습니다)_\n` : '')
+          + '_agy 가 이어 붙인 대화를 거부해서 그 대화를 버리고 새로 열었습니다. 앞 이야기는 '
+          + '최근 몇 마디만 넘어갔습니다. 자주 오면 상류(Gemini)가 나쁜 것입니다._',
+      });
+    } catch (error) {
+      this.logger.warn('대화를 새로 열었다는 알림을 못 보냈습니다', error);
+    }
   }
 
   /**
@@ -1074,6 +1130,11 @@ export class ChatHost {
             await this.react(client, 'remove', waiting.channel, ts, mark);
           }
         }
+
+        // **대화를 새로 열었으면 실장에게 알린다** — 답이 나갔든 안 나갔든. 앞 이야기를
+        // 잃은 것이라 사람이 알아야 하고, 자주 나면 그 자체가 상류가 나쁘다는 신호다.
+        // 답과 무관하게 먼저 처리한다 — 아래 분기 어디로 가든 알림은 같다.
+        if (result.reopened) await this.tellReopened(client, key, waiting.channel, result.reopened);
 
         if (result.error) {
           this.logger.warn(`Turn failed for ${key}: ${result.error}`);
