@@ -612,10 +612,12 @@ export class ChatHost {
    */
   private async tellReopened(
     client: App['client'], key: string, channel: string,
-    re: { from?: string; why?: string; ok?: boolean },
+    info: { from?: string; why?: string; ok?: boolean },
   ): Promise<void> {
-    const line = `대화를 새로 열었습니다 (${key} · 옛 대화 ${(re.from || '?').slice(0, 8)} · `
-      + `${re.ok ? '새 대화로 답함' : '새 대화도 실패'}) — ${(re.why || '').slice(0, 120)}`;
+    // 방이면 링크로, 1:1 이면(열쇠가 사람 ID) 그냥 「DM」 — `<#U…>` 는 깨진 링크로 뜬다.
+    const where = channel.startsWith('C') ? `<#${channel}>` : 'DM';
+    const line = `대화를 새로 열었습니다 (${key} · 옛 대화 ${(info.from || '?').slice(0, 8)} · `
+      + `${info.ok ? '새 대화로 답함' : '새 대화도 실패'}) — ${(info.why || '').slice(0, 120)}`;
     this.logger.warn(`[reopened] ${line}`);
     const manager = this.opts.managerUserId;
     if (!manager) return;
@@ -632,8 +634,9 @@ export class ChatHost {
       if (!im.channel?.id) return;
       await client.chat.postMessage({
         channel: im.channel.id,
-        text: `:recycle: *${this.opts.name}* 이(가) <#${channel}> 에서 ${line}\n`
-          + (held ? `_(지난 한 시간 동안 ${held}번 더 있었습니다)_\n` : '')
+        text: `:recycle: *${this.opts.name}* 이(가) ${where} 에서 ${line}\n`
+          // 「지난 한 시간」이라 적지 않는다 — 묶어 둔 것은 앞 알림 뒤 언제든 났을 수 있다.
+          + (held ? `_(앞 알림 뒤로 ${held}번 더 있었습니다)_\n` : '')
           + '_agy 가 이어 붙인 대화를 거부해서 그 대화를 버리고 새로 열었습니다. 앞 이야기는 '
           + '최근 몇 마디만 넘어갔습니다. 자주 오면 상류(Gemini)가 나쁜 것입니다._',
       });
@@ -1133,8 +1136,9 @@ export class ChatHost {
 
         // **대화를 새로 열었으면 실장에게 알린다** — 답이 나갔든 안 나갔든. 앞 이야기를
         // 잃은 것이라 사람이 알아야 하고, 자주 나면 그 자체가 상류가 나쁘다는 신호다.
-        // 답과 무관하게 먼저 처리한다 — 아래 분기 어디로 가든 알림은 같다.
-        if (result.reopened) await this.tellReopened(client, key, waiting.channel, result.reopened);
+        // **기다리지 않는다** — 알림 DM 이 느리다고 방에 나갈 답까지 늦어지면 안 된다.
+        // 실패는 안에서 삼킨다.
+        if (result.reopened) void this.tellReopened(client, key, waiting.channel, result.reopened);
 
         if (result.error) {
           this.logger.warn(`Turn failed for ${key}: ${result.error}`);
