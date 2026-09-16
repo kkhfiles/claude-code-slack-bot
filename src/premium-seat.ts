@@ -1374,6 +1374,18 @@ export class PremiumSeatSlack {
       }
       case 'SWAP_COMPLETED':
         return `${svc} Premium 좌석 변경이 끝났습니다. ${p.holder?.name} → ${p.recipient?.name}`;
+      case 'READ_FAILING': {
+        // 파이썬이 연속 실패를 세어 하루 한 번 줄 세운다(reconcile.note_read_result).
+        // 2026-09-15 관리 화면 문구 변경으로 읽기가 108회 연속 실패했는데 로그에만 남았다.
+        const lines = [
+          `*${svc} 좌석 읽기 ${p.streak}회 연속 실패*`,
+          '',
+          `마지막 오류: \`${p.failure_code ?? 'FAILED'}\``,
+        ];
+        if (p.message) lines.push(`> ${p.message}`);
+        lines.push('', '판이 갱신되지 않고 있습니다. 관리 화면 문구가 바뀌었거나 로그인이 풀렸을 수 있습니다 — 봇 로그의 [PremiumSeat] 를 보세요.');
+        return lines.join('\n');
+      }
       default:
         return '';
     }
@@ -1394,7 +1406,7 @@ export class PremiumSeatSlack {
     return [
       '관리 화면 순서',
       `1. ${recipient} 의 티어를 「할당된 좌석 없음」으로 변경`,
-      `2. ${holder} 의 티어를 「스탠다드」로 변경`,
+      `2. ${holder} 의 티어를 「표준」으로 변경`, // 2026-09-15 부터 화면 문구가 「스탠다드」→「표준」
       `3. ${recipient} 의 티어를 「Premium」으로 변경`,
     ];
   }
