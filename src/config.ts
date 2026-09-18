@@ -171,6 +171,10 @@ export const config = {
     // **연결은 늘지 않는다** — DM 과 같은 앱, 같은 소켓 하나가 두 자리를 다 받는다
     // (`ChatHost.surfaces`). 자리마다 연결을 열면 부름의 절반이 사라진다.
     chatChannel: process.env.LETTER_CHAT_CHANNEL || '',
+    // 실원 전체가 있는 방(general). 커피챗 독려 안내(파이썬 `coffeechat_nudge.py`)와
+    // 실장이 말로 시킨 「전해 줘」(`letter-notice.ts`)가 여기로 나간다. **비면 전달은
+    // 시험 방으로만 갈 수 있다** — 방을 고르는 창에 general 이 안 뜬다.
+    generalChannel: process.env.LETTER_GENERAL_CHANNEL || '',
     // 커피챗 방에서는 **앞장서서 이끌어도 된다**(실장 지시). 점심원정대보다 굴레가 느슨하다 —
     // 이 방은 소통 이야기를 하러 모인 자리고 그 이야기의 진행을 봇이 맡는다.
     // 커피챗 방에서는 **바로바로 받는다**(실장 지시). 말한 뒤 뜸을 들이지 않고(0분),

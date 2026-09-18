@@ -179,6 +179,22 @@ export interface ChatBotOptions {
    * 명령이 핸들러 없는 쪽으로 가면 조용히 실패한다. 그래서 이 앱을 그대로 넘긴다.
    */
   attach?: (app: App) => void;
+  /**
+   * 파이썬이 **실장 확인을 거쳐야 나가는 부탁**(`ask`)을 실었을 때 부른다 — 「실원들에게
+   * 전해 줘」 같은 것. 여기서 방에 올리지 않는다. 받는 쪽(`letter-notice.ts`)이 실장 DM
+   * 에 확인 카드를 띄우고, 실장이 창에서 「보내기」를 눌러야 나간다.
+   *
+   * `from` 은 그 턴에 말한 사람이다 — 파이썬이 이미 실장 턴에서만 싣지만, 받는 쪽이
+   * 한 번 더 대조한다(두 겹이라야 한쪽을 고치다 어긋나도 안 샌다).
+   */
+  onAsk?: (client: App['client'], asks: TurnAsk[], from: { user: string; channel: string })
+    => Promise<void>;
+}
+
+/** 파이썬이 `ask` 칸에 싣는 것 하나. `name` 은 그 봇의 `control.actions` 이름. */
+export interface TurnAsk {
+  name: string;
+  text: string;
 }
 
 interface Waiting {
@@ -216,6 +232,8 @@ interface TurnResult {
    * 실장에게 알린다. 평소 턴에는 이 칸이 없다.
    */
   reopened?: { from?: string; why?: string; ok?: boolean };
+  /** 실장 확인을 거쳐야 나가는 부탁(`turn.py` 의 `_control_do`). 평소 턴에는 없다. */
+  ask?: TurnAsk[];
 }
 
 export class ChatHost {
@@ -1139,6 +1157,15 @@ export class ChatHost {
         // **기다리지 않는다** — 알림 DM 이 느리다고 방에 나갈 답까지 늦어지면 안 된다.
         // 실패는 안에서 삼킨다.
         if (result.reopened) void this.tellReopened(client, key, waiting.channel, result.reopened);
+
+        // **실장 확인을 거쳐야 나가는 부탁은 받는 쪽에 넘긴다** — 여기서 방에 올리지 않는다.
+        // 방에 나갈 답과 별개로 돈다(카드가 늦다고 답이 늦으면 안 된다). 실패는 안에서 삼킨다.
+        if (result.ask?.length && this.opts.onAsk) {
+          const users = [...(waiting.users ?? [])];
+          void this.opts.onAsk(client, result.ask, { user: users.length === 1 ? users[0] : '',
+                                                     channel: waiting.channel })
+            .catch((error) => this.logger.warn('확인 카드를 못 띄웠습니다', error));
+        }
 
         if (result.error) {
           this.logger.warn(`Turn failed for ${key}: ${result.error}`);

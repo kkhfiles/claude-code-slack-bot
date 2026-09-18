@@ -25,6 +25,7 @@ import { LunchPoller } from './lunch-poller';
 import { LunchButtons, readLunchBotToken, readLunchAnnounceChannel } from './lunch-buttons';
 import { ChatHost } from './chat-host';
 import { LetterRelay } from './letter-relay';
+import { LetterNotice } from './letter-notice';
 import { LetterBooking } from './letter-booking';
 import { LetterBoost } from './letter-boost';
 import { PremiumSeatSlack } from './premium-seat';
@@ -403,6 +404,19 @@ export class SlackHandler {
     const botTalk = config.chat.botTalk.enabled ? config.chat.botTalk : null;
     if (turnScript && config.letter.enabled
         && config.letter.botToken && config.letter.appToken) {
+      // 실장이 대화에서 「실원들에게 ○○ 전해 줘」라고 한 것을 방에 올리는 길. 대화(turn.py)가
+      // `ask` 로 넘기면 실장 DM 에 확인 카드를 띄우고, 버튼·창을 거쳐야 나간다. **대화만으로는
+      // 안 나간다.** 올릴 수 있는 방은 general 과 시험 방뿐이고 창에서 고른다.
+      const letterData = path.join(path.dirname(turnScript), 'bots', 'letter', 'data');
+      const notice = new LetterNotice({
+        managerUserId: config.letter.managerUserId,
+        rooms: [
+          ...(config.letter.generalChannel ? [{ id: config.letter.generalChannel, label: 'general' }] : []),
+          ...(testRoom ? [{ id: testRoom, label: 'bot_test' }] : []),
+        ],
+        logPath: path.join(letterData, 'notice.jsonl'),
+        pendingPath: path.join(letterData, 'notice-pending.json'),
+      });
       this.chatHosts.push(new ChatHost({
         name: 'letter',
         botToken: config.letter.botToken,
@@ -418,10 +432,12 @@ export class SlackHandler {
         buttIn: config.letter.buttIn.enabled ? config.letter.buttIn : null,
         greetOnJoin: config.letter.greetOnJoin && !!config.letter.chatChannel,
         managerUserId: config.letter.managerUserId,
+        onAsk: notice.enabled ? notice.offer : undefined,
         // 칭찬 전달과 1on1 예약은 대화가 아니다 — 같은 앱에 슬래시 명령·모달로 따로 붙는다.
         // **앱은 하나뿐이다**(소켓을 두 번 열면 슬랙이 한쪽에만 보내 조용히 실패한다).
         // 그래서 둘 다 같은 앱에 얹는다.
         attach: (app) => {
+          notice.register(app);
           new LetterRelay({
             managerUserId: config.letter.managerUserId,
             members: config.letter.members,

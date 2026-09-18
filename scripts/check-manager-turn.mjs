@@ -102,6 +102,42 @@ const judge = (host, users) => host['isManagerTurn'](new Set(users));
     host['isManagerTurn'](both) === false, { 모인사람: [...(both ?? [])] });
 }
 
+// --- 실장 확인을 거쳐야 나가는 부탁(`ask`)이 받는 쪽으로 넘어가나 ------------------
+// 파이썬이 `ask` 를 실으면 호스트는 **방에 올리지 않고** `onAsk` 에 넘긴다. 누가 말한
+// 턴인지도 같이 넘긴다 — 받는 쪽이 한 번 더 실장인지 본다(두 겹).
+{
+  const got = [];
+  const host = make();
+  host['selfUserId'] = 'U_BOT';
+  host['say'] = async () => {};
+  host['opts'].onAsk = async (_client, asks, from) => { got.push({ asks, from }); };
+  host['runTurn'] = async () => ({ reply: '네', error: null,
+                                   ask: [{ name: 'notice', text: '내일 회의 10시' }] });
+  host['enqueue'](ROOM, { channel: ROOM, ts: '200.1', text: '전해줘', react: true, user: BOSS });
+  await host['pump'](client(), ROOM, true);
+  await new Promise((r) => setTimeout(r, 10));   // `void` 로 넘기므로 한 박자 기다린다
+  check('`ask` 가 받는 쪽으로 넘어간다', got.length === 1 && got[0].asks[0].text === '내일 회의 10시', got);
+  check('누가 말한 턴인지 같이 넘긴다', got[0]?.from.user === BOSS && got[0]?.from.channel === ROOM, got[0]?.from);
+
+  got.length = 0;
+  host['enqueue'](ROOM, { channel: ROOM, ts: '200.2', text: '전해줘', react: true, user: BOSS });
+  host['enqueue'](ROOM, { channel: ROOM, ts: '200.3', text: '저도요', react: true, user: OTHER });
+  await host['pump'](client(), ROOM, true);
+  await new Promise((r) => setTimeout(r, 10));
+  check('여러 사람이 섞인 턴은 사람을 비워 넘긴다 (받는 쪽이 버리게)',
+    got.length === 1 && got[0].from.user === '', got[0]?.from);
+
+  // 받는 쪽이 없는 봇(소인)은 `ask` 가 와도 조용히 지나간다.
+  const plain = make();
+  plain['selfUserId'] = 'U_BOT';
+  plain['say'] = async () => {};
+  plain['runTurn'] = async () => ({ reply: '네', error: null, ask: [{ name: 'notice', text: 'x' }] });
+  plain['enqueue'](ROOM, { channel: ROOM, ts: '200.4', text: '전해줘', react: true, user: BOSS });
+  let crashed = false;
+  try { await plain['pump'](client(), ROOM, true); } catch { crashed = true; }
+  check('받는 쪽이 없는 봇은 `ask` 가 와도 안 죽는다', crashed === false);
+}
+
 function client() {
   return {
     reactions: { add: async () => {}, remove: async () => {} },
