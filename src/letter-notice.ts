@@ -384,7 +384,7 @@ export class LetterNotice {
    * 최근 것부터 `REMEMBER_MAX` 개만 둔다.
    */
   private remember(file: string, room: NoticeRoom, text: string, ts: string): void {
-    const head = '# 네가 방에 던진 안건 (최근 것부터 · 실장이 시켜서 네가 쓴 글이다)';
+    const head = '# 네가 방에 먼저 올린 글 — 안건·아침 말 걸기 (최근 것부터 · 네가 쓰고 실장이 보내기를 누른 글이다)';
     const entry = `## ${ts.slice(0, 16).replace('T', ' ')} · ${room.label} 방\n${text}`;
     let old: string[] = [];
     try {
@@ -476,6 +476,16 @@ export function coffeeKinds(
       header: '',
       hint: '이 칸에 있는 그대로 커피콩 말로 나갑니다 (머리말 없음). 마음에 안 들면 고치거나 취소하세요.',
       rooms: [...chat, ...test, ...general],
+      rememberPath: files.agenda,
+    },
+    // 아침 시계(`letter-initiative.ts`)가 실은 「오늘 커피챗 방에 걸 글」. 안건과 같은 관문·같은
+    // 기억 파일이고, 파이썬 쪽 빗장(`gate`)을 이미 지난 글이다.
+    pulse: {
+      title: '커피챗 방에 먼저 말 걸기',
+      ask: '오늘 커피챗 방에 이렇게 말할까요? (아침 현황을 보고 커피콩이 쓴 글입니다)',
+      header: '',
+      hint: '이 칸에 있는 그대로 커피콩 말로 나갑니다 (머리말 없음). 마음에 안 들면 고치거나 취소하세요.',
+      rooms: [...chat, ...test],
       rememberPath: files.agenda,
     },
   };

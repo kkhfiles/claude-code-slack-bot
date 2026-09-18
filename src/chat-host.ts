@@ -234,9 +234,8 @@ export interface TurnResult {
   reopened?: { from?: string; why?: string; ok?: boolean };
   /** 실장 확인을 거쳐야 나가는 부탁(`turn.py` 의 `_control_do`). 평소 턴에는 없다. */
   ask?: TurnAsk[];
-  /** 봇이 먼저 말을 거는 턴(`initiate`)이었다는 표시와, 빗장이 막았으면 그 까닭. */
+  /** 아침 턴(`initiate`)이었다는 표시. */
   initiate?: boolean;
-  blocked?: string[];
 }
 
 export class ChatHost {
@@ -371,32 +370,15 @@ export class ChatHost {
   }
 
   /**
-   * **봇이 먼저 말을 거는 턴**(`turn.py` 의 `initiate`) — 사람 말 대신 현황판을 넣고, 낄지
-   * 말지·무슨 말을 할지를 모델이 정한다. 여기서 방에 올리지 않는다 — 부르는 쪽
-   * (`letter-initiative.ts`)이 빗장·상한을 거쳐 `post` 로 올린다. 상주 turn.py 를 같이 쓰므로
-   * 사람 턴과 줄을 서고, 그 방의 대화 기억에 남는다(다음에 사람이 답하면 봇이 안다).
-   *
-   * `key` 가 사람 ID 면 실장 DM 보고 턴이다(`where: dm`) — 실장 턴으로 넘긴다.
+   * **아침 턴**(`turn.py` 의 `initiate`) — 실장 DM 에 현황판을 넣고 「오늘 이렇게 할까요」를
+   * 만들게 한다. 실장 턴이므로 방에 걸 글은 `ask`(`pulse`)로 실려 나오고, 부르는 쪽
+   * (`letter-initiative.ts`)이 그것을 확인 카드로 띄운다. **여기서 방에 올리지 않는다.**
+   * 상주 turn.py 를 같이 쓰므로 사람 턴과 줄을 서고, 실장 DM 대화 기억에 남는다.
    */
   async initiate(client: App['client'], key: string, brief: string): Promise<TurnResult> {
     const manager = Boolean(this.opts.managerUserId) && key === this.opts.managerUserId;
-    return this.runTurn(key, manager ? await this.displayName(client, key) : '', brief, true,
+    return this.runTurn(key, manager ? await this.displayName(client, key) : '', brief, false,
                         manager, { initiate: true });
-  }
-
-  /** 밖에서 방에 올릴 때의 문 — 자리 대조(`canSay`)를 거친다. 올렸으면 참. */
-  async post(client: App['client'], channel: string, text: string): Promise<boolean> {
-    if (!this.canSay(channel, channel) || !text.trim()) {
-      this.logger.warn(`자리가 어긋나 올리지 않았습니다 (${channel})`);
-      return false;
-    }
-    try {
-      await client.chat.postMessage({ channel, text });
-      return true;
-    } catch (error) {
-      this.logger.warn('먼저 건 말을 못 올렸습니다', error);
-      return false;
-    }
   }
 
   async start(): Promise<void> {

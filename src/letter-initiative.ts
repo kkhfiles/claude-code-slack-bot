@@ -1,41 +1,39 @@
-import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
-import type { TurnResult } from './chat-host';
+import type { TurnAsk, TurnResult } from './chat-host';
 
 /**
- * 커피콩이 **스스로 움직이는** 시계 — 평일 아침 한 번, 현황판을 들고 커피챗 방에 먼저 말을
- * 걸지 정하고(수요일에는 실장에게 주간 보고도), 걸기로 했으면 빗장을 거쳐 올린다.
+ * 커피콩의 **아침 시계** — 평일 08:30, 현황판(코드가 센 숫자)을 들고 실장 DM 에 와서
+ * 「오늘 이렇게 할까요」를 말한다. 커피챗 방에 걸고 싶은 말이 있으면 **확인 카드**로 —
+ * 실장이 창에서 보고 「보내기」를 눌러야 방에 오른다. 이 시계는 방에 아무것도 안 올린다.
  *
- * 실장 결정(2026-09-18): 「커피챗 채널에선 주체적으로 나서도 된다. 단 개인정보 보호만
- * 중요하게 다중 안전장치를 두라.」 그래서 이 파일은 **말을 만드는 곳이 아니라 빗장을 세는
- * 곳**이다. 말은 `turn.py` 가 만들고, 여기는 아래를 거쳐야만 방에 올린다.
+ * 실장 결정(2026-09-18): 「10시가 아니라 8시 반에 먼저 나한테 DM 으로 이렇게 할까요
+ * 물어보고 나서 진행. 개인정보 보호는 다중 안전장치.」 그래서 겹이 이렇다.
  *
  *   ① 자료 층    `comm_pulse.py` 는 숫자만 낸다 — 원문·이름·아이디가 모델에 안 간다
- *   ② 안내 층    `turn.py` 의 INITIATE_NOTE — 지목·집계·원문 금지를 모델에게 이른다
- *   ③ 빗장 층 A  `privacy_gate.py`(파이썬) — 멘션·아이디·집계·원문 조각이면 침묵
- *   ④ 빗장 층 B  여기(TS) — 실원 **이름**·멘션. 자료가 다른 두 겹이라 한쪽 구멍이 다른 쪽에 걸린다
- *   ⑤ 횟수 층    하루 1번 · 주 2번 · 평일만 · 공휴일 제외
- *   ⑥ 끄는 층    `LETTER_INITIATIVE=0` 또는 실장이 말로 「자율 꺼」(control 파일)
- *   ⑦ 사본 층    **방에 올린 글은 그대로 실장 DM 으로 사본이 간다** — 「나 모르게」가 없게.
- *                막힌 것도 까닭과 함께 간다
+ *   ② 안내 층    `turn.py` 의 MORNING_NOTE — 지목·집계·원문 금지를 모델에게 이른다
+ *   ③ 빗장 층 A  `privacy_gate.py` — 방에 걸 글(`pulse`)이 멘션·아이디·집계·원문 조각이면
+ *                카드 자체가 안 만들어지고 실장에게 까닭만 간다
+ *   ④ 빗장 층 B  여기(TS) — 실원 **이름**·멘션·길이. 자료가 다른 두 겹
+ *   ⑤ 사람 층    **실장이 창에서 보고 「보내기」** — 대화·시계만으로는 방에 아무것도 안 간다
+ *   ⑥ 횟수 층    평일 08:30 뒤 두 시간 창 안에서 하루 한 번 · 공휴일 제외
+ *   ⑦ 끄는 층    `LETTER_INITIATIVE=0` 또는 실장이 말로 「자율 꺼」(control 파일)
  *
- * 어느 층도 다른 층을 믿고 느슨해지지 않는다.
+ * 수요일이면 같은 턴에 주간 보고(현황·눈에 띄는 것·general 제안)가 붙는다 — 안내 층이 한다.
  */
 
-const DEFAULT_AT = '10:00';
-const DAILY_CAP = 1;
-const WEEKLY_CAP = 2;
+const DEFAULT_AT = '08:30';
 const MAX_LEN = 1200;
 /** 시각 뒤 이만큼 안에서만 돈다 — 저녁 재시작이 아침 일을 대신 하지 않게. */
 const WINDOW_MIN = 120;
+/** 파이썬 `control.actions` 에서 방에 걸 글의 이름. 다른 이름은 이 시계가 안 다룬다. */
+const PULSE = 'pulse';
 
 export interface InitiativeHost {
   initiate(client: App['client'], key: string, brief: string): Promise<TurnResult>;
-  post(client: App['client'], channel: string, text: string): Promise<boolean>;
 }
 
 export interface LetterInitiativeOptions {
@@ -43,38 +41,28 @@ export interface LetterInitiativeOptions {
   enabled: boolean;
   /** 평일 이 시각에 한 번 (HH:MM). */
   at: string;
-  /** 커피챗 방. 비면 기능이 꺼진다. */
+  /** 커피챗 방 — 현황판을 셀 방. 비면 기능이 꺼진다. */
   room: string;
-  /** 실장 — 사본과 막힌 알림을 받고, 수요일 주간 보고를 받는다. 비면 기능이 꺼진다. */
+  /** 실장 — 아침 DM 을 받는 사람. 비면 기능이 꺼진다. */
   managerUserId: string;
   /** 실원 명단 — 이름 빗장에 쓴다(`users.info` 로 이름을 받아 둔다). */
   members: string[];
   python: string;
   /** `comm_pulse.py` */
   script: string;
-  /** 방에 올린 기록 `initiative.jsonl` — 상한도 여기서 센다. */
-  logPath: string;
   /** 오늘 돌았는지 `initiative-state.json` */
   statePath: string;
   /** 실장이 말로 끄는 값이 적히는 파일(`control.json` · `always.initiative === false` 면 꺼짐). */
   controlPath: string;
-  /** 주간 보고 요일 (0=일 … 3=수). */
-  reportDay: number;
   host: InitiativeHost;
+  /** 확인 카드를 띄우는 곳(`LetterNotice.offer`). 방에 걸 글은 전부 여기로만 간다. */
+  offer: (client: App['client'], asks: TurnAsk[], from: { user: string; channel: string }) => Promise<void>;
   logger?: Logger;
 }
 
 export type Outcome =
-  | 'off' | 'not-time' | 'done-today' | 'holiday' | 'cap' | 'no-brief'
-  | 'quiet' | 'blocked' | 'spoke' | 'error';
-
-interface Sent {
-  ts: string;
-  to: string;
-  chars: number;
-  head: string;
-  sha: string;
-}
+  | 'off' | 'not-time' | 'done-today' | 'holiday' | 'no-brief'
+  | 'quiet' | 'blocked' | 'proposed' | 'error';
 
 export class LetterInitiative {
   private logger: Logger;
@@ -97,15 +85,15 @@ export class LetterInitiative {
     }
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.tick(app.client).catch((error) => this.logger.warn('먼저 말 걸기에서 넘어졌습니다', error));
+      void this.tick(app.client).catch((error) => this.logger.warn('아침 턴에서 넘어졌습니다', error));
     }, 60 * 1000);
     this.timer.unref?.();
-    this.logger.info(`준비됨 — 평일 ${this.opts.at} · 하루 ${DAILY_CAP}번 · 주 ${WEEKLY_CAP}번 · 방 ${this.opts.room} · 사본 → 실장`);
+    this.logger.info(`준비됨 — 평일 ${this.opts.at} 실장 DM 으로 「오늘 이렇게 할까요」 · 방에는 카드를 거쳐야만`);
   };
 
   /**
    * 분마다 — 그 시각이고 오늘 아직이면 한 번 돈다. **창은 두 시간이다** — 저녁에 재시작하면
-   * 「10:00 이 지났으니」 그 자리에서 도는 일이 없게. 놓친 날은 그냥 넘어간다.
+   * 「08:30 이 지났으니」 그 자리에서 도는 일이 없게. 놓친 날은 그냥 넘어간다.
    */
   async tick(client: App['client'], now = new Date()): Promise<Outcome> {
     const [h, m] = this.opts.at.split(':').map((x) => parseInt(x, 10));
@@ -130,66 +118,44 @@ export class LetterInitiative {
     if (!pulse) return 'no-brief';
     if (!pulse.workday) return 'holiday';
 
-    // 수요일 — 실장에게 주간 보고. 방에 말 거는 것과 따로 센다(상한은 방 것만).
-    if (now.getDay() === this.opts.reportDay) await this.report(client, pulse.brief);
-
-    const { today, week } = this.counts(now);
-    if (today >= DAILY_CAP || week >= WEEKLY_CAP) {
-      this.logger.info(`상한 — 오늘 ${today}번 · 이번 주 ${week}번. 안 겁니다`);
-      return 'cap';
-    }
-
     let result: TurnResult;
     try {
-      result = await this.opts.host.initiate(client, this.opts.room, pulse.brief);
+      result = await this.opts.host.initiate(client, this.opts.managerUserId, pulse.brief);
     } catch (error) {
-      this.logger.warn('먼저 말 걸기 턴이 깨졌습니다', error);
+      this.logger.warn('아침 턴이 깨졌습니다', error);
       return 'error';
     }
     if (result.error) {
-      this.logger.warn(`먼저 말 걸기 턴 실패: ${result.error}`);
+      this.logger.warn(`아침 턴 실패: ${result.error}`);
       return 'error';
     }
-    if (result.blocked?.length) {
-      // 파이썬 빗장이 막았다 — 실장에게 까닭을 알린다(글은 안 보낸다 · 막힌 글이다).
-      await this.tell(client, `:no_entry_sign: 커피챗 방에 먼저 말을 걸려다 *빗장에 막혔습니다* — ${result.blocked.join(' · ')}\n_아무것도 안 나갔습니다._`);
-      return 'blocked';
-    }
-    const text = (result.reply || '').trim();
-    if (result.speak === false || !text) {
-      this.logger.info('오늘은 안 걸기로 했습니다');
+    // 실장에게 하는 말 — 그 자체는 카드가 아니다. 방에 걸 글은 아래 `ask` 로만 간다.
+    const said = (result.reply || '').trim();
+    if (said) await this.tell(client, `:sunrise: ${said}`);
+
+    const asks = (result.ask || []).filter((a) => a.name === PULSE);
+    if (!asks.length) {
+      this.logger.info(said ? '오늘은 방에 걸 글 없이 인사만' : '오늘은 조용히');
       return 'quiet';
     }
-    const hit = await this.nameHit(client, text);
-    if (hit || text.length > MAX_LEN) {
-      const why = hit ? `실원 이름·지목(「${hit}」)` : `너무 김(${text.length}자)`;
-      this.logger.warn(`호스트 빗장에 막힘 — ${why}`);
-      await this.tell(client, `:no_entry_sign: 커피챗 방에 먼저 말을 걸려다 *빗장에 막혔습니다* — ${why}\n_아무것도 안 나갔습니다._`);
-      return 'blocked';
-    }
-    const posted = await this.opts.host.post(client, this.opts.room, text);
-    if (!posted) return 'error';
-    this.note({ ts: now.toISOString(), to: this.opts.room, chars: text.length,
-                head: text.slice(0, 30), sha: sha16(text) });
-    this.logger.info(`커피챗 방에 먼저 말을 걸었습니다 (${text.length}자)`);
-    // ⑦ 사본 — 방에 올린 글 그대로. 「나 모르게」가 없게 하는 층이다.
-    await this.tell(client, `:speech_balloon: 커피챗 방에 먼저 말을 걸었습니다 (오늘 ${today + 1}번째 · 이번 주 ${week + 1}번째)\n${text.split('\n').map((l) => `> ${l}`).join('\n')}`);
-    return 'spoke';
-  }
-
-  // ── 실장 주간 보고 ───────────────────────────────────────────────────────
-  private async report(client: App['client'], brief: string): Promise<void> {
-    try {
-      const r = await this.opts.host.initiate(client, this.opts.managerUserId, brief);
-      const text = (r.reply || '').trim();
-      if (r.error || !text) {
-        this.logger.warn(`주간 보고 턴 실패: ${r.error || '빈 답'}`);
-        return;
+    // ④ 호스트 빗장 — 실장이 창에서 보기 전에 한 번 더. 자료가 다른 겹이다.
+    const clean: TurnAsk[] = [];
+    for (const ask of asks) {
+      const text = (ask.text || '').trim();
+      const hit = await this.nameHit(client, text);
+      if (hit || text.length > MAX_LEN) {
+        const why = hit ? `실원 이름·지목(「${hit}」)` : `너무 김(${text.length}자)`;
+        this.logger.warn(`호스트 빗장에 막힘 — ${why}`);
+        await this.tell(client, `:no_entry_sign: 방에 걸려던 글이 *빗장에 막혀 카드를 안 만들었습니다* — ${why}`);
+        continue;
       }
-      await this.tell(client, `:clipboard: *주간 현황 (커피콩)*\n${text}`);
-    } catch (error) {
-      this.logger.warn('주간 보고에서 넘어졌습니다', error);
+      clean.push(ask);
     }
+    if (!clean.length) return 'blocked';
+    // ⑤ 사람 층 — 카드. 실장이 「보내기」를 눌러야 방에 오른다.
+    await this.opts.offer(client, clean, { user: this.opts.managerUserId, channel: 'DM' });
+    this.logger.info(`오늘 제안 ${clean.length}건 — 카드로 실장에게`);
+    return 'proposed';
   }
 
   // ── 층들 ──────────────────────────────────────────────────────────────
@@ -220,20 +186,6 @@ export class LetterInitiative {
       this.logger.warn('현황판이 JSON 이 아닙니다');
       return null;
     }
-  }
-
-  private counts(now: Date): { today: number; week: number } {
-    const day = localDay(now);
-    const monday = new Date(now);
-    monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
-    const weekStart = localDay(monday);
-    let today = 0; let week = 0;
-    for (const past of this.history()) {
-      const d = localDay(new Date(past.ts));
-      if (d === day) today++;
-      if (d >= weekStart) week++;
-    }
-    return { today, week };
   }
 
   /** 실원 이름(성 포함·성 뺀 것)이나 멘션이 글에 있으면 그 조각. */
@@ -275,26 +227,7 @@ export class LetterInitiative {
       const im = await client.conversations.open({ users: this.opts.managerUserId });
       if (im.channel?.id) await client.chat.postMessage({ channel: im.channel.id, text });
     } catch (error) {
-      this.logger.warn('실장에게 알리지 못했습니다', error);
-    }
-  }
-
-  // ── 기록 ──────────────────────────────────────────────────────────────
-  private note(record: Sent): void {
-    try {
-      fs.mkdirSync(path.dirname(this.opts.logPath), { recursive: true });
-      fs.appendFileSync(this.opts.logPath, `${JSON.stringify(record)}\n`, 'utf-8');
-    } catch (error) {
-      this.logger.warn('기록을 못 남겼습니다', error);
-    }
-  }
-
-  private history(): Sent[] {
-    try {
-      return fs.readFileSync(this.opts.logPath, 'utf-8').trim().split('\n')
-        .filter(Boolean).map((line) => JSON.parse(line) as Sent);
-    } catch {
-      return [];
+      this.logger.warn('실장에게 말하지 못했습니다', error);
     }
   }
 
@@ -316,11 +249,8 @@ export class LetterInitiative {
   }
 }
 
-const sha16 = (text: string): string =>
-  crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
-
 function localDay(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-export { DAILY_CAP, WEEKLY_CAP, DEFAULT_AT };
+export { DEFAULT_AT };

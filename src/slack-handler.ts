@@ -419,8 +419,9 @@ export class SlackHandler {
         logPath: path.join(letterData, 'notice.jsonl'),
         pendingPath: path.join(letterData, 'notice-pending.json'),
       });
-      // 커피콩이 **스스로** 커피챗 방에 말을 거는 시계. 말은 대화 봇(아래 ChatHost)이 만들고
-      // 여기는 빗장·상한·사본만 센다. 호스트는 아래에서 만들어지므로 늦게 묶는다.
+      // 커피콩의 아침 시계 — 평일 08:30 실장 DM 에 「오늘 이렇게 할까요」. 말은 대화 봇(아래
+      // ChatHost)이 만들고, 방에 걸 글은 위 확인 카드(`notice.offer`)로만 간다. 호스트는 아래에서
+      // 만들어지므로 늦게 묶는다.
       let letterHost: ChatHost | null = null;
       const initiative = new LetterInitiative({
         enabled: config.letter.initiative.enabled,
@@ -430,14 +431,10 @@ export class SlackHandler {
         members: config.letter.members,
         python: config.chat.python,
         script: path.join(path.dirname(turnScript), 'comm_pulse.py'),
-        logPath: path.join(letterData, 'initiative.jsonl'),
         statePath: path.join(letterData, 'initiative-state.json'),
         controlPath: path.join(letterData, 'control.json'),
-        reportDay: config.letter.initiative.reportDay,
-        host: {
-          initiate: (client, key, brief) => letterHost!.initiate(client, key, brief),
-          post: (client, channel, text) => letterHost!.post(client, channel, text),
-        },
+        host: { initiate: (client, key, brief) => letterHost!.initiate(client, key, brief) },
+        offer: notice.offer,
       });
       letterHost = new ChatHost({
         name: 'letter',

@@ -175,13 +175,12 @@ export const config = {
     // 실장이 말로 시킨 「전해 줘」(`letter-notice.ts`)가 여기로 나간다. **비면 전달은
     // 시험 방으로만 갈 수 있다** — 방을 고르는 창에 general 이 안 뜬다.
     generalChannel: process.env.LETTER_GENERAL_CHANNEL || '',
-    // 커피콩이 **스스로** 커피챗 방에 말을 거는 시계(`letter-initiative.ts`). **기본은 꺼짐** —
-    // 만든 것과 켠 것은 다른 일이다. 켜면 평일 이 시각에 현황판을 보고 낄지 정하고, 수요일에는
-    // 실장에게 주간 보고를 DM 으로 한다. 개인정보 빗장 일곱 겹은 그 파일 머리에.
+    // 커피콩의 아침 시계(`letter-initiative.ts`) — 평일 이 시각에 현황판을 보고 실장 DM 에
+    // 「오늘 이렇게 할까요」. 방에 걸 글은 확인 카드로만 간다. **기본은 꺼짐** — 만든 것과
+    // 켠 것은 다른 일이다. 수요일이면 같은 턴에 주간 보고가 붙는다. 빗장 일곱 겹은 그 파일 머리에.
     initiative: {
       enabled: process.env.LETTER_INITIATIVE === '1',
-      at: process.env.LETTER_INITIATIVE_AT || '10:00',
-      reportDay: parseInt(process.env.LETTER_INITIATIVE_REPORT_DAY || '3', 10),   // 수요일
+      at: process.env.LETTER_INITIATIVE_AT || '08:30',
     },
     // 커피챗 방에서는 **앞장서서 이끌어도 된다**(실장 지시). 점심원정대보다 굴레가 느슨하다 —
     // 이 방은 소통 이야기를 하러 모인 자리고 그 이야기의 진행을 봇이 맡는다.

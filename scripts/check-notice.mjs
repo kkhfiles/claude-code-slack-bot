@@ -278,6 +278,30 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   ok('전할 말은 안건 파일에 안 적힌다',
     !fs.readFileSync(agendaPath, 'utf-8').includes('회의 10시'));
 
+  // ── 아침 말 걸기(`pulse`) — 안건과 같은 관문·같은 기억 파일, 방은 커피챗·bot_test 만 ──
+  c = fakeClient();
+  await na.offer(c, [{ name: 'pulse', text: '좋은 아침이에요! 이번 주 고마웠던 순간 하나씩 나눠 볼까요?' }],
+    { user: 'UBOSS', channel: 'DM' });
+  ok('아침 말 걸기도 카드는 실장 DM 으로만', c.posted.length === 1 && c.posted[0].channel === 'DM_UBOSS');
+  ok('카드에 아침 현황을 보고 쓴 글임을 밝힌다', JSON.stringify(c.posted[0].blocks).includes('아침 현황'));
+  const btnP = buttonOf(c.posted[0]);
+  c = fakeClient();
+  await appA.actions.notice_open({
+    ack: async () => {}, client: c,
+    body: { user: { id: 'UBOSS' }, trigger_id: 'tp', actions: [{ value: btnP.value }] },
+  });
+  const viewP = c.opened[0].view;
+  ok('아침 말 걸기 창은 커피챗·bot_test 만 (general 없음)',
+    viewP.blocks.find((b) => b.block_id === 'to').element.options.map((o) => o.value).join(',') === 'C_CHAT,C_TEST');
+  c = fakeClient();
+  await submit(c, 'UBOSS', 'C_CHAT', '좋은 아침이에요! 이번 주 고마웠던 순간 하나씩 나눠 볼까요?', btnP.value, 'pulse', appA);
+  const outP = c.posted.find((m) => m.channel === 'C_CHAT');
+  ok('머리말 없이 커피콩 말로 나간다', outP && outP.text.startsWith('좋은 아침이에요!'), outP);
+  ok('올린 글이 기억 파일에 적힌다 (다음 턴에 자기가 한 말을 안다)',
+    fs.readFileSync(agendaPath, 'utf-8').includes('고마웠던 순간'));
+  ok('기록에 갈래 pulse 가 남는다 (현황판이 「먼저 올린 글」로 센다)',
+    fs.readFileSync(path.join(dir, 'agenda.jsonl'), 'utf-8').includes('"kind":"pulse"'));
+
   console.log(`\n${fail ? `실패 ${fail}건` : '모두 통과.'}`);
   fs.rmSync(dir, { recursive: true, force: true });
   process.exitCode = fail ? 1 : 0;
