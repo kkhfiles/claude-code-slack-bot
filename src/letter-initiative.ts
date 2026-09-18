@@ -239,7 +239,7 @@ export class LetterInitiative {
         const name = (raw || '').trim();
         if (!name) continue;
         out.add(name);
-        // 「강규황」→「규황」. 두 자 이름은 성을 떼면 한 자라 못 쓴다.
+        // 「홍길동」→「길동」. 두 자 이름은 성을 떼면 한 자라 못 쓴다.
         if (/^[가-힣]{3,4}$/.test(name)) out.add(name.slice(1));
       }
     } catch (error) {

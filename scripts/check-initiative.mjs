@@ -45,7 +45,7 @@ function fakeClient() {
   const dm = [];
   return {
     dm,
-    users: { info: async ({ user }) => ({ user: { profile: { real_name: user === 'U_KKH' ? '강규황' : '김철수', display_name: '' } } }) },
+    users: { info: async ({ user }) => ({ user: { profile: { real_name: user === 'U_HGD' ? '홍길동' : '김철수', display_name: '' } } }) },
     conversations: { open: async ({ users }) => ({ channel: { id: `DM_${users}` } }) },
     chat: { postMessage: async (m) => { dm.push(m); return { ts: '1' }; } },
   };
@@ -55,7 +55,7 @@ const make = (extra = {}, host = fakeHost()) => {
   n += 1;
   const offered = [];
   const it = new LetterInitiative({
-    enabled: true, at: '08:30', room: 'C_CHAT', managerUserId: 'U_BOSS', members: ['U_KKH', 'U_CS'],
+    enabled: true, at: '08:30', room: 'C_CHAT', managerUserId: 'U_BOSS', members: ['U_HGD', 'U_CS'],
     python: 'python', script,
     statePath: path.join(dir, `state${n}.json`), controlPath: path.join(dir, `control${n}.json`),
     host, offer: async (_c, asks, from) => { offered.push({ asks, from }); }, ...extra,
@@ -162,11 +162,11 @@ ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 �
 }
 {
   const { it, host, offered } = make();
-  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: '규황님은 아직 안 남기셨네요, 이번 주엔 어떠세요?' }] });
+  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: '길동님은 아직 안 남기셨네요, 이번 주엔 어떠세요?' }] });
   const c = fakeClient();
   const r = await it.runOnce(c, MON);
   ok('실원 이름(성 뗀 것)이 들어가면 카드를 안 만들고 실장에게 까닭을 말한다',
-    r === 'blocked' && offered.length === 0 && c.dm.some((m) => m.text.includes('규황') && m.text.includes('막혀')), { r, dm: c.dm });
+    r === 'blocked' && offered.length === 0 && c.dm.some((m) => m.text.includes('길동') && m.text.includes('막혀')), { r, dm: c.dm });
 }
 {
   const { it, host, offered } = make();
@@ -175,7 +175,7 @@ ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 �
 }
 {
   const { it, host, offered } = make();
-  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: '<@U_KKH> 어떠세요?' }] });
+  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: '<@U_HGD> 어떠세요?' }] });
   ok('멘션은 호스트 빗장에서도 막는다 (두 겹)', (await it.runOnce(fakeClient(), MON)) === 'blocked' && offered.length === 0);
 }
 {
@@ -185,7 +185,7 @@ ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 �
   const c = fakeClient();
   c.users.info = async ({ user }) => {
     if (failing) throw new Error('ratelimited');
-    return { user: { profile: { real_name: user === 'U_KKH' ? '강규황' : '김철수', display_name: '' } } };
+    return { user: { profile: { real_name: user === 'U_HGD' ? '홍길동' : '김철수', display_name: '' } } };
   };
   const r1 = await it.runOnce(c, MON);
   ok('실원 이름을 못 받아 오면 막는다 (이름 빗장은 이 겹뿐이라 못 본 채 통과시키지 않는다)',
