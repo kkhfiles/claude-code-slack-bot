@@ -6,17 +6,22 @@ import { Logger } from './logger';
 import type { TurnAsk } from './chat-host';
 
 /**
- * 커피콩의 **전달** — 실장이 대화에서 「실원들에게 ○○ 전해 줘」라고 하면 방(general)에
- * 올린다. 말로 시작하지만 **나가는 관문은 버튼이다.**
+ * 커피콩이 **실장 부탁으로 방에 글을 올리는 길** — 말로 시작하지만 **나가는 관문은 버튼이다.**
  *
  *   1. 파이썬(`turn.py`)이 실장 턴에서 그 부탁을 `ask` 칸에 실어 보낸다 — 방에 안 올린다.
  *   2. 여기서 실장 DM 에 **확인 카드**를 띄운다(글 + 「확인 창 열기」 버튼).
  *   3. 버튼을 누르면 창이 뜬다 — 방을 고르고, 글을 고칠 수 있다.
  *   4. 「보내기」를 눌러야 방에 오른다. **창의 칸에 있던 글이 그대로** 나간다.
  *
+ * 부탁의 갈래(`kinds`)는 둘이고 글을 누가 쓰느냐가 다르다.
+ *   - `notice` 「실원들에게 ○○ 전해 줘」 — 실장 말 그대로. 머리말 한 줄이 붙어 general 로.
+ *   - `agenda` 「커피챗 활성화 안건 던져 줘」 — 주제만 받고 **커피콩이 초안을 쓴다.** 머리말
+ *     없이 제 말로 커피챗 방에. 방에 올리는 것은 호스트라 대화 기억에 없으므로 **던진
+ *     안건을 파일에 적어** 파이썬이 매 턴 붙이게 한다(`rememberPath`).
+ *
  * 칭찬 전달(`letter-relay.ts`)의 「말로 시킬 수 없어야 잡담 중에 오발이 나지 않는다」를
  * 「말로 시작은 하되 대화만으로는 안 나간다」로 지킨다. 모델은 초안을 채울 뿐이고,
- * 실장이 마지막으로 본 글자가 나간다. 말투·성격은 안 얹는다 — 머리말 한 줄만 붙는다.
+ * 실장이 마지막으로 본 글자가 나간다.
  *
  * **DM 에서 오간 말이 방으로 새는 일이 없어야 한다.** 그래서 카드는 실장 DM 에만 가고,
  * 방에는 실장이 창에서 「보내기」를 누른 그 글만 간다.
@@ -26,21 +31,40 @@ const ACTION_OPEN = 'notice_open';
 const CONFIRM = 'notice_confirm';
 const BLOCK_TO = 'to';
 const BLOCK_TEXT = 'body';
-/** 파이썬 `control.actions` 의 이름. 다른 이름이 오면 모르는 부탁이라 버린다. */
-const ACTION_NAME = 'notice';
-const HEADER_TEXT = '실장님 말씀을 전합니다';
-const HEADER = `:mega: *${HEADER_TEXT}*`;
 const MAX_LEN = 2500;
 /** 카드를 띄운 지 이만큼 지나면 버튼이 안 먹는다 — 며칠 지난 글이 나가면 안 된다. */
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 /** 같은 글을 같은 방에 이 안에 두 번 보내는 것은 실수뿐이다. */
 const AGAIN_S = 600;
+/** 던진 안건은 이만큼만 기억한다 — 매 턴 붙는 글이라 길면 대화 값을 먹는다. */
+const REMEMBER_MAX = 3;
+
+export interface NoticeRoom {
+  id: string;
+  label: string;
+}
+
+/** 부탁 한 갈래. 이름은 파이썬 `control.actions` 의 이름과 같아야 한다. */
+export interface NoticeKind {
+  /** 창 제목·카드 물음에 쓰는 이름. 「전할 말」·「안건」 */
+  title: string;
+  /** 카드의 물음 한 줄. */
+  ask: string;
+  /** 글 앞에 붙는 머리말(mrkdwn). 비면 안 붙는다 — 봇 제 말로 나간다. */
+  header: string;
+  /** 창의 글 칸 아래 안내 — 머리말이 붙는지, 제 말로 나가는지. */
+  hint: string;
+  /** 올릴 수 있는 방. 첫 것이 창에서 먼저 보인다. 비면 그 갈래는 꺼진다. */
+  rooms: NoticeRoom[];
+  /** 보낸 글을 적어 둘 파일 — 파이썬이 매 턴 붙여 봇이 「내가 던진 것」을 안다. 없으면 안 적는다. */
+  rememberPath?: string;
+}
 
 export interface LetterNoticeOptions {
   /** 이 사람만 쓴다. 비면 기능 자체가 꺼진다. */
   managerUserId: string;
-  /** 올릴 수 있는 방. 창에서 고른다. 비면 기능 자체가 꺼진다 — 갈 곳이 없다. */
-  rooms: Array<{ id: string; label: string }>;
+  /** 갈래별 설정. 방이 하나도 없으면 기능 자체가 꺼진다 — 갈 곳이 없다. */
+  kinds: Record<string, NoticeKind>;
   /** 보낸 기록. `bots/letter/data/notice.jsonl` */
   logPath: string;
   /** 아직 안 보낸 카드. 재시작해도 카드의 버튼이 살아 있게 파일에 둔다. */
@@ -49,6 +73,7 @@ export interface LetterNoticeOptions {
 
 interface Pending {
   id: string;
+  kind: string;
   text: string;
   at: string;
   from: string;
@@ -56,6 +81,7 @@ interface Pending {
 
 interface Sent {
   ts: string;
+  kind: string;
   to: string;
   to_label: string;
   chars: number;
@@ -75,7 +101,17 @@ export class LetterNotice {
   }
 
   get enabled(): boolean {
-    return Boolean(this.opts.managerUserId) && this.opts.rooms.length > 0;
+    return Boolean(this.opts.managerUserId) && this.kinds().length > 0;
+  }
+
+  /** 켜진 갈래 — 올릴 방이 하나라도 있는 것. */
+  private kinds(): string[] {
+    return Object.entries(this.opts.kinds).filter(([, k]) => k.rooms.length > 0).map(([n]) => n);
+  }
+
+  private kind(name: string): NoticeKind | null {
+    const k = this.opts.kinds[name];
+    return k && k.rooms.length > 0 ? k : null;
   }
 
   /** `ChatHost` 의 `attach` 로 넘긴다 — 소켓을 열기 전에 불린다. */
@@ -95,14 +131,15 @@ export class LetterNotice {
       }
       const id = String((body as any).actions?.[0]?.value ?? '');
       const found = this.pending.get(id);
-      if (!found || this.expired(found)) {
+      const kind = found ? this.kind(found.kind) : null;
+      if (!found || !kind || this.expired(found)) {
         this.pending.delete(id);
         this.save();
         await this.tell(client, user, '이 카드는 만료됐습니다 — *아무것도 보내지 않았습니다.* 다시 말씀해 주세요.');
         return;
       }
       try {
-        await client.views.open({ trigger_id: (body as any).trigger_id, view: this.confirmView(found) });
+        await client.views.open({ trigger_id: (body as any).trigger_id, view: this.confirmView(found, kind) });
       } catch (error) {
         this.logger.warn('확인 창을 못 열었습니다', error);
         await this.tell(client, user, `확인 창을 열지 못했습니다. 카드의 버튼을 한 번 더 눌러 주세요.\n\`${String(error).slice(0, 200)}\``);
@@ -136,26 +173,28 @@ export class LetterNotice {
         this.logger.warn(`${body.user.id} 가 전달 창을 제출했지만 실장이 아닙니다 — 보내지 않습니다`);
         return;
       }
-      const room = this.opts.rooms.find((r) => r.id === to);
-      if (!room) {
-        this.logger.warn(`목록에 없는 방(${to}) — 보내지 않습니다`);
-        await this.tell(client, body.user.id, '목록에 없는 방이라 *아무것도 보내지 않았습니다.*');
-        return;
-      }
-      let meta: { id?: string } = {};
+      let meta: { id?: string; kind?: string } = {};
       try {
         meta = JSON.parse((body.view.private_metadata || '{}') as string);
       } catch {
         meta = {};
       }
-      const sent = await this.send(client, body.user.id, room, text);
+      const kind = this.kind(meta.kind || '');
+      const room = kind?.rooms.find((r) => r.id === to);
+      if (!kind || !room) {
+        this.logger.warn(`목록에 없는 갈래(${meta.kind})나 방(${to}) — 보내지 않습니다`);
+        await this.tell(client, body.user.id, '목록에 없는 방이라 *아무것도 보내지 않았습니다.*');
+        return;
+      }
+      const sent = await this.send(client, body.user.id, meta.kind || '', kind, room, text);
       if (sent && meta.id) {
         this.pending.delete(meta.id);
         this.save();
       }
     });
 
-    this.logger.info(`전달 준비됨 (올릴 방 ${this.opts.rooms.map((r) => r.label).join('·')})`);
+    const rooms = this.kinds().map((n) => `${n}→${this.opts.kinds[n].rooms.map((r) => r.label).join('·')}`);
+    this.logger.info(`전달 준비됨 (${rooms.join(' / ')})`);
   };
 
   /**
@@ -173,7 +212,8 @@ export class LetterNotice {
       return;
     }
     for (const ask of asks) {
-      if (ask.name !== ACTION_NAME) {
+      const kind = this.kind(ask.name);
+      if (!kind) {
         this.logger.warn(`모르는 부탁(${ask.name}) — 버립니다`);
         continue;
       }
@@ -181,30 +221,31 @@ export class LetterNotice {
       if (!text) continue;
       const item: Pending = {
         id: crypto.randomBytes(6).toString('hex'),
+        kind: ask.name,
         text,
         at: new Date().toISOString(),
         from: from.channel,
       };
       this.pending.set(item.id, item);
       this.save();
-      await this.card(client, item);
+      await this.card(client, item, kind);
     }
   };
 
   // ── 화면 ──────────────────────────────────────────────────────────────
-  private async card(client: App['client'], item: Pending): Promise<void> {
-    const rooms = this.opts.rooms.map((r) => r.label).join(' · ');
+  private async card(client: App['client'], item: Pending, kind: NoticeKind): Promise<void> {
+    const rooms = kind.rooms.map((r) => r.label).join(' · ');
     const shown = item.text.length > 600 ? `${item.text.slice(0, 600)}…` : item.text;
     try {
       const im = await client.conversations.open({ users: this.opts.managerUserId });
       if (!im.channel?.id) throw new Error('DM 방을 못 열었습니다');
       await client.chat.postMessage({
         channel: im.channel.id,
-        text: `방에 올릴까요? — ${item.text.slice(0, 40)}`,
+        text: `${kind.ask} — ${item.text.slice(0, 40)}`,
         blocks: [
           {
             type: 'section',
-            text: { type: 'mrkdwn', text: '*이 글을 방에 올릴까요?* 아직 아무 데도 안 나갔습니다.' },
+            text: { type: 'mrkdwn', text: `*${kind.ask}* 아직 아무 데도 안 나갔습니다.` },
           },
           {
             type: 'section',
@@ -232,16 +273,16 @@ export class LetterNotice {
     }
   }
 
-  private confirmView(item: Pending): any {
-    const options = this.opts.rooms.map((r) => ({
+  private confirmView(item: Pending, kind: NoticeKind): any {
+    const options = kind.rooms.map((r) => ({
       text: { type: 'plain_text', text: r.label.slice(0, 75) }, value: r.id,
     }));
     return {
       type: 'modal',
       callback_id: CONFIRM,
-      // 카드 ID 만 들고 간다. 글은 화면의 칸이 정본이다 — 두 군데 두면 어긋난다.
-      private_metadata: JSON.stringify({ id: item.id }),
-      title: { type: 'plain_text', text: '방에 올리기' },
+      // 카드 ID 와 갈래만 들고 간다. 글은 화면의 칸이 정본이다 — 두 군데 두면 어긋난다.
+      private_metadata: JSON.stringify({ id: item.id, kind: item.kind }),
+      title: { type: 'plain_text', text: kind.title },
       submit: { type: 'plain_text', text: '보내기' },
       close: { type: 'plain_text', text: '취소' },
       blocks: [
@@ -258,7 +299,7 @@ export class LetterNotice {
         {
           type: 'input', block_id: BLOCK_TEXT,
           label: { type: 'plain_text', text: '올릴 글 (여기서 고칠 수 있습니다)' },
-          hint: { type: 'plain_text', text: `이 칸에 있는 그대로 나갑니다. 앞에 「${HEADER_TEXT}」 한 줄이 붙습니다.` },
+          hint: { type: 'plain_text', text: kind.hint },
           element: {
             type: 'plain_text_input', action_id: BLOCK_TEXT, multiline: true,
             initial_value: item.text,
@@ -270,7 +311,8 @@ export class LetterNotice {
 
   // ── 보내기 ────────────────────────────────────────────────────────────
   private async send(
-    client: App['client'], manager: string, room: { id: string; label: string }, text: string,
+    client: App['client'], manager: string, name: string, kind: NoticeKind, room: NoticeRoom,
+    text: string,
   ): Promise<boolean> {
     const again = this.sentJustNow(room.id, text);
     if (again !== null) {
@@ -282,17 +324,19 @@ export class LetterNotice {
     try {
       const posted = await client.chat.postMessage({
         channel: room.id,
-        text: `${HEADER}\n\n${text}`,
+        text: kind.header ? `${kind.header}\n\n${text}` : text,
       });
       const record: Sent = {
         ts: new Date().toISOString(),
+        kind: name,
         to: room.id, to_label: room.label,
         chars: text.length,
         head: text.slice(0, 30),
         sha: sha16(text),
       };
       this.note(record);
-      this.logger.info(`전달 완료 → ${room.label} (${text.length}자)`);
+      if (kind.rememberPath) this.remember(kind.rememberPath, room, text, record.ts);
+      this.logger.info(`${kind.title} 완료 → ${room.label} (${text.length}자)`);
 
       let link = '';
       try {
@@ -305,7 +349,7 @@ export class LetterNotice {
         `올렸습니다 · ${room.label} · ${text.length}자${link}\n> ${record.head}${text.length > 30 ? '…' : ''}`);
       return true;
     } catch (error) {
-      this.logger.warn('전달 실패', error);
+      this.logger.warn(`${kind.title} 실패`, error);
       await this.tell(client, manager,
         `올리지 못했습니다 (${room.label}). 카드는 그대로 있으니 다시 눌러 주세요.\n\`${String(error).slice(0, 200)}\``);
       return false;
@@ -330,6 +374,31 @@ export class LetterNotice {
       fs.appendFileSync(this.opts.logPath, `${JSON.stringify(record)}\n`, 'utf-8');
     } catch (error) {
       this.logger.warn('보낸 기록을 못 남겼습니다', error);
+    }
+  }
+
+  /**
+   * 던진 글을 봇이 기억하게 적는다 — 파이썬이 `context_files` 로 매 턴 붙인다. 방에 올린
+   * 것은 호스트라 대화 기억에 없고, 이 파일이 없으면 누가 답해도 무슨 안건인지 모른 채
+   * 받는다. **글 전체가 들어간다**(기록과 달리) — 봇이 그 글을 알아야 하기 때문이다.
+   * 최근 것부터 `REMEMBER_MAX` 개만 둔다.
+   */
+  private remember(file: string, room: NoticeRoom, text: string, ts: string): void {
+    const head = '# 네가 방에 던진 안건 (최근 것부터 · 실장이 시켜서 네가 쓴 글이다)';
+    const entry = `## ${ts.slice(0, 16).replace('T', ' ')} · ${room.label} 방\n${text}`;
+    let old: string[] = [];
+    try {
+      const body = fs.readFileSync(file, 'utf-8');
+      old = body.split(/\n(?=## )/).slice(1).map((s) => s.trim()).filter(Boolean);
+    } catch {
+      old = [];
+    }
+    const entries = [entry, ...old].slice(0, REMEMBER_MAX);
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${head}\n\n${entries.join('\n\n')}\n`, 'utf-8');
+    } catch (error) {
+      this.logger.warn('던진 안건을 못 적었습니다', error);
     }
   }
 
@@ -361,7 +430,7 @@ export class LetterNotice {
     try {
       const raw = JSON.parse(fs.readFileSync(this.opts.pendingPath, 'utf-8')) as Record<string, Pending>;
       for (const item of Object.values(raw)) {
-        if (item?.id && item.text && !this.expired(item)) this.pending.set(item.id, item);
+        if (item?.id && item.text && item.kind && !this.expired(item)) this.pending.set(item.id, item);
       }
     } catch {
       // 아직 없다 — 처음이다.
@@ -383,4 +452,31 @@ export class LetterNotice {
   pendingCount(): number {
     return this.pending.size;
   }
+}
+
+/** 커피콩의 두 갈래를 만든다. 방이 비어 오면 그 갈래는 창에 안 뜬다. */
+export function coffeeKinds(
+  rooms: { general?: string; chat?: string; test?: string },
+  files: { agenda?: string } = {},
+): Record<string, NoticeKind> {
+  const general = rooms.general ? [{ id: rooms.general, label: 'general' }] : [];
+  const chat = rooms.chat ? [{ id: rooms.chat, label: '커피챗' }] : [];
+  const test = rooms.test ? [{ id: rooms.test, label: 'bot_test' }] : [];
+  return {
+    notice: {
+      title: '전할 말 올리기',
+      ask: '이 글을 방에 올릴까요?',
+      header: ':mega: *실장님 말씀을 전합니다*',
+      hint: '이 칸에 있는 그대로 나갑니다. 앞에 「실장님 말씀을 전합니다」 한 줄이 붙습니다.',
+      rooms: [...general, ...test],
+    },
+    agenda: {
+      title: '안건 던지기',
+      ask: '이 안건을 던질까요? (커피콩이 쓴 초안입니다)',
+      header: '',
+      hint: '이 칸에 있는 그대로 커피콩 말로 나갑니다 (머리말 없음). 마음에 안 들면 고치거나 취소하세요.',
+      rooms: [...chat, ...test, ...general],
+      rememberPath: files.agenda,
+    },
+  };
 }

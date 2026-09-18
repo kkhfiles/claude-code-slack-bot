@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const { LetterNotice } = await import('../dist/letter-notice.js');
+const { LetterNotice, coffeeKinds } = await import('../dist/letter-notice.js');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'check-notice-'));
 const logPath = path.join(dir, 'notice.jsonl');
@@ -23,9 +23,11 @@ const ok = (name, cond, detail = '') => {
   if (!cond) { fail++; if (detail) console.log(`      ${String(detail).slice(0, 300)}`); }
 };
 
-const ROOMS = [{ id: 'C_GENERAL', label: 'general' }, { id: 'C_TEST', label: 'bot_test' }];
+const agendaPath = path.join(dir, 'agenda.md');
+// 실제 커피콩 갈래 그대로 — 전할 말은 general·bot_test, 안건은 커피챗·bot_test·general.
+const KINDS = coffeeKinds({ general: 'C_GENERAL', chat: 'C_CHAT', test: 'C_TEST' }, { agenda: agendaPath });
 const make = (extra = {}) => new LetterNotice({
-  managerUserId: 'UBOSS', rooms: ROOMS, logPath, pendingPath, ...extra,
+  managerUserId: 'UBOSS', kinds: KINDS, logPath, pendingPath, ...extra,
 });
 
 // 가짜 앱 — 핸들러를 모아 두고 검사에서 직접 부른다.
@@ -55,7 +57,10 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
 (async () => {
   // ── 꺼짐 조건 ───────────────────────────────────────────────────────────
   ok('실장이 없으면 꺼진다', make({ managerUserId: '' }).enabled === false);
-  ok('올릴 방이 없으면 꺼진다', make({ rooms: [] }).enabled === false);
+  ok('올릴 방이 없으면 꺼진다', make({ kinds: coffeeKinds({}) }).enabled === false);
+  ok('방이 빠진 갈래는 그 갈래만 꺼진다 (general 없음 → 전할 말은 시험 방으로만)',
+    coffeeKinds({ test: 'C_TEST' }).notice.rooms.map((r) => r.label).join() === 'bot_test'
+    && coffeeKinds({ test: 'C_TEST' }).agenda.rooms.map((r) => r.label).join() === 'bot_test');
   ok('둘 다 있으면 켜진다', make().enabled === true);
 
   // ── 카드 — 실장 DM 에만, 실장 턴에만 ──────────────────────────────────────
@@ -111,16 +116,24 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
     JSON.parse(view.private_metadata).id === btn.value && !view.private_metadata.includes('회의'));
 
   // ── 창 제출 = 보내기 ─────────────────────────────────────────────────────
-  const submit = async (client, user, to, text, id = btn.value) => {
+  const submit = async (client, user, to, text, id = btn.value, kind = 'notice', handlers = app) => {
     const acks = [];
-    await app.views.notice_confirm({
+    await handlers.views.notice_confirm({
       ack: async (a) => { acks.push(a); }, client,
-      body: { user: { id: user }, view: { private_metadata: JSON.stringify({ id }) } },
+      body: { user: { id: user }, view: { private_metadata: JSON.stringify({ id, kind }) } },
       view: { state: { values: { to: { to: { selected_option: to ? { value: to } : undefined } },
                                  body: { body: { value: text } } } } },
     });
     return acks;
   };
+  c = fakeClient();
+  await submit(c, 'UBOSS', 'C_TEST', '내일 회의 10시로 옮깁니다', btn.value, '');
+  ok('갈래를 모르면 안 나간다 (창이 갈래를 잃어버린 경우)',
+    c.posted.every((m) => m.channel !== 'C_TEST') && n.pendingCount() === 1, c.posted);
+  c = fakeClient();
+  await submit(c, 'UBOSS', 'C_CHAT', '내일 회의 10시로 옮깁니다');
+  ok('전할 말은 커피챗 방으로 못 간다 (그 갈래의 방 목록에 없다)',
+    c.posted.every((m) => m.channel !== 'C_CHAT') && n.pendingCount() === 1, c.posted);
   c = fakeClient();
   let acks = await submit(c, 'UBOSS', '', '내일 회의 10시로 옮깁니다');
   ok('방을 안 고르면 안 나간다', acks[0].response_action === 'errors' && c.posted.length === 0);
@@ -211,12 +224,59 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   };
   await app3.views.notice_confirm({
     ack: async () => {}, client: c,
-    body: { user: { id: 'UBOSS' }, view: { private_metadata: JSON.stringify({ id: btn4.value }) } },
+    body: { user: { id: 'UBOSS' }, view: { private_metadata: JSON.stringify({ id: btn4.value, kind: 'notice' }) } },
     view: { state: { values: { to: { to: { selected_option: { value: 'C_GENERAL' } } },
                                body: { body: { value: '점심 12시' } } } } },
   });
   ok('못 올리면 실장에게 알리고 카드를 남긴다',
     c.posted.some((m) => String(m.text).includes('올리지 못했습니다')) && n2.pendingCount() === 1, c.posted);
+
+  // ── 안건 던지기 — 커피콩이 쓴 초안 · 머리말 없음 · 커피챗 방이 먼저 · 던진 것을 기억 ──
+  const na = make({ logPath: path.join(dir, 'agenda.jsonl'), pendingPath: path.join(dir, 'agenda-pending.json') });
+  const appA = fakeApp();
+  na.register(appA);
+  c = fakeClient();
+  await na.offer(c, [{ name: 'agenda', text: '요즘 커피챗 어떠셨어요? 한 줄씩만 남겨 주세요!' }],
+    { user: 'UBOSS', channel: 'DM' });
+  ok('안건도 카드는 실장 DM 으로만 간다', c.posted.length === 1 && c.posted[0].channel === 'DM_UBOSS', c.posted);
+  ok('카드에 커피콩이 쓴 초안임을 밝힌다', JSON.stringify(c.posted[0].blocks).includes('초안'));
+  const btnA = buttonOf(c.posted[0]);
+  c = fakeClient();
+  await appA.actions.notice_open({
+    ack: async () => {}, client: c,
+    body: { user: { id: 'UBOSS' }, trigger_id: 'ta', actions: [{ value: btnA.value }] },
+  });
+  const viewA = c.opened[0].view;
+  const toA = viewA.blocks.find((b) => b.block_id === 'to');
+  ok('안건 창은 커피챗 방이 먼저, 시험 방·general 순',
+    toA.element.options.map((o) => o.value).join(',') === 'C_CHAT,C_TEST,C_GENERAL', toA.element.options);
+  ok('안건 창은 갈래를 들고 간다', JSON.parse(viewA.private_metadata).kind === 'agenda');
+  ok('안건 창의 안내는 머리말이 없다고 말한다', String(viewA.blocks[1].hint.text).includes('머리말 없음'));
+
+  c = fakeClient();
+  const AGENDA = '요즘 커피챗 어떠셨어요? 이번 주에 한 번씩만 남겨 볼까요?';
+  await submit(c, 'UBOSS', 'C_CHAT', AGENDA, btnA.value, 'agenda', appA);
+  const outA = c.posted.find((m) => m.channel === 'C_CHAT');
+  ok('안건은 커피챗 방에 오른다', Boolean(outA), c.posted);
+  ok('안건은 머리말 없이 커피콩 말로 그대로 나간다', outA && outA.text === AGENDA, outA && outA.text);
+  ok('던진 안건을 파일에 적는다 (봇이 매 턴 보는 파일)',
+    fs.existsSync(agendaPath) && fs.readFileSync(agendaPath, 'utf-8').includes(AGENDA)
+    && fs.readFileSync(agendaPath, 'utf-8').includes('커피챗 방'), fs.existsSync(agendaPath) && fs.readFileSync(agendaPath, 'utf-8'));
+  ok('기록에 갈래가 남는다', fs.readFileSync(path.join(dir, 'agenda.jsonl'), 'utf-8').includes('"kind":"agenda"'));
+
+  // 안건은 최근 셋만 기억한다 — 매 턴 붙는 글이라 길어지면 대화 값을 먹는다.
+  for (const i of [1, 2, 3]) {
+    c = fakeClient();
+    await na.offer(c, [{ name: 'agenda', text: `안건 ${i}번` }], { user: 'UBOSS', channel: 'DM' });
+    const b = buttonOf(c.posted[0]);
+    c = fakeClient();
+    await submit(c, 'UBOSS', 'C_TEST', `안건 ${i}번`, b.value, 'agenda', appA);
+  }
+  const mem = fs.readFileSync(agendaPath, 'utf-8');
+  ok('최근 셋만 남고 가장 새 것이 맨 위다',
+    (mem.match(/^## /gm) || []).length === 3 && mem.indexOf('안건 3번') < mem.indexOf('안건 2번') && !mem.includes(AGENDA), mem);
+  ok('전할 말은 안건 파일에 안 적힌다',
+    !fs.readFileSync(agendaPath, 'utf-8').includes('회의 10시'));
 
   console.log(`\n${fail ? `실패 ${fail}건` : '모두 통과.'}`);
   fs.rmSync(dir, { recursive: true, force: true });
