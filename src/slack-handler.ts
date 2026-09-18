@@ -412,6 +412,7 @@ export class SlackHandler {
       const letterData = path.join(path.dirname(turnScript), 'bots', 'letter', 'data');
       const notice = new LetterNotice({
         managerUserId: config.letter.managerUserId,
+        members: config.letter.members,
         kinds: coffeeKinds(
           { general: config.letter.generalChannel, chat: config.letter.chatChannel, test: testRoom },
           { agenda: path.join(letterData, 'agenda.md') },
@@ -428,12 +429,12 @@ export class SlackHandler {
         at: config.letter.initiative.at,
         room: config.letter.chatChannel,
         managerUserId: config.letter.managerUserId,
-        members: config.letter.members,
+        managerName: config.letter.managerName,
         python: config.chat.python,
         script: path.join(path.dirname(turnScript), 'comm_pulse.py'),
         statePath: path.join(letterData, 'initiative-state.json'),
         controlPath: path.join(letterData, 'control.json'),
-        host: { initiate: (client, key, brief) => letterHost!.initiate(client, key, brief) },
+        host: { initiate: (client, key, brief, name) => letterHost!.initiate(client, key, brief, name) },
         offer: notice.enabled ? notice.offer : undefined,
       });
       letterHost = new ChatHost({

@@ -27,7 +27,7 @@ const agendaPath = path.join(dir, 'agenda.md');
 // 실제 커피콩 갈래 그대로 — 전할 말은 general·bot_test, 안건은 커피챗·bot_test·general.
 const KINDS = coffeeKinds({ general: 'C_GENERAL', chat: 'C_CHAT', test: 'C_TEST' }, { agenda: agendaPath });
 const make = (extra = {}) => new LetterNotice({
-  managerUserId: 'UBOSS', kinds: KINDS, logPath, pendingPath, ...extra,
+  managerUserId: 'UBOSS', members: ['U_HGD', 'U_CS'], kinds: KINDS, logPath, pendingPath, ...extra,
 });
 
 // 가짜 앱 — 핸들러를 모아 두고 검사에서 직접 부른다.
@@ -45,6 +45,7 @@ function fakeClient() {
   return {
     posted, opened,
     conversations: { open: async ({ users }) => ({ channel: { id: `DM_${users}` } }) },
+    users: { info: async ({ user }) => ({ user: { profile: { real_name: user === 'U_HGD' ? '홍길동' : '김철수', display_name: '' } } }) },
     chat: {
       postMessage: async (msg) => { posted.push(msg); return { ts: '1700000000.000100' }; },
       getPermalink: async () => ({ permalink: 'https://slack.example/p/1' }),
@@ -169,10 +170,43 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   await submit(c, 'UBOSS', 'C_TEST', EDITED, btn2.value);
   ok('같은 글을 같은 방에 10분 안에 또 보내면 거절한다',
     !c.posted.some((m) => m.channel === 'C_TEST') && c.posted.some((m) => String(m.text).includes('다시 보내지 않았습니다')), c.posted);
-  ok('거절한 카드는 남아 있다 (다른 방으로는 보낼 수 있게)', n.pendingCount() === 1);
+  ok('카드는 한 번 쓰는 표다 — 거절돼도 닫힌다', n.pendingCount() === 0);
   c = fakeClient();
   await submit(c, 'UBOSS', 'C_GENERAL', EDITED, btn2.value);
-  ok('다른 방으로는 나간다', c.posted.some((m) => m.channel === 'C_GENERAL'));
+  ok('닫힌 카드로는 다른 방으로도 못 보낸다 (제출 때 카드를 다시 본다)',
+    !c.posted.some((m) => m.channel === 'C_GENERAL') && c.posted.some((m) => String(m.text).includes('만료됐거나 이미 처리')), c.posted);
+  c = fakeClient();
+  await n.offer(c, [{ name: 'notice', text: EDITED }], { user: 'UBOSS', channel: 'DM' });
+  const btn2b = buttonOf(c.posted[c.posted.length - 1]);
+  c = fakeClient();
+  await submit(c, 'UBOSS', 'C_GENERAL', EDITED, btn2b.value);
+  ok('새 카드로는 다른 방으로 나간다', c.posted.some((m) => m.channel === 'C_GENERAL'));
+
+  // ── 제출 때 카드를 다시 본다 — 갈래가 다르거나 · 없거나 · 시각이 깨졌으면 안 나간다 ──
+  c = fakeClient();
+  await n.offer(c, [{ name: 'notice', text: '갈래 대조용 글입니다' }], { user: 'UBOSS', channel: 'DM' });
+  const btnK = buttonOf(c.posted[0]);
+  c = fakeClient();
+  await submit(c, 'UBOSS', 'C_TEST', '갈래 대조용 글입니다', btnK.value, 'agenda');
+  ok('창의 갈래가 카드와 다르면 안 나간다', c.posted.every((m) => m.channel !== 'C_TEST') && c.posted.some((m) => String(m.text).includes('만료됐거나')));
+  ok('갈래가 다른 제출은 카드도 지운다 (한 번 쓰는 표)', n.pendingCount() === 0);
+  c = fakeClient();
+  await submit(c, 'UBOSS', 'C_TEST', '아무 글', 'no-such-id');
+  ok('없는 카드로는 안 나간다', c.posted.every((m) => m.channel !== 'C_TEST'));
+  c = fakeClient();
+  await n.offer(c, [{ name: 'notice', text: '시각 깨진 카드' }], { user: 'UBOSS', channel: 'DM' });
+  const btnN = buttonOf(c.posted[0]);
+  n['pending'].get(btnN.value).at = 'not-a-date';
+  c = fakeClient();
+  await submit(c, 'UBOSS', 'C_TEST', '시각 깨진 카드', btnN.value);
+  ok('시각이 깨진 카드는 만료로 본다 (영영 살아 있지 않게)', c.posted.every((m) => m.channel !== 'C_TEST') && n.pendingCount() === 0);
+  // 창을 둘 열어 같이 누르면 둘째는 걸린다
+  c = fakeClient();
+  await n.offer(c, [{ name: 'notice', text: '두 번 누른 글' }], { user: 'UBOSS', channel: 'DM' });
+  const btnD = buttonOf(c.posted[0]);
+  c = fakeClient();
+  await Promise.all([submit(c, 'UBOSS', 'C_TEST', '두 번 누른 글', btnD.value), submit(c, 'UBOSS', 'C_TEST', '두 번 누른 글', btnD.value)]);
+  ok('같은 카드를 동시에 두 번 제출해도 한 번만 나간다', c.posted.filter((m) => m.channel === 'C_TEST').length === 1, c.posted.filter((m) => m.channel === 'C_TEST').length);
 
   // ── 재시작 뒤에도 카드가 살아 있다 ────────────────────────────────────────
   c = fakeClient();
@@ -228,8 +262,10 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
     view: { state: { values: { to: { to: { selected_option: { value: 'C_GENERAL' } } },
                                body: { body: { value: '점심 12시' } } } } },
   });
-  ok('못 올리면 실장에게 알리고 카드를 남긴다',
-    c.posted.some((m) => String(m.text).includes('올리지 못했습니다')) && n2.pendingCount() === 1, c.posted);
+  ok('못 올렸을 수 있으면 방을 확인하라 알리고 카드는 닫는다 (다시 눌러 두 번 올리지 않게)',
+    c.posted.some((m) => String(m.text).includes('방을 먼저 확인')) && n2.pendingCount() === 0, c.posted);
+  ok('기록은 올리기 전에 남아 같은 글은 10분 안에 다시 안 나간다',
+    fs.existsSync(path.join(dir, 'other.jsonl')) && fs.readFileSync(path.join(dir, 'other.jsonl'), 'utf-8').includes('"to":"C_GENERAL"'));
 
   // ── 안건 던지기 — 커피콩이 쓴 초안 · 머리말 없음 · 커피챗 방이 먼저 · 던진 것을 기억 ──
   const na = make({ logPath: path.join(dir, 'agenda.jsonl'), pendingPath: path.join(dir, 'agenda-pending.json') });
@@ -265,16 +301,55 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   ok('기록에 갈래가 남는다', fs.readFileSync(path.join(dir, 'agenda.jsonl'), 'utf-8').includes('"kind":"agenda"'));
 
   // 안건은 최근 셋만 기억한다 — 매 턴 붙는 글이라 길어지면 대화 값을 먹는다.
-  for (const i of [1, 2, 3]) {
+  for (const w of ['하나', '둘', '셋']) {
     c = fakeClient();
-    await na.offer(c, [{ name: 'agenda', text: `안건 ${i}번` }], { user: 'UBOSS', channel: 'DM' });
+    await na.offer(c, [{ name: 'agenda', text: `안건 ${w}째 이야기` }], { user: 'UBOSS', channel: 'DM' });
     const b = buttonOf(c.posted[0]);
+    ok(`안건 ${w} 카드가 만들어진다`, Boolean(b), c.posted);
     c = fakeClient();
-    await submit(c, 'UBOSS', 'C_TEST', `안건 ${i}번`, b.value, 'agenda', appA);
+    await submit(c, 'UBOSS', 'C_CHAT', `안건 ${w}째 이야기`, b.value, 'agenda', appA);
   }
   const mem = fs.readFileSync(agendaPath, 'utf-8');
   ok('최근 셋만 남고 가장 새 것이 맨 위다',
-    (mem.match(/^## /gm) || []).length === 3 && mem.indexOf('안건 3번') < mem.indexOf('안건 2번') && !mem.includes(AGENDA), mem);
+    (mem.match(/^## /gm) || []).length === 3 && mem.indexOf('안건 셋째') < mem.indexOf('안건 둘째') && !mem.includes(AGENDA), mem);
+  // 시험 방·general 로 보낸 글은 기억 파일에 안 적힌다 — 그 파일은 모든 턴에 붙는다.
+  c = fakeClient();
+  await na.offer(c, [{ name: 'agenda', text: '시험 방에만 보낸 안건' }], { user: 'UBOSS', channel: 'DM' });
+  const bT = buttonOf(c.posted[0]);
+  c = fakeClient();
+  await submit(c, 'UBOSS', 'C_TEST', '시험 방에만 보낸 안건', bT.value, 'agenda', appA);
+  ok('시험 방에 보낸 글은 기억 파일에 안 적힌다 (다른 방에서 되풀이되지 않게)',
+    c.posted.some((m) => m.channel === 'C_TEST') && !fs.readFileSync(agendaPath, 'utf-8').includes('시험 방에만'));
+
+  // ── 봇이 쓴 갈래의 빗장 — 카드 전과 보내기 직전 둘 다 ─────────────────────────
+  for (const [why, text] of [['멘션', '<@U_HGD> 어떠세요?'], ['이름(성 뗀 것)', '길동님 이번 주 어떠셨어요?'], ['이름', '김철수 님 고마워요'],
+                             ['집계', '세 분만 남기셨어요'], ['비율', '참여율이 27%네요'], ['숫자', '3개 팀이 모여요']]) {
+    c = fakeClient();
+    await na.offer(c, [{ name: 'agenda', text }], { user: 'UBOSS', channel: 'DM' });
+    ok(`봇이 쓴 글에 ${why}이(가) 들어가면 카드를 안 만들고 까닭을 알린다`,
+      !c.posted.some((m) => buttonOf(m)) && c.posted.some((m) => String(m.text).includes('빗장')), c.posted);
+  }
+  c = fakeClient();
+  await na.offer(c, [{ name: 'agenda', text: '1on1 은 10시 반에도 돼요. 9/22 에 봬요!' }], { user: 'UBOSS', channel: 'DM' });
+  ok('시각·날짜·1on1 의 숫자는 둔다', c.posted.some((m) => buttonOf(m)), c.posted);
+  const bG = buttonOf(c.posted[0]);
+  c = fakeClient();
+  await submit(c, 'UBOSS', 'C_CHAT', '1on1 은 10시 반에도 돼요. 길동님도요!', bG.value, 'agenda', appA);   // 창에서 이름을 넣었다
+  ok('실장이 창에서 이름을 넣어도 보내기 직전 빗장이 막는다',
+    c.posted.every((m) => m.channel !== 'C_CHAT') && c.posted.some((m) => String(m.text).includes('빗장')), c.posted);
+  ok('막힌 뒤 카드는 닫혀 있다', na.pendingCount() === 0);
+  c = fakeClient();
+  await n.offer(c, [{ name: 'notice', text: '길동님 생일 축하해요! 세 분 모여요' }], { user: 'UBOSS', channel: 'DM' });
+  ok('실장 말 그대로인 전할 말에는 이름·숫자 빗장을 안 건다', c.posted.some((m) => buttonOf(m)), c.posted);
+  // 이름을 못 받아 오면 막는다 — 이름을 아직 안 받아 둔 새 인스턴스에서
+  const nb = make({ logPath: path.join(dir, 'nb.jsonl'), pendingPath: path.join(dir, 'nb-pending.json') });
+  nb.register(fakeApp());
+  c = fakeClient();
+  c.users.info = async () => { throw new Error('ratelimited'); };
+  await nb.offer(c, [{ name: 'agenda', text: '요즘 어떠세요?' }], { user: 'UBOSS', channel: 'DM' });
+  ok('실원 이름을 못 받아 오면 봇이 쓴 글은 막는다 (못 본 채 통과시키지 않는다)',
+    !c.posted.some((m) => buttonOf(m)) && c.posted.some((m) => String(m.text).includes('못 받아 옴')), c.posted);
+
   ok('전할 말은 안건 파일에 안 적힌다',
     !fs.readFileSync(agendaPath, 'utf-8').includes('회의 10시'));
 

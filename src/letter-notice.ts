@@ -58,11 +58,19 @@ export interface NoticeKind {
   rooms: NoticeRoom[];
   /** 보낸 글을 적어 둘 파일 — 파이썬이 매 턴 붙여 봇이 「내가 던진 것」을 안다. 없으면 안 적는다. */
   rememberPath?: string;
+  /** 기억 파일에 적는 방 — 여기 없는 방(시험 방·general)에 보낸 글은 안 적는다. 그 파일은 모든 턴에
+   *  붙으므로 다른 방의 글이 섞이면 카드 없이 되풀이될 수 있다(외부 검토 2026-09-18). */
+  rememberRooms?: string[];
+  /** **봇이 쓴 글**(안건·아침 말 걸기)이면 참 — 카드를 만들 때와 **실장이 창에서 고친 뒤 보낼 때** 둘 다
+   *  이름·멘션·집계·숫자·길이 빗장을 건다. 실장 말 그대로인 전할 말에는 안 건다. */
+  guard?: boolean;
 }
 
 export interface LetterNoticeOptions {
   /** 이 사람만 쓴다. 비면 기능 자체가 꺼진다. */
   managerUserId: string;
+  /** 실원 명단 — `guard` 갈래의 이름 빗장에 쓴다(`users.info` 로 이름을 받아 둔다). */
+  members?: string[];
   /** 갈래별 설정. 방이 하나도 없으면 기능 자체가 꺼진다 — 갈 곳이 없다. */
   kinds: Record<string, NoticeKind>;
   /** 보낸 기록. `bots/letter/data/notice.jsonl` */
@@ -92,9 +100,17 @@ interface Sent {
 const sha16 = (text: string): string =>
   crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
 
+/** 봇이 쓴 글이 방에 갈 때의 빗장 — 파이썬 `privacy_gate` 와 같은 뜻을 다른 자료·언어로 한 번 더. */
+const GUARD_MAX = 1200;
+const MENTION = /<@[^>]+>/;
+const NUM_KO = '(?:(?:열|스물|서른|마흔|쉰)(?:한|두|세|네|다섯|여섯|일곱|여덟|아홉)?|(?:한|두|세|네|다섯|여섯|일곱|여덟|아홉)|스무)';
+const TALLY = new RegExp(`\\d+\\s*(?:명|건|%|퍼센트|배|위|등|번째)|${NUM_KO}\\s*(?:명|분)(?!화)|절반|과반|대다수|대부분|다수`);
+const DIGIT_ALLOW = /1on1|\d{4}-\d{2}-\d{2}|\d{1,2}\s*\/\s*\d{1,2}|\d{1,2}\s*시(?:\s*\d{1,2}\s*분)?(?:\s*반)?|\d{1,2}\s*분|\d{1,2}\s*월|\d{1,2}\s*일|\d{1,2}\s*주|\d{4}\s*년/g;
+
 export class LetterNotice {
   private logger = new Logger('Letter:notice');
   private pending = new Map<string, Pending>();
+  private names = new Map<string, string[]>();
 
   constructor(private readonly opts: LetterNoticeOptions) {
     this.load();
@@ -186,11 +202,28 @@ export class LetterNotice {
         await this.tell(client, body.user.id, '목록에 없는 방이라 *아무것도 보내지 않았습니다.*');
         return;
       }
-      const sent = await this.send(client, body.user.id, meta.kind || '', kind, room, text);
-      if (sent && meta.id) {
-        this.pending.delete(meta.id);
-        this.save();
+      // **제출할 때 카드를 다시 본다** — 창을 미리 열어 두고 카드가 만료·소진된 뒤에 눌러도 나가면
+      // 안 된다(외부 검토 2026-09-18). 있고·같은 갈래고·안 지났으면 **먼저 소진한다**(선점) — 창을
+      // 둘 열어 같이 누르면 둘째는 여기서 걸린다.
+      const found = meta.id ? this.pending.get(meta.id) : undefined;
+      if (!found || found.kind !== meta.kind || this.expired(found)) {
+        if (meta.id) { this.pending.delete(meta.id); this.save(); }
+        this.logger.warn(`카드가 없거나 만료됨(${meta.id}) — 보내지 않습니다`);
+        await this.tell(client, body.user.id, '이 카드는 만료됐거나 이미 처리됐습니다 — *아무것도 보내지 않았습니다.* 다시 말씀해 주세요.');
+        return;
       }
+      this.pending.delete(found.id);
+      this.save();
+      // 봇이 쓴 글은 실장이 고친 뒤에도 빗장을 거친다 — 고치다 이름·숫자가 들어가는 것을 막는다.
+      if (kind.guard) {
+        const why = await this.guard(client, text);
+        if (why) {
+          this.logger.warn(`보내기 직전 빗장에 막힘 — ${why}`);
+          await this.tell(client, body.user.id, `:no_entry_sign: 고친 글이 *빗장에 막혔습니다* — ${why}\n_아무것도 안 나갔습니다. 카드는 닫혔으니 다시 말씀해 주세요._`);
+          return;
+        }
+      }
+      await this.send(client, body.user.id, meta.kind || '', kind, room, text);
     });
 
     const rooms = this.kinds().map((n) => `${n}→${this.opts.kinds[n].rooms.map((r) => r.label).join('·')}`);
@@ -217,8 +250,16 @@ export class LetterNotice {
         this.logger.warn(`모르는 부탁(${ask.name}) — 버립니다`);
         continue;
       }
-      const text = (ask.text || '').trim().slice(0, MAX_LEN);
+      const text = String(ask.text ?? '').trim().slice(0, MAX_LEN);
       if (!text) continue;
+      if (kind.guard) {
+        const why = await this.guard(client, text);
+        if (why) {
+          this.logger.warn(`카드 만들기 전 빗장에 막힘 — ${why}`);
+          await this.tell(client, this.opts.managerUserId, `:no_entry_sign: ${kind.title} 글이 *빗장에 막혀 카드를 안 만들었습니다* — ${why}`);
+          continue;
+        }
+      }
       const item: Pending = {
         id: crypto.randomBytes(6).toString('hex'),
         kind: ask.name,
@@ -321,21 +362,26 @@ export class LetterNotice {
         `방금 ${again}초 전에 같은 글을 ${room.label} 에 올렸습니다. *다시 보내지 않았습니다.*`);
       return false;
     }
+    // **기록을 올리기 전에 남긴다.** 슬랙이 올려 놓고 응답만 늦어 예외가 나면, 기록이 없을 때는
+    // 「다시 눌러」가 곧 두 번 올리기다(외부 검토 2026-09-18). 기록이 먼저 있으면 같은 글은
+    // 10분 안에 안 나간다 — 닫힌 쪽이다.
+    const record: Sent = {
+      ts: new Date().toISOString(),
+      kind: name,
+      to: room.id, to_label: room.label,
+      chars: text.length,
+      head: text.slice(0, 30),
+      sha: sha16(text),
+    };
+    this.note(record);
     try {
       const posted = await client.chat.postMessage({
         channel: room.id,
         text: kind.header ? `${kind.header}\n\n${text}` : text,
       });
-      const record: Sent = {
-        ts: new Date().toISOString(),
-        kind: name,
-        to: room.id, to_label: room.label,
-        chars: text.length,
-        head: text.slice(0, 30),
-        sha: sha16(text),
-      };
-      this.note(record);
-      if (kind.rememberPath) this.remember(kind.rememberPath, room, text, record.ts);
+      if (kind.rememberPath && (kind.rememberRooms ?? []).includes(room.id)) {
+        this.remember(kind.rememberPath, room, text, record.ts);
+      }
       this.logger.info(`${kind.title} 완료 → ${room.label} (${text.length}자)`);
 
       let link = '';
@@ -351,7 +397,7 @@ export class LetterNotice {
     } catch (error) {
       this.logger.warn(`${kind.title} 실패`, error);
       await this.tell(client, manager,
-        `올리지 못했습니다 (${room.label}). 카드는 그대로 있으니 다시 눌러 주세요.\n\`${String(error).slice(0, 200)}\``);
+        `올리지 못했을 수 있습니다 (${room.label}) — *방을 먼저 확인해 주세요.* 카드는 닫혔고, 같은 글은 10분 안에 다시 안 나갑니다.\n\`${String(error).slice(0, 200)}\``);
       return false;
     }
   }
@@ -423,7 +469,51 @@ export class LetterNotice {
 
   // ── 안 보낸 카드 ───────────────────────────────────────────────────────
   private expired(item: Pending): boolean {
-    return Date.now() - Date.parse(item.at) > PENDING_TTL_MS;
+    const at = Date.parse(item.at);
+    if (Number.isNaN(at)) return true;   // 시각이 깨진 카드는 만료로 — 영영 살아 있으면 안 된다
+    return Date.now() - at > PENDING_TTL_MS;
+  }
+
+  // ── 봇이 쓴 글의 빗장 ───────────────────────────────────────────────────
+  /** 막을 까닭 한 줄. 비면 통과. 이름을 못 받아 온 실원이 있으면 **막는다**(못 본 채 통과시키지 않는다). */
+  private async guard(client: App['client'], text: string): Promise<string> {
+    if (text.length > GUARD_MAX) return `너무 김(${text.length}자)`;
+    const m = text.match(MENTION);
+    if (m) return `사람 지목(${m[0]})`;
+    const t = text.match(TALLY);
+    if (t) return `집계·건수(「${t[0]}」)`;
+    const rest = text.replace(DIGIT_ALLOW, '');
+    const d = rest.match(/\d/);
+    if (d && d.index !== undefined) return `숫자(「${rest.slice(Math.max(0, d.index - 3), d.index + 4).trim()}」)`;
+    for (const id of this.opts.members ?? []) {
+      const names = await this.namesOf(client, id);
+      if (!names.length) return `이름을 못 받아 옴(${id}) — 빗장을 못 세워 막음`;
+      for (const name of names) if (name && text.includes(name)) return `실원 이름(「${name}」)`;
+    }
+    return '';
+  }
+
+  private async namesOf(client: App['client'], id: string): Promise<string[]> {
+    const cached = this.names.get(id);
+    if (cached) return cached;
+    const out = new Set<string>();
+    try {
+      const res = await client.users.info({ user: id });
+      const profile = res.user?.profile as { display_name?: string; real_name?: string } | undefined;
+      for (const raw of [profile?.real_name, profile?.display_name, res.user?.real_name]) {
+        const name = (raw || '').trim();
+        if (!name) continue;
+        out.add(name);
+        // 「홍길동」→「길동」. 두 자 이름은 성을 떼면 한 자라 못 쓴다.
+        if (/^[가-힣]{3,4}$/.test(name)) out.add(name.slice(1));
+      }
+    } catch (error) {
+      this.logger.warn(`users.info 실패 (${id}) — 이번엔 막고 다음에 다시 받아 온다`, error);
+      return [];   // 실패는 캐시하지 않는다
+    }
+    const names = [...out];
+    if (names.length) this.names.set(id, names);
+    return names;
   }
 
   private load(): void {
@@ -442,7 +532,10 @@ export class LetterNotice {
       fs.mkdirSync(path.dirname(this.opts.pendingPath), { recursive: true });
       const keep: Record<string, Pending> = {};
       for (const [id, item] of this.pending) if (!this.expired(item)) keep[id] = item;
-      fs.writeFileSync(this.opts.pendingPath, JSON.stringify(keep, null, 2), 'utf-8');
+      // 임시 파일에 쓰고 바꿔 끼운다 — 쓰는 도중 죽어도 반 토막 파일이 안 남는다.
+      const tmp = `${this.opts.pendingPath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(keep, null, 2), 'utf-8');
+      fs.renameSync(tmp, this.opts.pendingPath);
     } catch (error) {
       this.logger.warn('안 보낸 카드를 못 적었습니다', error);
     }
@@ -477,6 +570,8 @@ export function coffeeKinds(
       hint: '이 칸에 있는 그대로 커피콩 말로 나갑니다 (머리말 없음). 마음에 안 들면 고치거나 취소하세요.',
       rooms: [...chat, ...test, ...general],
       rememberPath: files.agenda,
+      rememberRooms: chat.map((r) => r.id),
+      guard: true,
     },
     // 아침 시계(`letter-initiative.ts`)가 실은 「오늘 커피챗 방에 걸 글」. 안건과 같은 관문·같은
     // 기억 파일이고, 파이썬 쪽 빗장(`gate`)을 이미 지난 글이다.
@@ -487,6 +582,8 @@ export function coffeeKinds(
       hint: '이 칸에 있는 그대로 커피콩 말로 나갑니다 (머리말 없음). 마음에 안 들면 고치거나 취소하세요.',
       rooms: [...chat, ...test],
       rememberPath: files.agenda,
+      rememberRooms: chat.map((r) => r.id),
+      guard: true,
     },
   };
 }

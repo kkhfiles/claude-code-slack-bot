@@ -159,6 +159,8 @@ export const config = {
       .split(',').map((s) => s.trim()).filter(Boolean),
     // 실장 본인. 봇이 말을 옮기는 상대이자, 지금 단계에서는 유일한 시험 상대다.
     managerUserId: process.env.LETTER_MANAGER_USER_ID || '',
+    // 실장 표시 이름 — 아침 대화(실장 DM 과 따로 두는 대화)의 첫 줄에 쓴다. 비면 「실장」.
+    managerName: process.env.LETTER_MANAGER_NAME || '실장',
     // 칭찬을 **받을** 수 있는 사람 명단(실원 전체). 대화 허용 명단과 다르다 —
     // 받는 사람은 목록에서 고르게 해서 이름 오타·동명이인이 끼지 못하게 한다.
     // **비면 칭찬 전달이 통째로 꺼진다.** 고를 목록이 없으면 고를 수가 없다.

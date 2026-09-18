@@ -38,7 +38,7 @@ function fakeHost() {
   return {
     calls,
     set: (r) => { next = r; },
-    initiate: async (_c, key, brief) => { calls.push({ key, brief }); return next; },
+    initiate: async (_c, key, brief, name) => { calls.push({ key, brief, name }); return next; },
   };
 }
 function fakeClient() {
@@ -55,7 +55,7 @@ const make = (extra = {}, host = fakeHost()) => {
   n += 1;
   const offered = [];
   const it = new LetterInitiative({
-    enabled: true, at: '08:30', room: 'C_CHAT', managerUserId: 'U_BOSS', members: ['U_HGD', 'U_CS'],
+    enabled: true, at: '08:30', room: 'C_CHAT', managerUserId: 'U_BOSS', managerName: '실장',
     python: 'python', script,
     statePath: path.join(dir, `state${n}.json`), controlPath: path.join(dir, `control${n}.json`),
     host, offer: async (_c, asks, from) => { offered.push({ asks, from }); }, ...extra,
@@ -134,8 +134,8 @@ ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 �
   const { it, host, offered } = make();
   const c = fakeClient();
   const r = await it.runOnce(c, MON);
-  ok('현황판을 들고 **실장 열쇠**로 턴을 부른다 (방 열쇠가 아니다)',
-    host.calls[0]?.key === 'U_BOSS' && host.calls[0]?.brief.includes('네 현황판'), host.calls);
+  ok('현황판을 들고 **아침 전용 대화**(실장 DM 과 따로)로 턴을 부른다 — 실장 DM 기억을 안 안고 돈다',
+    host.calls[0]?.key === 'U_BOSS-morning' && host.calls[0]?.brief.includes('네 현황판') && host.calls[0]?.name === '실장', host.calls);
   ok('실장에게 하는 말이 DM 으로 간다', c.dm.some((m) => m.channel === 'DM_U_BOSS' && m.text.includes('가볍게 말 걸어 볼게요')), c.dm);
   ok('방에 걸 글은 카드(offer)로만 간다', r === 'proposed' && offered.length === 1 && offered[0].asks[0].text === PROPOSAL, offered);
   ok('카드는 실장 이름으로, DM 자리로', offered[0].from.user === 'U_BOSS' && offered[0].from.channel === 'DM');
@@ -162,42 +162,16 @@ ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 �
 }
 {
   const { it, host, offered } = make();
-  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: '길동님은 아직 안 남기셨네요, 이번 주엔 어떠세요?' }] });
-  const c = fakeClient();
-  const r = await it.runOnce(c, MON);
-  ok('실원 이름(성 뗀 것)이 들어가면 카드를 안 만들고 실장에게 까닭을 말한다',
-    r === 'blocked' && offered.length === 0 && c.dm.some((m) => m.text.includes('길동') && m.text.includes('막혀')), { r, dm: c.dm });
+  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: '길동님은 아직 안 남기셨네요' }] });
+  ok('이름·숫자 빗장은 여기가 아니라 카드 쪽(LetterNotice.guard)이 건다 — 시계는 그대로 카드로 넘긴다',
+    (await it.runOnce(fakeClient(), MON)) === 'proposed' && offered.length === 1);
 }
 {
   const { it, host, offered } = make();
-  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: '김철수 님 고마워요!' }] });
-  ok('실원 이름(성 포함)도 막는다', (await it.runOnce(fakeClient(), MON)) === 'blocked' && offered.length === 0);
-}
-{
-  const { it, host, offered } = make();
-  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: '<@U_HGD> 어떠세요?' }] });
-  ok('멘션은 호스트 빗장에서도 막는다 (두 겹)', (await it.runOnce(fakeClient(), MON)) === 'blocked' && offered.length === 0);
-}
-{
-  const { it, host, offered } = make();
-  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: PROPOSAL }] });
-  let failing = true;
-  const c = fakeClient();
-  c.users.info = async ({ user }) => {
-    if (failing) throw new Error('ratelimited');
-    return { user: { profile: { real_name: user === 'U_HGD' ? '홍길동' : '김철수', display_name: '' } } };
-  };
-  const r1 = await it.runOnce(c, MON);
-  ok('실원 이름을 못 받아 오면 막는다 (이름 빗장은 이 겹뿐이라 못 본 채 통과시키지 않는다)',
-    r1 === 'blocked' && offered.length === 0 && c.dm.some((m) => m.text.includes('못 받아 옴')), { r1, dm: c.dm });
-  failing = false;
-  const r2 = await it.runOnce(c, new Date(2026, 8, 22, 8, 30));
-  ok('실패는 캐시하지 않는다 — 다음 날 이름을 받아 오면 다시 돈다', r2 === 'proposed' && offered.length === 1, r2);
-}
-{
-  const { it, host, offered } = make();
-  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: '가'.repeat(1300) }] });
-  ok('너무 긴 글은 막는다', (await it.runOnce(fakeClient(), MON)) === 'blocked' && offered.length === 0);
+  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: 42 }, { name: 7 }, null] });
+  let crashed = false;
+  try { await it.runOnce(fakeClient(), MON); } catch { crashed = true; }
+  ok('모델이 엉뚱한 꼴의 부탁을 줘도 시계가 안 죽는다', crashed === false && offered.length === 1 && offered[0].asks.length === 1);
 }
 {
   const { it, host, offered } = make();

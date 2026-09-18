@@ -375,10 +375,11 @@ export class ChatHost {
    * (`letter-initiative.ts`)이 그것을 확인 카드로 띄운다. **여기서 방에 올리지 않는다.**
    * 상주 turn.py 를 같이 쓰므로 사람 턴과 줄을 서고, 실장 DM 대화 기억에 남는다.
    */
-  async initiate(client: App['client'], key: string, brief: string): Promise<TurnResult> {
-    const manager = Boolean(this.opts.managerUserId) && key === this.opts.managerUserId;
-    return this.runTurn(key, manager ? await this.displayName(client, key) : '', brief, false,
-                        manager, { initiate: true });
+  async initiate(client: App['client'], key: string, brief: string, name: string): Promise<TurnResult> {
+    void client;
+    // 실장 턴으로 돈다 — 열쇠는 실장 DM 이 아니라 아침 전용 대화(`U…-morning`)라 열쇠로 실장을
+    // 못 알아보므로 부르는 쪽이 정한다. 이 진입점은 아침 시계만 부른다.
+    return this.runTurn(key, name, brief, false, true, { initiate: true });
   }
 
   async start(): Promise<void> {
