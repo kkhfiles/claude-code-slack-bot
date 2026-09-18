@@ -1562,6 +1562,11 @@ export class SlackHandler {
         //
         // ⚠️ **오류일 때는 남긴다** — ❌ 는 이 줄에만 뜬다. 지우면 세션이 넘어진
         // 사실이 채널 어디에도 안 남는다.
+        //
+        // **DM 에서는 사람이 물은 것도 안 남긴다** (2026-09-18). 「✅ 작업 완료」 다음
+        // 줄이 「무엇을 가리키는지 확실치 않습니다」(09/15 16:09)처럼 되물음이면 그
+        // 줄은 거짓이고, 「받았고 끝났다」는 원본 메시지의 반응 이모지가 이미 말한다.
+        // 채널은 그대로 — 다른 사람이 보는 방에서는 끝난 표가 스레드 밖에서 읽힌다.
         const pushed = Boolean((event as any).pushed);
         // **여기서도 기다리지 않는다** (2026-08-31). 상태 한 줄을 지우거나 고치는
         // 것은 슬랙 왕복인데, 그 결과를 읽는 곳이 없고 뒤에 오는 것은 판 반영이다.
@@ -1570,7 +1575,8 @@ export class SlackHandler {
         // ⚠️ **스트림 안의 고치기와 같은 줄에 세운다** — 따로 두면 이 「지우기」가
         // 아직 안 나간 「고치기」를 앞질러, 지운 메시지를 고치려 드는 순서가 나온다.
         this.queueStatus(sessionKey, channel, statusMessageTs,
-          `${doneEmoji} ${doneLabel}${toolSummary}${costSuffix}`, pushed && !cliError);
+          `${doneEmoji} ${doneLabel}${toolSummary}${costSuffix}`,
+          (pushed || (isDM && !isPlanMode)) && !cliError);
       }
       await this.updateMessageReaction(sessionKey, doneEmoji);
       await this.removeAnchorReaction(sessionKey);

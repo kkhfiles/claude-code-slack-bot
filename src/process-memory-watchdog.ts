@@ -167,6 +167,24 @@ export class ProcessMemoryWatchdog {
     await this.updateMessage(messageTs, line, blocks).catch(e =>
       this.logger.error('Failed to update health fix message', e as Error));
     this.logger.info('Health fix action done', { actionId, result: line });
+
+    // **정리한 뒤 다시 잰다.** 정리 스크립트는 `windows-health-latest.json` 을 안
+    // 건드리고 다음 측정은 정오·자정이라, 자정 알림에서 버튼을 누른 날도 08:00
+    // 브리핑은 이미 없어진 유령을 「잔존 🔴」로 냈다. 정오 재측정을 둔 이유(「해제」)
+    // 와 같은 것을 버튼 뒤에도 둔다. 기다리지 않는다 — 카드 갱신이 먼저다.
+    if ((actionId === 'health_fix_explorer' || actionId === 'health_fix_watchers')
+        && !line.startsWith('⚠️')) {
+      this.refreshHealthSnapshot().catch(e =>
+        this.logger.warn('정리 뒤 재측정 실패 — 다음 정기 측정까지 옛 값이 남는다', e as Error));
+    }
+  }
+
+  /** 읽기 전용 측정 한 번 — `windows-health-latest.json` 을 지금 상태로 바꾼다. */
+  private refreshHealthSnapshot(): Promise<void> {
+    const repo = process.env.MYCELIUM_REPO || 'P:/github/claude-workflow';
+    const argv = ['-X', 'utf8', '-m', 'mycelium.batch.windows_health_check', '--brief', '--exit-zero'];
+    return execAsync(`python ${argv.join(' ')}`, { cwd: repo, timeout: 180_000 })
+      .then(() => { this.logger.info('정리 뒤 재측정 완료'); });
   }
 
   /** 재시작은 두 단계. 첫 버튼은 묻기만 하고 아무것도 예약하지 않는다. */

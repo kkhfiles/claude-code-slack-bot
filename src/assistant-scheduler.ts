@@ -752,11 +752,16 @@ export class AssistantScheduler {
     });
   }
 
+  /**
+   * 라벨은 셈과 같아야 한다 — `getCostStats` 는 달력이 아니라 **지금부터 거꾸로**
+   * 24시간·7일·30일을 센다. 「이번 주」라고 적었더니 수→목에 $49.56→$48.84 로
+   * 줄어 읽는 사람이 걸렸다(2026-09-16·17 브리핑). 달력 주간이면 불가능한 움직임이다.
+   */
   private formatCostLine(): string {
     const stats = this.getCostStats();
-    let line = `\n\n💰 *비용* — 오늘: $${stats.daily.toFixed(2)} | 이번 주: $${stats.weekly.toFixed(2)} | 이번 달: $${stats.monthly.toFixed(2)}`;
+    let line = `\n\n💰 *비용* — 24시간: $${stats.daily.toFixed(2)} | 7일: $${stats.weekly.toFixed(2)} | 30일: $${stats.monthly.toFixed(2)}`;
     if (stats.analysisMonthly > 0) {
-      line += `\n📊 *분석* — 이번 주: $${stats.analysisWeekly.toFixed(2)} | 이번 달: $${stats.analysisMonthly.toFixed(2)}`;
+      line += `\n📊 *분석* — 7일: $${stats.analysisWeekly.toFixed(2)} | 30일: $${stats.analysisMonthly.toFixed(2)}`;
     }
     return line;
   }
