@@ -221,7 +221,7 @@ interface Waiting {
   users?: Set<string>;
 }
 
-interface TurnResult {
+export interface TurnResult {
   reply: string;
   speak?: boolean;
   error: string | null;
@@ -234,6 +234,9 @@ interface TurnResult {
   reopened?: { from?: string; why?: string; ok?: boolean };
   /** 실장 확인을 거쳐야 나가는 부탁(`turn.py` 의 `_control_do`). 평소 턴에는 없다. */
   ask?: TurnAsk[];
+  /** 봇이 먼저 말을 거는 턴(`initiate`)이었다는 표시와, 빗장이 막았으면 그 까닭. */
+  initiate?: boolean;
+  blocked?: string[];
 }
 
 export class ChatHost {
@@ -365,6 +368,35 @@ export class ChatHost {
    */
   private canSay(key: string, channel: string): boolean {
     return this.isDmKey(key) ? channel.startsWith('D') : channel === key;
+  }
+
+  /**
+   * **봇이 먼저 말을 거는 턴**(`turn.py` 의 `initiate`) — 사람 말 대신 현황판을 넣고, 낄지
+   * 말지·무슨 말을 할지를 모델이 정한다. 여기서 방에 올리지 않는다 — 부르는 쪽
+   * (`letter-initiative.ts`)이 빗장·상한을 거쳐 `post` 로 올린다. 상주 turn.py 를 같이 쓰므로
+   * 사람 턴과 줄을 서고, 그 방의 대화 기억에 남는다(다음에 사람이 답하면 봇이 안다).
+   *
+   * `key` 가 사람 ID 면 실장 DM 보고 턴이다(`where: dm`) — 실장 턴으로 넘긴다.
+   */
+  async initiate(client: App['client'], key: string, brief: string): Promise<TurnResult> {
+    const manager = Boolean(this.opts.managerUserId) && key === this.opts.managerUserId;
+    return this.runTurn(key, manager ? await this.displayName(client, key) : '', brief, true,
+                        manager, { initiate: true });
+  }
+
+  /** 밖에서 방에 올릴 때의 문 — 자리 대조(`canSay`)를 거친다. 올렸으면 참. */
+  async post(client: App['client'], channel: string, text: string): Promise<boolean> {
+    if (!this.canSay(channel, channel) || !text.trim()) {
+      this.logger.warn(`자리가 어긋나 올리지 않았습니다 (${channel})`);
+      return false;
+    }
+    try {
+      await client.chat.postMessage({ channel, text });
+      return true;
+    } catch (error) {
+      this.logger.warn('먼저 건 말을 못 올렸습니다', error);
+      return false;
+    }
   }
 
   async start(): Promise<void> {
@@ -1248,8 +1280,9 @@ export class ChatHost {
    * 한 턴의 요청 몸통. 상주 경로와 단발 경로가 **같은 것을 보내야** 하므로 한 곳에서 만든다.
    */
   private turnBody(key: string, name: string, text: string, decide: boolean,
-                   manager: boolean): Record<string, unknown> {
+                   manager: boolean, extra: Record<string, unknown> = {}): Record<string, unknown> {
     return {
+      ...extra,
       bot: this.opts.name,
       key,
       user: key.startsWith('U') ? key : '',
@@ -1372,24 +1405,24 @@ export class ChatHost {
    * 사람은 봇이 왜 대답을 안 했는지 알 길이 없다.
    */
   private async runTurn(key: string, name: string, text: string, decide: boolean,
-                        manager: boolean): Promise<TurnResult> {
+                        manager: boolean, extra: Record<string, unknown> = {}): Promise<TurnResult> {
     // ⛔ **`CHATBOT_SERVE=off` 로 상주를 끈다** (2026-09-14 추가). 켤 때 이 문을 안
     //    만들어서 되돌리려면 코드를 고쳐야 했다 — 이 저장소는 위험한 기본값에 문을
     //    달아 두는데(`BOARD_NARROW=off` · `ANALYSIS_AGY_TYPES` ·
     //    `BOARD_NARROW_FALLBACK=off`) 여기만 빠져 있었다.
     //    끄면 말 한 번에 프로세스 하나인 예전 길로 돈다(agy 기동 5초를 매 턴 문다).
     if (process.env.CHATBOT_SERVE === 'off') {
-      return this.runTurnOnce(this.turnBody(key, name, text, decide, manager));
+      return this.runTurnOnce(this.turnBody(key, name, text, decide, manager, extra));
     }
-    const first = await this.runTurnResident(key, name, text, decide, manager);
+    const first = await this.runTurnResident(key, name, text, decide, manager, extra);
     if (!first.error || !/turn\.py 종료/.test(first.error)) return first;
     this.logger.info('상주 turn.py 가 내려가 있었다 — 한 번 다시 보낸다');
-    return this.runTurnResident(key, name, text, decide, manager);
+    return this.runTurnResident(key, name, text, decide, manager, extra);
   }
 
   private runTurnResident(key: string, name: string, text: string, decide: boolean,
-                          manager: boolean): Promise<TurnResult> {
-    const body = this.turnBody(key, name, text, decide, manager);
+                          manager: boolean, extra: Record<string, unknown> = {}): Promise<TurnResult> {
+    const body = this.turnBody(key, name, text, decide, manager, extra);
     const child = this.ensureTurnProc();
     if (!child || !child.stdin) return this.runTurnOnce(body);
 

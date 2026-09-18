@@ -26,6 +26,7 @@ import { LunchButtons, readLunchBotToken, readLunchAnnounceChannel } from './lun
 import { ChatHost } from './chat-host';
 import { LetterRelay } from './letter-relay';
 import { LetterNotice, coffeeKinds } from './letter-notice';
+import { LetterInitiative } from './letter-initiative';
 import { LetterBooking } from './letter-booking';
 import { LetterBoost } from './letter-boost';
 import { PremiumSeatSlack } from './premium-seat';
@@ -418,7 +419,27 @@ export class SlackHandler {
         logPath: path.join(letterData, 'notice.jsonl'),
         pendingPath: path.join(letterData, 'notice-pending.json'),
       });
-      this.chatHosts.push(new ChatHost({
+      // 커피콩이 **스스로** 커피챗 방에 말을 거는 시계. 말은 대화 봇(아래 ChatHost)이 만들고
+      // 여기는 빗장·상한·사본만 센다. 호스트는 아래에서 만들어지므로 늦게 묶는다.
+      let letterHost: ChatHost | null = null;
+      const initiative = new LetterInitiative({
+        enabled: config.letter.initiative.enabled,
+        at: config.letter.initiative.at,
+        room: config.letter.chatChannel,
+        managerUserId: config.letter.managerUserId,
+        members: config.letter.members,
+        python: config.chat.python,
+        script: path.join(path.dirname(turnScript), 'comm_pulse.py'),
+        logPath: path.join(letterData, 'initiative.jsonl'),
+        statePath: path.join(letterData, 'initiative-state.json'),
+        controlPath: path.join(letterData, 'control.json'),
+        reportDay: config.letter.initiative.reportDay,
+        host: {
+          initiate: (client, key, brief) => letterHost!.initiate(client, key, brief),
+          post: (client, channel, text) => letterHost!.post(client, channel, text),
+        },
+      });
+      letterHost = new ChatHost({
         name: 'letter',
         botToken: config.letter.botToken,
         appToken: config.letter.appToken,
@@ -439,6 +460,7 @@ export class SlackHandler {
         // 그래서 둘 다 같은 앱에 얹는다.
         attach: (app) => {
           notice.register(app);
+          initiative.register(app);
           new LetterRelay({
             managerUserId: config.letter.managerUserId,
             members: config.letter.members,
@@ -481,7 +503,8 @@ export class SlackHandler {
             logger: this.logger,
           }).register(app);
         },
-      }));
+      });
+      this.chatHosts.push(letterHost);
     }
     // 점심봇의 채널 대화. **버튼도 여기에 얹는다** — 커피챗과 같은 이유로, 앱 하나에
     // 소켓을 두 번 열면 슬랙이 이벤트를 한쪽에만 보낸다. 버튼이 자기 연결을 따로 열고
