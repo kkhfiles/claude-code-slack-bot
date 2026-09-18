@@ -68,6 +68,7 @@ const MON = new Date(2026, 8, 21, 8, 30);   // 월요일 08:30
 ok('LETTER_INITIATIVE 가 1이 아니면 꺼진다', make({ enabled: false }).it.enabled === false);
 ok('방이 비면 꺼진다', make({ room: '' }).it.enabled === false);
 ok('실장이 비면 꺼진다', make({ managerUserId: '' }).it.enabled === false);
+ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 답해 놓고 카드가 안 오면 안 된다', make({ offer: undefined }).it.enabled === false);
 {
   const { it, host } = make({ enabled: false });
   ok('꺼졌으면 돌지 않는다', (await it.runOnce(fakeClient(), MON)) === 'off' && host.calls.length === 0);
@@ -83,6 +84,15 @@ ok('실장이 비면 꺼진다', make({ managerUserId: '' }).it.enabled === fals
   ok('시각이 되면 돈다', first === 'proposed' && offered.length === 1, first);
   ok('같은 날 다시는 안 돈다 (도중에 깨져도 두 번 안 돌게 먼저 적는다)',
     (await it.tick(fakeClient(), new Date(2026, 8, 21, 8, 35))) === 'done-today' && offered.length === 1);
+}
+{
+  // 상태 파일을 못 쓰는 PC — 폴더를 파일 자리에 둬서 흉내 낸다. 그래도 하루 한 번이어야 한다.
+  const { it, host, offered } = make({ statePath: path.join(dir, 'state-dir-as-file') });
+  fs.mkdirSync(it['opts'].statePath, { recursive: true });
+  await it.tick(fakeClient(), MON);
+  await it.tick(fakeClient(), new Date(2026, 8, 21, 8, 31));
+  await it.tick(fakeClient(), new Date(2026, 8, 21, 8, 32));
+  ok('상태 파일을 못 써도 하루 한 번만 돈다 (메모리 표시)', offered.length === 1 && host.calls.length === 1, host.calls.length);
 }
 
 // ── 공휴일 · 실장이 끈 것 · 현황판 실패 ────────────────────────────────────
@@ -102,6 +112,15 @@ ok('실장이 비면 꺼진다', make({ managerUserId: '' }).it.enabled === fals
   fs.writeFileSync(it['opts'].controlPath, JSON.stringify({ today: { date: '2026-09-21', initiative: false } }), 'utf-8');
   ok('「오늘만 꺼」는 그날만 먹는다', (await it.runOnce(fakeClient(), MON)) === 'off' && host.calls.length === 0);
   ok('어제 걸어 둔 「오늘만 꺼」는 오늘 안 먹는다', (await it.runOnce(fakeClient(), new Date(2026, 8, 22, 8, 30))) === 'proposed');
+}
+{
+  const { it, host } = make();
+  fs.writeFileSync(it['opts'].controlPath, '{ "always": { "initiative": fal', 'utf-8');   // 다시 쓰는 도중 · 깨진 파일
+  ok('설정 파일이 깨져 있으면 꺼진 쪽으로 (「자율 꺼」를 놓치지 않게)', (await it.runOnce(fakeClient(), MON)) === 'off' && host.calls.length === 0);
+}
+{
+  const { it } = make();
+  ok('설정 파일이 아예 없으면 켜진 것 (끈 적이 없다)', (await it.runOnce(fakeClient(), MON)) === 'proposed');
 }
 {
   process.env.FAKE_PULSE_FAIL = '1';
@@ -137,8 +156,9 @@ ok('실장이 비면 꺼진다', make({ managerUserId: '' }).it.enabled === fals
 }
 {
   const { it, host, offered } = make();
-  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'notice', text: '엉뚱한 갈래' }] });
-  ok('아침 턴에서는 `pulse` 만 받는다 (다른 갈래는 무시)', (await it.runOnce(fakeClient(), MON)) === 'quiet' && offered.length === 0);
+  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'notice', text: '철수님 생일 축하해요!' }] });
+  ok('다른 갈래도 카드로 간다 (파이썬이 「카드 드리겠다」고 답했으니) · 이름 빗장은 pulse 에만',
+    (await it.runOnce(fakeClient(), MON)) === 'proposed' && offered.length === 1 && offered[0].asks[0].name === 'notice', offered);
 }
 {
   const { it, host, offered } = make();
@@ -157,6 +177,22 @@ ok('실장이 비면 꺼진다', make({ managerUserId: '' }).it.enabled === fals
   const { it, host, offered } = make();
   host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: '<@U_KKH> 어떠세요?' }] });
   ok('멘션은 호스트 빗장에서도 막는다 (두 겹)', (await it.runOnce(fakeClient(), MON)) === 'blocked' && offered.length === 0);
+}
+{
+  const { it, host, offered } = make();
+  host.set({ reply: '오늘은 이렇게요.', speak: true, error: null, ask: [{ name: 'pulse', text: PROPOSAL }] });
+  let failing = true;
+  const c = fakeClient();
+  c.users.info = async ({ user }) => {
+    if (failing) throw new Error('ratelimited');
+    return { user: { profile: { real_name: user === 'U_KKH' ? '강규황' : '김철수', display_name: '' } } };
+  };
+  const r1 = await it.runOnce(c, MON);
+  ok('실원 이름을 못 받아 오면 막는다 (이름 빗장은 이 겹뿐이라 못 본 채 통과시키지 않는다)',
+    r1 === 'blocked' && offered.length === 0 && c.dm.some((m) => m.text.includes('못 받아 옴')), { r1, dm: c.dm });
+  failing = false;
+  const r2 = await it.runOnce(c, new Date(2026, 8, 22, 8, 30));
+  ok('실패는 캐시하지 않는다 — 다음 날 이름을 받아 오면 다시 돈다', r2 === 'proposed' && offered.length === 1, r2);
 }
 {
   const { it, host, offered } = make();

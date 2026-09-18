@@ -434,7 +434,7 @@ export class SlackHandler {
         statePath: path.join(letterData, 'initiative-state.json'),
         controlPath: path.join(letterData, 'control.json'),
         host: { initiate: (client, key, brief) => letterHost!.initiate(client, key, brief) },
-        offer: notice.offer,
+        offer: notice.enabled ? notice.offer : undefined,
       });
       letterHost = new ChatHost({
         name: 'letter',

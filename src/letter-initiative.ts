@@ -55,8 +55,9 @@ export interface LetterInitiativeOptions {
   /** 실장이 말로 끄는 값이 적히는 파일(`control.json` · `always.initiative === false` 면 꺼짐). */
   controlPath: string;
   host: InitiativeHost;
-  /** 확인 카드를 띄우는 곳(`LetterNotice.offer`). 방에 걸 글은 전부 여기로만 간다. */
-  offer: (client: App['client'], asks: TurnAsk[], from: { user: string; channel: string }) => Promise<void>;
+  /** 확인 카드를 띄우는 곳(`LetterNotice.offer`). 방에 걸 글은 전부 여기로만 간다. **비면 이 시계도 꺼진다** —
+   *  카드 길이 없는데 돌면 파이썬이 「카드 드리겠다」고 답해 놓고 카드는 안 온다. */
+  offer?: (client: App['client'], asks: TurnAsk[], from: { user: string; channel: string }) => Promise<void>;
   logger?: Logger;
 }
 
@@ -68,13 +69,16 @@ export class LetterInitiative {
   private logger: Logger;
   private timer: NodeJS.Timeout | null = null;
   private names = new Map<string, string[]>();
+  /** 오늘 돌았다는 표시를 메모리에도 둔다 — 상태 파일을 못 쓰면 두 시간 동안 매분 돌게 된다(검토 2026-09-18). */
+  private ranDay = '';
 
   constructor(private readonly opts: LetterInitiativeOptions) {
     this.logger = opts.logger ?? new Logger('Letter:initiative');
   }
 
   get enabled(): boolean {
-    return this.opts.enabled && Boolean(this.opts.room) && Boolean(this.opts.managerUserId);
+    return this.opts.enabled && Boolean(this.opts.room) && Boolean(this.opts.managerUserId)
+      && Boolean(this.opts.offer);
   }
 
   /** `ChatHost` 의 `attach` 로 넘긴다. */
@@ -101,8 +105,9 @@ export class LetterInitiative {
     const nowMin = now.getHours() * 60 + now.getMinutes();
     if (nowMin < atMin || nowMin >= atMin + WINDOW_MIN) return 'not-time';
     const today = localDay(now);
-    if (this.state().day === today) return 'done-today';
+    if (this.ranDay === today || this.state().day === today) return 'done-today';
     // **먼저 적고 돈다** — 도중에 넘어져도 같은 날 두 번 돌지 않는다.
+    this.ranDay = today;
     this.saveState({ day: today });
     return this.runOnce(client, now);
   }
@@ -133,7 +138,9 @@ export class LetterInitiative {
     const said = (result.reply || '').trim();
     if (said) await this.tell(client, `:sunrise: ${said}`);
 
-    const asks = (result.ask || []).filter((a) => a.name === PULSE);
+    // 갈래를 가리지 않는다 — 파이썬이 「카드 드리겠다」고 이미 답했으니 전부 카드로 간다(모르는 갈래는
+    // 카드 쪽이 버린다). 다만 **이름 빗장은 `pulse` 에만** — 전할 말은 실장이 이름을 넣기도 한다.
+    const asks = result.ask || [];
     if (!asks.length) {
       this.logger.info(said ? '오늘은 방에 걸 글 없이 인사만' : '오늘은 조용히');
       return 'quiet';
@@ -142,6 +149,10 @@ export class LetterInitiative {
     const clean: TurnAsk[] = [];
     for (const ask of asks) {
       const text = (ask.text || '').trim();
+      if (ask.name !== PULSE) {
+        clean.push(ask);
+        continue;
+      }
       const hit = await this.nameHit(client, text);
       if (hit || text.length > MAX_LEN) {
         const why = hit ? `실원 이름·지목(「${hit}」)` : `너무 김(${text.length}자)`;
@@ -153,20 +164,32 @@ export class LetterInitiative {
     }
     if (!clean.length) return 'blocked';
     // ⑤ 사람 층 — 카드. 실장이 「보내기」를 눌러야 방에 오른다.
-    await this.opts.offer(client, clean, { user: this.opts.managerUserId, channel: 'DM' });
+    await this.opts.offer!(client, clean, { user: this.opts.managerUserId, channel: 'DM' });
     this.logger.info(`오늘 제안 ${clean.length}건 — 카드로 실장에게`);
     return 'proposed';
   }
 
   // ── 층들 ──────────────────────────────────────────────────────────────
   private switchedOff(now = new Date()): boolean {
+    let text: string;
     try {
-      const raw = JSON.parse(fs.readFileSync(this.opts.controlPath, 'utf-8'));
+      text = fs.readFileSync(this.opts.controlPath, 'utf-8');
+    } catch (error) {
+      // 파일이 없으면 끈 적이 없는 것. **있는데 못 읽으면 꺼진 쪽으로** — 「자율 꺼」를 놓치는 것이
+      // 하루 조용한 것보다 나쁘다(검토 2026-09-18).
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      this.logger.warn('설정 파일을 못 읽어 오늘은 안 돕니다', error);
+      return true;
+    }
+    try {
+      const raw = JSON.parse(text);
       if (raw?.always?.initiative === false) return true;
       // 「오늘만 꺼」는 그 날짜일 때만 — 어제 걸어 둔 것이 오늘까지 먹으면 안 된다.
       return raw?.today?.initiative === false && raw?.today?.date === localDay(now);
-    } catch {
-      return false;
+    } catch (error) {
+      // turn.py 가 다시 쓰는 도중이거나 깨진 파일 — 꺼진 쪽으로.
+      this.logger.warn('설정 파일이 JSON 이 아니라 오늘은 안 돕니다', error);
+      return true;
     }
   }
 
@@ -188,12 +211,17 @@ export class LetterInitiative {
     }
   }
 
-  /** 실원 이름(성 포함·성 뺀 것)이나 멘션이 글에 있으면 그 조각. */
+  /**
+   * 실원 이름(성 포함·성 뺀 것)이나 멘션이 글에 있으면 그 조각. **이름을 못 받아 온 실원이 있으면
+   * 막는다** — 이 겹은 이름을 보는 유일한 겹이라, 못 본 채 통과시키면 열린 것이다(검토 2026-09-18).
+   */
   private async nameHit(client: App['client'], text: string): Promise<string> {
     const m = text.match(/<@[^>]+>/);
     if (m) return m[0];
     for (const id of this.opts.members) {
-      for (const name of await this.namesOf(client, id)) {
+      const names = await this.namesOf(client, id);
+      if (!names.length) return `이름을 못 받아 옴(${id}) — 빗장을 못 세워 막음`;
+      for (const name of names) {
         if (name && text.includes(name)) return name;
       }
     }
@@ -215,10 +243,11 @@ export class LetterInitiative {
         if (/^[가-힣]{3,4}$/.test(name)) out.add(name.slice(1));
       }
     } catch (error) {
-      this.logger.debug(`users.info 실패 (${id})`, error);
+      this.logger.warn(`users.info 실패 (${id}) — 이번엔 막고 다음에 다시 받아 온다`, error);
+      return [];   // **실패는 캐시하지 않는다** — 캐시하면 프로세스가 사는 동안 그 실원의 이름 검사가 사라진다
     }
     const names = [...out];
-    this.names.set(id, names);
+    if (names.length) this.names.set(id, names);
     return names;
   }
 
