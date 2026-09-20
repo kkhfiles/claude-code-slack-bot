@@ -21,6 +21,7 @@ import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
 import { setUntil, stillBlocked, clearUntil } from './rate-limit-until';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
+import { DaouLoginNotifier, ACTION_ID as DAOU_LOGIN_ACTION } from './daou-login';
 import { LunchPoller } from './lunch-poller';
 import { LunchButtons, readLunchBotToken, readLunchAnnounceChannel } from './lunch-buttons';
 import { ChatHost } from './chat-host';
@@ -311,6 +312,7 @@ export class SlackHandler {
 
   // System memory watchdog
   private memoryWatchdog: ProcessMemoryWatchdog | null = null;
+  private daouLogin: DaouLoginNotifier | null = null;
 
   // Lunch recruitment bot (external script, its own Slack identity)
   private lunchPoller: LunchPoller | null = null;
@@ -577,6 +579,30 @@ export class SlackHandler {
               break;
             }
           }
+        },
+      );
+    }
+
+    // 다우 세션 만료 → 로그인 버튼 (2026-09-21). 감시기와 같은 DM 채널·같은 콜백 모양.
+    // 창은 이 PC 에 뜨므로 봇이 대화형 세션(session 1)에서 돌 때만 뜻이 있다 —
+    // 서비스로 옮기면 버튼이 창을 못 띄운다(그때는 이 줄이 먼저 눈에 걸려야 한다).
+    if (process.platform === 'win32' && config.assistant.dmChannel) {
+      this.daouLogin = new DaouLoginNotifier(
+        async (text, blocks?) => {
+          const result = await this.app.client.chat.postMessage({
+            channel: config.assistant.dmChannel,
+            text,
+            ...(blocks ? { blocks } : {}),
+          });
+          return result.ts as string;
+        },
+        async (ts, text, blocks?) => {
+          await this.app.client.chat.update({
+            channel: config.assistant.dmChannel,
+            ts,
+            text,
+            ...(blocks ? { blocks } : {}),
+          });
         },
       );
     }
@@ -4621,6 +4647,16 @@ export class SlackHandler {
         await ack();
         const ts = (body as any).message?.ts;
         if (ts) await this.memoryWatchdog?.handleHealthDismiss(ts);
+      });
+    }
+
+    // 다우 로그인 버튼 — 하루 뒤에 눌러도 되도록 상태는 버튼이 아니라 파일에 있다.
+    if (this.daouLogin) {
+      this.daouLogin.start();
+      this.action(DAOU_LOGIN_ACTION, async ({ ack, body }) => {
+        await ack();
+        const ts = (body as any).message?.ts;
+        if (ts) await this.daouLogin?.handleAction(ts);
       });
     }
   }
