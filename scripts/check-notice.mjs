@@ -357,8 +357,23 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   c = fakeClient();
   await na.offer(c, [{ name: 'pulse', text: '좋은 아침이에요! 이번 주 고마웠던 순간 하나씩 나눠 볼까요?' }],
     { user: 'UBOSS', channel: 'DM' });
-  ok('아침 말 걸기도 카드는 실장 DM 으로만', c.posted.length === 1 && c.posted[0].channel === 'DM_UBOSS');
-  ok('카드에 아침 현황을 보고 쓴 글임을 밝힌다', JSON.stringify(c.posted[0].blocks).includes('아침 현황'));
+  ok('말 걸기도 카드는 실장 DM 으로만', c.posted.length === 1 && c.posted[0].channel === 'DM_UBOSS');
+  ok('카드에 주간 현황을 보고 쓴 글임을 밝힌다', JSON.stringify(c.posted[0].blocks).includes('주간 현황'));
+  ok('하나뿐이면 후보 번호를 안 붙인다', !JSON.stringify(c.posted[0].blocks).includes('후보 1/'));
+  // **대안 두셋이 한꺼번에 오면 「후보 n/N — 하나만」** (실장 2026-09-21 「대안을 3개 정도 물어보는 건 어때」).
+  {
+    const c3 = fakeClient();
+    await na.offer(c3, [
+      { name: 'pulse', text: '첫째 길 — 지난주 이야기를 잇는 글입니다' },
+      { name: 'pulse', text: '둘째 길 — 새 화제를 여는 글입니다' },
+      { name: 'pulse', text: '셋째 길 — 한 조각을 이어 가는 글입니다' },
+    ], { user: 'UBOSS', channel: 'DM' });
+    const heads = c3.posted.map((m) => JSON.stringify(m.blocks));
+    ok('대안 셋이면 카드 셋 · 각각 「후보 n/3 — 하나만」', c3.posted.length === 3
+      && heads[0].includes('후보 1/3') && heads[1].includes('후보 2/3') && heads[2].includes('후보 3/3')
+      && heads.every((h) => h.includes('하나만')), heads.map((h) => h.slice(0, 80)));
+    ok('셋 다 실장 DM 으로만 · 셋 다 기다리는 카드', c3.posted.every((m) => m.channel === 'DM_UBOSS') && na.pendingCount() >= 3);
+  }
   const btnP = buttonOf(c.posted[0]);
   c = fakeClient();
   await appA.actions.notice_open({

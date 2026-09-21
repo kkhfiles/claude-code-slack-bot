@@ -244,6 +244,12 @@ export class LetterNotice {
       this.logger.warn(`실장이 아닌 턴(${from.user || '?'} · ${from.channel})에 부탁이 실려 왔습니다 — 버립니다`);
       return;
     }
+    // **같은 갈래가 여럿이면 「후보 n/N — 하나만」으로 번호를 붙인다.** 주간 턴이 대화를 풀어 가는
+    // 길을 두세 가지로 내고 실장이 고른다(실장 2026-09-21). 카드는 갈래마다 하나씩 그대로 —
+    // 고르는 것은 그중 하나를 열어 보내는 일이고, 나머지는 두면 하루 뒤 만료된다.
+    const total = new Map<string, number>();
+    for (const a of asks) total.set(a.name, (total.get(a.name) ?? 0) + 1);
+    const seen = new Map<string, number>();
     for (const ask of asks) {
       const kind = this.kind(ask.name);
       if (!kind) {
@@ -269,14 +275,21 @@ export class LetterNotice {
       };
       this.pending.set(item.id, item);
       this.save();
-      await this.card(client, item, kind);
+      const n = (seen.get(ask.name) ?? 0) + 1;
+      seen.set(ask.name, n);
+      await this.card(client, item, kind, (total.get(ask.name) ?? 1) > 1 ? { n, of: total.get(ask.name)! } : undefined);
     }
   };
 
   // ── 화면 ──────────────────────────────────────────────────────────────
-  private async card(client: App['client'], item: Pending, kind: NoticeKind): Promise<void> {
+  private async card(
+    client: App['client'], item: Pending, kind: NoticeKind, alt?: { n: number; of: number },
+  ): Promise<void> {
     const rooms = kind.rooms.map((r) => r.label).join(' · ');
     const shown = item.text.length > 600 ? `${item.text.slice(0, 600)}…` : item.text;
+    const head = alt
+      ? `*${kind.ask}* 후보 ${alt.n}/${alt.of} — *하나만* 골라 보내세요. 나머지는 그냥 두면 하루 뒤 만료됩니다.`
+      : `*${kind.ask}* 아직 아무 데도 안 나갔습니다.`;
     try {
       const im = await client.conversations.open({ users: this.opts.managerUserId });
       if (!im.channel?.id) throw new Error('DM 방을 못 열었습니다');
@@ -286,7 +299,7 @@ export class LetterNotice {
         blocks: [
           {
             type: 'section',
-            text: { type: 'mrkdwn', text: `*${kind.ask}* 아직 아무 데도 안 나갔습니다.` },
+            text: { type: 'mrkdwn', text: head },
           },
           {
             type: 'section',
@@ -573,11 +586,11 @@ export function coffeeKinds(
       rememberRooms: chat.map((r) => r.id),
       guard: true,
     },
-    // 아침 시계(`letter-initiative.ts`)가 실은 「오늘 커피챗 방에 걸 글」. 안건과 같은 관문·같은
-    // 기억 파일이고, 파이썬 쪽 빗장(`gate`)을 이미 지난 글이다.
+    // 주간 시계(`letter-initiative.ts`)가 실은 「이번 주 커피챗 방에 걸 글」 — 대개 두세 후보가
+    // 한꺼번에 온다. 안건과 같은 관문·같은 기억 파일이고, 파이썬 쪽 빗장(`gate`)을 이미 지난 글이다.
     pulse: {
       title: '커피챗 방에 먼저 말 걸기',
-      ask: '오늘 커피챗 방에 이렇게 말할까요? (아침 현황을 보고 커피콩이 쓴 글입니다)',
+      ask: '이번 주 커피챗 방에 이렇게 말할까요? (주간 현황과 방의 지난주를 보고 커피콩이 쓴 글입니다)',
       header: '',
       hint: '이 칸에 있는 그대로 커피콩 말로 나갑니다 (머리말 없음). 마음에 안 들면 고치거나 취소하세요.',
       rooms: [...chat, ...test],
