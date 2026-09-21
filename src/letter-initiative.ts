@@ -6,32 +6,39 @@ import { Logger } from './logger';
 import type { TurnAsk, TurnResult } from './chat-host';
 
 /**
- * 커피콩의 **아침 시계** — 평일 08:30, 현황판(코드가 센 숫자)을 들고 실장 DM 에 와서
- * 「오늘 이렇게 할까요」를 말한다. 커피챗 방에 걸고 싶은 말이 있으면 **확인 카드**로 —
- * 실장이 창에서 보고 「보내기」를 눌러야 방에 오른다. 이 시계는 방에 아무것도 안 올린다.
+ * 커피콩의 **주간 시계** — 주 첫 업무일 13:00, 현황판(코드가 센 숫자)과 지난 7일 방에서 오간
+ * 말(글쓴이는 뺀 것)을 들고 실장 DM 에 와서 「이번 주 이렇게 할까요」를 말한다. 커피챗 방에
+ * 걸고 싶은 말이 있으면 **확인 카드**로 — 실장이 창에서 보고 「보내기」를 눌러야 방에 오른다.
+ * 이 시계는 방에 아무것도 안 올린다.
  *
- * 실장 결정(2026-09-18): 「10시가 아니라 8시 반에 먼저 나한테 DM 으로 이렇게 할까요
- * 물어보고 나서 진행. 개인정보 보호는 다중 안전장치.」 그래서 겹이 이렇다.
+ * 실장 결정(2026-09-18): 「먼저 나한테 DM 으로 이렇게 할까요 물어보고 나서 진행. 개인정보
+ * 보호는 다중 안전장치.」 (2026-09-21): 「월요일 오후 1시쯤 · 부서 내 커뮤니케이션 개선이라는
+ * 목적 하에 커피콩이 스스로 의견도 묻고 취합하고 아이디어도 내면서 주도해야 한다.」 취합하려면
+ * 사람들이 한 말을 알아야 하므로 방의 지난 7일을 같이 준다 — **방에 공개된 말만**, 글쓴이와
+ * 멘션은 지우고. 커피챗 원문·1:1·1on1 은 여전히 숫자로만 간다. 그래서 겹이 이렇다.
  *
- *   ① 자료 층    `comm_pulse.py` 는 숫자만 낸다 — 원문·이름·아이디가 모델에 안 간다
- *   ② 안내 층    `turn.py` 의 MORNING_NOTE — 지목·집계·원문 금지를 모델에게 이른다
+ *   ① 자료 층    `comm_pulse.py` 는 숫자만 낸다 — 커피챗 원문·1:1·이름·아이디가 모델에 안 간다.
+ *                방의 지난 7일(`recent`)은 방에 이미 공개된 말이고, 글쓴이·멘션은 지운다
+ *   ② 안내 층    `turn.py` 의 MORNING_NOTE — 목적·취합·지목·집계·원문 금지를 모델에게 이른다
  *   ③ 빗장 층 A  `privacy_gate.py` — 방에 걸 글(`pulse`)이 멘션·아이디·집계·숫자·원문 조각이면
  *                카드 자체가 안 만들어지고 실장에게 까닭만 간다
  *   ④ 빗장 층 B  `letter-notice.ts` 의 `guard` — 실원 **이름**·멘션·집계·숫자·길이. 카드를 만들 때와
  *                실장이 창에서 고친 뒤 보낼 때 둘 다. 자료가 다른 두 겹
  *   ⑤ 사람 층    **실장이 창에서 보고 「보내기」** — 대화·시계만으로는 방에 아무것도 안 간다
- *   ⑧ 대화 분리   아침 턴은 실장 DM 대화가 아니라 **따로 둔 대화**(`<실장>-morning`)에서 돈다 — 실장이
+ *   ⑧ 대화 분리   주간 턴은 실장 DM 대화가 아니라 **따로 둔 대화**(`<실장>-morning`)에서 돈다 — 실장이
  *                DM 에서 한 사람 이야기를 안고 돌면 그 뜻이 글에 스밀 수 있다(외부 검토 2026-09-18).
- *                실장 DM 대화에는 오늘 낸 것을 파일(`morning-today.md`)로 알린다
- *   ⑥ 횟수 층    평일 08:30 뒤 두 시간 창 안에서 하루 한 번 · 공휴일 제외
+ *                실장 DM 대화에는 이번 주 낸 것을 파일(`morning-today.md`)로 알린다
+ *   ⑥ 횟수 층    주 첫 업무일(연휴면 밀린다 · 파이썬이 판정) 13:00 뒤 두 시간 창 안에서 한 번
  *   ⑦ 끄는 층    `LETTER_INITIATIVE=0` 또는 실장이 말로 「자율 꺼」(control 파일)
- *
- * 수요일이면 같은 턴에 주간 보고(현황·눈에 띄는 것·general 제안)가 붙는다 — 안내 층이 한다.
  */
 
-const DEFAULT_AT = '08:30';
-/** 시각 뒤 이만큼 안에서만 돈다 — 저녁 재시작이 아침 일을 대신 하지 않게. */
+const DEFAULT_AT = '13:00';
+/** 시각 뒤 이만큼 안에서만 돈다 — 저녁 재시작이 낮의 일을 대신 하지 않게. */
 const WINDOW_MIN = 120;
+/** 방의 지난 7일에서 모델에게 주는 말의 상한 — 줄 수와 줄 길이. 넘치면 오래된 것부터 버린다. */
+const RECENT_DAYS = 7;
+const RECENT_MAX_LINES = 25;
+const RECENT_MAX_CHARS = 280;
 /** 파이썬 `control.actions` 에서 방에 걸 글의 이름. 다른 이름은 이 시계가 안 다룬다. */
 const PULSE = 'pulse';
 
@@ -43,13 +50,13 @@ export interface InitiativeHost {
 export interface LetterInitiativeOptions {
   /** `LETTER_INITIATIVE=1`. 기본은 꺼짐 — 만든 것과 켠 것은 다른 일이다. */
   enabled: boolean;
-  /** 평일 이 시각에 한 번 (HH:MM). */
+  /** 주 첫 업무일 이 시각에 한 번 (HH:MM). */
   at: string;
-  /** 커피챗 방 — 현황판을 셀 방. 비면 기능이 꺼진다. */
+  /** 커피챗 방 — 현황판을 셀 방이자 지난 7일을 읽을 방. 비면 기능이 꺼진다. */
   room: string;
-  /** 실장 — 아침 DM 을 받는 사람. 비면 기능이 꺼진다. */
+  /** 실장 — 주간 DM 을 받는 사람. 비면 기능이 꺼진다. */
   managerUserId: string;
-  /** 실장 표시 이름 — 아침 대화의 첫 줄(「지금 말을 거는 사람은 ○○님이다」)에 쓴다. */
+  /** 실장 표시 이름 — 주간 대화의 첫 줄(「지금 말을 거는 사람은 ○○님이다」)에 쓴다. */
   managerName: string;
   python: string;
   /** `comm_pulse.py` */
@@ -66,7 +73,7 @@ export interface LetterInitiativeOptions {
 }
 
 export type Outcome =
-  | 'off' | 'not-time' | 'done-today' | 'holiday' | 'no-brief'
+  | 'off' | 'not-time' | 'done-today' | 'holiday' | 'not-week-first' | 'no-brief'
   | 'quiet' | 'proposed' | 'error';
 
 export class LetterInitiative {
@@ -92,15 +99,16 @@ export class LetterInitiative {
     }
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.tick(app.client).catch((error) => this.logger.warn('아침 턴에서 넘어졌습니다', error));
+      void this.tick(app.client).catch((error) => this.logger.warn('주간 턴에서 넘어졌습니다', error));
     }, 60 * 1000);
     this.timer.unref?.();
-    this.logger.info(`준비됨 — 평일 ${this.opts.at} 실장 DM 으로 「오늘 이렇게 할까요」 · 방에는 카드를 거쳐야만`);
+    this.logger.info(`준비됨 — 주 첫 업무일 ${this.opts.at} 실장 DM 으로 「이번 주 이렇게 할까요」 · 방에는 카드를 거쳐야만`);
   };
 
   /**
    * 분마다 — 그 시각이고 오늘 아직이면 한 번 돈다. **창은 두 시간이다** — 저녁에 재시작하면
-   * 「08:30 이 지났으니」 그 자리에서 도는 일이 없게. 놓친 날은 그냥 넘어간다.
+   * 「13:00 이 지났으니」 그 자리에서 도는 일이 없게. 놓친 날은 그냥 넘어간다. 첫 업무일이
+   * 아닌 날도 「오늘 봤다」로 적힌다 — 파이썬을 하루 한 번 불러 그 판정을 받는 값이다.
    */
   async tick(client: App['client'], now = new Date()): Promise<Outcome> {
     const [h, m] = this.opts.at.split(':').map((x) => parseInt(x, 10));
@@ -125,36 +133,79 @@ export class LetterInitiative {
     const pulse = this.pulse();
     if (!pulse) return 'no-brief';
     if (!pulse.workday) return 'holiday';
+    if (!pulse.weekFirst) return 'not-week-first';
+
+    // 취합할 재료 — 방의 지난 7일. 못 읽으면 숫자만 들고 간다(주간 턴을 거르지는 않는다).
+    const recent = await this.recent(client, now);
+    const brief = recent ? `${pulse.brief}\n\n${recent}` : pulse.brief;
 
     let result: TurnResult;
     try {
-      // ⑧ 실장 DM 대화(`U…`)가 아니라 아침 전용 대화(`U…-morning`)에서 돈다.
-      result = await this.opts.host.initiate(client, `${this.opts.managerUserId}-morning`, pulse.brief,
+      // ⑧ 실장 DM 대화(`U…`)가 아니라 주간 전용 대화(`U…-morning`)에서 돈다.
+      result = await this.opts.host.initiate(client, `${this.opts.managerUserId}-morning`, brief,
                                              this.opts.managerName);
     } catch (error) {
-      this.logger.warn('아침 턴이 깨졌습니다', error);
+      this.logger.warn('주간 턴이 깨졌습니다', error);
       return 'error';
     }
     if (result.error) {
-      this.logger.warn(`아침 턴 실패: ${result.error}`);
+      this.logger.warn(`주간 턴 실패: ${result.error}`);
       return 'error';
     }
     // 실장에게 하는 말 — 그 자체는 카드가 아니다. 방에 걸 글은 아래 `ask` 로만 간다.
     const said = (result.reply || '').trim();
-    if (said) await this.tell(client, `:sunrise: ${said}`);
+    if (said) await this.tell(client, `:coffee: ${said}`);
 
     // 갈래를 가리지 않는다 — 파이썬이 「카드 드리겠다」고 이미 답했으니 전부 카드로 간다. 빗장(이름·
     // 멘션·집계·숫자·길이)은 카드 쪽(`LetterNotice.guard`)이 봇이 쓴 갈래에 건다 — 카드를 만들 때와
     // 실장이 고친 뒤 보낼 때 둘 다.
     const asks = (result.ask || []).filter((a) => a && typeof a.name === 'string');
     if (!asks.length) {
-      this.logger.info(said ? '오늘은 방에 걸 글 없이 인사만' : '오늘은 조용히');
+      this.logger.info(said ? '이번 주는 방에 걸 글 없이 실장에게 말만' : '이번 주는 조용히');
       return 'quiet';
     }
     // ⑤ 사람 층 — 카드. 실장이 「보내기」를 눌러야 방에 오른다.
     await this.opts.offer!(client, asks, { user: this.opts.managerUserId, channel: 'DM' });
-    this.logger.info(`오늘 제안 ${asks.length}건 — 카드로 실장에게`);
+    this.logger.info(`이번 주 제안 ${asks.length}건 — 카드로 실장에게`);
     return 'proposed';
+  }
+
+  /**
+   * 방의 지난 7일에서 **사람이 한 말**을 모은다 — 글쓴이는 안 싣고 멘션은 지운다. 커피콩 자신의
+   * 글 아래 달린 답글은 「어느 글에 단 답인지」를 붙인다(취합할 때 물음과 답을 짝지어야 한다).
+   * 다른 봇(소인)의 말은 뺀다. 방에 이미 공개된 말만이고, 이 글은 실장 DM 과 카드로만 간다.
+   *
+   * 무엇이든 못 읽으면 빈 글자 — 주간 턴은 숫자만 들고 돈다. 취합이 빠지는 것이 턴이 빠지는
+   * 것보다 낫다.
+   */
+  private async recent(client: App['client'], now: Date): Promise<string> {
+    try {
+      const me = (await client.auth.test()).user_id as string | undefined;
+      if (!me) return '';
+      const oldest = String(Math.floor((now.getTime() - RECENT_DAYS * 86_400_000) / 1000));
+      const hist = await client.conversations.history({ channel: this.opts.room, oldest, limit: 100 });
+      const lines: string[] = [];
+      for (const m of [...(hist.messages || [])].reverse()) {          // 오래된 것부터
+        if (m.subtype) continue;                                       // 들어옴·나감·핀 같은 것
+        const mine = m.user === me;
+        if (!mine && m.bot_id) continue;                               // 다른 봇의 말
+        if (!mine && m.text) lines.push(`- ${scrub(m.text)}`);
+        if (mine && m.reply_count && m.ts) {
+          const rep = await client.conversations.replies({ channel: this.opts.room, ts: m.ts, limit: 50 });
+          const head = scrub(m.text || '').slice(0, 30);
+          for (const r of (rep.messages || []).slice(1)) {
+            if (r.user === me || r.bot_id || !r.text) continue;
+            lines.push(`- (네 글 「${head}」에 단 답) ${scrub(r.text)}`);
+          }
+        }
+      }
+      if (!lines.length) return '';
+      const kept = lines.slice(-RECENT_MAX_LINES);
+      return `[지난 ${RECENT_DAYS}일 커피챗 방에서 사람들이 한 말 — 누가 했는지는 뺐다 · 방에 공개된 말이다]\n${kept.join('\n')}`;
+    } catch (error) {
+      this.logger.warn('방의 지난 7일을 못 읽었습니다 — 숫자만 들고 갑니다', error);
+      return '';
+    }
   }
 
   // ── 층들 ──────────────────────────────────────────────────────────────
@@ -181,7 +232,7 @@ export class LetterInitiative {
     }
   }
 
-  private pulse(): { workday: boolean; brief: string } | null {
+  private pulse(): { workday: boolean; weekFirst: boolean; brief: string } | null {
     const r = spawnSync(this.opts.python, ['-X', 'utf8', this.opts.script, '--room', this.opts.room], {
       encoding: 'utf-8', windowsHide: true, timeout: 30_000,
     });
@@ -192,7 +243,12 @@ export class LetterInitiative {
     try {
       const got = JSON.parse((r.stdout || '').trim());
       if (typeof got.brief !== 'string' || !got.brief) return null;
-      return { workday: Boolean(got.workday), brief: got.brief };
+      // 첫 업무일 판정은 파이썬 몫(공휴일 표가 거기 있다). 그 칸이 없으면 옛 파이썬이다 — 돌리지 않고 알린다.
+      if (typeof got.week_first !== 'boolean') {
+        this.logger.warn('현황판에 week_first 가 없습니다 — comm_pulse.py 가 옛 판입니다');
+        return null;
+      }
+      return { workday: Boolean(got.workday), weekFirst: got.week_first, brief: got.brief };
     } catch {
       this.logger.warn('현황판이 JSON 이 아닙니다');
       return null;
@@ -230,6 +286,17 @@ export class LetterInitiative {
 
 function localDay(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** 멘션·방 링크·URL 라벨을 지우고 한 줄로 — 글쓴이가 누구인지 되짚을 실마리를 남기지 않는다. */
+function scrub(text: string): string {
+  return text
+    .replace(/<@[^>]+>/g, '@누군가')
+    .replace(/<#[^|>]+\|([^>]*)>/g, '#$1')
+    .replace(/<([^|>]+)\|([^>]*)>/g, '$2')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, RECENT_MAX_CHARS);
 }
 
 export { DEFAULT_AT };
