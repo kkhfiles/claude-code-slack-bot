@@ -6,7 +6,7 @@ import { Logger } from './logger';
 import type { TurnAsk, TurnResult } from './chat-host';
 
 /**
- * 커피콩의 **주간 시계** — 주 첫 업무일 13:00, 현황판(코드가 센 숫자)과 지난 7일 방에서 오간
+ * 커피콩의 **주간 시계** — 주 첫 업무일 13:00, 현황판(코드가 센 숫자)과 지난주부터 방에서 오간
  * 말(글쓴이는 뺀 것)을 들고 실장 DM 에 와서 「이번 주 이렇게 할까요」를 말한다. 커피챗 방에
  * 걸고 싶은 말이 있으면 **확인 카드**로 — 실장이 창에서 보고 「보내기」를 눌러야 방에 오른다.
  * 이 시계는 방에 아무것도 안 올린다.
@@ -14,11 +14,11 @@ import type { TurnAsk, TurnResult } from './chat-host';
  * 실장 결정(2026-09-18): 「먼저 나한테 DM 으로 이렇게 할까요 물어보고 나서 진행. 개인정보
  * 보호는 다중 안전장치.」 (2026-09-21): 「월요일 오후 1시쯤 · 부서 내 커뮤니케이션 개선이라는
  * 목적 하에 커피콩이 스스로 의견도 묻고 취합하고 아이디어도 내면서 주도해야 한다.」 취합하려면
- * 사람들이 한 말을 알아야 하므로 방의 지난 7일을 같이 준다 — **방에 공개된 말만**, 글쓴이와
+ * 사람들이 한 말을 알아야 하므로 방의 지난주부터의 말을 같이 준다 — **방에 공개된 말만**, 글쓴이와
  * 멘션은 지우고. 커피챗 원문·1:1·1on1 은 여전히 숫자로만 간다. 그래서 겹이 이렇다.
  *
  *   ① 자료 층    `comm_pulse.py` 는 숫자만 낸다 — 커피챗 원문·1:1·이름·아이디가 모델에 안 간다.
- *                방의 지난 7일(`recent`)은 방에 이미 공개된 말이고, 글쓴이·멘션은 지운다
+ *                방의 지난주부터의 말(`recent`)은 방에 이미 공개된 말이고, 글쓴이·멘션은 지운다
  *   ② 안내 층    `turn.py` 의 MORNING_NOTE — 목적·취합·지목·집계·원문 금지를 모델에게 이른다
  *   ③ 빗장 층 A  `privacy_gate.py` — 방에 걸 글(`pulse`)이 멘션·아이디·집계·숫자·원문 조각이면
  *                카드 자체가 안 만들어지고 실장에게 까닭만 간다
@@ -28,17 +28,19 @@ import type { TurnAsk, TurnResult } from './chat-host';
  *   ⑧ 대화 분리   주간 턴은 실장 DM 대화가 아니라 **따로 둔 대화**(`<실장>-morning`)에서 돈다 — 실장이
  *                DM 에서 한 사람 이야기를 안고 돌면 그 뜻이 글에 스밀 수 있다(외부 검토 2026-09-18).
  *                실장 DM 대화에는 이번 주 낸 것을 파일(`morning-today.md`)로 알린다
- *   ⑥ 횟수 층    주 첫 업무일(연휴면 밀린다 · 파이썬이 판정) 13:00 뒤 두 시간 창 안에서 한 번
+ *   ⑥ 횟수 층    **한 주에 한 번** — 월요일 13:00 뒤 두 시간 창. 그날 못 돌면(쉬는 날 · PC 꺼짐 ·
+ *                현황판 실패) 그 주 다음 업무일 같은 창에서. 놓친 주는 되찾지 않는다(검토 2026-09-21)
  *   ⑦ 끄는 층    `LETTER_INITIATIVE=0` 또는 실장이 말로 「자율 꺼」(control 파일)
  */
 
 const DEFAULT_AT = '13:00';
 /** 시각 뒤 이만큼 안에서만 돈다 — 저녁 재시작이 낮의 일을 대신 하지 않게. */
 const WINDOW_MIN = 120;
-/** 방의 지난 7일에서 모델에게 주는 말의 상한 — 줄 수와 줄 길이. 넘치면 오래된 것부터 버린다. */
-const RECENT_DAYS = 7;
+/** 방에서 읽어 오는 말의 상한 — 줄 수와 줄 길이. 넘치면 오래된 것부터 버린다. */
 const RECENT_MAX_LINES = 25;
 const RECENT_MAX_CHARS = 280;
+/** 방 이력을 넘길 최대 장수(장당 200) — 3주치 커피챗 방이면 한두 장이다. */
+const HISTORY_PAGES = 5;
 /** 파이썬 `control.actions` 에서 방에 걸 글의 이름. 다른 이름은 이 시계가 안 다룬다. */
 const PULSE = 'pulse';
 
@@ -50,9 +52,9 @@ export interface InitiativeHost {
 export interface LetterInitiativeOptions {
   /** `LETTER_INITIATIVE=1`. 기본은 꺼짐 — 만든 것과 켠 것은 다른 일이다. */
   enabled: boolean;
-  /** 주 첫 업무일 이 시각에 한 번 (HH:MM). */
+  /** 이 시각에 한 주 한 번 (HH:MM) — 월요일이 기본이고 못 돌면 다음 업무일. */
   at: string;
-  /** 커피챗 방 — 현황판을 셀 방이자 지난 7일을 읽을 방. 비면 기능이 꺼진다. */
+  /** 커피챗 방 — 현황판을 셀 방이자 지난주부터의 말을 읽을 방. 비면 기능이 꺼진다. */
   room: string;
   /** 실장 — 주간 DM 을 받는 사람. 비면 기능이 꺼진다. */
   managerUserId: string;
@@ -61,7 +63,7 @@ export interface LetterInitiativeOptions {
   python: string;
   /** `comm_pulse.py` */
   script: string;
-  /** 오늘 돌았는지 `initiative-state.json` */
+  /** 이번 주 돌았는지(`week`) · 오늘 쉬는 날로 봤는지(`day`) `initiative-state.json` */
   statePath: string;
   /** 실장이 말로 끄는 값이 적히는 파일(`control.json` · `always.initiative === false` 면 꺼짐). */
   controlPath: string;
@@ -73,14 +75,16 @@ export interface LetterInitiativeOptions {
 }
 
 export type Outcome =
-  | 'off' | 'not-time' | 'done-today' | 'holiday' | 'not-week-first' | 'no-brief'
+  | 'off' | 'not-time' | 'done-today' | 'done-this-week' | 'holiday' | 'no-brief'
   | 'quiet' | 'proposed' | 'error';
 
 export class LetterInitiative {
   private logger: Logger;
   private timer: NodeJS.Timeout | null = null;
-  /** 오늘 돌았다는 표시를 메모리에도 둔다 — 상태 파일을 못 쓰면 두 시간 동안 매분 돌게 된다(검토 2026-09-18). */
-  private ranDay = '';
+  /** 이번 주 돌았다는 표시를 메모리에도 둔다 — 상태 파일을 못 쓰면 두 시간 동안 매분 돌게 된다(검토 2026-09-18). */
+  private ranWeek = '';
+  /** 오늘을 쉬는 날로 봤다는 표시 — 쉬는 날에 두 시간 동안 매분 파이썬을 부르지 않게. */
+  private restDay = '';
 
   constructor(private readonly opts: LetterInitiativeOptions) {
     this.logger = opts.logger ?? new Logger('Letter:initiative');
@@ -102,13 +106,17 @@ export class LetterInitiative {
       void this.tick(app.client).catch((error) => this.logger.warn('주간 턴에서 넘어졌습니다', error));
     }, 60 * 1000);
     this.timer.unref?.();
-    this.logger.info(`준비됨 — 주 첫 업무일 ${this.opts.at} 실장 DM 으로 「이번 주 이렇게 할까요」 · 방에는 카드를 거쳐야만`);
+    this.logger.info(`준비됨 — 월요일(못 돌면 다음 업무일) ${this.opts.at} 실장 DM 으로 「이번 주 이렇게 할까요」 · 방에는 카드를 거쳐야만`);
   };
 
   /**
-   * 분마다 — 그 시각이고 오늘 아직이면 한 번 돈다. **창은 두 시간이다** — 저녁에 재시작하면
-   * 「13:00 이 지났으니」 그 자리에서 도는 일이 없게. 놓친 날은 그냥 넘어간다. 첫 업무일이
-   * 아닌 날도 「오늘 봤다」로 적힌다 — 파이썬을 하루 한 번 불러 그 판정을 받는 값이다.
+   * 분마다 — 그 시각이고 이번 주 아직이면 한 번 돈다. **창은 두 시간이다** — 저녁에 재시작하면
+   * 「13:00 이 지났으니」 그 자리에서 도는 일이 없게.
+   *
+   * **주 단위로 센다.** 월요일 창을 놓치면(PC 꺼짐 · 쉬는 날 · 현황판 실패) 그 주 다음 업무일
+   * 같은 창에서 돈다 — 하루 한 번이던 때는 하루 손해였는데 주 한 번이 되면서 한 주 손해가
+   * 됐다(검토 2026-09-21). 아무 일도 안 한 결과(현황판 실패 · 쉬는 날)는 표시를 되돌리고,
+   * 모델을 부른 뒤의 결과는 되돌리지 않는다 — 되돌리면 매분 모델을 부른다.
    */
   async tick(client: App['client'], now = new Date()): Promise<Outcome> {
     const [h, m] = this.opts.at.split(':').map((x) => parseInt(x, 10));
@@ -116,11 +124,25 @@ export class LetterInitiative {
     const nowMin = now.getHours() * 60 + now.getMinutes();
     if (nowMin < atMin || nowMin >= atMin + WINDOW_MIN) return 'not-time';
     const today = localDay(now);
-    if (this.ranDay === today || this.state().day === today) return 'done-today';
-    // **먼저 적고 돈다** — 도중에 넘어져도 같은 날 두 번 돌지 않는다.
-    this.ranDay = today;
-    this.saveState({ day: today });
-    return this.runOnce(client, now);
+    const week = localDay(mondayOf(now));
+    const st = this.state();
+    if (this.ranWeek === week || st.week === week) return 'done-this-week';
+    if (this.restDay === today || st.day === today) return 'done-today';
+    // **먼저 적고 돈다** — 도중에 넘어져도 같은 주에 두 번 돌지 않는다.
+    this.ranWeek = week;
+    this.saveState({ week });
+    const out = await this.runOnce(client, now);
+    if (out === 'holiday') {
+      // 오늘은 쉬는 날 — 이번 주 표시는 되돌리고(다음 업무일에 돈다) 오늘 표시만 남긴다.
+      this.ranWeek = '';
+      this.restDay = today;
+      this.saveState({ day: today });
+    } else if (out === 'no-brief') {
+      // 현황판을 못 만들었다 — 모델도 DM 도 없었으니 되돌려 다음 분에 다시 해 본다.
+      this.ranWeek = '';
+      this.saveState({});
+    }
+    return out;
   }
 
   /** 한 번 돈다. 시각·「오늘 했나」는 안 본다(검사에서 바로 부른다). */
@@ -133,9 +155,8 @@ export class LetterInitiative {
     const pulse = this.pulse();
     if (!pulse) return 'no-brief';
     if (!pulse.workday) return 'holiday';
-    if (!pulse.weekFirst) return 'not-week-first';
 
-    // 취합할 재료 — 방의 지난 7일. 못 읽으면 숫자만 들고 간다(주간 턴을 거르지는 않는다).
+    // 취합할 재료 — 방의 지난주부터. 못 읽으면 숫자만 들고 간다(주간 턴을 거르지는 않는다).
     const recent = await this.recent(client, now);
     const brief = recent ? `${pulse.brief}\n\n${recent}` : pulse.brief;
 
@@ -171,7 +192,7 @@ export class LetterInitiative {
   }
 
   /**
-   * 방의 지난 7일에서 **사람이 한 말**을 모은다 — 글쓴이는 안 싣고 멘션은 지운다. 스레드는
+   * 방의 지난주부터 **사람이 한 말**을 모은다 — 글쓴이는 안 싣고 멘션은 지운다. 스레드는
    * **누구 글 아래든** 읽는다(처음엔 커피콩 글만 읽었다 — 물음과 답을 짝지으려고. 그런데 취합
    * 재료로는 남의 글 아래 오간 말도 같은 값이다 · 실장 물음 2026-09-21). 답글에는 「어느 글에
    * 단 답인지」를 붙이고, 그 글이 커피콩 것이면 「네 글」이라고 적는다. 다른 봇(소인)의 말과
@@ -184,28 +205,44 @@ export class LetterInitiative {
     try {
       const me = (await client.auth.test()).user_id as string | undefined;
       if (!me) return '';
-      const oldest = String(Math.floor((now.getTime() - RECENT_DAYS * 86_400_000) / 1000));
-      const hist = await client.conversations.history({ channel: this.opts.room, oldest, limit: 100 });
+      // **말은 지난주 월요일 0시부터, 뿌리 글은 3주 전 월요일부터.** 「지금부터 7일」로 잡으면
+      // 지난주 월요일 08:30 에 나간 한 조각이 이번 주 월요일 13:00 창에서 4시간 반 차이로 빠지고,
+      // 뿌리를 지난주부터만 보면 그 전 주 물음에 지난주 달린 답이 안 보인다 — persona 는 「답은
+      // 다음 주까지 온다」고 하는데 정작 그 답을 못 읽는다(검토 2026-09-21). 스레드 답글은 뿌리
+      // 글을 거쳐야 읽히므로 뿌리는 넓게 훑고 답은 날짜로 거른다.
+      const since = mondayOf(now, 1).getTime() / 1000;
+      const oldest = String(Math.floor(mondayOf(now, 3).getTime() / 1000));
+      const msgs: MessageLike[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < HISTORY_PAGES; page++) {
+        // 슬랙은 새 것부터 주므로 한 장으로 끊으면 **가장 오래된 뿌리(지난주 월요일 한 조각)부터** 떨어진다.
+        const hist = await client.conversations.history({ channel: this.opts.room, oldest, limit: 200, cursor });
+        msgs.push(...((hist.messages || []) as MessageLike[]));
+        cursor = hist.response_metadata?.next_cursor || undefined;
+        if (!cursor) break;
+      }
       const lines: string[] = [];
-      for (const m of [...(hist.messages || [])].reverse()) {          // 오래된 것부터
+      for (const m of msgs.reverse()) {                                // 오래된 것부터
         if (m.subtype) continue;                                       // 들어옴·나감·핀 같은 것
         const mine = m.user === me;
         if (!mine && m.bot_id) continue;                               // 다른 봇의 말 — 그 스레드도
-        if (!mine && m.text) lines.push(`- ${scrub(m.text)}`);
-        if (m.reply_count && m.ts) {
+        const fresh = Number(m.ts) >= since;
+        if (!mine && m.text && fresh) lines.push(`- ${scrub(m.text)}`);
+        // 답이 지난주보다 오래된 스레드는 안 연다 — `latest_reply` 가 있으면 그것으로 미리 거른다.
+        if (m.reply_count && m.ts && !(m.latest_reply && Number(m.latest_reply) < since)) {
           const rep = await client.conversations.replies({ channel: this.opts.room, ts: m.ts, limit: 50 });
           const head = scrub(m.text || '').slice(0, 30);
-          for (const r of (rep.messages || []).slice(1)) {
-            if (r.user === me || r.bot_id || !r.text) continue;
+          for (const r of ((rep.messages || []) as MessageLike[]).slice(1)) {
+            if (r.user === me || r.bot_id || !r.text || Number(r.ts) < since) continue;
             lines.push(`- (${mine ? '네 글' : '위'} 「${head}」에 단 답) ${scrub(r.text)}`);
           }
         }
       }
       if (!lines.length) return '';
       const kept = lines.slice(-RECENT_MAX_LINES);
-      return `[지난 ${RECENT_DAYS}일 커피챗 방에서 사람들이 한 말 — 누가 했는지는 뺐다 · 방에 공개된 말이다]\n${kept.join('\n')}`;
+      return `[지난주부터 커피챗 방에서 사람들이 한 말 — 누가 했는지는 뺐다 · 방에 공개된 말이다]\n${kept.join('\n')}`;
     } catch (error) {
-      this.logger.warn('방의 지난 7일을 못 읽었습니다 — 숫자만 들고 갑니다', error);
+      this.logger.warn('방의 지난주부터를 못 읽었습니다 — 숫자만 들고 갑니다', error);
       return '';
     }
   }
@@ -234,7 +271,7 @@ export class LetterInitiative {
     }
   }
 
-  private pulse(): { workday: boolean; weekFirst: boolean; brief: string } | null {
+  private pulse(): { workday: boolean; brief: string } | null {
     const r = spawnSync(this.opts.python, ['-X', 'utf8', this.opts.script, '--room', this.opts.room], {
       encoding: 'utf-8', windowsHide: true, timeout: 30_000,
     });
@@ -245,12 +282,7 @@ export class LetterInitiative {
     try {
       const got = JSON.parse((r.stdout || '').trim());
       if (typeof got.brief !== 'string' || !got.brief) return null;
-      // 첫 업무일 판정은 파이썬 몫(공휴일 표가 거기 있다). 그 칸이 없으면 옛 파이썬이다 — 돌리지 않고 알린다.
-      if (typeof got.week_first !== 'boolean') {
-        this.logger.warn('현황판에 week_first 가 없습니다 — comm_pulse.py 가 옛 판입니다');
-        return null;
-      }
-      return { workday: Boolean(got.workday), weekFirst: got.week_first, brief: got.brief };
+      return { workday: Boolean(got.workday), brief: got.brief };
     } catch {
       this.logger.warn('현황판이 JSON 이 아닙니다');
       return null;
@@ -266,7 +298,7 @@ export class LetterInitiative {
     }
   }
 
-  private state(): { day?: string } {
+  private state(): { week?: string; day?: string } {
     try {
       return JSON.parse(fs.readFileSync(this.opts.statePath, 'utf-8'));
     } catch {
@@ -274,7 +306,7 @@ export class LetterInitiative {
     }
   }
 
-  private saveState(s: { day: string }): void {
+  private saveState(s: { week?: string; day?: string }): void {
     try {
       fs.mkdirSync(path.dirname(this.opts.statePath), { recursive: true });
       const tmp = `${this.opts.statePath}.tmp`;
@@ -286,14 +318,38 @@ export class LetterInitiative {
   }
 }
 
+/** `back` 주 전 월요일 0시(이 PC 시간). 0 이면 이번 주 월요일. 월요일이 쉬는 주여도 월요일부터. */
+export function mondayOf(now: Date, back = 0): Date {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7) - 7 * back);
+  return d;
+}
+
+/** 지난주 월요일 0시 — 방에서 「사람들이 한 말」을 읽기 시작하는 때. */
+export function lastWeekMonday(now: Date): Date {
+  return mondayOf(now, 1);
+}
+
+/** 슬랙 이력의 한 줄 — 여기서 보는 칸만. */
+interface MessageLike {
+  ts?: string; user?: string; bot_id?: string; subtype?: string; text?: string;
+  reply_count?: number; latest_reply?: string;
+}
+
 function localDay(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-/** 멘션·방 링크·URL 라벨을 지우고 한 줄로 — 글쓴이가 누구인지 되짚을 실마리를 남기지 않는다. */
+/**
+ * 멘션·팀 멘션·방 링크·URL 라벨을 지우고 한 줄로. **글 속에 적힌 이름은 못 지운다**(「철수님 말대로」) —
+ * 이 글은 실장에게만 가고, 방에 걸 글은 카드 쪽 이름 빗장이 막는다. 그 선을 README 에 적어 뒀다.
+ */
 function scrub(text: string): string {
   return text
     .replace(/<@[^>]+>/g, '@누군가')
+    .replace(/<!subteam\^[^>]+>/g, '@어느 팀')
+    .replace(/<![a-z]+(\|[^>]*)?>/g, '@모두')
     .replace(/<#[^|>]+\|([^>]*)>/g, '#$1')
     .replace(/<([^|>]+)\|([^>]*)>/g, '$2')
     .replace(/\s+/g, ' ')
