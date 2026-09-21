@@ -14,6 +14,10 @@ const ALERT_ID = 'daou-session';
 export const ACTION_ID = 'daou_login';
 const NOTICE_FILE = 'daou-login-notice.json';
 
+/** 메시지에 찍는 시각은 이 PC 시각 — `toISOString` 은 UTC 라 「해소 (01:23)」로 나갔다(2026-09-21 시연). */
+const localHHMM = (): string =>
+  new Date().toLocaleTimeString('ko-KR', { hour12: false, hour: '2-digit', minute: '2-digit' });
+
 interface Notice {
   key: string;        // `daou-session:<since>` — 만료 한 번에 알림 한 번
   ts: string;         // 버튼이 달린 메시지. 하루 뒤에 눌러도 이 메시지를 고쳐 쓴다
@@ -128,7 +132,7 @@ export class DaouLoginNotifier {
     if (!alert) {
       // 마커가 걷혔다 — 열려 있던 알림을 해소로 고친다(하루 뒤에 보는 사람이 옛 🔴 를 안 믿게).
       if (notice && !notice.resolvedAt) {
-        const when = new Date().toISOString().slice(11, 16);
+        const when = localHHMM();
         const done = `✅ 다우 세션 살아 있음 — 해소 (${when})`;
         await this.updateMessage(notice.ts, done, this.plainBlocks(done)).catch(() => {});
         this.writeNotice({ ...notice, resolvedAt: new Date().toISOString() });
@@ -182,7 +186,7 @@ export class DaouLoginNotifier {
         return;
       }
 
-      const when = new Date().toISOString().slice(11, 16);
+      const when = localHHMM();
       const head = `✅ 다우 로그인 됨 (${when}) · 쿠키 ${result.cookies ?? '?'}개`;
       await this.updateMessage(messageTs, `${head} · 밀린 적재 확인 중…`,
         this.plainBlocks(`${head} · 밀린 적재 확인 중…`));
