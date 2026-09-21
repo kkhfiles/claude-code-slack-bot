@@ -47,13 +47,17 @@ const ROOM = [
   { ts: '5', user: 'U_HGD', text: '회의가 길어지는 게 <@U_CS> 말대로 문제예요' },
   { ts: '4', user: 'U_BEAN', bot_id: 'B1', text: '요즘 회의 어떠세요? 한 줄만 남겨 주세요', reply_count: 2 },
   { ts: '3', user: 'U_SOIN', bot_id: 'B2', text: '오늘 점심은 김치찌개!' },
-  { ts: '2', user: 'U_CS', text: '저는 아침 회의가 좋아요 <#C_CHAT|coffee>' },
+  { ts: '2', user: 'U_CS', text: '저는 아침 회의가 좋아요 <#C_CHAT|coffee>', reply_count: 1 },
   { ts: '1', user: 'U_HGD', subtype: 'channel_join', text: 'has joined' },
 ];
 const REPLIES = {
   4: [{ ts: '4', user: 'U_BEAN', bot_id: 'B1', text: '요즘 회의 어떠세요?' },
       { ts: '4.1', user: 'U_CS', text: '짧게만 하면 좋겠어요' },
       { ts: '4.2', user: 'U_BEAN', bot_id: 'B1', text: '고마워요!' }],
+  2: [{ ts: '2', user: 'U_CS', text: '저는 아침 회의가 좋아요' },
+      { ts: '2.1', user: 'U_HGD', text: '저는 오후가 낫던데요' }],
+  3: [{ ts: '3', user: 'U_SOIN', bot_id: 'B2', text: '오늘 점심은 김치찌개!' },
+      { ts: '3.1', user: 'U_HGD', text: '김치찌개 좋죠' }],
 };
 function fakeClient(extra = {}) {
   const dm = [];
@@ -178,7 +182,9 @@ ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 �
   ok('멘션·방 링크는 지운다', brief.includes('@누군가 말대로') && brief.includes('#coffee') && !brief.includes('<@') && !brief.includes('<#'), brief);
   ok('커피콩 글 아래 답글은 어느 글에 단 답인지와 함께 · 커피콩 자신의 답글은 뺀다',
     brief.includes('(네 글 「요즘 회의 어떠세요? 한 줄만 남겨 주세요」에 단 답) 짧게만 하면 좋겠어요') && !brief.includes('고마워요!'), brief);
-  ok('다른 봇(소인)의 말과 들어옴 같은 것은 뺀다', !brief.includes('김치찌개') && !brief.includes('has joined'), brief);
+  ok('다른 봇(소인)의 말과 그 스레드, 들어옴 같은 것은 뺀다', !brief.includes('김치찌개') && !brief.includes('has joined'), brief);
+  ok('남의 글 아래 스레드도 읽는다 — 어느 글에 단 답인지와 함께',
+    brief.includes('(위 「저는 아침 회의가 좋아요 #coffee」에 단 답) 저는 오후가 낫던데요'), brief);
   ok('커피콩 자신의 글은 사람 말로 안 싣는다', !brief.includes('- 요즘 회의 어떠세요? 한 줄만'), brief);
   ok('실장에게 하는 말이 DM 으로 간다', c.dm.some((m) => m.channel === 'DM_U_BOSS' && m.text.includes('가볍게 말 걸어 볼게요')), c.dm);
   ok('방에 걸 글은 카드(offer)로만 간다', r === 'proposed' && offered.length === 1 && offered[0].asks[0].text === PROPOSAL, offered);

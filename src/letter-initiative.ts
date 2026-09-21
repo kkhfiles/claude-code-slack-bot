@@ -171,9 +171,11 @@ export class LetterInitiative {
   }
 
   /**
-   * 방의 지난 7일에서 **사람이 한 말**을 모은다 — 글쓴이는 안 싣고 멘션은 지운다. 커피콩 자신의
-   * 글 아래 달린 답글은 「어느 글에 단 답인지」를 붙인다(취합할 때 물음과 답을 짝지어야 한다).
-   * 다른 봇(소인)의 말은 뺀다. 방에 이미 공개된 말만이고, 이 글은 실장 DM 과 카드로만 간다.
+   * 방의 지난 7일에서 **사람이 한 말**을 모은다 — 글쓴이는 안 싣고 멘션은 지운다. 스레드는
+   * **누구 글 아래든** 읽는다(처음엔 커피콩 글만 읽었다 — 물음과 답을 짝지으려고. 그런데 취합
+   * 재료로는 남의 글 아래 오간 말도 같은 값이다 · 실장 물음 2026-09-21). 답글에는 「어느 글에
+   * 단 답인지」를 붙이고, 그 글이 커피콩 것이면 「네 글」이라고 적는다. 다른 봇(소인)의 말과
+   * 그 스레드는 뺀다. 방에 이미 공개된 말만이고, 이 글은 실장 DM 과 카드로만 간다.
    *
    * 무엇이든 못 읽으면 빈 글자 — 주간 턴은 숫자만 들고 돈다. 취합이 빠지는 것이 턴이 빠지는
    * 것보다 낫다.
@@ -188,14 +190,14 @@ export class LetterInitiative {
       for (const m of [...(hist.messages || [])].reverse()) {          // 오래된 것부터
         if (m.subtype) continue;                                       // 들어옴·나감·핀 같은 것
         const mine = m.user === me;
-        if (!mine && m.bot_id) continue;                               // 다른 봇의 말
+        if (!mine && m.bot_id) continue;                               // 다른 봇의 말 — 그 스레드도
         if (!mine && m.text) lines.push(`- ${scrub(m.text)}`);
-        if (mine && m.reply_count && m.ts) {
+        if (m.reply_count && m.ts) {
           const rep = await client.conversations.replies({ channel: this.opts.room, ts: m.ts, limit: 50 });
           const head = scrub(m.text || '').slice(0, 30);
           for (const r of (rep.messages || []).slice(1)) {
             if (r.user === me || r.bot_id || !r.text) continue;
-            lines.push(`- (네 글 「${head}」에 단 답) ${scrub(r.text)}`);
+            lines.push(`- (${mine ? '네 글' : '위'} 「${head}」에 단 답) ${scrub(r.text)}`);
           }
         }
       }
