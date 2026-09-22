@@ -831,7 +831,7 @@ export async function narrowApply(json: string, task: string): Promise<QuickOutc
 //    아니라 **터지면 전부 멈추기 때문에** 둔다.
 
 /** 좁은 길 폴백 엔진. 값을 바꾸려면 여기 한 줄 — 잰 것은 `sol` · `low` 다. */
-const NARROW_CODEX_MODEL = process.env.BOARD_NARROW_CODEX_MODEL || 'gpt-5.6-sol';
+const NARROW_CODEX_MODEL = process.env.BOARD_NARROW_CODEX_MODEL || 'gpt-6-sol';   // 2026-09-23 5.6 → 6 (위 측정은 5.6 때 것)
 const NARROW_CODEX_EFFORT = process.env.BOARD_NARROW_CODEX_EFFORT || 'low';
 
 /**
@@ -840,10 +840,10 @@ const NARROW_CODEX_EFFORT = process.env.BOARD_NARROW_CODEX_EFFORT || 'low';
  * 좁은 길은 판을 재는 실험이라 `sol`·`low` 가 그 실험의 조건이다. 여기서 같이
  * 쓰면 주 작업 쪽 사정으로 실험 조건이 바뀌어 앞뒤 회차를 못 비교한다.
  *
- * 등급 대응은 **Opus 5 ↔ GPT-5.6 Sol** 이고 effort 는 부르는 쪽 값을 그대로
+ * 등급 대응은 **Opus 5.5 ↔ GPT-6 Sol**(2026-09-23 둘 다 한 세대 올림) 이고 effort 는 부르는 쪽 값을 그대로
  * 받는다(2026-09-08 사용자). 정기 작업에 Astra·Fable 급은 쓰지 않는다.
  */
-const SESSION_CODEX_MODEL = process.env.SESSION_FALLBACK_CODEX_MODEL || 'gpt-5.6-sol';
+const SESSION_CODEX_MODEL = process.env.SESSION_FALLBACK_CODEX_MODEL || 'gpt-6-sol';
 const SESSION_CODEX_EFFORT = process.env.SESSION_FALLBACK_CODEX_EFFORT || 'low';
 
 /**
