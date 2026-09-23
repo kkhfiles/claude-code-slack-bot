@@ -97,7 +97,8 @@ export const config = {
     // connection so its message buttons work. Empty = no buttons; the emoji
     // fallback still works because reactions are picked up by the poller.
     appToken: process.env.LUNCH_BOT_SLACK_APP_TOKEN || '',
-    // 이 채널에서 오가는 말에 답한다(불렀을 때 + 조건이 차면 먼저).
+    // 이 채널에서 오가는 말에 답한다(불렀을 때 + 조건이 차면 먼저). 쉼표로 여럿 적는다 —
+    // 봇이 방에 들어가 있어도 여기 없는 방의 말은 안 들린다.
     // 비면 채널 대화는 꺼진 채로 둔다 — 사람들이 쓰는 방이라 기본값은 침묵이어야 한다.
     chatChannel: process.env.LUNCH_CHAT_CHANNEL || '',
   },

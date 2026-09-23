@@ -402,7 +402,9 @@ export class SlackHandler {
     // 시험용 방은 **모든 대화 봇의 방 목록에 같이 들어간다.** 초대해 둔 봇이 어느 것인지
     // 몰라도 되게 — 실원 방을 건드려 가며 말투를 시험하지 않으려고 두는 자리다.
     const testRoom = config.chat.testChannel;
-    const rooms = (main: string) => [main, testRoom].filter(Boolean);
+    // 봇이 사는 방은 쉼표로 여럿 적을 수 있다(점심 방 + 친목 방처럼). 방마다 하는 일은
+    // 봇 설정의 `rooms` 가 가른다 — 여기 목록은 「이 방 말을 듣는다」만 정한다.
+    const rooms = (main: string) => [...main.split(','), testRoom].map((s) => s.trim()).filter(Boolean);
     // 봇끼리 말 섞기는 **두 봇에 같이 건다** — 한쪽만 들으면 한쪽이 혼잣말을 한다.
     const botTalk = config.chat.botTalk.enabled ? config.chat.botTalk : null;
     if (turnScript && config.letter.enabled
