@@ -39,7 +39,8 @@
     "check:sessionfb": "node scripts/check-session-fallback.mjs",
     "check:ladder": "node scripts/check-model-ladder.mjs",
     "check:turnserve": "node scripts/check-turn-serve.mjs",
-    "check:replaynarrow": "node scripts/check-replay-narrow.mjs"
+    "check:replaynarrow": "node scripts/check-replay-narrow.mjs",
+    "check:followup": "node scripts/check-followup.mjs"
   },
   "keywords": [],
   "author": "",

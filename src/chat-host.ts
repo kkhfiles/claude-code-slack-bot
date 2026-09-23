@@ -176,6 +176,8 @@ export interface ChatBotOptions {
   buttIn?: ButtInRule | null;   // channel: null 이면 불렀을 때만 답한다
   /** 방에 들어간 직후 한 번 인사할지. 인사말은 그 자리에서 지어낸다(고정 문구 아님). */
   greetOnJoin?: boolean;
+  /** 먼저 말 꺼내기(후속) — null 이면 안 한다. 카드를 띄울 `onAsk` 가 없으면 역시 안 한다. */
+  followup?: FollowupRule | null;
   /**
    * 같은 슬랙 앱에 **대화가 아닌 기능**을 얹을 자리(레터의 칭찬 전달).
    *
@@ -199,6 +201,21 @@ export interface ChatBotOptions {
 export interface TurnAsk {
   name: string;
   text: string;
+  /** 먼저 말 꺼내기(후속) 부탁에만 — 올릴 방 · 쓴 봇 · 까닭(맡은 일 이름). */
+  room?: string;
+  bot?: string;
+  why?: string;
+}
+
+/**
+ * 먼저 말 꺼내기(후속). 평일 `start`~`end` 사이 `everyMin` 분마다 파이썬에 기한 지난 일감을 묻고(`ask: due`),
+ * 나온 방마다 후속 턴을 돌린다. 쓴 글은 방에 안 나가고 `onAsk` 로 실장 확인 카드가 된다 — 「보내기」를 눌러야
+ * 나간다(실장 2026-09-24 「먼저 말 꺼내기 전에 내게 DM 으로 확인받기」).
+ */
+export interface FollowupRule {
+  everyMin: number;
+  start: string;
+  end: string;
 }
 
 interface Waiting {
@@ -265,6 +282,9 @@ export class ChatHost {
   private botTone = '';
   /** 쌓인 말을 주기적으로 훑어보는 타이머. */
   private sweeper: NodeJS.Timeout | null = null;
+  /** 먼저 말 꺼내기(후속) 타이머와 겹침 막이. */
+  private followTimer: NodeJS.Timeout | null = null;
+  private followBusy = false;
 
   /** 지금 턴이 도는 열쇠 — 그쪽으로 새로 온 말은 뒤에 줄서지 않고 합쳐진다. */
   private active = new Set<string>();
@@ -379,6 +399,39 @@ export class ChatHost {
    * (`letter-initiative.ts`)이 그것을 확인 카드로 띄운다. **여기서 방에 올리지 않는다.**
    * 상주 turn.py 를 같이 쓰므로 사람 턴과 줄을 서고, 실장 DM 대화 기억에 남는다.
    */
+  /**
+   * 먼저 말 꺼내기(후속) 한 바퀴 — 창(평일 `start`~`end`) 밖이면 안 한다. 맡은 방만(`channels`).
+   * 파이썬이 쓴 글은 **여기서 방에 안 올린다** — `onAsk` 가 실장 DM 에 카드를 띄운다. 겹쳐 돌지 않는다.
+   * 부르는 쪽이 시각을 주면(시험) 그 시각으로 판단한다.
+   */
+  async followupSweep(now: Date = new Date()): Promise<number> {
+    const fu = this.opts.followup;
+    if (!fu || !this.opts.onAsk || !this.app || this.followBusy) return 0;
+    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const day = now.getDay();
+    if (day === 0 || day === 6 || hhmm < fu.start || hhmm >= fu.end) return 0;
+    this.followBusy = true;
+    let carded = 0;
+    try {
+      const got = await this.runTurn('', '', '(조회)', false, false, { ask: 'due' }) as TurnResult & {
+        due?: { key: string; titles: string[] }[];
+      };
+      for (const item of got.due ?? []) {
+        if (!(this.opts.channels ?? []).includes(item.key)) continue;
+        const r = await this.runTurn(item.key, '', '(후속 점검 — 이 방에서는 지금 아무도 말하지 않았다)',
+          false, false, { followup: true });
+        if (r.ask?.length) {
+          await this.opts.onAsk(this.app.client, r.ask, { user: '', channel: item.key });
+          carded += r.ask.length;
+        }
+      }
+      if (carded) this.logger.info(`먼저 말 꺼내기 — 확인 카드 ${carded}장을 실장 DM 에 띄웠습니다`);
+    } finally {
+      this.followBusy = false;
+    }
+    return carded;
+  }
+
   async initiate(client: App['client'], key: string, brief: string, name: string): Promise<TurnResult> {
     void client;
     // 실장 턴으로 돈다 — 열쇠는 실장 DM 이 아니라 아침 전용 대화(`U…-morning`)라 열쇠로 실장을
@@ -438,6 +491,14 @@ export class ChatHost {
         }, every * 1000);
         this.sweeper.unref?.();
       }
+      const fu = this.opts.followup;
+      if (fu && this.opts.onAsk && fu.everyMin > 0) {
+        this.followTimer = setInterval(() => {
+          void this.followupSweep().catch((error) =>
+            this.logger.warn('먼저 말 꺼내기 점검이 넘어졌습니다', error));
+        }, fu.everyMin * 60_000);
+        this.followTimer.unref?.();
+      }
       const where: string[] = [];
       if (this.servesDm) where.push(`DM ${this.opts.allowUsers?.length ?? 0}명 허용`);
       if (this.servesChannel) {
@@ -489,6 +550,10 @@ export class ChatHost {
     if (this.sweeper) {
       clearInterval(this.sweeper);
       this.sweeper = null;
+    }
+    if (this.followTimer) {
+      clearInterval(this.followTimer);
+      this.followTimer = null;
     }
     // 상주 turn.py 를 내린다 — 안 내리면 그 아래 agy 워커(하나에 177MB)가 남는다.
     // 트리째 죽인다: turn.py 만 죽이면 그 자식인 agy 가 고아로 남을 수 있다.
