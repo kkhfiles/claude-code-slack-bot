@@ -430,12 +430,19 @@ export class SlackHandler {
       // 나간다. **대화만으로는 안 나간다.** 올릴 방은 창에서 고른다 — 전할 말은 general·시험 방,
       // 안건은 커피챗 방·시험 방·general. 던진 안건은 `agenda.md` 에 적어 파이썬이 매 턴 붙인다.
       const letterData = path.join(path.dirname(turnScript), 'bots', 'letter', 'data');
+      const coffee = coffeeKinds(
+        { general: config.letter.generalChannel, chat: config.letter.chatChannel, test: testRoom },
+        { agenda: path.join(letterData, 'agenda.md') },
+      );
+      // 커피콩 설정의 `rooms` 에는 시험 방만 있다 — 커피챗 방 이름은 카드 갈래가 이미 들고 있는 것을 쓴다.
+      const letterLabel = (id: string): string =>
+        coffee.agenda?.rooms.find((r) => r.id === id)?.label ?? roomLabel('letter', id);
       const followKinds: Record<string, NoticeKind> = {};
       if (followup) {
         followKinds['followup-letter'] = {
           title: '먼저 말 꺼내기', ask: '커피콩이 먼저 말을 꺼내려 합니다.', header: '',
           hint: '커피콩 이름으로 나갑니다. 여기서 고칠 수 있습니다.',
-          rooms: rooms(config.letter.chatChannel).map((id) => ({ id, label: roomLabel('letter', id) })),
+          rooms: rooms(config.letter.chatChannel).map((id) => ({ id, label: letterLabel(id) })),
           guard: true, system: true, speaker: '커피콩',
         };
         if (lunchToken && config.lunchBot.chatChannel) {
@@ -450,13 +457,7 @@ export class SlackHandler {
       notice = new LetterNotice({
         managerUserId: config.letter.managerUserId,
         members: config.letter.members,
-        kinds: {
-          ...coffeeKinds(
-            { general: config.letter.generalChannel, chat: config.letter.chatChannel, test: testRoom },
-            { agenda: path.join(letterData, 'agenda.md') },
-          ),
-          ...followKinds,
-        },
+        kinds: { ...coffee, ...followKinds },
         logPath: path.join(letterData, 'notice.jsonl'),
         pendingPath: path.join(letterData, 'notice-pending.json'),
       });
