@@ -20,6 +20,11 @@ import { errorCollector } from './error-collector';
 import type { SpawnOpts, SessionResult } from './assistant-scheduler';
 import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
+import { ladderText } from './model-ladder';
+
+/** 회의 알림 판단 모델 — 별칭(하위 등급). 같은 등급 폴백(codex·agy)도 이 이름으로 찾는다. */
+const CALENDAR_MODEL = 'haiku';
+const JUDGE_SYSTEM = 'You judge calendar events and output JSON. No other output.';
 
 // --- Types ---
 
@@ -593,21 +598,24 @@ export class CalendarPoller {
     prompt = prompt.replace(/\{existingNotifications\}/g, existingText);
 
     if (this.aiJudgmentPaused) {
-      this.logger.debug('AI judgment paused (rate limit backoff), skipping');
-      return [];
+      // Claude 가 한도로 쉬는 동안에도 판단은 한다 — 같은 등급의 codex → agy(2026-09-23).
+      // 예전에는 여기서 [] 로 끝나, 그 시간의 일정 변경 알림이 영구히 사라졌다(변경은 이미 캐시에 저장됨).
+      this.logger.debug('AI judgment paused (rate limit backoff) — 사다리로 판단');
+      return this.judgeByLadder(prompt, diff, config.reminders.beforeMinutes, 'Claude 한도로 쉬는 중');
     }
 
     try {
       const useSdk = shouldUseSdk('calendar');
       const result = await this.spawnSession(prompt, {
         workingDirectory: os.tmpdir(),  // No CLAUDE.md → saves ~39K tokens
-        model: 'claude-haiku-4-5-20251001',
+        // 별칭 — 모델이 새로 나와도 이 줄을 안 고치게(봇 설정과 같은 원칙). 같은 등급 폴백도 이 이름으로 찾는다.
+        model: CALENDAR_MODEL,
         permissionMode: 'default',
         // **정본은 `assistant/config.json` 의 `reminders.maxBudgetUsd`.** 여기 숫자는
         // 그 키가 없을 때만 쓰는 값인데, 둘이 다르면 설정을 지웠을 때 조용히
         // 빠듯해진다 — 2026-08-21 까지 여기는 0.02, 설정은 0.05 였다. 같은 값으로 맞춘다.
         maxBudgetUsd: config.reminders.maxBudgetUsd || 0.15,
-        systemPrompt: 'You judge calendar events and output JSON. No other output.',
+        systemPrompt: JUDGE_SYSTEM,
         tools: [],
         noSessionPersistence: true,
         skipMcp: true,
@@ -623,7 +631,10 @@ export class CalendarPoller {
       // 에러일 때만 연다(분석·브리핑 경로와 같은 형태).
       if (isSessionRateLimited(result)) {
         this.pauseAiJudgment();
-        return [];
+        return this.judgeByLadder(prompt, diff, config.reminders.beforeMinutes, 'Claude 한도');
+      }
+      if (result.isError || !(result.text || '').trim()) {
+        return this.judgeByLadder(prompt, diff, config.reminders.beforeMinutes, `Claude ${result.subtype || '빈 답'}`);
       }
 
       // Parse JSON from response
@@ -633,7 +644,7 @@ export class CalendarPoller {
       const msg = (error as Error).message || '';
       if (isRateLimitText(msg)) {
         this.pauseAiJudgment();
-        return [];
+        return this.judgeByLadder(prompt, diff, config.reminders.beforeMinutes, 'Claude 한도');
       }
       // **예산에 걸린 것을 「AI 판단 실패」로만 적으면 고칠 데를 못 찾는다.**
       // 브리핑의 「시스템 이슈」에 이 줄이 그대로 실리는데, 원인이 안 보여
@@ -644,8 +655,26 @@ export class CalendarPoller {
           + ' — 그 차례는 알림을 못 보낸다. assistant/config.json 의 reminders.maxBudgetUsd 를 올릴 것'
         : `AI 판단 실패: ${msg}`);
       this.logger.error('AI judgment failed', error);
+      return this.judgeByLadder(prompt, diff, config.reminders.beforeMinutes, 'Claude 실패');
+    }
+  }
+
+  /**
+   * Claude 가 못 한 판단을 같은 등급의 다른 회사 모델로(codex → agy · llm-playbook 사다리).
+   * 도구 없이 JSON 만 주고받는 판단이라 사다리에 그대로 맞는다. 못 하면 빈 목록(예전 동작).
+   */
+  private async judgeByLadder(
+    prompt: string, diff: CalendarDiff, beforeMinutes: number, why: string,
+  ): Promise<CalendarNotification[]> {
+    const got = await ladderText('회의 알림 판단', prompt, {
+      model: CALENDAR_MODEL, system: JUDGE_SYSTEM, timeoutMs: 180_000,
+    });
+    if (!got) {
+      errorCollector.add('CalendarPoller', `회의 알림 판단 — ${why} · 사다리(codex·agy)도 실패 — 그 차례 알림 없음`);
       return [];
     }
+    this.logger.warn(`회의 알림 판단: ${why} → ${got.backend} ${got.model} 가 받음`);
+    return this.clampNotifyAt(this.parseJudgmentResponse(got.text), diff, beforeMinutes);
   }
 
   private parseJudgmentResponse(text: string): CalendarNotification[] {

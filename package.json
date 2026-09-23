@@ -37,6 +37,7 @@
     "check:initiative": "node scripts/check-initiative.mjs",
     "check:narrow": "node scripts/check-narrow-fallback.mjs",
     "check:sessionfb": "node scripts/check-session-fallback.mjs",
+    "check:ladder": "node scripts/check-model-ladder.mjs",
     "check:turnserve": "node scripts/check-turn-serve.mjs",
     "check:replaynarrow": "node scripts/check-replay-narrow.mjs"
   },

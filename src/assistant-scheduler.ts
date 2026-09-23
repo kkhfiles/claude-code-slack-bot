@@ -19,6 +19,8 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
 import type { QuickOutcome } from './work-assistant';
 import { boardLabel, boardQueueEnabled, drain, event as recordEvent } from './board-queue';
 import type { ContactItem } from './board-queue';
+import { config } from './config';
+import { ladderEventLines, ladderTable, ladderText, sameTier } from './model-ladder';
 
 /**
  * 업무 넛지 시각. 09:00 데일리 미팅 직전이라는 것이 이 값의 전부다 —
@@ -494,6 +496,8 @@ export class AssistantScheduler {
       configPath: this.configPath,
       workingDir: this.workingDir,
     });
+    // 등급 사다리 표를 미리 읽어 둔다 — 첫 폴백이 표를 기다리지 않게, 브리핑이 기록 파일 경로를 알게.
+    void ladderTable();
 
     // Catch-up briefing if missed today (e.g. bot restarted after briefing time)
     setTimeout(() => this.catchUpBriefingIfNeeded().catch(e =>
@@ -2050,17 +2054,39 @@ export class AssistantScheduler {
       return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
     }
 
-    const said = await codexSession(prompt, {
-      workingDirectory: opts.workingDirectory,
-      appendSystemPrompt: opts.appendSystemPrompt,
-      timeoutMs: opts.maxDurationMs,
-      // **1차와 같은 깊이로 돈다** — 폴백이 얕게 돌면 「돌긴 돌았는데 쓸 게 없는」
-      // 산출물이 나오고, 그건 실패보다 알아채기 어렵다(2026-09-08).
-      effort: opts.effort,
-    });
-    recordEvent('session-fallback', { label, why, ok: !!said });
+    // **같은 등급으로 넘긴다**(2026-09-23) — 모델은 llm-playbook 의 등급 표에서(Opus → Astra ·
+    // Sonnet → Sol · Haiku → Luna). 예전에는 1차 등급과 무관하게 늘 같은 codex 모델로 갔다.
+    const primary = opts.model || config.defaultModel;
+    const toolFree = Array.isArray(opts.tools) && opts.tools.length === 0;
+    let said = '';
+    let via = '';
+    if (toolFree) {
+      // **도구 없는 회차는 사다리로**(읽기 전용 codex → agy) — 글만 주고받는 일이다. codex 세션으로
+      // 넘기면 작업 폴더 쓰기 권한까지 붙어 1차보다 권한이 넓어진다(2026-09-23 점검).
+      const got = await ladderText(label, prompt, {
+        model: primary,
+        system: opts.systemPrompt ?? opts.appendSystemPrompt,
+        timeoutMs: opts.maxDurationMs,
+      });
+      if (got) { said = got.text; via = `${got.backend} ${got.model}`; }
+    } else {
+      const cell = await sameTier(primary, 'codex');
+      said = await codexSession(prompt, {
+        workingDirectory: opts.workingDirectory,
+        appendSystemPrompt: opts.appendSystemPrompt,
+        timeoutMs: opts.maxDurationMs,
+        // **1차와 같은 깊이로 돈다** — 폴백이 얕게 돌면 「돌긴 돌았는데 쓸 게 없는」
+        // 산출물이 나오고, 그건 실패보다 알아채기 어렵다(2026-09-08).
+        effort: opts.effort,
+        model: cell?.model,
+      });
+      via = `codex ${cell?.model ?? '(기본 모델)'}`;
+      // 사다리를 안 거친 폴백은 기록 파일에 안 남으므로 브리핑 「시스템 이슈」로 직접 알린다.
+      errorCollector.add('폴백', `${label} — Claude ${why} → ${said ? `${via} 가 받음` : '폴백도 실패'}`);
+    }
+    recordEvent('session-fallback', { label, why, ok: !!said, via });
     if (said) {
-      this.logger.warn(`${label} 1차가 못 해서(${why}) codex 로 처리했습니다`);
+      this.logger.warn(`${label} 1차가 못 해서(${why}) ${via} 로 처리했습니다`);
       return { text: said, costUsd: 0, sessionId: '', subtype: 'success', isError: false, toolCalls: 0 };
     }
     this.logger.warn(`${label} 1차·폴백 둘 다 못 했습니다(${why})`);
@@ -2171,6 +2197,8 @@ export class AssistantScheduler {
 
   /** Format collected bot errors for briefing output. */
   private formatErrorReport(): string {
+    // 사다리를 거친 폴백(파이썬 배치 · 도구 없는 회차)은 llm-playbook 기록 파일에 남는다 — 지난 24시간을 싣는다.
+    for (const line of ladderEventLines(24)) errorCollector.add('폴백', line);
     const errors = errorCollector.getAndClear();
     if (errors.length === 0) return '';
 

@@ -38,6 +38,8 @@ const evFile = path.join(os.tmpdir(), `wa-sev-${Date.now()}.jsonl`);
 process.env.WORK_EVENTS_FILE = evFile;
 // 폴백이 실제로 불리는지만 보고 싶다 — 없는 실행체를 주면 빈손으로 돌아온다.
 process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
+// 등급 사다리(파이썬)도 같은 까닭으로 — 없는 실행체면 표도 사다리도 빈손으로 물러난다(2026-09-23).
+process.env.LADDER_PYTHON = 'python-없는-이름-2026';
 
 const { AssistantScheduler } = await import('../dist/assistant-scheduler.js');
 const { config } = await import('../dist/config.js');
@@ -114,7 +116,22 @@ const OKR = { text: '잘 됐다', costUsd: 0, sessionId: 's', subtype: 'success'
   eq('빈손도 폴백을 부르러 간다', ev.map((e) => e.why), ['empty']);
 }
 
+// ── 어느 길로 넘기나 — 도구 없는 회차는 사다리, 도구를 쓰는 회차는 codex 세션 (2026-09-23) ──
+// 도구 없는 회차를 codex 세션으로 넘기면 작업 폴더 쓰기 권한까지 붙어 1차보다 권한이 넓어진다.
+{
+  const { ev } = await run({ ...OKR, text: '', isError: true, subtype: 'error', toolCalls: 0 },
+                           { ...OPTS, tools: [], model: 'sonnet' });
+  eq('도구 없는 회차는 사다리로 간다(codex 세션을 안 부른다)', ev.map((e) => [e.ok, e.via]), [[false, '']]);
+}
+{
+  const { ev } = await run({ ...OKR, text: '', isError: true, subtype: 'error', toolCalls: 0 },
+                           { ...OPTS, model: 'opus' });
+  ok(`도구를 쓰는 회차는 codex 세션으로 간다 (via ${ev[0] && ev[0].via})`,
+     ev.length === 1 && String(ev[0].via).startsWith('codex'));
+}
+
 delete process.env.BOARD_NARROW_CODEX_BIN;
+delete process.env.LADDER_PYTHON;
 delete process.env.WORK_EVENTS_FILE;
 try { fs.unlinkSync(evFile); } catch { /* 없으면 그만 */ }
 
