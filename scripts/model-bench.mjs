@@ -27,7 +27,7 @@ const arg = (name, dflt) => {
   return hit ? hit.slice(name.length + 3) : dflt;
 };
 
-const MODELS = arg('models', 'claude-opus-5,claude-sonnet-5,claude-haiku-4-5-20251001').split(',');
+const MODELS = arg('models', 'claude-opus-5-5,claude-sonnet-5,claude-haiku-4-5-20251001').split(',');
 const EFFORTS = arg('efforts', 'low,medium,high').split(',');
 const ONLY = arg('only', '');
 
