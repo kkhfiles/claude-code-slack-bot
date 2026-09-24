@@ -64,15 +64,9 @@ export interface NoticeKind {
   /** **봇이 쓴 글**(안건·아침 말 걸기)이면 참 — 카드를 만들 때와 **실장이 창에서 고친 뒤 보낼 때** 둘 다
    *  이름·멘션·집계·숫자·길이 빗장을 건다. 실장 말 그대로인 전할 말에는 안 건다. */
   guard?: boolean;
-  /**
-   * **실장 턴이 아닌 데서 오는 부탁**(먼저 말 꺼내기 · 후속)이면 참. 그런 부탁은 말한 사람이 없으므로
-   * `from.user` 대조 대신 **부탁의 방(`room`)이 이 갈래의 방 목록에 있어야** 카드를 만든다. 나가는 관문은 같다 —
-   * 실장이 창에서 「보내기」를 눌러야 나간다.
-   */
-  system?: boolean;
-  /** 이 갈래의 글을 **다른 봇 이름으로** 올릴 때 그 봇의 클라이언트(소인 방의 후속은 소인으로). 없으면 이 앱으로. */
+  /** 이 갈래의 글을 **다른 봇 이름으로** 올릴 때 그 봇의 클라이언트(소인의 주간 제안은 소인으로). 없으면 이 앱으로. */
   poster?: { chat: Pick<App['client']['chat'], 'postMessage' | 'getPermalink'> };
-  /** 카드에 보일 「누가 꺼내려는지」 — 봇 이름. */
+  /** 카드 머리에 보일 「누가 어느 방에 말을 꺼내려는지」의 봇 이름. 없으면 `ask` 한 줄. */
   speaker?: string;
 }
 
@@ -95,9 +89,8 @@ interface Pending {
   text: string;
   at: string;
   from: string;
-  /** 후속 부탁 — 올릴 방(창에서 먼저 골라 둔다)과 까닭(맡은 일 이름). */
+  /** 주간 판단이 고른 방 — 창에서 먼저 골라 둔다. */
   room?: string;
-  why?: string;
 }
 
 interface Sent {
@@ -255,21 +248,13 @@ export class LetterNotice {
     client: App['client'], asks: TurnAsk[], from: { user: string; channel: string },
   ): Promise<void> => {
     if (!this.enabled) return;
-    // 부른 쪽이 다른 앱(소인 호스트)이어도 카드·빗장 조회는 버튼을 받는 앱으로.
+    // 부른 쪽이 다른 앱(소인의 주간 시계)이어도 카드·빗장 조회는 버튼을 받는 앱으로.
     client = this.home ?? client;
     // 파이썬이 이미 실장 턴에서만 싣지만 여기서 한 번 더 본다 — 두 겹이라야 한쪽을
     // 고치다 어긋나도 안 샌다. 방에서 여러 사람이 섞인 턴은 `user` 가 비어 오므로 걸린다.
-    // **예외는 후속(`system`) 갈래뿐** — 말한 사람이 없는 턴이라, 그 부탁의 방이 갈래의 방 목록에 있을 때만 받는다.
     if (from.user !== this.opts.managerUserId) {
-      const ok = asks.filter((a) => {
-        const k = this.kind(a.name);
-        return Boolean(k?.system && a.room && a.room === from.channel && k.rooms.some((r) => r.id === a.room));
-      });
-      if (ok.length !== asks.length) {
-        this.logger.warn(`실장이 아닌 턴(${from.user || '?'} · ${from.channel})에 부탁이 실려 왔습니다 — 후속 갈래·방이 맞는 것만 받습니다`);
-      }
-      asks = ok;
-      if (!asks.length) return;
+      this.logger.warn(`실장이 아닌 턴(${from.user || '?'} · ${from.channel})에 부탁이 실려 왔습니다 — 버립니다`);
+      return;
     }
     // **같은 갈래가 여럿이면 「후보 n/N — 하나만」으로 번호를 붙인다.** 주간 턴이 대화를 풀어 가는
     // 길을 두세 가지로 내고 실장이 고른다(실장 2026-09-21). 카드는 갈래마다 하나씩 그대로 —
@@ -300,7 +285,6 @@ export class LetterNotice {
         at: new Date().toISOString(),
         from: from.channel,
         ...(ask.room ? { room: String(ask.room) } : {}),
-        ...(ask.why ? { why: String(ask.why).slice(0, 120) } : {}),
       };
       this.pending.set(item.id, item);
       this.save();
@@ -317,12 +301,10 @@ export class LetterNotice {
     const rooms = kind.rooms.map((r) => r.label).join(' · ');
     const shown = item.text.length > 600 ? `${item.text.slice(0, 600)}…` : item.text;
     const where = item.room ? kind.rooms.find((r) => r.id === item.room)?.label : '';
+    const lead = kind.speaker ? `*${kind.speaker}이 ${where || '방'}에 먼저 말을 꺼내려 합니다.*` : `*${kind.ask}*`;
     const head = alt
-      ? `*${kind.ask}* 후보 ${alt.n}/${alt.of} — *하나만* 골라 보내세요. 나머지는 그냥 두면 하루 뒤 만료됩니다.`
-      : kind.system
-        ? `*${kind.speaker ?? '봇'}이 ${where || '방'}에 먼저 말을 꺼내려 합니다*${item.why ? ` — 맡은 일 「${item.why}」` : ''}. `
-          + '아직 아무 데도 안 나갔습니다.'
-        : `*${kind.ask}* 아직 아무 데도 안 나갔습니다.`;
+      ? `${lead} 후보 ${alt.n}/${alt.of} — *하나만* 골라 보내세요. 나머지는 그냥 두면 하루 뒤 만료됩니다.`
+      : `${lead} 아직 아무 데도 안 나갔습니다.`;
     try {
       const im = await client.conversations.open({ users: this.opts.managerUserId });
       if (!im.channel?.id) throw new Error('DM 방을 못 열었습니다');

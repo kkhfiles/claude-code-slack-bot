@@ -20,7 +20,8 @@ const script = path.join(dir, 'fake_pulse.py');
 fs.writeFileSync(script, [
   'import json, os, sys',
   'if os.environ.get("FAKE_PULSE_FAIL") == "1": sys.exit(3)',
-  'print(json.dumps({"workday": os.environ.get("FAKE_WORKDAY", "1") == "1", "brief": "[네 현황판 · 가짜]"}))',
+  'args = (" 인자=" + " ".join(sys.argv[1:])) if os.environ.get("FAKE_PULSE_ARGS") == "1" else ""',
+  'print(json.dumps({"workday": os.environ.get("FAKE_WORKDAY", "1") == "1", "brief": "[네 현황판 · 가짜]" + args}))',
   '',
 ].join('\n'), 'utf-8');
 
@@ -283,6 +284,60 @@ ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 �
   const c = fakeClient();
   ok('턴이 실패하면 아무것도 안 나간다', (await it.runOnce(c, MON)) === 'error' && offered.length === 0 && c.dm.length === 0);
 }
+
+// ── 소인도 같은 시계 — 방 여럿 · 소인 토큰으로 읽음 · 현황판 인자 · DM 머리 (실장 2026-09-24) ──
+{
+  // 소인이 사는 방 둘. 방 이력은 소인 클라이언트(`reader`)로만 읽는다 — 커피콩 앱은 그 방에 없다.
+  const T2 = (d, h = 9) => String(new Date(2026, 8, d, h).getTime() / 1000);
+  const PLAY = [
+    { ts: T2(24), user: 'U_HGD', text: '이번 달 회식은 언제 해요?' },
+    { ts: T2(23), user: 'U_SOIN', bot_id: 'B2', text: '팀데이 어디로 갈지 한 줄씩 주시겠사옵니까?', reply_count: 1, latest_reply: T2(23, 10) },
+  ];
+  const LUNCH = [{ ts: T2(22), user: 'U_CS', text: '오늘 국밥 어때요' }];
+  const readerCalls = [];
+  const reader = {
+    auth: { test: async () => ({ user_id: 'U_SOIN' }) },
+    conversations: {
+      history: async (args) => { readerCalls.push(args.channel); return { messages: args.channel === 'C_PLAY' ? PLAY : LUNCH, response_metadata: {} }; },
+      replies: async () => ({ messages: [PLAY[1], { ts: T2(23, 10), user: 'U_CS', text: '볼링 좋아요' }] }),
+    },
+  };
+  process.env.FAKE_PULSE_ARGS = '1';
+  const { it, host, offered } = make({
+    room: undefined, rooms: [{ id: 'C_PLAY', label: '놀이 방' }, { id: 'C_LUNCH', label: '점심원정대' }],
+    reader, pulseArgs: [], prefix: ':cow: *소인의 이번 주 제안*\n',
+  });
+  host.set({ reply: '이번 주는 회식 날짜를 여쭙겠사옵니다.', speak: true, error: null,
+             ask: [{ name: 'lunch-pulse', text: '회식 되는 날 알려 주시겠사옵니까?', room: 'C_PLAY' }] });
+  ok('방(`room`) 없이 방 여럿(`rooms`)만 있어도 켜진다', it.enabled === true);
+  const c = fakeClient({ conversations: {
+    open: async ({ users }) => ({ channel: { id: `DM_${users}` } }),
+    history: async () => { throw new Error('커피콩 앱은 소인 방에 없다'); },
+  } });
+  const r = await it.runOnce(c, new Date(2026, 8, 28, 13, 30));
+  delete process.env.FAKE_PULSE_ARGS;
+  const brief = host.calls[0]?.brief || '';
+  ok('현황판 인자는 `pulseArgs` 그대로 (커피콩의 --room 을 안 붙인다)',
+    brief.startsWith('[네 현황판 · 가짜] 인자=') && !brief.includes('--room'), brief.split('\n')[0]);
+  ok('방 이력은 소인 클라이언트로 두 방 다 읽는다 (커피콩 앱으로는 안 읽는다)',
+    readerCalls.includes('C_PLAY') && readerCalls.includes('C_LUNCH'), readerCalls);
+  ok('방마다 제목을 달아 붙인다',
+    brief.includes('[지난주부터 놀이 방 방에서') && brief.includes('[지난주부터 점심원정대 방에서')
+    && brief.includes('이번 달 회식은 언제') && brief.includes('오늘 국밥 어때요'), brief);
+  ok('소인 자신의 글 아래 답은 「네 글」로 · 글쓴이는 없다',
+    brief.includes('(네 글 「팀데이 어디로 갈지 한 줄씩 주시겠사옵니까?」에 단 답) 볼링 좋아요') && !brief.includes('U_HGD'), brief);
+  ok('실장 DM 은 소인 머리를 달고 이 앱으로 간다',
+    c.dm.some((m) => m.channel === 'DM_U_BOSS' && m.text.startsWith(':cow: *소인의 이번 주 제안*') && m.text.includes('회식 날짜')), c.dm);
+  ok('방에 걸 글은 방과 함께 카드로만 (실장 이름 · DM 자리)',
+    r === 'proposed' && offered[0]?.asks[0]?.room === 'C_PLAY' && offered[0].from.user === 'U_BOSS' && offered[0].from.channel === 'DM', offered);
+}
+{
+  const reader = { auth: { test: async () => { throw new Error('invalid_auth'); } }, conversations: {} };
+  const { it, host } = make({ room: undefined, rooms: [{ id: 'C_PLAY', label: '놀이 방' }], reader, pulseArgs: [] });
+  const r = await it.runOnce(fakeClient(), MON);
+  ok('읽는 봇을 못 알아봐도 숫자만 들고 돈다', r === 'proposed' && host.calls[0]?.brief === '[네 현황판 · 가짜]', [r, host.calls[0]?.brief]);
+}
+ok('방도 방 여럿도 없으면 꺼진다', make({ room: undefined, rooms: [] }).it.enabled === false);
 
 console.log(`\n${fail ? `실패 ${fail}건` : '모두 통과.'}`);
 fs.rmSync(dir, { recursive: true, force: true });

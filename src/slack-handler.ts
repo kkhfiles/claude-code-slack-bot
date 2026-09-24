@@ -408,11 +408,11 @@ export class SlackHandler {
     const rooms = (main: string) => [...main.split(','), testRoom].map((s) => s.trim()).filter(Boolean);
     // 봇끼리 말 섞기는 **두 봇에 같이 건다** — 한쪽만 들으면 한쪽이 혼잣말을 한다.
     const botTalk = config.chat.botTalk.enabled ? config.chat.botTalk : null;
-    // **먼저 말 꺼내기(후속)** — 기한 지난 일감이 있는 방에 봇이 먼저 말을 꺼낼 때, 글은 실장 DM 확인 카드로만
-    // 간다(실장 2026-09-24). 카드 창구는 실장 DM 이 있는 커피콩 앱 하나다 — 소인 방의 후속도 거기 뜨고,
-    // 「보내기」를 누르면 **소인 이름으로** 그 방에 오른다(`poster`). 방 이름은 봇 설정의 `rooms` 에서 읽는다.
-    const followup = config.chat.followup.enabled ? config.chat.followup : null;
-    let notice: LetterNotice | null = null;
+    // **봇의 주간 판단**(실장 2026-09-24 「봇 모두 주체적 판단은 주 1회 후 나에게 DM 으로 제안」) — 커피콩·소인 둘 다
+    // 주 첫 업무일 오후에 스스로 판단해 실장 DM 에 제안하고, 방에 걸 글은 확인 카드로만 간다. 카드 창구는 실장 DM 이
+    // 있는 커피콩 앱 하나다 — 소인의 제안도 거기 뜨고, 「보내기」를 누르면 **소인 이름으로** 그 방에 오른다(`poster`).
+    // 방 이름은 봇 설정의 `rooms` 에서 읽는다. 소인 대화 호스트는 아래에서 만들어지므로 늦게 묶는다.
+    let lunchHost: ChatHost | null = null;
     const roomLabel = (bot: string, id: string): string => {
       try {
         const cfg = JSON.parse(fs.readFileSync(
@@ -423,6 +423,8 @@ export class SlackHandler {
       }
     };
     const lunchToken = turnScript && config.lunchBot.script ? readLunchBotToken(config.lunchBot.script) : null;
+    // 소인 이름으로 쓰고 소인이 사는 방을 읽는 클라이언트 — 커피콩 앱은 그 방에 없다.
+    const lunchClient = lunchToken && config.lunchBot.chatChannel ? new WebClient(lunchToken) : null;
     if (turnScript && config.letter.enabled
         && config.letter.botToken && config.letter.appToken) {
       // 실장이 대화에서 「실원들에게 ○○ 전해 줘」·「○○ 안건 던져 줘」라고 한 것을 방에 올리는
@@ -434,36 +436,24 @@ export class SlackHandler {
         { general: config.letter.generalChannel, chat: config.letter.chatChannel, test: testRoom },
         { agenda: path.join(letterData, 'agenda.md') },
       );
-      // 커피콩 설정의 `rooms` 에는 시험 방만 있다 — 커피챗 방 이름은 카드 갈래가 이미 들고 있는 것을 쓴다.
-      const letterLabel = (id: string): string =>
-        coffee.agenda?.rooms.find((r) => r.id === id)?.label ?? roomLabel('letter', id);
-      const followKinds: Record<string, NoticeKind> = {};
-      if (followup) {
-        followKinds['followup-letter'] = {
-          title: '먼저 말 꺼내기', ask: '커피콩이 먼저 말을 꺼내려 합니다.', header: '',
-          hint: '커피콩 이름으로 나갑니다. 여기서 고칠 수 있습니다.',
-          rooms: rooms(config.letter.chatChannel).map((id) => ({ id, label: letterLabel(id) })),
-          guard: true, system: true, speaker: '커피콩',
-        };
-        if (lunchToken && config.lunchBot.chatChannel) {
-          followKinds['followup-lunch'] = {
-            title: '먼저 말 꺼내기', ask: '소인이 먼저 말을 꺼내려 합니다.', header: '',
-            hint: '소인 이름으로 나갑니다. 여기서 고칠 수 있습니다.',
-            rooms: rooms(config.lunchBot.chatChannel).map((id) => ({ id, label: roomLabel('lunch', id) })),
-            system: true, speaker: '소인', poster: new WebClient(lunchToken),
-          };
-        }
-      }
-      notice = new LetterNotice({
+      // 소인이 방에 걸 글(주간 판단의 `lunch-pulse`) — 점심원정대·친목 방·시험 방 · 소인 이름으로.
+      const lunchKinds: Record<string, NoticeKind> = lunchClient ? {
+        'lunch-pulse': {
+          title: '소인의 주간 제안', ask: '소인이 먼저 말을 꺼내려 합니다.', header: '',
+          hint: '소인 이름으로 나갑니다. 여기서 고칠 수 있습니다.',
+          rooms: rooms(config.lunchBot.chatChannel).map((id) => ({ id, label: roomLabel('lunch', id) })),
+          speaker: '소인', poster: lunchClient,
+        },
+      } : {};
+      const letterNotice = new LetterNotice({
         managerUserId: config.letter.managerUserId,
         members: config.letter.members,
-        kinds: { ...coffee, ...followKinds },
+        kinds: { ...coffee, ...lunchKinds },
         logPath: path.join(letterData, 'notice.jsonl'),
         pendingPath: path.join(letterData, 'notice-pending.json'),
       });
-      const letterNotice = notice;
-      // 커피콩의 아침 시계 — 평일 08:30 실장 DM 에 「오늘 이렇게 할까요」. 말은 대화 봇(아래
-      // ChatHost)이 만들고, 방에 걸 글은 위 확인 카드(`notice.offer`)로만 간다. 호스트는 아래에서
+      // 커피콩의 주간 시계 — 주 첫 업무일 13:00 실장 DM 에 「이번 주 이렇게 할까요」. 말은 대화 봇(아래
+      // ChatHost)이 만들고, 방에 걸 글은 위 확인 카드(`letterNotice.offer`)로만 간다. 호스트는 아래에서
       // 만들어지므로 늦게 묶는다.
       let letterHost: ChatHost | null = null;
       const initiative = new LetterInitiative({
@@ -478,6 +468,31 @@ export class SlackHandler {
         controlPath: path.join(letterData, 'control.json'),
         host: { initiate: (client, key, brief, name) => letterHost!.initiate(client, key, brief, name) },
         offer: letterNotice.enabled ? letterNotice.offer : undefined,
+      });
+      // 소인의 주간 시계 — 같은 장치를 커피콩 앱에 얹는다(실장 DM 과 카드가 이 앱으로 간다). 읽을 방은 시험 방 뺀
+      // 소인의 방 · 방 이력은 소인 토큰으로 · 현황판은 `lunch_pulse.py` · 판단 턴은 소인 대화 호스트가 단발로 돈다.
+      const lunchData = path.join(path.dirname(turnScript), 'bots', 'lunch', 'data');
+      const lunchInitiative = new LetterInitiative({
+        enabled: config.lunchBot.initiative.enabled && Boolean(lunchClient),
+        at: config.lunchBot.initiative.at,
+        rooms: rooms(config.lunchBot.chatChannel).filter((id) => id !== testRoom)
+          .map((id) => ({ id, label: roomLabel('lunch', id) })),
+        reader: lunchClient ?? undefined,
+        pulseArgs: [],
+        prefix: ':cow: *소인의 이번 주 제안*\n',
+        managerUserId: config.letter.managerUserId,
+        managerName: config.letter.managerName,
+        python: config.chat.python,
+        script: path.join(path.dirname(turnScript), 'lunch_pulse.py'),
+        statePath: path.join(lunchData, 'initiative-state.json'),
+        controlPath: path.join(lunchData, 'control.json'),
+        host: {
+          initiate: (client, key, brief, name) => (lunchHost
+            ? lunchHost.initiate(client, key, brief, name)
+            : Promise.resolve({ reply: '', error: '소인 대화 호스트가 없습니다' })),
+        },
+        offer: letterNotice.enabled ? letterNotice.offer : undefined,
+        logger: new Logger('Lunch:initiative'),
       });
       letterHost = new ChatHost({
         name: 'letter',
@@ -495,13 +510,13 @@ export class SlackHandler {
         greetOnJoin: config.letter.greetOnJoin && !!config.letter.chatChannel,
         managerUserId: config.letter.managerUserId,
         onAsk: letterNotice.enabled ? letterNotice.offer : undefined,
-        followup,
         // 칭찬 전달과 1on1 예약은 대화가 아니다 — 같은 앱에 슬래시 명령·모달로 따로 붙는다.
         // **앱은 하나뿐이다**(소켓을 두 번 열면 슬랙이 한쪽에만 보내 조용히 실패한다).
         // 그래서 둘 다 같은 앱에 얹는다.
         attach: (app) => {
           letterNotice.register(app);
           initiative.register(app);
+          lunchInitiative.register(app);
           new LetterRelay({
             managerUserId: config.letter.managerUserId,
             members: config.letter.members,
@@ -558,7 +573,7 @@ export class SlackHandler {
         // 좌석 기능도 이 앱에 얹는다. 소켓을 두 번 열면 슬랙이 이벤트를 한쪽에만
         // 보내고, 버튼 절반이 흔적 없이 사라진다(위 주석과 같은 이유).
         const premium = this.premiumSeat;
-        this.chatHosts.push(new ChatHost({
+        lunchHost = new ChatHost({
           name: 'lunch',
           botToken: token,
           appToken: config.lunchBot.appToken,
@@ -575,9 +590,6 @@ export class SlackHandler {
           managerUserId: config.letter.managerUserId,
           botTalk,
           buttIn: config.chat.buttIn.enabled ? config.chat.buttIn : null,
-          // 소인 방의 후속 카드는 커피콩 창구(실장 DM)로 — 소인 앱에는 실장 DM 이 없다. 보낼 때는 소인 이름으로.
-          onAsk: notice?.enabled ? notice.offer : undefined,
-          followup,
           // **둘 중 하나라도 켜져 있으면 붙인다.** 점심 버튼 존재만 보고 정하면,
           // 버튼을 끈 날 좌석 기능이 오류도 로그도 없이 등록되지 않는다.
           attach: (buttons || premium)
@@ -586,7 +598,8 @@ export class SlackHandler {
                 premium?.register(app);
               }
             : undefined,
-        }));
+        });
+        this.chatHosts.push(lunchHost);
         // 대화 호스트가 버튼을 들고 가므로 자기 연결은 열지 않는다.
         this.lunchButtons = null;
       }

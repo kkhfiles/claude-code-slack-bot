@@ -392,9 +392,9 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   ok('기록에 갈래 pulse 가 남는다 (현황판이 「먼저 올린 글」로 센다)',
     fs.readFileSync(path.join(dir, 'agenda.jsonl'), 'utf-8').includes('"kind":"pulse"'));
 
-  // ── 먼저 말 꺼내기(후속) — 말한 사람이 없는 턴 · 다른 봇 이름으로 나감 (실장 2026-09-24) ──
-  // 「먼저 말 꺼내기 전에 내게 DM 으로 확인받기」. `from.user` 대조 대신 **부탁의 방이 턴의 방과 같고 갈래의 방
-  // 목록에 있어야** 카드가 된다. 나가는 관문은 같다(버튼 → 창 → 보내기) · 보낼 때는 그 봇의 클라이언트(`poster`)로.
+  // ── 소인의 주간 제안(`lunch-pulse`) — 실장 DM 의 주간 턴에서 옴 · 소인 이름으로 나감 (실장 2026-09-24) ──
+  // 「봇 모두 주체적 판단은 주 1회 후 나에게 DM 으로 제안」. 카드는 커피콩 앱으로(버튼을 받는 앱) · 창에서 그 방이
+  // 먼저 골라짐 · 보낼 때는 소인의 클라이언트(`poster`). **실장 턴이 아닌 부탁은 이 갈래도 버린다.**
   const lunchPosted = [];
   const lunchPoster = { chat: {
     postMessage: async (msg) => { lunchPosted.push(msg); return { ts: '1700000000.000900' }; },
@@ -402,27 +402,26 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   } };
   const FK = {
     ...KINDS,
-    'followup-lunch': { title: '먼저 말 꺼내기', ask: '소인이 먼저 말을 꺼내려 합니다.', header: '', hint: '소인 이름으로',
-      rooms: [{ id: 'C_PLAY', label: '놀이 방' }, { id: 'C_TEST', label: 'bot_test' }], system: true, speaker: '소인',
+    'lunch-pulse': { title: '소인의 주간 제안', ask: '소인이 먼저 말을 꺼내려 합니다.', header: '', hint: '소인 이름으로',
+      rooms: [{ id: 'C_PLAY', label: '놀이 방' }, { id: 'C_TEST', label: 'bot_test' }], speaker: '소인',
       poster: lunchPoster },
   };
   const nF = make({ kinds: FK, logPath: path.join(dir, 'f.jsonl'), pendingPath: path.join(dir, 'f-pending.json') });
   const appF = fakeApp();
   nF.register(appF);
   c = fakeClient();
-  await nF.offer(c, [{ name: 'followup-lunch', text: '팀데이 날짜를 이번 주에 정해 볼까요?', room: 'C_PLAY', why: '팀데이' }],
+  await nF.offer(c, [{ name: 'lunch-pulse', text: '팀데이 어디로 갈지 한 줄씩 주시겠사옵니까?', room: 'C_PLAY' }],
     { user: '', channel: 'C_PLAY' });
+  await nF.offer(c, [{ name: 'lunch-pulse', text: '실원 턴에서 온 글', room: 'C_PLAY' }], { user: 'UA', channel: 'C_PLAY' });
+  ok('실장 턴이 아닌 부탁은 이 갈래도 버린다 (말한 사람 없음 · 실원)', c.posted.length === 0 && nF.pendingCount() === 0, c.posted);
+  c = fakeClient();
+  await nF.offer(c, [{ name: 'lunch-pulse', text: '팀데이 어디로 갈지 한 줄씩 주시겠사옵니까?', room: 'C_PLAY' }],
+    { user: 'UBOSS', channel: 'DM' });
   const cardF = c.posted.find((m) => m.channel === 'DM_UBOSS');
   const cardFText = cardF ? JSON.stringify(cardF.blocks) : '';
-  ok('후속 부탁은 말한 사람 없이도 실장 DM 카드가 된다 (방이 맞을 때)',
+  ok('주간 제안은 실장 DM 카드가 되고 머리에 누가 어느 방에 말을 꺼내려는지 보인다',
     cardFText.includes('소인이 놀이 방에 먼저 말을 꺼내려 합니다') && cardFText.includes('팀데이'), cardFText.slice(0, 300));
-  ok('후속 카드를 띄워도 방에는 아무것도 안 갔다', c.posted.every((m) => m.channel === 'DM_UBOSS') && lunchPosted.length === 0);
-  c = fakeClient();
-  await nF.offer(c, [{ name: 'followup-lunch', text: '갈래 밖 방', room: 'C_GENERAL' }], { user: '', channel: 'C_GENERAL' });
-  await nF.offer(c, [{ name: 'followup-lunch', text: '턴의 방과 다름', room: 'C_PLAY' }], { user: '', channel: 'C_TEST' });
-  await nF.offer(c, [{ name: 'followup-lunch', text: '방 없음' }], { user: '', channel: 'C_PLAY' });
-  await nF.offer(c, [{ name: 'notice', text: '후속 아닌 갈래', room: 'C_PLAY' }], { user: '', channel: 'C_PLAY' });
-  ok('갈래 밖 방 · 턴의 방과 다른 방 · 방 없는 부탁 · 후속 아닌 갈래는 카드가 안 된다', c.posted.length === 0, c.posted);
+  ok('카드를 띄워도 방에는 아무것도 안 갔다', c.posted.every((m) => m.channel === 'DM_UBOSS') && lunchPosted.length === 0);
   const btnF = buttonOf(cardF);
   c = fakeClient();
   await appF.actions.notice_open({
@@ -430,23 +429,33 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
     body: { user: { id: 'UBOSS' }, trigger_id: 'tf', actions: [{ value: btnF.value }] },
   });
   const toF = c.opened[0] && c.opened[0].view.blocks.find((b) => b.block_id === 'to').element;
-  ok('창에서 후속의 방이 먼저 골라져 있다', toF && toF.initial_option && toF.initial_option.value === 'C_PLAY', toF);
+  ok('창에서 제안의 방이 먼저 골라져 있다', toF && toF.initial_option && toF.initial_option.value === 'C_PLAY', toF);
   c = fakeClient();
-  await submit(c, 'UBOSS', 'C_PLAY', '팀데이 날짜를 이번 주에 정해 볼까요?', btnF.value, 'followup-lunch', appF);
+  await submit(c, 'UBOSS', 'C_PLAY', '팀데이 어디로 갈지 한 줄씩 주시겠사옵니까?', btnF.value, 'lunch-pulse', appF);
   ok('보내면 그 봇(소인)의 클라이언트로 방에 오른다 — 커피콩 앱으로는 안 올린다',
-    lunchPosted.some((m) => m.channel === 'C_PLAY' && m.text.includes('팀데이 날짜')) && !c.posted.some((m) => m.channel === 'C_PLAY'),
+    lunchPosted.some((m) => m.channel === 'C_PLAY' && m.text.includes('팀데이')) && !c.posted.some((m) => m.channel === 'C_PLAY'),
     JSON.stringify({ lunchPosted, posted: c.posted }));
   ok('영수증은 실장 DM 으로 (커피콩 앱)', c.posted.some((m) => m.channel === 'DM_UBOSS' && String(m.text).includes('올렸습니다')), c.posted);
-  // 소인 호스트가 부르면 넘어오는 클라이언트는 소인 앱이다. 카드를 그걸로 띄우면 버튼이 소인 소켓으로 가서
-  // 커피콩의 핸들러에 안 닿는다 — **카드는 핸들러를 건 앱으로** 띄워야 한다.
+  ok('기록에 갈래 lunch-pulse 가 남는다 (소인 현황판이 「먼저 말 건 것」으로 센다)',
+    fs.readFileSync(path.join(dir, 'f.jsonl'), 'utf-8').includes('"kind":"lunch-pulse"'));
+  c = fakeClient();
+  await nF.offer(c, [
+    { name: 'lunch-pulse', text: '첫째 길', room: 'C_PLAY' },
+    { name: 'lunch-pulse', text: '둘째 길', room: 'C_TEST' },
+  ], { user: 'UBOSS', channel: 'DM' });
+  const heads2 = c.posted.map((m) => JSON.stringify(m.blocks));
+  ok('제안이 여럿이면 후보 번호와 함께 방마다 누가 꺼내려는지 보인다',
+    heads2.length === 2 && heads2[0].includes('소인이 놀이 방에') && heads2[0].includes('후보 1/2')
+    && heads2[1].includes('소인이 bot_test에') && heads2[1].includes('후보 2/2'), heads2.map((h) => h.slice(0, 120)));
+  // 소인의 주간 시계가 부를 때 넘어오는 클라이언트는 커피콩 앱이지만, 어느 앱이 부르든 카드는 핸들러를 건 앱으로.
   const homeC = fakeClient();
   const nH = make({ kinds: FK, logPath: path.join(dir, 'h.jsonl'), pendingPath: path.join(dir, 'h-pending.json') });
   nH.register({ ...fakeApp(), client: homeC });
-  const lunchC = fakeClient();
-  await nH.offer(lunchC, [{ name: 'followup-lunch', text: '팀데이 이야기 이어 가 볼까요?', room: 'C_PLAY' }], { user: '', channel: 'C_PLAY' });
-  ok('다른 앱(소인)이 불러도 카드는 버튼을 받는 앱(커피콩)으로 띄운다',
-    homeC.posted.some((m) => m.channel === 'DM_UBOSS' && buttonOf(m)) && lunchC.posted.length === 0,
-    JSON.stringify({ home: homeC.posted.length, lunch: lunchC.posted.length }));
+  const otherC = fakeClient();
+  await nH.offer(otherC, [{ name: 'lunch-pulse', text: '팀데이 이야기 이어 가 볼까요?', room: 'C_PLAY' }], { user: 'UBOSS', channel: 'DM' });
+  ok('다른 앱이 불러도 카드는 버튼을 받는 앱(커피콩)으로 띄운다',
+    homeC.posted.some((m) => m.channel === 'DM_UBOSS' && buttonOf(m)) && otherC.posted.length === 0,
+    JSON.stringify({ home: homeC.posted.length, other: otherC.posted.length }));
 
   console.log(`\n${fail ? `실패 ${fail}건` : '모두 통과.'}`);
   fs.rmSync(dir, { recursive: true, force: true });

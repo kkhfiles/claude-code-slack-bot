@@ -101,6 +101,13 @@ export const config = {
     // 봇이 방에 들어가 있어도 여기 없는 방의 말은 안 들린다.
     // 비면 채널 대화는 꺼진 채로 둔다 — 사람들이 쓰는 방이라 기본값은 침묵이어야 한다.
     chatChannel: process.env.LUNCH_CHAT_CHANNEL || '',
+    // 소인의 주간 판단(`letter-initiative.ts` 를 같이 씀) — 주 첫 업무일 이 시각에 현황판·방의 지난주·맡은 일을 보고
+    // (필요하면 웹 검색) 실장 DM 에 「이번 주 이렇게 할까요」. 방에 걸 글은 확인 카드로만(실장 2026-09-24).
+    // 커피콩(13:00)과 겹치지 않게 30분 뒤. **기본은 꺼짐** — 커피콩과 같다.
+    initiative: {
+      enabled: process.env.LUNCH_INITIATIVE === '1',
+      at: process.env.LUNCH_INITIATIVE_AT || '13:30',
+    },
   },
   // agy 대화 계층. **봇 여러 개가 한 코드를 같이 쓴다**(chat-host.ts).
   // 봇마다 자기 슬랙 앱이라 토큰도 소켓 연결도 따로다. 답을 만드는 일은
@@ -113,14 +120,6 @@ export const config = {
     // 말투·성격을 바꿔 보려면, 아무 데서나 답하지 않는 규칙에 문을 하나 내야 한다.
     // 비워 두면 문은 닫힌 채다(기본값이 침묵인 것은 그대로).
     testChannel: process.env.BOT_TEST_CHANNEL || '',
-    // 먼저 말 꺼내기(후속) — 기한 지난 일감이 있는 방에 봇이 먼저 말을 꺼내되, **글은 실장 DM 확인 카드로만**
-    // 간다(실장 2026-09-24). 평일 창 안에서 `everyMin` 분마다 본다. `TASK_FOLLOWUP=0` 으로 끈다.
-    followup: {
-      enabled: process.env.TASK_FOLLOWUP !== '0',
-      everyMin: parseInt(process.env.TASK_FOLLOWUP_MIN || '60', 10),
-      start: process.env.TASK_FOLLOWUP_START || '10:00',
-      end: process.env.TASK_FOLLOWUP_END || '17:00',
-    },
     // 봇끼리 말 섞기. 꺼 두면 봇이 한 말은 전부 안 들린다(기본값이 침묵).
     // 굴레가 없으면 부름(멘션)이 조용한 시간·하루 한도를 건너뛰므로 둘이 최고 속도로
     // 주고받는다 — 그래서 두 문턱이 이 기능의 일부다. 열 번에서 스스로 맺으라 이르고,

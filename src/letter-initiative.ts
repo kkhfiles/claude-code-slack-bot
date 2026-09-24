@@ -31,6 +31,12 @@ import type { TurnAsk, TurnResult } from './chat-host';
  *   ⑥ 횟수 층    **한 주에 한 번** — 월요일 13:00 뒤 두 시간 창. 그날 못 돌면(쉬는 날 · PC 꺼짐 ·
  *                현황판 실패) 그 주 다음 업무일 같은 창에서. 놓친 주는 되찾지 않는다(검토 2026-09-21)
  *   ⑦ 끄는 층    `LETTER_INITIATIVE=0` 또는 실장이 말로 「자율 꺼」(control 파일)
+ *
+ * **소인도 같은 시계를 쓴다**(실장 2026-09-24 「봇 모두 주체적 판단은 주 1회 후 나에게 DM 으로 제안 · 필요하면
+ * 뉴스·웹 검색」). 다른 것은 넷 — 읽을 방(`rooms` · 점심원정대·친목 방) · 방 이력을 읽는 클라이언트(`reader` · 소인
+ * 토큰 — 커피콩 앱은 그 방에 없다) · 현황판(`lunch_pulse.py` · `pulseArgs`) · DM 머리(`prefix`). DM 과 카드는 둘 다
+ * 커피콩 앱으로 간다(소인 앱에는 실장 DM 이 없다) — 카드를 「보내기」하면 소인 이름으로 오른다(`LetterNotice` 의
+ * `poster`). 판단 턴은 파이썬이 웹 검색을 열고(`WEB_NOTE`) 제안만 받는다.
  */
 
 const DEFAULT_AT = '13:00';
@@ -54,8 +60,16 @@ export interface LetterInitiativeOptions {
   enabled: boolean;
   /** 이 시각에 한 주 한 번 (HH:MM) — 월요일이 기본이고 못 돌면 다음 업무일. */
   at: string;
-  /** 커피챗 방 — 현황판을 셀 방이자 지난주부터의 말을 읽을 방. 비면 기능이 꺼진다. */
-  room: string;
+  /** 커피챗 방 — 현황판을 셀 방이자 지난주부터의 말을 읽을 방. `rooms` 가 없고 이것도 비면 기능이 꺼진다. */
+  room?: string;
+  /** 지난주부터의 말을 읽을 방 여럿(이름과 함께). 없으면 `room` 하나(커피챗). */
+  rooms?: { id: string; label: string }[];
+  /** 방 이력을 읽는 클라이언트 — 그 방에 들어가 있는 봇의 것. 없으면 이 앱. `auth.test` 로 「네 글」을 가린다. */
+  reader?: Pick<App['client'], 'auth' | 'conversations'>;
+  /** 현황판 스크립트 인자. 없으면 `--room <room>`(커피콩 `comm_pulse.py`). */
+  pulseArgs?: string[];
+  /** 실장 DM 에 붙는 머리. 없으면 `:coffee: `. */
+  prefix?: string;
   /** 실장 — 주간 DM 을 받는 사람. 비면 기능이 꺼진다. */
   managerUserId: string;
   /** 실장 표시 이름 — 주간 대화의 첫 줄(「지금 말을 거는 사람은 ○○님이다」)에 쓴다. */
@@ -91,14 +105,18 @@ export class LetterInitiative {
   }
 
   get enabled(): boolean {
-    return this.opts.enabled && Boolean(this.opts.room) && Boolean(this.opts.managerUserId)
+    return this.opts.enabled && this.rooms().length > 0 && Boolean(this.opts.managerUserId)
       && Boolean(this.opts.offer);
+  }
+
+  private rooms(): { id: string; label: string }[] {
+    return this.opts.rooms ?? (this.opts.room ? [{ id: this.opts.room, label: '커피챗' }] : []);
   }
 
   /** `ChatHost` 의 `attach` 로 넘긴다. */
   register = (app: App): void => {
     if (!this.enabled) {
-      this.logger.info(`꺼짐 — ${!this.opts.enabled ? 'LETTER_INITIATIVE 가 1이 아님' : '방이나 실장 ID 가 비어 있음'}`);
+      this.logger.info(`꺼짐 — ${!this.opts.enabled ? '켜는 설정(…_INITIATIVE)이 1이 아님' : '방이나 실장 ID 가 비어 있음'}`);
       return;
     }
     if (this.timer) return;
@@ -175,7 +193,7 @@ export class LetterInitiative {
     }
     // 실장에게 하는 말 — 그 자체는 카드가 아니다. 방에 걸 글은 아래 `ask` 로만 간다.
     const said = (result.reply || '').trim();
-    if (said) await this.tell(client, `:coffee: ${said}`);
+    if (said) await this.tell(client, `${this.opts.prefix ?? ':coffee: '}${said}`);
 
     // 갈래를 가리지 않는다 — 파이썬이 「카드 드리겠다」고 이미 답했으니 전부 카드로 간다. 빗장(이름·
     // 멘션·집계·숫자·길이)은 카드 쪽(`LetterNotice.guard`)이 봇이 쓴 갈래에 건다 — 카드를 만들 때와
@@ -202,9 +220,28 @@ export class LetterInitiative {
    * 것보다 낫다.
    */
   private async recent(client: App['client'], now: Date): Promise<string> {
+    const reader = this.opts.reader ?? client;
+    let me: string | undefined;
     try {
-      const me = (await client.auth.test()).user_id as string | undefined;
-      if (!me) return '';
+      me = (await reader.auth.test()).user_id as string | undefined;
+    } catch (error) {
+      this.logger.warn('방 이력을 읽을 봇을 못 알아봤습니다 — 숫자만 들고 갑니다', error);
+      return '';
+    }
+    if (!me) return '';
+    const parts: string[] = [];
+    for (const room of this.rooms()) {
+      const got = await this.recentRoom(reader, room, me, now);
+      if (got) parts.push(got);
+    }
+    return parts.join('\n\n');
+  }
+
+  /** 방 하나의 지난주부터 — 못 읽으면 빈 글자(다른 방·숫자는 그대로 간다). */
+  private async recentRoom(
+    client: Pick<App['client'], 'conversations'>, room: { id: string; label: string }, me: string, now: Date,
+  ): Promise<string> {
+    try {
       // **말은 지난주 월요일 0시부터, 뿌리 글은 3주 전 월요일부터.** 「지금부터 7일」로 잡으면
       // 지난주 월요일 08:30 에 나간 한 조각이 이번 주 월요일 13:00 창에서 4시간 반 차이로 빠지고,
       // 뿌리를 지난주부터만 보면 그 전 주 물음에 지난주 달린 답이 안 보인다 — persona 는 「답은
@@ -216,7 +253,7 @@ export class LetterInitiative {
       let cursor: string | undefined;
       for (let page = 0; page < HISTORY_PAGES; page++) {
         // 슬랙은 새 것부터 주므로 한 장으로 끊으면 **가장 오래된 뿌리(지난주 월요일 한 조각)부터** 떨어진다.
-        const hist = await client.conversations.history({ channel: this.opts.room, oldest, limit: 200, cursor });
+        const hist = await client.conversations.history({ channel: room.id, oldest, limit: 200, cursor });
         msgs.push(...((hist.messages || []) as MessageLike[]));
         cursor = hist.response_metadata?.next_cursor || undefined;
         if (!cursor) break;
@@ -230,7 +267,7 @@ export class LetterInitiative {
         if (!mine && m.text && fresh) lines.push(`- ${scrub(m.text)}`);
         // 답이 지난주보다 오래된 스레드는 안 연다 — `latest_reply` 가 있으면 그것으로 미리 거른다.
         if (m.reply_count && m.ts && !(m.latest_reply && Number(m.latest_reply) < since)) {
-          const rep = await client.conversations.replies({ channel: this.opts.room, ts: m.ts, limit: 50 });
+          const rep = await client.conversations.replies({ channel: room.id, ts: m.ts, limit: 50 });
           const head = scrub(m.text || '').slice(0, 30);
           for (const r of ((rep.messages || []) as MessageLike[]).slice(1)) {
             if (r.user === me || r.bot_id || !r.text || Number(r.ts) < since) continue;
@@ -240,9 +277,9 @@ export class LetterInitiative {
       }
       if (!lines.length) return '';
       const kept = lines.slice(-RECENT_MAX_LINES);
-      return `[지난주부터 커피챗 방에서 사람들이 한 말 — 누가 했는지는 뺐다 · 방에 공개된 말이다]\n${kept.join('\n')}`;
+      return `[지난주부터 ${room.label} 방에서 사람들이 한 말 — 누가 했는지는 뺐다 · 방에 공개된 말이다]\n${kept.join('\n')}`;
     } catch (error) {
-      this.logger.warn('방의 지난주부터를 못 읽었습니다 — 숫자만 들고 갑니다', error);
+      this.logger.warn(`${room.label} 방의 지난주부터를 못 읽었습니다 — 그 방은 빼고 갑니다`, error);
       return '';
     }
   }
@@ -272,7 +309,8 @@ export class LetterInitiative {
   }
 
   private pulse(): { workday: boolean; brief: string } | null {
-    const r = spawnSync(this.opts.python, ['-X', 'utf8', this.opts.script, '--room', this.opts.room], {
+    const args = this.opts.pulseArgs ?? ['--room', this.opts.room ?? ''];
+    const r = spawnSync(this.opts.python, ['-X', 'utf8', this.opts.script, ...args], {
       encoding: 'utf-8', windowsHide: true, timeout: 30_000,
     });
     if (r.status !== 0) {
