@@ -5,6 +5,8 @@ import {
   type CanUseTool,
   type PermissionMode as SdkPermissionMode,
 } from '@anthropic-ai/claude-agent-sdk';
+import { existsSync } from 'fs';
+import * as path from 'path';
 import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
 import { errorCollector } from './error-collector';
@@ -54,6 +56,31 @@ export function shouldUseSdk(scope: string): boolean {
 function toBaseToolName(entry: string): string {
   const idx = entry.indexOf('(');
   return idx > 0 ? entry.substring(0, idx) : entry;
+}
+
+/**
+ * SDK 가 띄울 Claude Code 실행 파일 — **시스템에 깔린 것을 먼저** 쓴다.
+ *
+ * SDK 패키지에 딸린 실행 파일은 패키지를 올리기 전까지 낡은 채로 남고, 모델 별칭(`sonnet`·`opus`)을
+ * 푸는 것이 그 실행 파일이다. 실측 2026-09-29: 딸린 2.1.280 은 `sonnet` 을 한 세대 전 모델로 풀었고,
+ * 사람이 올리는 시스템 쪽 2.1.284 는 새 세대로 풀었다. `CLAUDE_CLI_PATH` → PATH 의 `claude` 순서로
+ * 찾고, 못 찾으면 `undefined` 를 줘서 SDK 가 자기 것을 쓰게 둔다. 윈도에서는 `.exe` 만 본다 —
+ * npm 의 `claude.cmd` 는 셸 없이 띄울 수 없다.
+ */
+let claudeExecutable: string | undefined | null = null;
+export function resolveClaudeExecutable(): string | undefined {
+  if (claudeExecutable !== null) return claudeExecutable;
+  const envp = process.env.CLAUDE_CLI_PATH;
+  const names = process.platform === 'win32' ? ['claude.exe'] : ['claude'];
+  const found = envp && existsSync(envp) ? envp
+    : (process.env.PATH || '').split(path.delimiter).filter(Boolean)
+        .flatMap(dir => names.map(n => path.join(dir, n)))
+        .find(p => existsSync(p));
+  claudeExecutable = found || undefined;
+  new Logger('SdkHandler').info(claudeExecutable
+    ? 'Claude Code 실행 파일 — 시스템 것을 씀' : 'Claude Code 실행 파일 — 못 찾아 SDK 에 딸린 것을 씀',
+    { path: claudeExecutable });
+  return claudeExecutable;
 }
 
 // --- SDK message → CliEvent translation -----------------------------------
@@ -338,6 +365,8 @@ export class SdkHandler {
       includePartialMessages: true,
       abortController,
     };
+    const exe = resolveClaudeExecutable();
+    if (exe) sdkOptions.pathToClaudeCodeExecutable = exe;
 
     if (sdkPermissionMode === 'bypassPermissions') {
       sdkOptions.allowDangerouslySkipPermissions = true;

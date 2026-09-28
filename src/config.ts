@@ -36,7 +36,9 @@ export const config = {
   // claude-opus-4-7 로 풀렸고, 그 사실이 아무 데도 안 드러나 한 세대 전을 쓰면서
   // 최신인 줄 알고 있었다. **2026-09-23 에 한 번 더 났다** — 0.3.222(딸린 CLI 2.1.222)는
   // `opus` 를 claude-opus-5 로 풀어, PC 의 다른 경로가 5.5 로 올라간 뒤에도 이 봇만 5 에
-  // 남았다. 0.3.280(CLI 2.1.280)으로 올려 5.5 로 풀린다. 세대를 확인하는 자리는 세션마다 찍히는
+  // 남았다. 0.3.280(CLI 2.1.280)으로 올려 5.5 로 풀린다. **2026-09-29 에 세 번째** — Sonnet 5.5 가
+  // 나왔는데 딸린 CLI 2.1.280 은 `sonnet` 을 claude-sonnet-5 로 풀었다. 그래서 이제는 SDK 를 올리는
+  // 대신 **시스템에 깔린 CLI 를 쓴다**(`sdk-handler.ts` `resolveClaudeExecutable`). 세대를 확인하는 자리는 세션마다 찍히는
   // `Session initialized {model: …}` 로그다 — 별칭이 아니라 **풀린 ID** 가 찍힌다.
   models: {
     opus: process.env.MODEL_OPUS || 'opus',
