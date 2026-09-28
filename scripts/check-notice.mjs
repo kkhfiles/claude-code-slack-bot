@@ -403,7 +403,7 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   const FK = {
     ...KINDS,
     'lunch-pulse': { title: '소인의 주간 제안', ask: '소인이 먼저 말을 꺼내려 합니다.', header: '', hint: '소인 이름으로',
-      rooms: [{ id: 'C_PLAY', label: '놀이 방' }, { id: 'C_TEST', label: 'bot_test' }], speaker: '소인',
+      rooms: [{ id: 'C_PLAY', label: '놀이 방' }, { id: 'C_TEST', label: 'bot_test' }], guard: 'names', speaker: '소인',
       poster: lunchPoster },
   };
   const nF = make({ kinds: FK, logPath: path.join(dir, 'f.jsonl'), pendingPath: path.join(dir, 'f-pending.json') });
@@ -456,6 +456,23 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   ok('다른 앱이 불러도 카드는 버튼을 받는 앱(커피콩)으로 띄운다',
     homeC.posted.some((m) => m.channel === 'DM_UBOSS' && buttonOf(m)) && otherC.posted.length === 0,
     JSON.stringify({ home: homeC.posted.length, other: otherC.posted.length }));
+  // 소인 제안의 빗장은 **이름·멘션만**(`guard: 'names'`) — 모임 제안은 숫자가 곧 내용이다(검토 2026-09-28).
+  for (const [why, text] of [['이름', '길동님이 볼링 좋아하시니 볼링 어떠하옵니까?'], ['멘션', '<@U_HGD> 님 어떠하옵니까?']]) {
+    c = fakeClient();
+    await nF.offer(c, [{ name: 'lunch-pulse', text, room: 'C_PLAY' }], { user: 'UBOSS', channel: 'DM' });
+    ok(`소인 제안도 ${why}이(가) 들어가면 카드를 안 만들고 까닭을 알린다`,
+      !c.posted.some((m) => buttonOf(m)) && c.posted.some((m) => String(m.text).includes('빗장')), c.posted);
+  }
+  c = fakeClient();
+  await nF.offer(c, [{ name: 'lunch-pulse', text: '네 분 이상 모이시면 볼링 3게임에 1인 2만 원쯤이옵니다', room: 'C_PLAY' }],
+    { user: 'UBOSS', channel: 'DM' });
+  ok('소인 제안의 인원·숫자는 막지 않는다 (모임 제안의 내용)', c.posted.some((m) => buttonOf(m)), c.posted);
+  const btnLN = buttonOf(c.posted.find((m) => buttonOf(m)));
+  c = fakeClient();
+  const lunchBefore = lunchPosted.length;
+  await submit(c, 'UBOSS', 'C_PLAY', '길동님 포함 네 분 이상이면 볼링이옵니다', btnLN.value, 'lunch-pulse', appF);
+  ok('실장이 창에서 이름을 넣어도 보내기 직전 빗장이 막는다 (소인 제안)',
+    lunchPosted.length === lunchBefore && c.posted.some((m) => String(m.text).includes('빗장')), c.posted);
 
   console.log(`\n${fail ? `실패 ${fail}건` : '모두 통과.'}`);
   fs.rmSync(dir, { recursive: true, force: true });

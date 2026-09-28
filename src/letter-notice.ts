@@ -63,7 +63,9 @@ export interface NoticeKind {
   rememberRooms?: string[];
   /** **봇이 쓴 글**(안건·아침 말 걸기)이면 참 — 카드를 만들 때와 **실장이 창에서 고친 뒤 보낼 때** 둘 다
    *  이름·멘션·집계·숫자·길이 빗장을 건다. 실장 말 그대로인 전할 말에는 안 건다. */
-  guard?: boolean;
+  /** `'names'` 면 **이름·멘션·길이만** 본다 — 모임·점심 제안(소인)은 「4명 이상이면」·「볼링 3게임」처럼 숫자가 곧 내용이라
+   *  집계·숫자 빗장을 걸면 제안이 통째로 막힌다. 사람을 지목하지 않는 선은 같다(검토 2026-09-28). */
+  guard?: boolean | 'names';
   /** 이 갈래의 글을 **다른 봇 이름으로** 올릴 때 그 봇의 클라이언트(소인의 주간 제안은 소인으로). 없으면 이 앱으로. */
   poster?: { chat: Pick<App['client']['chat'], 'postMessage' | 'getPermalink'> };
   /** 카드 머리에 보일 「누가 어느 방에 말을 꺼내려는지」의 봇 이름. 없으면 `ask` 한 줄. */
@@ -226,7 +228,7 @@ export class LetterNotice {
       this.save();
       // 봇이 쓴 글은 실장이 고친 뒤에도 빗장을 거친다 — 고치다 이름·숫자가 들어가는 것을 막는다.
       if (kind.guard) {
-        const why = await this.guard(client, text);
+        const why = await this.guard(client, text, kind.guard);
         if (why) {
           this.logger.warn(`보내기 직전 빗장에 막힘 — ${why}`);
           await this.tell(client, body.user.id, `:no_entry_sign: 고친 글이 *빗장에 막혔습니다* — ${why}\n_아무것도 안 나갔습니다. 카드는 닫혔으니 다시 말씀해 주세요._`);
@@ -271,7 +273,7 @@ export class LetterNotice {
       const text = String(ask.text ?? '').trim().slice(0, MAX_LEN);
       if (!text) continue;
       if (kind.guard) {
-        const why = await this.guard(client, text);
+        const why = await this.guard(client, text, kind.guard);
         if (why) {
           this.logger.warn(`카드 만들기 전 빗장에 막힘 — ${why}`);
           await this.tell(client, this.opts.managerUserId, `:no_entry_sign: ${kind.title} 글이 *빗장에 막혀 카드를 안 만들었습니다* — ${why}`);
@@ -509,15 +511,17 @@ export class LetterNotice {
 
   // ── 봇이 쓴 글의 빗장 ───────────────────────────────────────────────────
   /** 막을 까닭 한 줄. 비면 통과. 이름을 못 받아 온 실원이 있으면 **막는다**(못 본 채 통과시키지 않는다). */
-  private async guard(client: App['client'], text: string): Promise<string> {
+  private async guard(client: App['client'], text: string, mode: boolean | 'names' = true): Promise<string> {
     if (text.length > GUARD_MAX) return `너무 김(${text.length}자)`;
     const m = text.match(MENTION);
     if (m) return `사람 지목(${m[0]})`;
-    const t = text.match(TALLY);
-    if (t) return `집계·건수(「${t[0]}」)`;
-    const rest = text.replace(DIGIT_ALLOW, '');
-    const d = rest.match(/\d/);
-    if (d && d.index !== undefined) return `숫자(「${rest.slice(Math.max(0, d.index - 3), d.index + 4).trim()}」)`;
+    if (mode !== 'names') {
+      const t = text.match(TALLY);
+      if (t) return `집계·건수(「${t[0]}」)`;
+      const rest = text.replace(DIGIT_ALLOW, '');
+      const d = rest.match(/\d/);
+      if (d && d.index !== undefined) return `숫자(「${rest.slice(Math.max(0, d.index - 3), d.index + 4).trim()}」)`;
+    }
     for (const id of this.opts.members ?? []) {
       const names = await this.namesOf(client, id);
       if (!names.length) return `이름을 못 받아 옴(${id}) — 빗장을 못 세워 막음`;

@@ -442,7 +442,8 @@ export class SlackHandler {
           title: '소인의 주간 제안', ask: '소인이 먼저 말을 꺼내려 합니다.', header: '',
           hint: '소인 이름으로 나갑니다. 여기서 고칠 수 있습니다.',
           rooms: rooms(config.lunchBot.chatChannel).map((id) => ({ id, label: roomLabel('lunch', id) })),
-          speaker: '소인', poster: lunchClient,
+          // 소인이 쓴 글이라 이름·멘션 빗장은 건다(카드 만들 때와 실장이 고친 뒤 둘 다) — 숫자는 모임 제안의 내용이라 둔다.
+          guard: 'names', speaker: '소인', poster: lunchClient,
         },
       } : {};
       const letterNotice = new LetterNotice({
