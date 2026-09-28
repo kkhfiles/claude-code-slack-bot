@@ -65,6 +65,27 @@ const GIVE_TICK = '\u{1F7E9}';   // 초록 눈금
 const SWAP_ICON = '\u{1F504}';   // 바꾸는 중
 const WAIT_ICON = '\u{23F3}';    // 기다리는 사람
 const CLOCK_ICON = '\u{1F553}';
+const BUSY_ICON = '\u{1F534}';   // 빨간 원 · 계정 사용 중
+const FREE_ICON = '\u{1F7E2}';   // 초록 원 · 계정 비어 있음
+
+const SERVICES = ['CHATGPT', 'CLAUDE'];
+
+/** 계정 주소는 현황판의 좁은 열에 다 안 들어간다. @ 앞만 이름으로 쓴다. */
+function accountShort(account: string): string {
+  return account.split('@')[0] || account;
+}
+
+/** 예약 명령이 거절한 이유. 겹친 사람 이름은 파이썬이 message 에 실어 보낸다. */
+const BOOKING_ERROR: Record<string, (message: string) => string> = {
+  ACCOUNT_TAKEN: (who) => `그 시간에는 ${who} 님이 이미 예약해 두었습니다. 다른 계정이나 시간대를 골라 주세요.`,
+  YOU_HAVE_BOOKING: (acct) => `같은 시간에 ${accountShort(acct)} 계정을 이미 예약해 두셨습니다. 한 사람이 동시에 두 계정을 잡을 수 없습니다.`,
+  PAST_SLOT: () => '이미 지난 시간대입니다. 오늘이면 지금 시간대부터 고를 수 있습니다.',
+  TOO_FAR: () => '7일 뒤까지만 예약할 수 있습니다.',
+  UNKNOWN_ACCOUNT: () => '없는 계정입니다. 창을 닫고 다시 열어 주세요.',
+  NOT_YOURS: () => '본인 예약만 반납하거나 취소할 수 있습니다.',
+  NOT_FOUND: () => '이미 취소된 예약입니다.',
+  NO_ACCOUNTS: () => '예약할 계정이 아직 설정되지 않았습니다. 실장에게 알려 주세요.',
+};
 
 /** 라디오에서 「바꾸지 않음」을 나타내는 값. 슬랙이 빈 문자열을 안 받는다. */
 const KEEP_AS_IS = '__keep__';
@@ -118,6 +139,7 @@ const ERROR_TEXT: Record<string, string> = {
   NO_SEAT: '이 서비스에 좌석이 없어 Premium 교환 대상이 아닙니다. 실장에게 스탠다드 좌석을 먼저 요청해 주세요.',
   SOURCE_DECLARED: '이 서비스는 실장이 직접 반영합니다. 따로 확인할 것이 없습니다.',
   SOURCE_UNAVAILABLE: '아직 준비되지 않은 방식입니다. 실장에게 알려 주세요.',
+  SERVICE_RETIRED: '이 서비스는 Premium 교환을 마쳤습니다.',
 };
 
 const SWAP_ACTION_DONE: Record<string, string> = {
@@ -169,8 +191,26 @@ export class PremiumSeatSlack {
   private notifiedExpiredServices = new Set<string>();
   private loginBusy = new Set<string>();
   private lastSessionCheckAt = 0;
+  /**
+   * Premium 교환을 마친 서비스. 파이썬이 설정 시각을 보고 판정하고, 여기서는
+   * 현황판 자료를 읽을 때마다(1분마다) 받아 둔다 — 날짜가 지나면 재시작 없이 넘어간다.
+   */
+  private retired = new Set<string>();
 
   constructor(private opts: PremiumSeatOptions) {}
+
+  /** 아직 Premium 교환을 하는 서비스. 창·세션 점검이 이 목록만 돈다. */
+  private activeServices(): string[] {
+    return SERVICES.filter((k) => !this.retired.has(k));
+  }
+
+  private noteRetired(model: any): void {
+    const services = model?.services ?? {};
+    for (const key of SERVICES) {
+      if (services[key]?.retired) this.retired.add(key);
+      else if (services[key]) this.retired.delete(key);
+    }
+  }
 
   // ------------------------------------------------------------- 등록
   register(app: App): void {
@@ -227,6 +267,18 @@ export class PremiumSeatSlack {
     app.action('premium_request_cancel', async ({ ack, body, action, client }) => {
       await ack();
       void this.cancelFromModal(client, body, (action as any).value as string);
+    });
+    // GPT Pro 계정 예약(§28). 현황판과 「곧 끝납니다」 DM 양쪽에서 같은 창을 연다.
+    app.action('premium_booking_open', async ({ ack, body, client }) => {
+      await ack();
+      void this.openBooking(client, body);
+    });
+    app.action('premium_booking_release', async ({ ack, body, action, client }) => {
+      await ack();
+      void this.releaseFromModal(client, body, (action as any).value as string);
+    });
+    app.view('premium_booking_submit', async ({ ack, body, view }) => {
+      await ack(await this.resultAck('Pro 계정 예약', this.handleBooking(body.user.id, view), body.user.id));
     });
 
     // 제출 결과를 그 창에 그대로 보여 준다. 창에서 한 일의 답이 DM 으로 가면
@@ -392,6 +444,8 @@ export class PremiumSeatSlack {
     for (const row of rows) {
       const check = await this.run('notification validate', { id: row.id, lease_token: row.lease_token });
       if (!check.result?.send) continue;
+      // 예약 알림은 보내기 직전에 파이썬이 다시 짓는다 — 뒤 예약이 그사이 바뀌었을 수 있다.
+      if (check.result?.payload) row.payload = check.result.payload;
       try {
         const posted = await this.postNotification(row);
         await this.run('notification ack', {
@@ -410,12 +464,15 @@ export class PremiumSeatSlack {
   /** 관측이 오래되면 확인을 예약한다. 이미 대기 중이면 파이썬이 새로 만들지 않는다. */
   private async scheduleReconciles(): Promise<void> {
     const model = await this.run('dashboard model', {});
+    if (model.ok) this.noteRetired(model.result);
     const services = model.result?.services ?? {};
     const maxAge = model.result?.snapshot_max_age_minutes ?? 60;
     for (const [service, view] of Object.entries<any>(services)) {
       // DECLARED 는 바깥을 안 읽는다. 그런데도 예약하면 30분마다 작업이 서고
       // 돌자마자 SOURCE_DECLARED 로 실패한다 — 실측으로 실패 6건이 쌓여 있었다.
       if (view.source === 'DECLARED') continue;
+      // 교환을 마친 서비스는 살아 있는 교환이 없으면 읽을 까닭이 없다.
+      if (view.retired && !view.swap) continue;
       const observed = view.observed_at ? Date.parse(view.observed_at) : 0;
       const ageMin = observed ? (Date.now() - observed) / 60000 : Number.POSITIVE_INFINITY;
       if (ageMin >= maxAge) await this.run('reconcile enqueue', { service });
@@ -461,6 +518,7 @@ export class PremiumSeatSlack {
     if (!this.app) return null;
     const model = await this.run('dashboard model', {});
     if (!model.ok) return null;
+    this.noteRetired(model.result);
     const blocks = this.dashboardBlocks(model.result);
     const text = 'AI Premium 좌석 현황';
     const saved = model.result?.message;
@@ -514,10 +572,21 @@ export class PremiumSeatSlack {
     const waitingServices: string[] = [];
     const warnings: string[] = [];
     const seenBy: Array<{ short: string; seen: string; declared: boolean }> = [];
+    const pro = model?.pro;
+    let proPlaced = false;
 
-    for (const key of ['CHATGPT', 'CLAUDE']) {
+    for (const key of SERVICES) {
       const view = model?.services?.[key];
       if (!view) continue;
+      // 교환을 마친 서비스는 칸을 비운다. 살아 있는 교환이 남았으면 닫힐 때까지 둔다.
+      if (view.retired && !view.swap) {
+        // 빈 ChatGPT 칸에 Pro 계정을 놓는다 — 같은 회사 것을 같은 자리에서 찾게 한다.
+        if (key === 'CHATGPT' && pro && !proPlaced) {
+          fields.push(this.proField(pro));
+          proPlaced = true;
+        }
+        continue;
+      }
       const short = SERVICE_SHORT[key] ?? key;
       const holders: any[] = view.premium ?? [];
       const waiting: string[] = view.waiting ?? [];
@@ -556,6 +625,12 @@ export class PremiumSeatSlack {
     }
 
     if (fields.length) blocks.push({ type: 'section', fields });
+    // ChatGPT Premium 칸이 아직 있으면(교환 마감 전) Pro 계정은 그 아래 따로 놓는다.
+    // 세 칸을 fields 에 넣으면 슬랙이 두 열로 접어 Claude 가 혼자 아랫줄로 내려간다.
+    if (pro && !proPlaced) {
+      blocks.push({ type: 'divider' });
+      blocks.push({ type: 'section', text: this.proField(pro) });
+    }
 
     if (moving.length || waitingLines.length) {
       blocks.push({ type: 'divider' });
@@ -590,7 +665,9 @@ export class PremiumSeatSlack {
     blocks.push({
       type: 'actions',
       elements: [
-        this.button('Premium 요청', 'premium_request_open', 'primary'),
+        // Pro 계정 예약이 가장 자주 쓰일 버튼이라 앞에 두고 강조를 옮긴다.
+        ...(pro ? [this.button('Pro 계정 예약', 'premium_booking_open', 'primary')] : []),
+        this.button('Premium 요청', 'premium_request_open', pro ? undefined : 'primary'),
         // 보기와 바꾸기를 한 창으로 합쳤다. Premium 좌석이 있으면 그 창에서
         // 바로 양도 의사를 고르고, 요청이 있으면 거기서 취소한다.
         this.button('내 상태 확인 및 변경', 'premium_my_status'),
@@ -611,8 +688,26 @@ export class PremiumSeatSlack {
       });
     }
 
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: this.legend(moving, waitingLines, seenBy) }] });
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: this.legend(moving, waitingLines, seenBy, Boolean(pro)) }],
+    });
     return blocks;
+  }
+
+  /**
+   * GPT Pro 계정 칸 — 계정마다 지금 쓰는 사람과 언제 비는지, 비었으면 다음 예약.
+   *
+   * 도구는 누가 예약했는지만 안다. 실제로 로그인해 쓰는지는 모른다 — 본인 신고가 정본이다.
+   */
+  private proField(pro: any): any {
+    const lines = (pro?.accounts ?? []).map((a: any) => {
+      const name = `*${accountShort(a.account)}*`;
+      if (a.current) return `${BUSY_ICON} ${name}  ${a.current.display_name} · ${a.current.until}`;
+      const next = a.next ? ` · 다음 ${a.next.label} ${a.next.display_name}` : '';
+      return `${FREE_ICON} ${name}  비어 있음${next}`;
+    });
+    return { type: 'mrkdwn', text: `${SERVICE_ICON.CHATGPT} *GPT Pro 계정*\n\n${lines.join('\n')}` };
   }
 
   /** 범례 — 화면에 있는 기호만 설명한다. 좌석 상태 두 항목은 눈금이 늘 쓰므로 항상 넣는다. */
@@ -620,8 +715,10 @@ export class PremiumSeatSlack {
     moving: string[],
     waitingLines: string[],
     seenBy: Array<{ short: string; seen: string; declared: boolean }>,
+    pro = false,
   ): string {
     const items = [`${KEEP_TICK}${KEEP_ICON} 유지 필요`, `${GIVE_TICK}${GIVE_ICON} 양도 가능`];
+    if (pro) items.push(`${BUSY_ICON} 사용 중`, `${FREE_ICON} 비어 있음`);
     // 승인 대기·보류도 이 기호로 뜬다. 「바꾸는 중」이라고 적으면
     // 아무것도 안 바뀐 교환까지 움직이는 것처럼 읽힌다.
     if (moving.length) items.push(`${SWAP_ICON} 좌석 교환`);
@@ -741,9 +838,10 @@ export class PremiumSeatSlack {
 
     const usable: string[] = [];
     const reasons: string[] = [];
-    for (const key of ['CHATGPT', 'CLAUDE']) {
+    for (const key of SERVICES) {
       const view = services[key];
-      if (!view) continue;
+      // 교환을 마친 서비스는 고를 것에도 안 된다는 이유에도 안 넣는다 — 없는 것으로 친다.
+      if (!view || view.retired) continue;
       const name = SERVICE_LABEL[key] ?? key;
       if (view.request) reasons.push(`*${name}* — 이미 요청이 들어가 있습니다`);
       else if (view.tier === 'PREMIUM') reasons.push(`*${name}* — 이미 Premium 을 쓰고 계십니다`);
@@ -793,10 +891,10 @@ export class PremiumSeatSlack {
   }
 
   private async adminView(user: string): Promise<any> {
-    const blocks: any[] = [this.radio('service', '서비스', [
-      { label: 'ChatGPT Business', value: 'CHATGPT' },
-      { label: 'Claude Team', value: 'CLAUDE' },
-    ])];
+    const blocks: any[] = [this.radio('service', '서비스', this.activeServices().map((key) => ({
+      label: SERVICE_LABEL[key] ?? key,
+      value: key,
+    })))];
     const roster = await this.roster(user);
     if (roster.length) blocks.push(this.select('target', '대상', roster));
     blocks.push(this.radio('tier', '좌석 배정', [
@@ -830,7 +928,7 @@ export class PremiumSeatSlack {
     const out = await this.run('members list', {});
     const rows: any[] = out.result?.members ?? [];
     const seatOf = (m: any) => {
-      const bits = ['CHATGPT', 'CLAUDE']
+      const bits = this.activeServices()
         .filter((k) => m.seats?.[k] && m.seats[k] !== 'NONE')
         .map((k) => `${SERVICE_SHORT[k]} ${m.seats[k] === 'PREMIUM' ? 'Premium' : 'Std'}`);
       return bits.length ? ` (${bits.join(' · ')})` : '';
@@ -1072,15 +1170,17 @@ export class PremiumSeatSlack {
     } else {
       if (note) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `:white_check_mark: ${note}` }] });
       const services = out.result?.services ?? {};
-      for (const key of ['CHATGPT', 'CLAUDE']) {
+      for (const key of SERVICES) {
         const view = services[key];
         if (!view) continue;
+        // 교환을 마친 서비스는 보여 줄 것이 없다. 걸린 교환이 남았으면 닫힐 때까지 보인다.
+        if (view.retired && !view.swap && !view.request) continue;
         blocks.push({
           type: 'section',
           text: { type: 'mrkdwn', text: `${SERVICE_ICON[key] ?? ''} *${SERVICE_LABEL[key] ?? key}*\n${this.myLines(view).join('\n')}` },
         });
         // 교환이 걸려 있는 좌석은 못 바꾼다 — 라디오를 띄우면 눌러 놓고 거절당한다.
-        if (view.tier === 'PREMIUM' && !view.swap) {
+        if (view.tier === 'PREMIUM' && !view.swap && !view.retired) {
           const now = view.availability === 'TRANSFERABLE' ? 'TRANSFERABLE' : 'REQUIRED';
           before[key] = now;
           blocks.push(this.radio(`wish_${key}`, '양도 의사', [
@@ -1096,7 +1196,7 @@ export class PremiumSeatSlack {
         }
         blocks.push({ type: 'divider' });
       }
-      blocks.pop();
+      if (blocks[blocks.length - 1]?.type === 'divider') blocks.pop();
     }
 
     const changeable = Object.keys(before).length > 0;
@@ -1163,6 +1263,167 @@ export class PremiumSeatSlack {
       lines.push(`${SWAP_ICON} ${view.swap.from_name} \u2192 ${view.swap.to_name}  ·  ${role}  ·  ${SWAP_STATE_LABEL[view.swap.state] ?? view.swap.state}`);
     }
     return lines;
+  }
+
+  // --------------------------------------------------------- GPT Pro 계정 예약
+  /** 「Pro 계정 예약」 창. 현황판 버튼과 「곧 끝납니다」 DM 버튼이 같은 창을 연다. */
+  private async openBooking(client: any, body: any): Promise<void> {
+    if (!(await this.openToMe(body))) return;
+    const view = await this.bookingView(this.userOf(body));
+    try {
+      await client.views.open({ trigger_id: body.trigger_id, view });
+    } catch (error) {
+      this.logger.warn('views.open failed', error);
+    }
+  }
+
+  /**
+   * 위에는 계정별 일정, 아래에는 새 예약 칸. 보는 것과 잡는 것을 한 창에서 한다 —
+   * 비었는지 보려고 창을 하나 열고 잡으려고 또 여는 일을 없앤다.
+   *
+   * 내 예약 옆에는 반납·취소 버튼을 단다. 실장이면 모든 예약 옆에 단다.
+   */
+  private async bookingView(userId: string, note?: string): Promise<any> {
+    const title = 'Pro 계정 예약';
+    const out = await this.run('booking board', { slack_user_id: userId }, MODAL_RUN_MS);
+    if (!out.ok) return this.noticeView(title, { ok: false, lines: [this.bookingErrorText(out)] });
+    const r = out.result ?? {};
+    const accounts: any[] = r.accounts ?? [];
+    const blocks: any[] = [];
+    if (note) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: note }] });
+
+    for (const a of accounts) {
+      const head = a.current
+        ? `${BUSY_ICON} *${accountShort(a.account)}*  지금 ${a.current.display_name} 님 · ${a.current.until}`
+        : `${FREE_ICON} *${accountShort(a.account)}*  지금 비어 있음`;
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: head } });
+      blocks.push({ type: 'context', elements: [{ type: 'plain_text', text: a.account }] });
+      const schedule: any[] = a.schedule ?? [];
+      if (!schedule.length) {
+        blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '예약 없음' }] });
+      }
+      for (const b of schedule) {
+        const mine = b.slack_user_id === userId;
+        const block: any = {
+          type: 'section',
+          text: { type: 'mrkdwn', text: `${b.label}  ·  ${b.display_name}${mine ? ' (나)' : ''}` },
+        };
+        const ongoing = a.current?.id === b.id;
+        const label = mine ? (ongoing ? '지금 반납' : '취소') : r.is_manager ? '취소 (실장)' : '';
+        if (label) block.accessory = this.button(label, 'premium_booking_release', undefined, b.id);
+        blocks.push(block);
+      }
+    }
+
+    blocks.push({ type: 'divider' });
+    // 지금 빈 계정을 미리 골라 둔다. 다 차 있으면 첫 계정 — 다른 시간대를 잡으면 된다.
+    const free = accounts.find((a) => !a.current) ?? accounts[0];
+    const options = accounts.map((a) => ({
+      text: {
+        type: 'plain_text',
+        text: `${accountShort(a.account)} · ${a.current ? `지금 ${a.current.display_name} 님` : '지금 비어 있음'}`.slice(0, 75),
+      },
+      value: a.account,
+    }));
+    const initialAccount = options.find((o) => o.value === free?.account);
+    blocks.push({
+      type: 'input',
+      block_id: 'account',
+      label: { type: 'plain_text', text: '계정' },
+      element: {
+        type: 'radio_buttons',
+        action_id: 'value',
+        options,
+        ...(initialAccount ? { initial_option: initialAccount } : {}),
+      },
+    });
+    blocks.push({
+      type: 'input',
+      block_id: 'day',
+      label: { type: 'plain_text', text: '날짜' },
+      element: { type: 'datepicker', action_id: 'value', ...(r.today ? { initial_date: r.today } : {}) },
+    });
+    const halves = ['AM', 'PM'].map((h) => ({
+      text: { type: 'plain_text', text: h === 'AM' ? '오전 (정오까지)' : '오후 (정오부터)' },
+      value: h,
+    }));
+    const nowHalf = halves.find((h) => h.value === r.half_now);
+    blocks.push({
+      type: 'input',
+      block_id: 'halves',
+      label: { type: 'plain_text', text: '시간대' },
+      element: {
+        type: 'checkboxes',
+        action_id: 'value',
+        options: halves,
+        ...(nowHalf ? { initial_options: [nowHalf] } : {}),
+      },
+    });
+    blocks.push({
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: `오전·오후를 함께 고르면 하루 전체입니다 · 오늘부터 ${r.max_days_ahead ?? 7}일 뒤까지 · 내 예약에 바로 이어 잡으면 한 건으로 합칩니다`,
+      }],
+    });
+
+    return {
+      type: 'modal',
+      callback_id: 'premium_booking_submit',
+      title: { type: 'plain_text', text: title },
+      submit: { type: 'plain_text', text: '예약' },
+      close: { type: 'plain_text', text: '닫기' },
+      blocks,
+    };
+  }
+
+  /** 예약 창의 제출. 결과는 그 창에 띄운다. */
+  private async handleBooking(userId: string, view: any): Promise<Outcome> {
+    const values = view?.state?.values ?? {};
+    const account = values.account?.value?.selected_option?.value ?? '';
+    const day = values.day?.value?.selected_date ?? '';
+    const halves = (values.halves?.value?.selected_options ?? []).map((o: any) => o.value);
+    const out = await this.run('booking create', { slack_user_id: userId, account, day, halves });
+    if (!out.ok) return { ok: false, lines: [this.bookingErrorText(out)] };
+    if (out.dashboard_dirty) this.markDashboardDirty();
+    const r = out.result ?? {};
+    const acct = accountShort(account);
+    return {
+      ok: true,
+      lines: [
+        r.extended
+          ? `*${acct}* 계정 · 앞뒤 내 예약과 합쳐 지금 예약은 *${r.booking?.label}* 입니다.`
+          : `*${acct}* 계정 · *${r.picked}* 예약했습니다.`,
+        '반납·취소는 같은 「Pro 계정 예약」 창에서 합니다.',
+      ],
+    };
+  }
+
+  /** 창 안의 반납·취소. 누른 자리에서 창을 다시 그린다. */
+  private async releaseFromModal(client: any, body: any, bookingId: string): Promise<void> {
+    const user = this.userOf(body);
+    const out = await this.run('booking release', { slack_user_id: user, booking_id: bookingId });
+    let note: string;
+    if (!out.ok) {
+      note = `:warning: ${this.bookingErrorText(out)}`;
+    } else if (!out.result?.changed) {
+      note = ':warning: 이미 끝난 예약입니다.';
+    } else {
+      const b = out.result.booking ?? {};
+      const what = out.result.action === 'RELEASED' ? '지금 시간대부터 비웠습니다' : '취소했습니다';
+      note = `:white_check_mark: *${accountShort(b.account ?? '')}* · ${b.label} 예약을 ${what}.`;
+    }
+    if (out.dashboard_dirty) this.markDashboardDirty();
+    try {
+      await client.views.update({ view_id: body.view?.id, view: await this.bookingView(user, note) });
+    } catch (error) {
+      this.logger.warn('views.update failed', error);
+    }
+  }
+
+  private bookingErrorText(out: Envelope): string {
+    const make = BOOKING_ERROR[out.error?.code ?? ''];
+    return make ? make(out.error?.message ?? '') : this.errorText(out);
   }
 
   /**
@@ -1296,6 +1557,10 @@ export class PremiumSeatSlack {
 
   /** 관리자에게 가는 알림에만 버튼을 단다. 팀원 알림은 읽는 것으로 끝난다. */
   private notificationButtons(row: any): any | null {
+    // 예약이 곧 끝나거나 교환 요청이 닫힌 사람에게는 예약 창으로 가는 길을 붙인다.
+    if (row.kind === 'BOOKING_ENDING' || row.kind === 'REQUEST_RETIRED') {
+      return { type: 'actions', elements: [this.button('Pro 계정 예약', 'premium_booking_open', 'primary')] };
+    }
     const id = row.payload?.swap_id;
     if (!id) return null;
     switch (row.kind) {
@@ -1386,6 +1651,22 @@ export class PremiumSeatSlack {
         lines.push('', '판이 갱신되지 않고 있습니다. 관리 화면 문구가 바뀌었거나 로그인이 풀렸을 수 있습니다 — 봇 로그의 [PremiumSeat] 를 보세요.');
         return lines.join('\n');
       }
+      case 'BOOKING_ENDING': {
+        // 파이썬은 정오에 끝나는 예약에만 이 알림을 건다(자정에 끝나는 오후 예약은 안 건다).
+        const acct = accountShort(p.account ?? '');
+        const lines = [`*${acct}* 계정 예약이 10분 뒤 정오에 끝납니다.`];
+        if (p.next_is_adjacent && p.next) lines.push(`정오부터 ${p.next.display_name} 님이 이어서 씁니다.`);
+        else if (p.next) lines.push(`다음 예약은 ${p.next.label} ${p.next.display_name} 님입니다. 오후에도 쓰시려면 오후를 예약해 주세요.`);
+        else lines.push('뒤 예약이 없습니다. 오후에도 쓰시려면 오후를 예약해 주세요.');
+        return lines.join('\n');
+      }
+      case 'BOOKING_CANCELLED': {
+        const acct = accountShort(p.account ?? '');
+        const what = p.action === 'RELEASED' ? '지금 시간대부터 비웠습니다' : '취소했습니다';
+        return `실장이 *${acct}* 계정 *${p.label}* 예약을 ${what}.`;
+      }
+      case 'REQUEST_RETIRED':
+        return `${svc} Premium 교환을 마쳐 기다리시던 요청을 닫았습니다. GPT Pro 계정은 현황판의 「Pro 계정 예약」으로 잡아 쓰실 수 있습니다.`;
       default:
         return '';
     }
@@ -1515,8 +1796,10 @@ export class PremiumSeatSlack {
     const managerId = manualUserId || this.opts.managerUserIds[0];
     if (!managerId) return;
 
+    // 교환을 마친 서비스의 관리 화면은 더 안 쓴다. 만료를 2시간마다 알리면 소음이다.
+    const services = this.activeServices();
     const results: Record<string, { alive: boolean; reason?: string }> = {};
-    for (const svc of ['CHATGPT', 'CLAUDE']) {
+    for (const svc of services) {
       try {
         const out = await this.run('session check', { service: svc }, 30_000);
         const alive = Boolean(out.result?.alive);
@@ -1535,7 +1818,7 @@ export class PremiumSeatSlack {
         '',
       ];
       const buttons: any[] = [];
-      for (const svc of ['CHATGPT', 'CLAUDE']) {
+      for (const svc of services) {
         const info = results[svc];
         const name = SERVICE_LABEL[svc] ?? svc;
         if (info?.alive) {
@@ -1584,7 +1867,7 @@ export class PremiumSeatSlack {
     }
 
     // 2시간 주기 자동 점검
-    for (const svc of ['CHATGPT', 'CLAUDE']) {
+    for (const svc of services) {
       const info = results[svc];
       const name = SERVICE_LABEL[svc] ?? svc;
       if (!info?.alive) {
