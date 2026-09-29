@@ -3,6 +3,7 @@ import * as path from 'path';
 import Holidays from 'date-holidays';
 import { Logger } from './logger';
 import { errorCollector } from './error-collector';
+import { offDays, ymd } from './work-assistant';
 
 export interface ScheduleEntry {
   time: string;     // "HH:MM" 24-hour format
@@ -230,11 +231,18 @@ export class ScheduleManager {
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
   }
 
-  /** Check if a date is a non-working day (weekend or Korean public holiday). */
+  /**
+   * Check if a date is a non-working day (weekend, Korean public holiday, or my off day).
+   *
+   * `date-holidays` 는 대체공휴일을 모른다(2026-10-05 개천절 대체공휴일이 빠짐). 정본
+   * `config.json` 의 `holidays`(법정 공휴일 + 개인 휴가 · `bin/offdays.py` 가 지킴)를
+   * 함께 본다 — assistant-scheduler 와 같은 판정.
+   */
   private isNonWorkingDay(date: Date = new Date()): { skip: boolean; reason?: string } {
     const day = date.getDay();
     if (day === 0) return { skip: true, reason: 'Sunday' };
     if (day === 6) return { skip: true, reason: 'Saturday' };
+    if (offDays().has(ymd(date))) return { skip: true, reason: '휴가·휴일 (config.json)' };
     const result = this.holidays.isHoliday(date);
     if (Array.isArray(result)) {
       const publicHoliday = result.find(h => h.type === 'public');
