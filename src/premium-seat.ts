@@ -1479,9 +1479,9 @@ export class PremiumSeatSlack {
 
   /** 관리자에게 가는 알림에만 버튼을 단다. 팀원 알림은 읽는 것으로 끝난다. */
   private notificationButtons(row: any): any | null {
-    // 예약이 곧 끝나거나 취소됐거나 교환 요청이 닫힌 사람에게는 통합 예약 화면으로 가는 길을 붙인다.
+    // 예약이 곧 끝나거나 취소됐거나 교환 요청이 닫힌 사람에게는 예약 화면(TurnTable)으로 가는 길을 붙인다.
     if (row.kind === 'BOOKING_ENDING' || row.kind === 'BOOKING_CANCELLED' || row.kind === 'REQUEST_RETIRED') {
-      const link = this.bookingLink('통합 예약 열기', 'primary');
+      const link = this.bookingLink('TurnTable 열기', 'primary');
       return link ? { type: 'actions', elements: [link] } : null;
     }
     const id = row.payload?.swap_id;
@@ -1579,8 +1579,8 @@ export class PremiumSeatSlack {
         const acct = accountShort(p.account ?? '');
         const lines = [`*${acct}* 계정 예약이 10분 뒤 정오에 끝납니다.`];
         if (p.next_is_adjacent && p.next) lines.push(`정오부터 ${p.next.display_name} 님이 이어서 씁니다.`);
-        else if (p.next) lines.push(`다음 예약은 ${p.next.label} ${p.next.display_name} 님입니다. 오후에도 쓰시려면 통합 예약에서 오후를 잡아 주세요.`);
-        else lines.push('뒤 예약이 없습니다. 오후에도 쓰시려면 통합 예약에서 오후를 잡아 주세요.');
+        else if (p.next) lines.push(`다음 예약은 ${p.next.label} ${p.next.display_name} 님입니다. 오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.`);
+        else lines.push('뒤 예약이 없습니다. 오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.');
         return lines.join('\n');
       }
       case 'BOOKING_CANCELLED': {
@@ -1590,7 +1590,7 @@ export class PremiumSeatSlack {
         return `실장이 *${acct}* 계정 *${p.label}* 예약을 취소했습니다.${kept}`;
       }
       case 'REQUEST_RETIRED':
-        return `${svc} Premium 교환을 마쳐 기다리시던 요청을 닫았습니다. GPT Pro 계정은 통합 예약에서 잡아 쓰실 수 있습니다.`;
+        return `${svc} Premium 교환을 마쳐 기다리시던 요청을 닫았습니다. GPT Pro 계정은 TurnTable에서 잡아 쓰실 수 있습니다.`;
       default:
         return '';
     }
