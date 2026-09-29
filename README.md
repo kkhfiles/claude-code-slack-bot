@@ -479,6 +479,7 @@ Monitors system commit memory so that always-on work (the bot, its sessions, sch
 
 - **Runaway path** — one process above the per-process threshold is the usual cause of real exhaustion; it is killed after a short delay even if it belongs to always-on work.
 - **System path** — commit % above the threshold with no runaway: processes in the always-on lineage (the bot's ancestors and descendants, the pipeline runner and its children) are never killed; at most one decision per peak.
+- **Interactive terminals** (Windows Terminal and the sessions inside it) are where the user works: a runaway there is killed only when severe — commit at 97% or more, or the process alone at 16 GB or more — and then after one minute. The system path never kills them.
 - An optional AI review (Opus, medium, no tools) picks the target or chooses to wait, within those rules. If it fails, the runaway path falls back to the rule and the system path only alerts.
 - Right before an automatic kill the watchdog measures again and cancels if the pressure has eased. Decisions and kills are logged to `~/.claude/state/memory-watchdog-events.jsonl`.
 

@@ -59,14 +59,15 @@ const ROWS = [
   eq('스탠리 자신은 역할 없음(따로 제외)', r(BOT), null);
   eq('스탠리 세션과 그 자식 = stanley', [r(21), r(22)], ['stanley', 'stanley']);
   eq('러너와 그 자손(커밋 데몬 포함) = pipeline', [r(30), r(31), r(32)], ['pipeline', 'pipeline', 'pipeline']);
-  eq('그 밖은 역할 없음', [r(40), r(41), r(42), r(5)], [null, null, null, null]);
+  eq('터미널과 그 안의 세션 = interactive', [r(41), r(42)], ['interactive', 'interactive']);
+  eq('그 밖은 역할 없음', [r(40), r(5)], [null, null]);
   const noLock = W.classifyRoles(ROWS, { botPid: BOT, pipelinePid: null });
   eq('잠금 파일이 없으면 러너 계보를 모른다', noLock.get(32) ?? null, null);
 }
 
 // ── 판정 ──────────────────────────────────────────────────────────────
 const C = (pid, name, mb, role = null, growth = 0) => ({ pid, name, commitMB: mb, startTicks: '1', role, growthMB: growth, parent: '', cmd: '' });
-const base = { processThresholdMB: 7168, runawayDelaySec: 180, systemDelaySec: 600, lineageKnown: true };
+const base = { processThresholdMB: 7168, runawayDelaySec: 180, systemDelaySec: 600, lineageKnown: true, systemPct: 91 };
 const DAEMON = C(32, 'python', 4364, 'pipeline');
 const CHROME = C(40, 'chrome', 1200);
 {
@@ -96,6 +97,34 @@ const CHROME = C(40, 'chrome', 1200);
   eq('③ 표에 없는 PID 는 거절 → 규칙', [d.target?.pid, d.source], [50, 'rule']);
   const h = W.decide({ ...base, path: 'runaway', candidates: [C(10, 'node', 12000, 'host')], verdict: null, systemHigh: true });
   eq('⑤ 스탠리를 띄운 쪽은 폭주여도 안 끊는다(끊으면 감시기도 죽는다)', h.kind, 'alert');
+}
+
+// ── 대화형 터미널 — 폭주여도 심각할 때만(2026-09-29 사용자 결정) ─────────
+{
+  const TERM = (mb) => C(41, 'WindowsTerminal', mb, 'interactive', 500);
+  const t = (mb, pct, verdict = null) => W.decide({ ...base, systemPct: pct, systemHigh: pct >= 90,
+    path: 'runaway', candidates: [TERM(mb)], verdict });
+  const a = t(11468, 95.4, { action: 'kill', pid: 41, reason: '터미널 폭주' });
+  eq('⑦ 9/2 재현 — 터미널 11.2GB · 95.4% 는 AI 가 골라도 두고 본다', [a.kind, a.source], ['alert', 'rule']);
+  ok('⑦ 두고 보는 까닭을 알린다', /심각/.test(a.reason));
+  const b = t(11468, 97.2);
+  eq('⑦ 커밋 97% 이상이면 심각 → 끊는다 · 유예 1분', [b.kind, b.target?.pid, b.delaySec], ['kill', 41, 60]);
+  const c = t(17000, 85);
+  eq('⑦ 한 프로세스 16GB 이상이면 심각 → 끊는다', [c.kind, c.target?.pid], ['kill', 41]);
+  const d = W.decide({ ...base, path: 'system', candidates: [TERM(4137), CHROME],
+                       verdict: { action: 'kill', pid: 41, reason: '가장 큼' }, systemHigh: true });
+  eq('⑦ 시스템 경로에서는 터미널을 안 죽인다(AI 가 골라도 거절)', d.kind, 'alert');
+  const e = W.decide({ ...base, systemPct: 95.4, systemHigh: true, path: 'runaway', candidates: [TERM(11468), CHROME],
+                       verdict: { action: 'kill', pid: 40, reason: '터미널 대신 브라우저로 압박을 던다' } });
+  eq('⑦ 터미널은 두고 상시 작업 밖의 브라우저를 끊을 수 있다', [e.kind, e.target?.pid], ['kill', 40]);
+  const f = W.decide({ ...base, systemPct: 95.4, systemHigh: true, path: 'runaway', candidates: [TERM(11468), CHROME], verdict: null });
+  eq('⑦ AI 가 없으면 규칙은 폭주가 아닌 것을 대신 끊지 않는다', f.kind, 'alert');
+  const th = { thresholdPct: 90, processThresholdMB: 7168 };
+  eq('⑦ 쏘기 직전 — 여전히 심각해야 쏜다', [
+    W.stillWarranted('runaway', { usagePct: 95, targetMB: 11000 }, th, true),
+    W.stillWarranted('runaway', { usagePct: 97.5, targetMB: 11000 }, th, true),
+    W.stillWarranted('runaway', { usagePct: 95, targetMB: 11000 }, th, false),
+  ], [false, true, true]);
 }
 
 // ── AI 답 해석 · 쏘기 직전 재확인 ─────────────────────────────────────
@@ -166,6 +195,21 @@ const TOP = [
   await wd.checkMemory();
   await new Promise((r) => setTimeout(r, 400));
   eq('② 폭주 33GB(동기화 계보) → AI 실패여도 규칙대로 끊는다', kills, [32]);
+  wd.stop();
+}
+{
+  // ⑦ 터미널 11.2GB — 95% 에서는 알림만 · 같은 크기로 97% 가 되면 다시 판정해 끊는다
+  const TERM = [{ pid: 41, name: 'WindowsTerminal', commitMB: 11468, startTicks: '1' }, ...TOP.slice(1)];
+  const { wd, sent, kills } = await oneRound({ reviewer: async () => null, pctSeq: [95.4], top: TERM });
+  await wd.checkMemory();
+  ok(`⑦ 95.4% 에서는 알림만 (${sent.length}통 · 예약 ${wd.pendingKills.size})`, sent.length === 1 && wd.pendingKills.size === 0);
+  await wd.checkMemory();
+  eq('⑦ 커지지 않으면 3분마다 다시 알리지 않는다', sent.length, 1);
+  wd.getSystemCommitStatus = async () => ({ committedMB: 47500, limitMB: 48914, usagePct: 97.3 });
+  wd.getProcessMB = async () => 11500;
+  await wd.checkMemory();
+  ok('⑦ 97% 를 넘으면 다시 판정해 종료 예약', wd.pendingKills.has(41));
+  await new Promise((r) => setTimeout(r, 1500));
   wd.stop();
 }
 {

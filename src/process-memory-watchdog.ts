@@ -98,8 +98,20 @@ const PROTECTED_PROCESSES = new Set([
 // 그래서 — 폭주는 빨리 끊고, 상시 작업은 폭주가 아닌 한 끊지 않고(계보로 판정 · 기계),
 // 그 사이 애매한 판단은 AI 검토(Opus · medium)에 맡긴다.
 
-export type Role = 'host' | 'stanley' | 'pipeline';
+export type Role = 'host' | 'stanley' | 'pipeline' | 'interactive';
 export type Path = 'runaway' | 'system';
+
+/**
+ * 대화형 터미널 계보(터미널과 그 안의 세션) — 사용자가 일하는 곳이라 폭주해도 **심각할 때만** 끊는다
+ * (2026-09-29 사용자 결정 「터미널 폭주는 좀 더 봐주고 심각해지면 죽인다」).
+ * 심각 = 커밋 97% 이상 또는 그 프로세스 하나가 16GB 이상. 근거 — 9/2 터미널 11.2GB · 최고 95.4% 는
+ * 실제 부족 없이 지나갔고(사용자가 제외함) · 실제 부족은 커밋 100% 근처에서 났으며 그때 세션 주범은
+ * 8~65GB 였다. 97% 부터는 남은 여유가 1.5GB 안팎이라 심각이면 유예를 1분으로 줄인다.
+ */
+export const INTERACTIVE_HOSTS = new Set(['windowsterminal']);
+export const INTERACTIVE_SEVERE_PCT = 97;
+export const INTERACTIVE_SEVERE_MB = 16384;
+export const INTERACTIVE_SEVERE_DELAY_SEC = 60;
 
 /** 프로세스 표 한 줄 — 계보를 따라가려고 부모와 명령줄을 같이 받는다. */
 export interface ProcRow { pid: number; ppid: number; name: string; cmd: string }
@@ -128,6 +140,7 @@ export interface Decision {
 
 const ROLE_LABEL: Record<Role, string> = {
   host: '스탠리를 띄운 쪽', stanley: '스탠리 세션', pipeline: '자정 · 정오 동기화',
+  interactive: '대화형 터미널',
 };
 
 /**
@@ -158,6 +171,17 @@ export function classifyRoles(rows: ProcRow[], roots: { botPid: number; pipeline
   if (roots.pipelinePid && byPid.has(roots.pipelinePid)) descend(roots.pipelinePid, 'pipeline');
   descend(roots.botPid, 'stanley');
   roles.delete(roots.botPid);
+  // 대화형 터미널과 그 안의 세션 — 위 상시 작업 역할이 이미 붙은 것은 덮지 않는다
+  for (const r of rows) {
+    if (!INTERACTIVE_HOSTS.has(r.name.toLowerCase()) || roles.has(r.pid)) continue;
+    const stack = [r.pid];
+    while (stack.length) {
+      const pid = stack.pop()!;
+      if (roles.has(pid)) continue;
+      roles.set(pid, 'interactive');
+      for (const c of children.get(pid) || []) stack.push(c);
+    }
+  }
   // 조상은 마지막에 덮는다 — 무엇보다 먼저 지켜야 한다
   let cur = byPid.get(roots.botPid);
   for (let i = 0; cur && i < 50; i += 1) {
@@ -186,28 +210,44 @@ export function parseVerdict(text: string | null | undefined): Verdict | null {
   }
 }
 
+export function interactiveSevere(c: { commitMB: number }, systemPct: number): boolean {
+  return systemPct >= INTERACTIVE_SEVERE_PCT || c.commitMB >= INTERACTIVE_SEVERE_MB;
+}
+
 /**
  * 판정 규칙 — AI 답이 있든 없든 여기서 최종 결정한다(AI 는 규칙 안에서만 고른다).
  *
  * | 경로 | 죽일 수 있는 것 | AI 가 kill | AI 가 wait | AI 실패 |
  * |---|---|---|---|---|
- * | 폭주 | 기준 넘은 것(스탠리 조상 빼고) | 그것 | 시스템도 기준 넘었으면 거절 → 규칙 | 가장 큰 폭주 |
- * | 시스템 | 상시 작업 계보 밖 | 그것 | 알림만 | 알림만 |
+ * | 폭주 | 기준 넘은 것(스탠리 조상 빼고 · 대화형 터미널 계보는 심각할 때만) | 그것 | 시스템도 기준 넘었으면 거절 → 규칙 | 가장 큰 폭주 |
+ * | 시스템 | 상시 작업 · 대화형 터미널 계보 밖 | 그것 | 알림만 | 알림만 |
  */
 export function decide(input: {
   path: Path; candidates: Candidate[]; verdict: Verdict | null; systemHigh: boolean;
+  /** 지금 커밋 % — 대화형 터미널 계보의 「심각」 판정에 쓴다 */
+  systemPct: number;
   processThresholdMB: number; runawayDelaySec: number; systemDelaySec: number;
   /** 프로세스 표를 읽었나. 못 읽었으면 누가 상시 작업인지 모르므로 시스템 경로는 아무것도 안 죽인다. */
   lineageKnown: boolean;
 }): Decision {
   const { path: p, candidates, verdict } = input;
+  const runaways = candidates.filter((c) => c.commitMB >= input.processThresholdMB && c.role !== 'host');
+  const outside = input.lineageKnown ? candidates.filter((c) => c.role === null) : [];
+  const runawayKillable = runaways.filter((c) => c.role !== 'interactive' || interactiveSevere(c, input.systemPct));
+  // 폭주 경로라도 시스템이 기준을 넘었으면 상시 작업 밖의 다른 후보도 AI 가 고를 수 있다 —
+  // 두고 보는 터미널 대신 브라우저를 끊어 압박을 덜 수 있게
   const killable = p === 'runaway'
-    ? candidates.filter((c) => c.commitMB >= input.processThresholdMB && c.role !== 'host')
-    : input.lineageKnown ? candidates.filter((c) => c.role === null) : [];
-  const delaySec = p === 'runaway' ? input.runawayDelaySec : input.systemDelaySec;
+    ? [...runawayKillable, ...(input.systemHigh ? outside.filter((c) => !runawayKillable.includes(c)) : [])]
+    : outside;
+  const delayFor = (c: Candidate) => (p === 'system' ? input.systemDelaySec
+    : c.role === 'interactive' ? Math.min(input.runawayDelaySec, INTERACTIVE_SEVERE_DELAY_SEC) : input.runawayDelaySec);
   if (verdict?.action === 'kill') {
     const hit = killable.find((c) => c.pid === verdict.pid);
-    if (hit) return { kind: 'kill', target: hit, delaySec, source: 'ai', reason: verdict.reason };
+    if (hit) return { kind: 'kill', target: hit, delaySec: delayFor(hit), source: 'ai', reason: verdict.reason };
+  }
+  if (p === 'runaway' && !runawayKillable.length && runaways.some((c) => c.role === 'interactive')) {
+    return { kind: 'alert', delaySec: 0, source: 'rule',
+      reason: `대화형 터미널의 폭주 — 심각(커밋 ${INTERACTIVE_SEVERE_PCT}% 이상 또는 ${INTERACTIVE_SEVERE_MB / 1024}GB 이상) 전까지는 두고 봄` };
   }
   if (verdict?.action === 'wait' && !(p === 'runaway' && input.systemHigh)) {
     return { kind: 'alert', delaySec: 0, source: 'ai', reason: verdict.reason };
@@ -217,18 +257,21 @@ export function decide(input: {
     : !verdict ? 'AI 검토 실패'
       : verdict.action === 'kill' ? `AI 가 고른 PID ${verdict.pid} 는 종료할 수 없는 대상`
         : '폭주 중에 시스템도 기준을 넘어 기다릴 수 없음';
-  if (p === 'runaway' && killable.length) {
-    const top = [...killable].sort((a, b) => b.commitMB - a.commitMB)[0];
-    return { kind: 'kill', target: top, delaySec, source: 'rule', reason: `${why} — 가장 큰 폭주를 규칙대로` };
+  if (p === 'runaway' && runawayKillable.length) {
+    const top = [...runawayKillable].sort((a, b) => b.commitMB - a.commitMB)[0];
+    return { kind: 'kill', target: top, delaySec: delayFor(top), source: 'rule', reason: `${why} — 가장 큰 폭주를 규칙대로` };
   }
   return { kind: 'alert', delaySec: 0, source: 'none', reason: `${why} — 상시 작업을 지키려고 자동 종료하지 않음` };
 }
 
 /** 자동 종료 직전 — 그 사이 압박이 풀렸으면 쏘지 않는다(2026-09-29: 종료 순간 89.4% 였다). */
 export function stillWarranted(p: Path, now: { usagePct: number | null; targetMB: number | null },
-                               th: { thresholdPct: number; processThresholdMB: number }): boolean {
+                               th: { thresholdPct: number; processThresholdMB: number },
+                               interactive = false): boolean {
   if (p === 'system') return now.usagePct !== null && now.usagePct >= th.thresholdPct;
-  return now.targetMB !== null && now.targetMB >= th.processThresholdMB;
+  if (now.targetMB === null || now.targetMB < th.processThresholdMB) return false;
+  // 대화형 터미널은 쏘는 순간에도 여전히 심각해야 한다
+  return !interactive || interactiveSevere({ commitMB: now.targetMB }, now.usagePct ?? 0);
 }
 
 export function buildReviewPrompt(ctx: {
@@ -237,7 +280,9 @@ export function buildReviewPrompt(ctx: {
 }): string {
   const row = (c: Candidate) => `| ${c.pid} | ${c.name} | ${c.commitMB} | `
     + `${c.growthMB === null ? '?' : (c.growthMB >= 0 ? '+' : '') + c.growthMB} | `
-    + `${c.role ? `보호 — ${ROLE_LABEL[c.role]}` : '-'} | ${c.parent} | ${c.cmd.replace(/\|/g, '/').slice(0, 160)} |`;
+    + `${c.role === 'interactive'
+      ? `대화형 터미널 — 심각할 때만(커밋 ${INTERACTIVE_SEVERE_PCT}% 이상 또는 ${INTERACTIVE_SEVERE_MB / 1024}GB 이상)`
+      : c.role ? `보호 — ${ROLE_LABEL[c.role]}` : '-'} | ${c.parent} | ${c.cmd.replace(/\|/g, '/').slice(0, 160)} |`;
   return [
     '이 PC 의 메모리 감시기가 자동 종료 대상을 정하려 한다. 도구 없이 아래 자료만으로 판정해 JSON 하나로 답한다.',
     '',
@@ -257,6 +302,7 @@ export function buildReviewPrompt(ctx: {
     '- 폭주: 한 프로세스가 기준 이상이거나 다른 것보다 몇 배 크고 계속 커지면 그것이 주범이다. 지난 1년 실제 고갈 22일 중 19일이 폭주 하나(8~65GB)였다.',
     '- 폭주 경로는 원칙적으로 kill. wait 는 시스템 커밋이 기준 미만이고 그 프로세스가 커지지 않을 때만(정상 작업의 큰 메모리).',
     '- 시스템 경로에서 「보호」 표시가 있는 것은 고르지 않는다(골라도 거절된다). 사용자가 쓰는 대화형 프로그램(터미널 안의 claude · 편집기)보다 백그라운드 부가 프로그램(브라우저 · 장치 에이전트 · 디스크 분석기 등)을 먼저 고른다.',
+    '- 「대화형 터미널」 표시(터미널과 그 안의 세션 · 사용자가 일하는 곳)는 폭주여도 심각할 때만 고른다 — 심각이 아니면 골라도 거절된다.',
     '- 뚜렷한 주범 없이 여러 프로세스가 고르게 쓰면 wait — 동기화 봉우리는 대개 10~20분 안에 스스로 내려온다.',
     '- pid 는 위 표에 있는 것만.',
     '',
@@ -631,7 +677,9 @@ export class ProcessMemoryWatchdog {
       !this.excludedPids.has(p.pid) &&
       !this.pendingKills.has(p.pid),
     );
-    const runaways = base.filter(p => p.commitMB >= this.processThresholdMB && !this.waitStillHolds(p));
+    // 커밋이 대화형 터미널의 「심각」 선을 넘으면 기다리기로 한 폭주도 다시 판정한다
+    const severeNow = status.usagePct >= INTERACTIVE_SEVERE_PCT;
+    const runaways = base.filter(p => p.commitMB >= this.processThresholdMB && (severeNow || !this.waitStillHolds(p)));
 
     // 봉우리가 내려오면(기준 −3%p) 다음 봉우리에 다시 판정한다
     if (!systemHigh && status.usagePct < this.thresholdPct - 3) this.systemEpisodeOpen = false;
@@ -653,7 +701,9 @@ export class ProcessMemoryWatchdog {
 
     this.reviewing = true;
     try {
-      if (route === 'system') this.systemEpisodeOpen = true;
+      // 커밋이 기준을 넘은 채 판정했으면 경로와 상관없이 그 고점은 판정한 것으로 친다 —
+      // 폭주 판정이 이미 상시 작업 밖의 후보까지 봤으므로 시스템 경로가 3분 뒤 또 묻지 않게
+      if (systemHigh) this.systemEpisodeOpen = true;
       await this.judge(route, status, base, systemHigh);
     } finally {
       this.reviewing = false;
@@ -689,7 +739,8 @@ export class ProcessMemoryWatchdog {
       reviewMs = Date.now() - t0;
     }
     const decision = decide({
-      path: route, candidates, verdict, systemHigh, processThresholdMB: this.processThresholdMB,
+      path: route, candidates, verdict, systemHigh, systemPct: status.usagePct,
+      processThresholdMB: this.processThresholdMB,
       runawayDelaySec: this.opts.runawayDelaySec ?? 180, systemDelaySec: this.autoKillDelaySec,
       lineageKnown: rows.length > 0,
     });
@@ -784,10 +835,13 @@ export class ProcessMemoryWatchdog {
 
       // **쏘기 직전에 다시 잰다.** 그 사이 압박이 풀렸으면 쏘지 않는다 — 9/29 00:15 에는
       // 커밋이 이미 89.4% 로 기준 아래였는데 그대로 동기화 커밋 데몬을 죽였다.
+      const interactive = target.role === 'interactive';
       const now = route === 'system'
         ? { usagePct: (await this.getSystemCommitStatus())?.usagePct ?? null, targetMB: null }
-        : { usagePct: null, targetMB: await this.getProcessMB(target.pid) };
-      if (!stillWarranted(route, now, { thresholdPct: this.thresholdPct, processThresholdMB: this.processThresholdMB })) {
+        : { usagePct: interactive ? (await this.getSystemCommitStatus())?.usagePct ?? null : null,
+            targetMB: await this.getProcessMB(target.pid) };
+      if (!stillWarranted(route, now, { thresholdPct: this.thresholdPct, processThresholdMB: this.processThresholdMB },
+                          interactive)) {
         const shown = route === 'system' ? `커밋 ${now.usagePct ?? '측정 실패'}%` : `${now.targetMB ?? '측정 실패'} MB`;
         await this.updateMessage(pending.messageTs,
           t('watchdog.cancelled', this.locale, { pid: String(target.pid), name: target.name, now: shown }),
