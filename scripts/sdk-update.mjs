@@ -211,8 +211,14 @@ function pyStage(c, llm, step) {
     return step('파이썬 SDK 설치', false, `설치 뒤 판이 다름(${now.version} · 짝 ${now.pair}) · 되돌림`);
   }
   step('파이썬 SDK 설치', true, `${prev} → ${t} (짝 ${now.pair})`);
+  // 최소 판이 이미 이 판이면 파일이 안 바뀐다 — 그때 커밋하면 「바뀐 것 없음」으로 실패해 멀쩡한 판 맞춤을
+  // 되돌린다(사본 시험 준비 중 발견 2026-09-29). 시험·호출은 하고 커밋만 건너뛴다.
+  let changed = false;
   try {
-    fs.writeFileSync(pyproj, bumpPyproject(fs.readFileSync(pyproj, 'utf-8'), t, now.pair), 'utf-8');
+    const before = fs.readFileSync(pyproj, 'utf-8');
+    const after = bumpPyproject(before, t, now.pair);
+    changed = after !== before;
+    if (changed) fs.writeFileSync(pyproj, after, 'utf-8');
   } catch (e) {
     restore();
     return step('llm-playbook 최소 판', false, `${e.message} · 되돌림`);
@@ -223,6 +229,7 @@ function pyStage(c, llm, step) {
   const probe = sh(PY, ['-X', 'utf8', '-c', PY_PROBE], { cwd: llm, timeout: 300_000 });
   if (!probe.ok) { restore(); return step('파이썬 실제 호출', false, '응답 없음 · 되돌림'); }
   step('파이썬 실제 호출', true, lastLine(probe.stdout));
+  if (!changed) return step('llm-playbook 최소 판', true, `이미 ${t} — 커밋 없음`);
   const sha = commit(llm, ['pyproject.toml'],
     `sdk 최소 판 ${prev} → ${t} — Claude Code(${c.cli})와 판을 맞춤\n\n`
     + '주간 판 대조 → 스탠리 버튼으로 반영(claude-code-slack-bot scripts/sdk-update.mjs) · pytest · 실제 호출 통과.\n');
