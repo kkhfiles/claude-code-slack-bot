@@ -21,6 +21,7 @@ import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
 import { setUntil, stillBlocked, clearUntil } from './rate-limit-until';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
+import { SdkUpdate, RUN_ACTION as SDK_UPDATE_RUN, SKIP_ACTION as SDK_UPDATE_SKIP } from './sdk-update';
 import { DaouLoginNotifier, ACTION_ID as DAOU_LOGIN_ACTION } from './daou-login';
 import { LunchPoller } from './lunch-poller';
 import { LunchButtons, readLunchBotToken, readLunchAnnounceChannel } from './lunch-buttons';
@@ -314,6 +315,8 @@ export class SlackHandler {
 
   // System memory watchdog
   private memoryWatchdog: ProcessMemoryWatchdog | null = null;
+  // Agent SDK 판 맞춤 — 주 1회 DM 버튼
+  private sdkUpdate: SdkUpdate | null = null;
   private daouLogin: DaouLoginNotifier | null = null;
 
   // Lunch recruitment bot (external script, its own Slack identity)
@@ -640,6 +643,24 @@ export class SlackHandler {
           }
         },
       );
+    }
+
+    // Agent SDK 판 맞춤 — 주 첫 업무일에 판을 대조해 어긋나면 DM 에 [업데이트] 버튼(2026-09-29).
+    if (config.sdkUpdate.enabled && config.assistant.dmChannel) {
+      const channel = config.assistant.dmChannel;
+      this.sdkUpdate = new SdkUpdate({
+        at: config.sdkUpdate.at,
+        repoRoot: path.resolve(__dirname, '..'),
+        dmChannel: channel,
+        send: async (text, blocks) =>
+          (await this.app.client.chat.postMessage({ channel, text, blocks })).ts as string | undefined,
+        reply: async (threadTs, text) => {
+          await this.app.client.chat.postMessage({ channel, thread_ts: threadTs, text });
+        },
+        update: async (ts, text, blocks) => {
+          await this.app.client.chat.update({ channel, ts, text, blocks });
+        },
+      });
     }
 
     // 다우 세션 만료 → 로그인 버튼 (2026-09-21). 감시기와 같은 DM 채널·같은 콜백 모양.
@@ -4728,6 +4749,14 @@ export class SlackHandler {
     // 대화 봇들 (레터 DM · 점심봇 채널)
     for (const host of this.chatHosts) {
       host.start().catch((err) => this.logger.warn('Chat host failed to start', err));
+    }
+
+    // Agent SDK 판 맞춤 — 허용된 사람만 누르게 `this.action` 으로(DM 인지는 모듈이 다시 본다).
+    if (this.sdkUpdate) {
+      const su = this.sdkUpdate;
+      su.start();
+      this.action(SDK_UPDATE_RUN, (args) => su.onRun(args));
+      this.action(SDK_UPDATE_SKIP, (args) => su.onSkip(args));
     }
 
     // System memory watchdog

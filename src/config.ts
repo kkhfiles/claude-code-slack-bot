@@ -53,6 +53,12 @@ export const config = {
     dmChannel: process.env.ASSISTANT_DM_CHANNEL || '',
     configDir: process.env.ASSISTANT_CONFIG_DIR || '',
   },
+  // Agent SDK 판 맞춤 — 주 첫 업무일에 판을 대조해 어긋나면 스탠리 DM 에 [업데이트] 버튼(`sdk-update.ts`).
+  // 누르면 `scripts/sdk-update.mjs` 가 설치·시험·커밋·푸시·재시작까지 한다. 기본은 꺼짐.
+  sdkUpdate: {
+    enabled: process.env.SDK_UPDATE_CHECK === '1',
+    at: process.env.SDK_UPDATE_AT || '09:30',
+  },
   // 개인 업무 비서(work-assistant). 태스크 정본은 로컬 볼트(2026-08-18 전환)이고, 이 레포는
   // 결정론 조회 계층만 갖는다. 경로가 비면 관련 기능 전체가 조용히 꺼진다.
   // **기본값을 두지 않는다** — 이 저장소는 공개라, 운영자 PC 의 경로를 소스에 박으면

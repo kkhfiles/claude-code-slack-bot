@@ -4,6 +4,7 @@
  *   node scripts/sdk-update.mjs --check                  판 대조만 · JSON 한 줄(봇의 주간 점검이 부른다)
  *   node scripts/sdk-update.mjs --run --dry-run          점검(브랜치·커밋 안 된 파일·목표 판)까지만
  *   node scripts/sdk-update.mjs --run                    올리기 — 시험 · 실제 호출 · 커밋 · 푸시 · 봇 재시작
+ *   node scripts/sdk-update.mjs --busy                   「다른 작업 중」인지만 · JSON 한 줄(버튼을 누른 순간 봇이 부른다)
  *   node scripts/sdk-update.mjs --run --request <파일>   봇 버튼이 pm2 한 번짜리 앱으로 부르는 모양
  *   … --no-push --no-restart                             저장소 사본에서 끝까지 돌려 볼 때(커밋까지만)
  *   환경 변수 LLM_PLAYBOOK_ROOT                            llm-playbook 위치를 바꿀 때(사본 시험) · 없으면 설치본에서 찾음
@@ -307,9 +308,21 @@ if (has('--check')) {
     console.log(JSON.stringify({ error: String(e.message ?? e) }));
     process.exitCode = 1;
   }
+} else if (has('--busy')) {
+  // 버튼을 누른 그 자리에서 봇이 묻는다 — 「다른 작업 중」 규칙을 여기 한 곳에만 두려고.
+  try {
+    let reason = '';
+    for (const [label, cwd] of [['봇 저장소', ROOT], ['llm-playbook', llmRoot()]]) {
+      const why = busy(cwd);
+      if (why) { reason = `다른 작업 중(${label}) — ${why}`; break; }
+    }
+    console.log(JSON.stringify({ reason }));
+  } catch (e) {
+    console.log(JSON.stringify({ reason: `점검 실패 — ${e.message ?? e}` }));
+  }
 } else if (has('--run')) {
   process.exitCode = await run();
 } else {
-  console.error('사용: --check | --run [--dry-run] [--request <파일>]');
+  console.error('사용: --check | --busy | --run [--dry-run] [--request <파일>]');
   process.exitCode = 2;
 }

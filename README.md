@@ -491,6 +491,19 @@ MEMORY_WATCHDOG_AUTO_KILL_SEC=300   # Auto-kill if no response (default: 5 min)
 
 When triggered, sends a Slack message with Kill/Ignore/Exclude buttons. Auto-kills the largest non-system process after the timeout if no response. Exclude registers the PID as an exception for the current runtime (auto-cleared when the process exits).
 
+### Agent SDK Version Alignment
+
+The Agent SDKs (this bot's TypeScript SDK and the Python SDK) each pair with one Claude Code version, while Claude Code updates itself almost daily. Once a week the bot compares them and, if they drifted, posts a card to `ASSISTANT_DM_CHANNEL` with **Update** / **Skip this week** buttons.
+
+**Update** runs `scripts/sdk-update.mjs` as a one-shot pm2 app: install → build → tests → live call → commit & push → bot restart, for each SDK. Any failing step is rolled back and reported in the card's thread. It refuses to run while either repository is off its default branch or has uncommitted changes.
+
+```env
+SDK_UPDATE_CHECK=1                  # 1 to enable (default: off)
+SDK_UPDATE_AT=09:30                 # first workday of the week, HH:MM
+```
+
+Manual: `node scripts/sdk-update.mjs --check` (compare only) · `--run --dry-run` (checks only) · `--run`.
+
 ### Session Auto-Start
 
 Schedule automatic session starts to maximize Claude Pro/Max session windows.
