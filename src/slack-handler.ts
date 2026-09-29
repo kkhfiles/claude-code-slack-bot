@@ -3359,7 +3359,8 @@ export class SlackHandler {
   // --- Account management commands ---
 
   private isAccountCommand(text: string): boolean {
-    return /^`?-(?:account|ac)(`?\s*.*)?$|^계정(\s.*)?$/i.test(text.trim());
+    // `-ac` 뒤에는 공백이나 끝만 — 전에는 무엇이 붙든 받아서 `-actions` 가 계정 명령으로 먹혔다(2026-09-29).
+    return /^`?-(?:account|ac)`?(?:\s.*)?$|^계정(\s.*)?$/i.test(text.trim());
   }
 
   private async handleAccountCommand(text: string, _channel: string, threadTs: string | undefined, locale: Locale, say: any): Promise<void> {

@@ -25,6 +25,11 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// **모듈을 불러오기 전에 정한다** — 이벤트 기록 경로는 `board-queue` 를 불러올 때 한 번 읽힌다.
+// 뒤에서 정하면 앞선 require 가 그 모듈을 먼저 끌어와 진짜 기록 파일에 쓴다.
+const EVENTS_FILE = path.join(os.tmpdir(), `actions-check-ev-${Date.now()}.jsonl`);
+process.env.WORK_EVENTS_FILE = EVENTS_FILE;
+process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
 const {
   ActionPipeline, buildDigestBlocks, markDecided, parseWindow,
 } = require(path.join(ROOT, 'dist', 'action-pipeline.js'));
@@ -265,6 +270,24 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   ok('수동 -briefing 에 처리 제안 요약', manual.includes('actionDigestBlocks('));
 }
 
+// ── 명령이 다른 명령에 먹히지 않는가 — `-actions` 가 계정 명령(`-ac…`)으로 읽혔다(2026-09-29) ──
+// 판정 함수를 전부 불러 **정확히 하나**만 받아야 한다. 순서에 기대면 앞 판정이 넓어질 때 조용히 샌다.
+{
+  const { SlackHandler } = require(path.join(ROOT, 'dist', 'slack-handler.js'));
+  const proto = SlackHandler.prototype;
+  const judges = Object.getOwnPropertyNames(proto).filter((n) => /^is[A-Z]\w*Command$/.test(n));
+  ok(`명령 판정 함수를 찾는다 (${judges.length}개)`, judges.length >= 10 && judges.includes('isActionsCommand'));
+  const who = (text) => judges.filter((n) => {
+    try { return proto[n].call({}, text) === true; } catch { return false; }
+  });
+  for (const text of ['-actions', '-actions review', '-actions run', '`-actions` review']) {
+    eq(`「${text}」은 처리 제안 명령 하나만 받는다`, who(text), ['isActionsCommand']);
+  }
+  for (const text of ['-ac', '-ac 1', '-account', '-account setup', '`-ac`']) {
+    eq(`「${text}」은 여전히 계정 명령`, who(text), ['isAccountCommand']);
+  }
+}
+
 // ── ⑦ 밤 검토 시간대 ──────────────────────────────────────────────────
 {
   eq('시간대 읽기', parseWindow('02:00-07:00'), [120, 420]);
@@ -309,9 +332,7 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
 
 // ── ② 스케줄러: 폴백 없음(null)이면 Codex 를 안 부른다 ───────────────────
 {
-  const evFile = path.join(tmp, 'events.jsonl');
-  process.env.WORK_EVENTS_FILE = evFile;
-  process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
+  const evFile = EVENTS_FILE;
   const { AssistantScheduler } = await import('../dist/assistant-scheduler.js');
   const { config } = await import('../dist/config.js');
   const sched = new AssistantScheduler(async () => {},
@@ -321,11 +342,10 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   const ev = fs.existsSync(evFile)
     ? fs.readFileSync(evFile, 'utf-8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
   eq('폴백 없음이면 건너뛴다고 남기고 부르지 않는다', ev.map((e) => e.skipped), ['off']);
-  delete process.env.WORK_EVENTS_FILE;
-  delete process.env.BOARD_NARROW_CODEX_BIN;
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });
+try { fs.unlinkSync(EVENTS_FILE); } catch { /* 안 썼으면 없다 */ }
 
 if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
