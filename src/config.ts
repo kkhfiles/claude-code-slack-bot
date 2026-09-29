@@ -96,6 +96,8 @@ export const config = {
     runawayKillDelaySec: parseInt(process.env.MEMORY_WATCHDOG_RUNAWAY_KILL_SEC || '180', 10),
     // 종료 대상 AI 검토(Opus · medium) — 0 이면 규칙만
     aiReview: process.env.MEMORY_WATCHDOG_AI_REVIEW !== '0',
+    // AI 판정대로 실제로 종료하나 — 기본은 관찰(기록 · DM 만). 판정 기록으로 맞았는지 본 뒤 1 로 켠다
+    aiActs: process.env.MEMORY_WATCHDOG_AI_ACT === '1',
   },
   // Lunch recruitment bot. Runs an external Python script that owns its own
   // Slack token and channel — this bot only supplies the 24/7 heartbeat.

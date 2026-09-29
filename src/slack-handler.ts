@@ -652,6 +652,7 @@ export class SlackHandler {
             ? path.join(config.assistant.configDir, '..', 'reports', 'pipeline-runs', '.lock-pipeline.json')
             : undefined,
           runawayDelaySec: config.memoryWatchdog.runawayKillDelaySec,
+          aiActs: config.memoryWatchdog.aiActs,
         },
       );
     }

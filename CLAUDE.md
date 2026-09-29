@@ -189,10 +189,11 @@ npm test        # 빌드 + check:* 전부
   - 상시 작업 계보는 기계로 가름(`classifyRoles`) — 봇의 조상(pm2 등 · 후보에서도 뺌) · 봇의 자손 · 파이프라인 러너(잠금 파일 PID)와 자손. 프로세스 표를 못 읽으면 시스템 경로는 아무것도 안 죽임
   - 대화형 터미널 계보(WindowsTerminal 과 그 안의 세션)는 폭주여도 **심각할 때만** 끊음 — 커밋 97% 이상 또는 그 프로세스 16GB 이상 · 그때 유예 1분 · 시스템 경로에서는 안 죽임(2026-09-29 사용자 결정 · 9/2 터미널 11.2GB · 95.4% 는 부족 없이 지나감)
   - AI 검토(Opus · medium · 도구 없음 · 2분)가 그 규칙 안에서 대상을 고르거나 「기다림」 — 최종 결정은 `decide()` · AI 실패 시 폭주는 규칙대로 · 시스템은 알림만 · `MEMORY_WATCHDOG_AI_REVIEW=0` 이면 규칙만
+  - **기본은 관찰 모드** — AI 판정은 기록 · DM 에만 보이고 실제 결정은 규칙만(폭주는 규칙대로 · 시스템 경로는 알림만). 판정 기록의 `aiWould` 로 맞았는지 본 뒤 `MEMORY_WATCHDOG_AI_ACT=1` 로 켠다(2026-09-29 사용자 「시험하다 사고 나면 안 됨」)
   - 자동 종료 직전 다시 잼 — 압박이 풀렸으면 안 쏨 · 판정 · 취소 · 자동 종료는 `~/.claude/state/memory-watchdog-events.jsonl`
   - Kill/Ignore/Exclude 버튼 · Exclude 는 런타임 예외(디스크 영속화 없음) · 시스템 프로세스 보호 목록 + 자기 자신 제외
   - `ASSISTANT_DM_CHANNEL`로 알림 전송, Windows 전용 (`process.platform === 'win32'`)
-  - 환경변수: `MEMORY_WATCHDOG_ENABLED`, `MEMORY_WATCHDOG_THRESHOLD_PCT`, `MEMORY_WATCHDOG_PROCESS_THRESHOLD_MB`, `MEMORY_WATCHDOG_INTERVAL_SEC`, `MEMORY_WATCHDOG_AUTO_KILL_SEC`, `MEMORY_WATCHDOG_RUNAWAY_KILL_SEC`, `MEMORY_WATCHDOG_AI_REVIEW`
+  - 환경변수: `MEMORY_WATCHDOG_ENABLED`, `MEMORY_WATCHDOG_THRESHOLD_PCT`, `MEMORY_WATCHDOG_PROCESS_THRESHOLD_MB`, `MEMORY_WATCHDOG_INTERVAL_SEC`, `MEMORY_WATCHDOG_AUTO_KILL_SEC`, `MEMORY_WATCHDOG_RUNAWAY_KILL_SEC`, `MEMORY_WATCHDOG_AI_REVIEW`, `MEMORY_WATCHDOG_AI_ACT`
   - 검사: `npm run check:watchdog`
 
 ### CLI Integration

@@ -146,7 +146,7 @@ eq('④ 폭주가 기준 아래로 줄었으면 안 쏜다', W.stillWarranted('r
 }
 
 // ── 감시기 한 회차(가짜 OS) ───────────────────────────────────────────
-async function oneRound({ reviewer, pctSeq, top, delaySec = 600 }) {
+async function oneRound({ reviewer, pctSeq, top, delaySec = 600, aiActs = false }) {
   const sent = [];
   const updated = [];
   const lock = path.join(tmp, `lock-${Math.random()}.json`);
@@ -155,7 +155,7 @@ async function oneRound({ reviewer, pctSeq, top, delaySec = 600 }) {
     async (text) => { sent.push(text); return `ts${sent.length}`; },
     async (ts, text) => { updated.push(text); },
     undefined,
-    { reviewer, pipelineLockFile: lock, runawayDelaySec: 0.05 });
+    { reviewer, pipelineLockFile: lock, runawayDelaySec: 0.05, aiActs });
   const seq = [...pctSeq];
   wd.getSystemCommitStatus = async () => ({ committedMB: 44000, limitMB: 48914, usagePct: seq.length > 1 ? seq.shift() : seq[0] });
   wd.getTopProcesses = async () => top;
@@ -181,11 +181,27 @@ const TOP = [
 {
   const { wd, sent, updated, kills } = await oneRound({
     reviewer: async () => '{"action":"kill","pid":40,"reason":"브라우저 탭"}', pctSeq: [91.4, 89.4], top: TOP, delaySec: 0.05,
+    aiActs: true,
   });
   await wd.checkMemory();
   ok('③ AI 가 고른 브라우저로 종료 예약', wd.pendingKills.has(40) && sent[0].includes('chrome'));
   await new Promise((r) => setTimeout(r, 400));
   ok(`④ 쏘기 직전 89.4% → 취소 · 안 죽임 (${updated.join(' / ')})`, kills.length === 0 && updated.some((u) => u.includes('압박이 풀려')));
+  wd.stop();
+}
+{
+  // ⑧ 관찰 모드(기본) — AI 가 브라우저를 골라도 실행하지 않고 알림 · 「AI 대로였다면」을 기록
+  const { wd, sent, kills } = await oneRound({
+    reviewer: async () => '{"action":"kill","pid":40,"reason":"브라우저 탭"}', pctSeq: [91.4], top: TOP,
+  });
+  await wd.checkMemory();
+  ok(`⑧ 관찰 모드는 AI 판정을 실행하지 않는다 (예약 ${wd.pendingKills.size} · ${sent.length}통)`,
+     wd.pendingKills.size === 0 && kills.length === 0 && sent.length === 1);
+  ok('⑧ DM 에 AI 판정을 관찰로 보인다', /관찰/.test(sent[0] || '') && /PID 40/.test(sent[0] || ''));
+  const last = fs.readFileSync(process.env.MEMORY_WATCHDOG_EVENTS_FILE, 'utf-8').trim().split('\n').map(JSON.parse)
+    .filter((l) => l.phase === 'decide').pop();
+  eq('⑧ 기록에 실제 결정과 AI 대로였다면을 둘 다', [last.aiActs, last.decision.kind, last.aiWould.kind, last.aiWould.target?.pid],
+     [false, 'alert', 'kill', 40]);
   wd.stop();
 }
 {

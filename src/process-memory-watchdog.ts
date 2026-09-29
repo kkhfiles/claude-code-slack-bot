@@ -229,6 +229,8 @@ export function decide(input: {
   processThresholdMB: number; runawayDelaySec: number; systemDelaySec: number;
   /** 프로세스 표를 읽었나. 못 읽었으면 누가 상시 작업인지 모르므로 시스템 경로는 아무것도 안 죽인다. */
   lineageKnown: boolean;
+  /** 관찰 모드 — AI 답을 안 받은 까닭을 「실패」가 아니라 「관찰 기간」으로 적는다 */
+  observe?: boolean;
 }): Decision {
   const { path: p, candidates, verdict } = input;
   const runaways = candidates.filter((c) => c.commitMB >= input.processThresholdMB && c.role !== 'host');
@@ -254,6 +256,7 @@ export function decide(input: {
   }
   // 여기부터는 AI 가 없거나 · 실패했거나 · 규칙 밖을 골랐다
   const why = !input.lineageKnown && p === 'system' ? '프로세스 계보를 못 읽음'
+    : !verdict && input.observe ? '관찰 기간(규칙만 결정)'
     : !verdict ? 'AI 검토 실패'
       : verdict.action === 'kill' ? `AI 가 고른 PID ${verdict.pid} 는 종료할 수 없는 대상`
         : '폭주 중에 시스템도 기준을 넘어 기다릴 수 없음';
@@ -323,6 +326,12 @@ export interface WatchdogOptions {
   pipelineLockFile?: string;
   /** 폭주 경로 자동 종료 유예(초). 시스템 경로는 생성자의 autoKillDelaySec. */
   runawayDelaySec?: number;
+  /**
+   * AI 판정대로 실제로 행동하나. **기본은 관찰** — 판정은 받아 기록 · DM 에 보이되 결정은 규칙만 한다
+   * (폭주는 규칙대로 끊고 · 시스템 경로는 알림만). 며칠치 판정 기록으로 맞았는지 본 뒤 켠다
+   * (2026-09-29 사용자 「안전하게 · 시험하다 사고 나면 안 됨」).
+   */
+  aiActs?: boolean;
 }
 
 export class ProcessMemoryWatchdog {
@@ -738,17 +747,28 @@ export class ProcessMemoryWatchdog {
       verdict = parseVerdict(await this.opts.reviewer(prompt).catch(() => null));
       reviewMs = Date.now() - t0;
     }
-    const decision = decide({
-      path: route, candidates, verdict, systemHigh, systemPct: status.usagePct,
+    const args = {
+      path: route, candidates, systemHigh, systemPct: status.usagePct,
       processThresholdMB: this.processThresholdMB,
       runawayDelaySec: this.opts.runawayDelaySec ?? 180, systemDelaySec: this.autoKillDelaySec,
       lineageKnown: rows.length > 0,
+    };
+    const acts = !!this.opts.aiActs;
+    // 관찰 모드: 실제 결정은 규칙만(AI 답 없이) · AI 대로였다면의 결정도 계산해 기록한다
+    const ruled = decide({ ...args, verdict: acts ? verdict : null, observe: !acts });
+    const aiWould = decide({ ...args, verdict });
+    const decision: Decision = acts ? ruled : {
+      ...ruled,
+      reason: `${ruled.reason} · AI 판정(관찰 · 실행 안 함): ${verdict
+        ? `${verdict.action === 'kill' ? `PID ${verdict.pid} 종료` : '기다림'} — ${verdict.reason}` : '없음'}`,
+    };
+    const brief = (d: Decision) => ({
+      kind: d.kind, source: d.source, reason: d.reason,
+      target: d.target ? { pid: d.target.pid, name: d.target.name, mb: d.target.commitMB, role: d.target.role } : null,
     });
     this.record({
-      phase: 'decide', route, pct: status.usagePct, verdict, reviewMs, decision: {
-        kind: decision.kind, source: decision.source, reason: decision.reason,
-        target: decision.target ? { pid: decision.target.pid, name: decision.target.name, mb: decision.target.commitMB, role: decision.target.role } : null,
-      },
+      phase: 'decide', route, pct: status.usagePct, verdict, reviewMs, aiActs: acts,
+      decision: brief(decision), aiWould: brief(aiWould),
       candidates: candidates.slice(0, 6).map(c => ({ pid: c.pid, name: c.name, mb: c.commitMB, role: c.role, growth: c.growthMB })),
     });
     this.logger.info(`판정 ${route} → ${decision.kind}(${decision.source}) ${decision.target ? `${decision.target.name} PID ${decision.target.pid}` : ''} — ${decision.reason}`);

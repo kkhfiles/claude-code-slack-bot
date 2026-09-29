@@ -481,6 +481,7 @@ Monitors system commit memory so that always-on work (the bot, its sessions, sch
 - **System path** — commit % above the threshold with no runaway: processes in the always-on lineage (the bot's ancestors and descendants, the pipeline runner and its children) are never killed; at most one decision per peak.
 - **Interactive terminals** (Windows Terminal and the sessions inside it) are where the user works: a runaway there is killed only when severe — commit at 97% or more, or the process alone at 16 GB or more — and then after one minute. The system path never kills them.
 - An optional AI review (Opus, medium, no tools) picks the target or chooses to wait, within those rules. If it fails, the runaway path falls back to the rule and the system path only alerts.
+- **The AI review starts in observation mode**: its verdict is logged and shown in the DM, but only the rules act. Set `MEMORY_WATCHDOG_AI_ACT=1` after checking the logged verdicts (`aiWould`).
 - Right before an automatic kill the watchdog measures again and cancels if the pressure has eased. Decisions and kills are logged to `~/.claude/state/memory-watchdog-events.jsonl`.
 
 **Requirements:**
@@ -496,6 +497,7 @@ MEMORY_WATCHDOG_INTERVAL_SEC=180           # Check interval (default: 3 min)
 MEMORY_WATCHDOG_AUTO_KILL_SEC=600          # System path auto-kill delay (default: 10 min)
 MEMORY_WATCHDOG_RUNAWAY_KILL_SEC=180       # Runaway path auto-kill delay (default: 3 min)
 MEMORY_WATCHDOG_AI_REVIEW=1                # 0 to use rules only
+MEMORY_WATCHDOG_AI_ACT=0                   # 1 to act on the AI verdict (default: observe only)
 ```
 
 When triggered, sends a Slack message with Kill/Ignore/Exclude buttons. Auto-kills the largest non-system process after the timeout if no response. Exclude registers the PID as an exception for the current runtime (auto-cleared when the process exits).
