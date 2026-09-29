@@ -18,6 +18,7 @@
     "check:bottalk": "node scripts/check-bot-talk.mjs",
     "check:marks": "node scripts/check-marks.mjs",
     "check:offdays": "node scripts/check-offdays.mjs",
+    "check:bookingwatch": "node scripts/check-bookingwatch.mjs",
     "check:summary": "node scripts/check-summary.mjs",
     "restart": "node scripts/restart.mjs",
     "check:restart": "node scripts/check-restart.mjs",

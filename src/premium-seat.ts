@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
+import { BookingVersion, afterBookingTick, bookingTickReason, initialWatch } from './booking-watch';
 
 /**
  * Premium 좌석 관리 — 슬랙 표면.
@@ -23,6 +24,8 @@ export interface PremiumSeatOptions {
   jobPollSeconds?: number;
   /** 시험용. 채우면 팀원 DM 이 전부 이 사람에게 간다. 운영에서는 비운다. */
   dmRedirectTo?: string;
+  /** 통합 예약 변경 번호 확인에 쓰는 봇 인증(Access 서비스 토큰). 없으면 예전처럼 1분 회차. */
+  bookingAuth?: { id: string; secret: string };
 }
 
 interface Envelope {
@@ -187,6 +190,10 @@ export class PremiumSeatSlack {
   /** 통합 예약 화면 주소. 파이썬 설정이 정본이고, 현황판 자료를 읽을 때마다 받아 둔다. */
   private bookingPage = '';
   private bookingBusy = false;
+  /** 통합 예약 회차를 언제 돌릴지 — `booking-watch.ts`. */
+  private bookingWatch = initialWatch(Date.now());
+  /** 변경 번호를 못 읽은 까닭 — 바뀔 때만 한 줄 남긴다(15초마다 쌓지 않게). */
+  private bookingVersionError = '';
 
   constructor(private opts: PremiumSeatOptions) {}
 
@@ -309,7 +316,9 @@ export class PremiumSeatSlack {
     this.every(60_000, () => this.syncAnnouncements());
     this.every(60_000, () => this.scheduleReconciles());
     // 통합 예약 사이트와 잇기 — 명단 올리기 · 판 받기 · 11:50 알림 · 실장 취소 알림.
-    this.every(60_000, () => this.pumpBooking());
+    // 15초마다 사이트의 변경 번호만 보고(파이썬 안 띄움), 바뀌었을 때·자정·정오·11:50·10분마다만
+    // 회차를 돈다. 번호를 못 읽으면 예전처럼 1분 회차(`booking-watch.ts`).
+    this.every(15_000, () => this.watchBooking());
     setTimeout(() => {
       void this.pumpBooking();
     }, 5_000).unref?.();
@@ -437,6 +446,58 @@ export class PremiumSeatSlack {
    * 통합 예약 사이트와 잇는 1분 회차. 사이트를 부르는 것은 이 명령 하나라 시한을 넉넉히 둔다
    * (파이썬은 요청마다 8초에서 끊는다). 앞 회차가 살아 있으면 이번은 건너뛴다.
    */
+  private async watchBooking(): Promise<void> {
+    if (this.bookingBusy) return;
+    const version = await this.bookingVersion();
+    if (!bookingTickReason(this.bookingWatch, version, Date.now())) return;
+    await this.pumpBooking();
+    this.bookingWatch = afterBookingTick(this.bookingWatch, version, Date.now());
+  }
+
+  /**
+   * 사이트의 변경 번호와 지금 칸. 사이트 주소는 파이썬이 주는 예약 화면 주소에서 끌어낸다 — 주소를
+   * 이 저장소(공개)에 적지 않고, 정본도 파이썬 설정 하나로 둔다. 못 읽으면 null(1분 회차로 돈다).
+   */
+  private async bookingVersion(): Promise<BookingVersion | null> {
+    const auth = this.opts.bookingAuth;
+    if (!auth || !this.bookingPage) return null;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8_000);
+    try {
+      const res = await fetch(`${new URL(this.bookingPage).origin}/api/booking/version`, {
+        headers: {
+          'CF-Access-Client-Id': auth.id,
+          'CF-Access-Client-Secret': auth.secret,
+          // 이름 없는 요청은 Cloudflare 가 막는다(Error 1010) — 파이썬 쪽과 같이 이름을 밝힌다.
+          'user-agent': 'dynamic-booking-bot/1.0 (slack watch)',
+          accept: 'application/json',
+        },
+        redirect: 'manual',   // Access 가 로그인으로 돌려보내면 실패로 본다
+        signal: ctrl.signal,
+      });
+      if (!res.ok) return this.versionFailed(`HTTP ${res.status}`);
+      const body: any = await res.json();
+      if (!body?.ok || typeof body.last_event !== 'number' || typeof body.slot !== 'string') {
+        return this.versionFailed('BAD_BODY');
+      }
+      if (this.bookingVersionError) this.logger.info('booking version check recovered');
+      this.bookingVersionError = '';
+      return { lastEvent: body.last_event, slot: body.slot };
+    } catch (error: any) {
+      return this.versionFailed(error?.name ?? 'ERROR');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private versionFailed(code: string): null {
+    if (this.bookingVersionError !== code) {
+      this.logger.warn(`booking version check failed: ${code} — falling back to 1-minute ticks`);
+      this.bookingVersionError = code;
+    }
+    return null;
+  }
+
   private async pumpBooking(): Promise<void> {
     if (this.bookingBusy) return;
     this.bookingBusy = true;

@@ -262,6 +262,9 @@ export const config = {
     python: process.env.PREMIUM_SEAT_PYTHON || process.env.CHATBOT_PYTHON || 'python',
     // `python -m premium_seat_manager.cli` 를 부를 작업 폴더.
     workerDir: process.env.PREMIUM_SEAT_WORKER_DIR || '',
+    // 통합 예약 변경 번호 확인(15초)에 쓰는 봇 인증 — 파이썬과 같은 값 · 둘 다 있어야 켜진다.
+    bookingClientId: process.env.BOOKING_API_CLIENT_ID || '',
+    bookingClientSecret: process.env.BOOKING_API_CLIENT_SECRET || '',
     jobPollSeconds: parseInt(process.env.PREMIUM_SEAT_JOB_POLL_SECONDS || '10', 10),
     // 시험용. 슬랙 사용자 ID 하나를 넣으면 팀원에게 갈 DM 이 전부 그 사람에게
     // 간다 — 안 보내는 것이 아니라 돌리는 것이라, 동료가 받을 글을 그대로 본다.
