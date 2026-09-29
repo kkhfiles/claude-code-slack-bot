@@ -368,6 +368,11 @@ export class SdkHandler {
       // these; assistant-scheduler/calendar paths just ignore unrecognised
       // events, so flipping this on is safe across all callers.
       includePartialMessages: true,
+      // 프롬프트 속 `@경로` 펼침·슬래시 명령을 끈다 — 메일 본문 같은 남의 글이 들어오는데, 끄지 않으면
+      // 글 속 `@C:/…` 가 그 파일 내용을 모델에 붙인다(도구를 꺼도 붙는다 · 실측 2026-09-29). 슬랙 대화에서
+      // `@파일` 을 쓰는 일은 없다(사용자 · 기록된 프롬프트 3,162건 중 `/`·`@경로` 로 기대는 것 0).
+      // 설명서는 첫 턴 스킬 목록·CLAUDE.md 도 빠질 수 있다고 하나, 이 설정으로 재 보니 셋 다 보였다.
+      verbatimPrompts: true,
       abortController,
     };
     const exe = resolveClaudeExecutable();

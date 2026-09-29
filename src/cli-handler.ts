@@ -344,7 +344,8 @@ export class CliHandler {
     noSessionPersistence?: boolean;
     tools?: string[];
   }): CliProcess {
-    const args = ['-p', '--output-format', 'stream-json', '--verbose'];
+    // 입력도 stream-json — 메시지에 `client_composed` 를 붙여 `@경로` 펼침·슬래시 명령을 끄려고(아래 stdin).
+    const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
 
     // Permission mode
     if (opts.permissionMode === 'trust') {
@@ -438,8 +439,11 @@ export class CliHandler {
       windowsHide: true,
     });
 
-    // Write prompt to stdin and close it
-    proc.stdin!.write(prompt);
+    // 프롬프트를 사용자 메시지 한 줄로 쓰고 닫는다. `client_composed` = SDK 의 `verbatimPrompts` 와 같은
+    // 표시 — 없으면 글 속 `@경로` 가 그 파일 내용으로 붙는다(실측 2026-09-29 · `sdk-handler.ts` 같은 칸).
+    proc.stdin!.write(JSON.stringify({
+      type: 'user', message: { role: 'user', content: prompt }, parent_tool_use_id: null, client_composed: true,
+    }) + '\n');
     proc.stdin!.end();
 
     return new CliProcess(proc);
