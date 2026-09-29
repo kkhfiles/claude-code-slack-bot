@@ -66,21 +66,26 @@ function toBaseToolName(entry: string): string {
  * 사람이 올리는 시스템 쪽 2.1.284 는 새 세대로 풀었다. `CLAUDE_CLI_PATH` → PATH 의 `claude` 순서로
  * 찾고, 못 찾으면 `undefined` 를 줘서 SDK 가 자기 것을 쓰게 둔다. 윈도에서는 `.exe` 만 본다 —
  * npm 의 `claude.cmd` 는 셸 없이 띄울 수 없다.
+ *
+ * **부를 때마다 다시 찾는다** — 한 번 찾은 값을 붙들면 Claude Code 가 스스로 업데이트하는 사이 파일이
+ * 잠깐 없을 때 띄우기가 실패하고, 못 찾은 값을 붙들면 재시작 전까지 한 세대 전 모델에 머문다.
+ * 결과가 바뀔 때만 기록하고, 못 찾으면 **경고**로 남긴다(조용한 판내림이라서).
  */
-let claudeExecutable: string | undefined | null = null;
+let lastExecutable: string | undefined | null = null;
 export function resolveClaudeExecutable(): string | undefined {
-  if (claudeExecutable !== null) return claudeExecutable;
   const envp = process.env.CLAUDE_CLI_PATH;
   const names = process.platform === 'win32' ? ['claude.exe'] : ['claude'];
   const found = envp && existsSync(envp) ? envp
     : (process.env.PATH || '').split(path.delimiter).filter(Boolean)
         .flatMap(dir => names.map(n => path.join(dir, n)))
         .find(p => existsSync(p));
-  claudeExecutable = found || undefined;
-  new Logger('SdkHandler').info(claudeExecutable
-    ? 'Claude Code 실행 파일 — 시스템 것을 씀' : 'Claude Code 실행 파일 — 못 찾아 SDK 에 딸린 것을 씀',
-    { path: claudeExecutable });
-  return claudeExecutable;
+  if (found !== lastExecutable) {
+    const log = new Logger('SdkHandler');
+    if (found) log.info('Claude Code 실행 파일 — 시스템 것을 씀', { path: found });
+    else log.warn('Claude Code 실행 파일 — 못 찾아 SDK 에 딸린 것을 씀 · 모델 별칭이 한 세대 전으로 풀릴 수 있음');
+    lastExecutable = found;
+  }
+  return found;
 }
 
 // --- SDK message → CliEvent translation -----------------------------------
