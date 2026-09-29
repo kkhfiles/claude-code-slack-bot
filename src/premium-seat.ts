@@ -443,7 +443,8 @@ export class PremiumSeatSlack {
     try {
       const out = await this.run('booking tick', {}, 45_000);
       const r = out.result ?? {};
-      for (const key of ['sync_error', 'board_error', 'events_error']) {
+      // 공휴일 오류도 남긴다 — 파이썬이 실패 뒤 한 시간은 다시 안 부르므로 한 시간에 한 줄이다.
+      for (const key of ['sync_error', 'board_error', 'events_error', 'holidays_error']) {
         if (r[key]) this.logger.warn(`booking tick ${key}: ${r[key]}`);
       }
       if (out.dashboard_dirty) this.markDashboardDirty();
@@ -618,7 +619,8 @@ export class PremiumSeatSlack {
       fields.push({
         type: 'mrkdwn',
         // 인원은 이름 옆 괄호 — 따로 한 줄을 두면 칸이 세로로 길어진다(2026-09-29 실장).
-        text: `${SERVICE_ICON[key] ?? ''} *${short}* (Premium ${holders.length}명)${lock}\n${gauge}\n\n${names}`,
+        // 보유자가 없으면 막대 줄이 비므로 빼야 빈 줄이 둘 생기지 않는다.
+        text: `${SERVICE_ICON[key] ?? ''} *${short}* (Premium ${holders.length}명)${lock}${gauge ? `\n${gauge}` : ''}\n\n${names}`,
       });
 
       if (view.swap) {

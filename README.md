@@ -73,7 +73,7 @@ Claude Pro/Max subscriptions have session limits with 5-hour windows. Schedule a
 - **Auto follow-up**: 5 hours later, a second greeting fires automatically to cover the next session window (persisted to disk — survives restarts)
 - Different accounts can have overlapping times; conflict checking is per-account only (5-hour window)
 - Uses `claude-haiku-4-5-20251001` model for minimal token cost
-- **Non-working day skip**: Weekends and Korean public holidays (including lunar calendar) are automatically skipped
+- **Non-working day skip**: Weekends, Korean public holidays (including lunar calendar), and the off-day list in the work-assistant `config.json` (`holidays` — substitute holidays and personal days off) are automatically skipped
 - Schedule repeats daily, persisted in `.schedule-config.json`
 
 ### Assistant Scheduler (Optional)
@@ -513,7 +513,7 @@ Schedule automatic session starts to maximize Claude Pro/Max session windows.
 **Behavior:**
 - Randomized jitter (+0~10 min) to avoid automation detection
 - Auto follow-up 5 hours later for the next session window
-- Non-working day skip (weekends + public holidays)
+- Non-working day skip (weekends + public holidays + the work-assistant off-day list, which includes personal days off)
 - Daily rotation (toggle button): for 2-account cross-schedules, swap accounts on alternating days (by day-of-year) to balance usage over 2 weeks
 - Persisted in `.schedule-config.json`
 
