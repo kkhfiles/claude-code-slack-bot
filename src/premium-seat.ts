@@ -617,7 +617,8 @@ export class PremiumSeatSlack {
       const lock = view.locked ? '\n:warning: 실장 확인 중' : '';
       fields.push({
         type: 'mrkdwn',
-        text: `${SERVICE_ICON[key] ?? ''} *${short}*${lock}\n${gauge}\nPremium *${holders.length}명*\n\n${names}`,
+        // 인원은 이름 옆 괄호 — 따로 한 줄을 두면 칸이 세로로 길어진다(2026-09-29 실장).
+        text: `${SERVICE_ICON[key] ?? ''} *${short}* (Premium ${holders.length}명)${lock}\n${gauge}\n\n${names}`,
       });
 
       if (view.swap) {
