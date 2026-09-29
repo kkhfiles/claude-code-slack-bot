@@ -182,15 +182,17 @@ npm test        # 빌드 + check:* 전부
 - CLI `is_error` 감지: `cliError` 플래그 추적 → 에러 시 ❌ 리액션 + `status.errorOccurred` 표시
 - 완료 시 도구 사용 요약 표시 (`toolUsageCounts` → `✅ Task completed (Grep ×5, Read ×2)`)
 - 로깅은 `Logger` 클래스 사용 (`this.logger.info/debug/warn/error`)
-- **시스템 메모리 워치독**: `ProcessMemoryWatchdog` — Windows 시스템 커밋 메모리 감시
-  - 5분 간격으로 시스템 커밋 사용률 체크 (PowerShell `Get-CimInstance Win32_OperatingSystem`)
-  - 커밋 사용률 > 임계값(기본 80%) 시 가장 큰 프로세스 대상 Slack 확인 메시지 (Kill/Ignore/Exclude 버튼)
-  - Exclude: 해당 PID를 런타임 예외 등록 (프로세스 종료 시 자동 해제, 디스크 영속화 없음)
-  - 5분 무응답 시 자동 kill, 다음 주기에 재평가 → 여전히 초과이면 다음 대상
-  - 시스템 프로세스 보호 목록 (svchost, dwm, csrss 등) + 자기 자신(봇) 제외
+- **시스템 메모리 워치독**: `ProcessMemoryWatchdog` — Windows 시스템 커밋 메모리 감시 · **목적은 상시 작업(봇과 그 세션 · 예약 파이프라인)이 메모리 고갈로 넘어지지 않게 하는 것 — 감시기가 그 작업을 죽이는 것도 같은 사고**(2026-09-29 개편 · 근거는 소스 머리 주석)
+  - 3분 간격 체크 · 두 경로
+    - **폭주**: 한 프로세스가 `processThresholdMB`(기본 7GB) 이상 → 상시 작업이어도 종료 대상 · 유예 3분(`MEMORY_WATCHDOG_RUNAWAY_KILL_SEC`)
+    - **시스템**: 커밋 `thresholdPct`(기본 90%) 이상 · 폭주 없음 → **상시 작업 계보는 절대 안 죽임** · 한 고점에 한 번만 판정 · 유예 10분
+  - 상시 작업 계보는 기계로 가름(`classifyRoles`) — 봇의 조상(pm2 등 · 후보에서도 뺌) · 봇의 자손 · 파이프라인 러너(잠금 파일 PID)와 자손. 프로세스 표를 못 읽으면 시스템 경로는 아무것도 안 죽임
+  - AI 검토(Opus · medium · 도구 없음 · 2분)가 그 규칙 안에서 대상을 고르거나 「기다림」 — 최종 결정은 `decide()` · AI 실패 시 폭주는 규칙대로 · 시스템은 알림만 · `MEMORY_WATCHDOG_AI_REVIEW=0` 이면 규칙만
+  - 자동 종료 직전 다시 잼 — 압박이 풀렸으면 안 쏨 · 판정 · 취소 · 자동 종료는 `~/.claude/state/memory-watchdog-events.jsonl`
+  - Kill/Ignore/Exclude 버튼 · Exclude 는 런타임 예외(디스크 영속화 없음) · 시스템 프로세스 보호 목록 + 자기 자신 제외
   - `ASSISTANT_DM_CHANNEL`로 알림 전송, Windows 전용 (`process.platform === 'win32'`)
-  - 단일 프로세스 커밋이 `processThresholdMB` (기본 5120MB) 초과 시 시스템 임계치 미달이어도 확인 메시지 발송
-  - 환경변수: `MEMORY_WATCHDOG_ENABLED`, `MEMORY_WATCHDOG_THRESHOLD_PCT`, `MEMORY_WATCHDOG_PROCESS_THRESHOLD_MB`, `MEMORY_WATCHDOG_INTERVAL_SEC`, `MEMORY_WATCHDOG_AUTO_KILL_SEC`
+  - 환경변수: `MEMORY_WATCHDOG_ENABLED`, `MEMORY_WATCHDOG_THRESHOLD_PCT`, `MEMORY_WATCHDOG_PROCESS_THRESHOLD_MB`, `MEMORY_WATCHDOG_INTERVAL_SEC`, `MEMORY_WATCHDOG_AUTO_KILL_SEC`, `MEMORY_WATCHDOG_RUNAWAY_KILL_SEC`, `MEMORY_WATCHDOG_AI_REVIEW`
+  - 검사: `npm run check:watchdog`
 
 ### CLI Integration
 - `child_process.spawn('claude', ['-p', '--output-format', 'stream-json', ...])` 방식

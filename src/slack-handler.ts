@@ -645,6 +645,14 @@ export class SlackHandler {
             }
           }
         },
+        {
+          reviewer: config.memoryWatchdog.aiReview ? (prompt) => this.reviewMemoryTarget(prompt) : undefined,
+          // 자정 · 정오 파이프라인 러너의 잠금 파일 — 러너는 세션 밖에서 떨어져 돌아 계보로 못 잡는다
+          pipelineLockFile: config.assistant.configDir
+            ? path.join(config.assistant.configDir, '..', 'reports', 'pipeline-runs', '.lock-pipeline.json')
+            : undefined,
+          runawayDelaySec: config.memoryWatchdog.runawayKillDelaySec,
+        },
       );
     }
 
@@ -3077,6 +3085,31 @@ export class SlackHandler {
    * Used by AssistantScheduler for briefing, reminders, and analysis.
    * Reuses OAuth injection (line 500-506) + for-await loop (line 525) + extractTextFromContent (line 987).
    */
+  /**
+   * 메모리 감시기의 종료 대상 검토 — 도구 없이 글만 주고받는 Opus(medium) 한 번(2026-09-29 사용자 결정).
+   * 설정 · 규칙 파일 · 훅을 안 싣는다(`settingSources: []`) — 압박 중이라 가볍게 · 2분 안에.
+   * 실패하면 null — 감시기가 규칙으로 물러난다(`process-memory-watchdog.ts` 의 `decide`).
+   */
+  private async reviewMemoryTarget(prompt: string): Promise<string | null> {
+    try {
+      const r = await this.runAssistantSession(prompt, {
+        workingDirectory: os.tmpdir(),
+        model: 'opus',
+        effort: 'medium',
+        tools: [],
+        settingSources: [],
+        skipMcp: true,
+        noSessionPersistence: true,
+        maxDurationMs: 120_000,
+        useSdk: shouldUseSdk('watchdog'),
+      });
+      return r.isError ? null : r.text;
+    } catch (err) {
+      this.logger.warn('메모리 감시기 검토 실패 — 규칙으로 물러남', err);
+      return null;
+    }
+  }
+
   private async runAssistantSession(prompt: string, opts: SpawnOpts): Promise<SessionResult> {
     // OAuth token injection — handleMessage pattern (line 494-506)
     this.accountManager.syncFromCredentialsFile();

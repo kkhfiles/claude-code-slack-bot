@@ -399,6 +399,18 @@ const messages: Record<string, Record<Locale, string>> = {
     en: ':no_entry_sign: `{{name}}` (PID {{pid}}) — excluded from future watchdog alerts.',
     ko: ':no_entry_sign: `{{name}}` (PID {{pid}}) — 향후 워치독 감시에서 제외됨.',
   },
+  'watchdog.review': {
+    en: ':robot_face: Review ({{source}}): {{reason}}',
+    ko: ':robot_face: 검토({{source}}): {{reason}}',
+  },
+  'watchdog.alertOnly': {
+    en: ':warning: *System Memory Warning — no auto-kill*\nCommit memory: {{committedMB}} MB / {{limitMB}} MB ({{pct}}%)\n{{review}}\nTop users: {{top}}',
+    ko: ':warning: *시스템 메모리 경고 — 자동 종료 안 함*\n커밋 메모리: {{committedMB}} MB / {{limitMB}} MB ({{pct}}%)\n{{review}}\n많이 쓰는 것: {{top}}',
+  },
+  'watchdog.cancelled': {
+    en: ':white_check_mark: `{{name}}` (PID {{pid}}) — pressure eased ({{now}}), not killed.',
+    ko: ':white_check_mark: `{{name}}` (PID {{pid}}) — 압박이 풀려({{now}}) 종료하지 않았습니다.',
+  },
 };
 
 /**

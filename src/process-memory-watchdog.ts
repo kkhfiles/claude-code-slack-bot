@@ -1,5 +1,6 @@
 import { exec } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
 import { Logger } from './logger';
@@ -33,7 +34,7 @@ interface PendingKill {
 }
 
 /** System commit memory status */
-interface CommitStatus {
+export interface CommitStatus {
   committedMB: number;
   limitMB: number;
   usagePct: number;
@@ -85,6 +86,199 @@ const PROTECTED_PROCESSES = new Set([
   'registry', 'secure system', 'ntoskrnl',
 ]);
 
+// ── 종료 대상 판정 (2026-09-29) ────────────────────────────────────────
+//
+// **목적은 이 PC 에서 상시 도는 작업이 메모리 고갈로 넘어지지 않게 하는 것이다.** 감시기가 그
+// 작업을 직접 죽이는 것도 같은 사고다. 4~9월 실측으로 두 경로가 갈렸다.
+//   - 실제 가상 메모리 부족(윈도 이벤트 2004) 22일 중 19일은 한 프로세스가 혼자 8~65GB 로
+//     부푼 폭주였다 — 프로세스 기준(7GB)이 그 대부분을 먼저 잡았다.
+//   - 시스템 90% 는 5/20 이후 33번 울렸는데 실제 부족과 겹친 것은 4번이다. 나머지는 자정 ·
+//     정오 동기화의 봉우리였고, 「가장 큰 것」으로 고른 대상은 대개 그 동기화의 python 이었다
+//     (sync-v2 커밋 데몬을 겨눈 것만 6번 · 그중 4번이 반영 미완으로 끝났다).
+// 그래서 — 폭주는 빨리 끊고, 상시 작업은 폭주가 아닌 한 끊지 않고(계보로 판정 · 기계),
+// 그 사이 애매한 판단은 AI 검토(Opus · medium)에 맡긴다.
+
+export type Role = 'host' | 'stanley' | 'pipeline';
+export type Path = 'runaway' | 'system';
+
+/** 프로세스 표 한 줄 — 계보를 따라가려고 부모와 명령줄을 같이 받는다. */
+export interface ProcRow { pid: number; ppid: number; name: string; cmd: string }
+
+export interface Candidate {
+  pid: number;
+  name: string;
+  commitMB: number;
+  startTicks: string;
+  role: Role | null;
+  /** 최근 몇 회차(3분 간격) 사이 늘어난 MB · 기록이 없으면 null */
+  growthMB: number | null;
+  parent: string;
+  cmd: string;
+}
+
+export interface Verdict { action: 'kill' | 'wait'; pid: number | null; reason: string }
+
+export interface Decision {
+  kind: 'kill' | 'alert';
+  target?: Candidate;
+  delaySec: number;
+  source: 'ai' | 'rule' | 'none';
+  reason: string;
+}
+
+const ROLE_LABEL: Record<Role, string> = {
+  host: '스탠리를 띄운 쪽', stanley: '스탠리 세션', pipeline: '자정 · 정오 동기화',
+};
+
+/**
+ * 상시 작업의 계보를 가른다 — 스탠리의 조상(`host` · 죽이면 감시기도 같이 죽는다), 스탠리의
+ * 자손(`stanley` · 예약 분석 · 처리 제안 세션 등), 파이프라인 러너와 그 자손(`pipeline`).
+ * 러너는 세션 밖에서 떨어져 돌아(DETACHED) 스탠리 계보에 안 걸리므로 잠금 파일의 PID 로 잡는다.
+ */
+export function classifyRoles(rows: ProcRow[], roots: { botPid: number; pipelinePid?: number | null }):
+    Map<number, Role> {
+  const byPid = new Map(rows.map((r) => [r.pid, r]));
+  const children = new Map<number, number[]>();
+  for (const r of rows) {
+    if (r.ppid === r.pid) continue;
+    const list = children.get(r.ppid) || [];
+    list.push(r.pid);
+    children.set(r.ppid, list);
+  }
+  const roles = new Map<number, Role>();
+  const descend = (root: number, role: Role) => {
+    const stack = [root];
+    while (stack.length) {
+      const pid = stack.pop()!;
+      if (roles.has(pid) && pid !== root) continue;
+      roles.set(pid, role);
+      for (const c of children.get(pid) || []) if (!roles.has(c)) stack.push(c);
+    }
+  };
+  if (roots.pipelinePid && byPid.has(roots.pipelinePid)) descend(roots.pipelinePid, 'pipeline');
+  descend(roots.botPid, 'stanley');
+  roles.delete(roots.botPid);
+  // 조상은 마지막에 덮는다 — 무엇보다 먼저 지켜야 한다
+  let cur = byPid.get(roots.botPid);
+  for (let i = 0; cur && i < 50; i += 1) {
+    const parent = byPid.get(cur.ppid);
+    if (!parent || parent.pid === cur.pid) break;
+    roles.set(parent.pid, 'host');
+    cur = parent;
+  }
+  return roles;
+}
+
+/** AI 답 → 판정. 모양이 어긋나면 null(= 실패로 처리). */
+export function parseVerdict(text: string | null | undefined): Verdict | null {
+  if (!text) return null;
+  const s = text.indexOf('{');
+  const e = text.lastIndexOf('}');
+  if (s < 0 || e <= s) return null;
+  try {
+    const d = JSON.parse(text.slice(s, e + 1));
+    if (d.action !== 'kill' && d.action !== 'wait') return null;
+    const pid = d.pid === null || d.pid === undefined ? null : Number(d.pid);
+    if (d.action === 'kill' && !Number.isInteger(pid)) return null;
+    return { action: d.action, pid: d.action === 'kill' ? pid : null, reason: String(d.reason || '').slice(0, 300) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 판정 규칙 — AI 답이 있든 없든 여기서 최종 결정한다(AI 는 규칙 안에서만 고른다).
+ *
+ * | 경로 | 죽일 수 있는 것 | AI 가 kill | AI 가 wait | AI 실패 |
+ * |---|---|---|---|---|
+ * | 폭주 | 기준 넘은 것(스탠리 조상 빼고) | 그것 | 시스템도 기준 넘었으면 거절 → 규칙 | 가장 큰 폭주 |
+ * | 시스템 | 상시 작업 계보 밖 | 그것 | 알림만 | 알림만 |
+ */
+export function decide(input: {
+  path: Path; candidates: Candidate[]; verdict: Verdict | null; systemHigh: boolean;
+  processThresholdMB: number; runawayDelaySec: number; systemDelaySec: number;
+  /** 프로세스 표를 읽었나. 못 읽었으면 누가 상시 작업인지 모르므로 시스템 경로는 아무것도 안 죽인다. */
+  lineageKnown: boolean;
+}): Decision {
+  const { path: p, candidates, verdict } = input;
+  const killable = p === 'runaway'
+    ? candidates.filter((c) => c.commitMB >= input.processThresholdMB && c.role !== 'host')
+    : input.lineageKnown ? candidates.filter((c) => c.role === null) : [];
+  const delaySec = p === 'runaway' ? input.runawayDelaySec : input.systemDelaySec;
+  if (verdict?.action === 'kill') {
+    const hit = killable.find((c) => c.pid === verdict.pid);
+    if (hit) return { kind: 'kill', target: hit, delaySec, source: 'ai', reason: verdict.reason };
+  }
+  if (verdict?.action === 'wait' && !(p === 'runaway' && input.systemHigh)) {
+    return { kind: 'alert', delaySec: 0, source: 'ai', reason: verdict.reason };
+  }
+  // 여기부터는 AI 가 없거나 · 실패했거나 · 규칙 밖을 골랐다
+  const why = !input.lineageKnown && p === 'system' ? '프로세스 계보를 못 읽음'
+    : !verdict ? 'AI 검토 실패'
+      : verdict.action === 'kill' ? `AI 가 고른 PID ${verdict.pid} 는 종료할 수 없는 대상`
+        : '폭주 중에 시스템도 기준을 넘어 기다릴 수 없음';
+  if (p === 'runaway' && killable.length) {
+    const top = [...killable].sort((a, b) => b.commitMB - a.commitMB)[0];
+    return { kind: 'kill', target: top, delaySec, source: 'rule', reason: `${why} — 가장 큰 폭주를 규칙대로` };
+  }
+  return { kind: 'alert', delaySec: 0, source: 'none', reason: `${why} — 상시 작업을 지키려고 자동 종료하지 않음` };
+}
+
+/** 자동 종료 직전 — 그 사이 압박이 풀렸으면 쏘지 않는다(2026-09-29: 종료 순간 89.4% 였다). */
+export function stillWarranted(p: Path, now: { usagePct: number | null; targetMB: number | null },
+                               th: { thresholdPct: number; processThresholdMB: number }): boolean {
+  if (p === 'system') return now.usagePct !== null && now.usagePct >= th.thresholdPct;
+  return now.targetMB !== null && now.targetMB >= th.processThresholdMB;
+}
+
+export function buildReviewPrompt(ctx: {
+  path: Path; status: CommitStatus; thresholdPct: number; processThresholdMB: number;
+  candidates: Candidate[]; pipelineRunning: boolean; delaySec: number;
+}): string {
+  const row = (c: Candidate) => `| ${c.pid} | ${c.name} | ${c.commitMB} | `
+    + `${c.growthMB === null ? '?' : (c.growthMB >= 0 ? '+' : '') + c.growthMB} | `
+    + `${c.role ? `보호 — ${ROLE_LABEL[c.role]}` : '-'} | ${c.parent} | ${c.cmd.replace(/\|/g, '/').slice(0, 160)} |`;
+  return [
+    '이 PC 의 메모리 감시기가 자동 종료 대상을 정하려 한다. 도구 없이 아래 자료만으로 판정해 JSON 하나로 답한다.',
+    '',
+    '목적: 이 PC 에서 상시 도는 작업(스탠리 봇과 그 세션 · 자정 · 정오 동기화 파이프라인)이 메모리 고갈로 넘어지지 않게 지킨다. 감시기가 그 작업을 직접 죽이는 것도 같은 사고다.',
+    '',
+    `경로: ${ctx.path === 'runaway'
+      ? `폭주 — 한 프로세스가 ${ctx.processThresholdMB} MB 이상`
+      : `시스템 — 커밋 ${ctx.thresholdPct}% 이상 · 기준을 넘은 단일 프로세스는 없음`}`,
+    `시스템 커밋: ${ctx.status.committedMB}/${ctx.status.limitMB} MB (${ctx.status.usagePct}%) · 페이지 파일이 고정이라 100% 에서 메모리 할당이 실패한다`,
+    `동기화 파이프라인: ${ctx.pipelineRunning ? '지금 도는 중' : '안 돎'} · 판정이 kill 이면 ${Math.round(ctx.delaySec / 60)}분 뒤 다시 재서 여전히 넘으면 종료`,
+    '',
+    '| PID | 이름 | 메모리 MB | 최근 변화 MB | 역할 | 부모 | 명령줄 |',
+    '|---|---|---|---|---|---|---|',
+    ...ctx.candidates.map(row),
+    '',
+    '판정 규칙',
+    '- 폭주: 한 프로세스가 기준 이상이거나 다른 것보다 몇 배 크고 계속 커지면 그것이 주범이다. 지난 1년 실제 고갈 22일 중 19일이 폭주 하나(8~65GB)였다.',
+    '- 폭주 경로는 원칙적으로 kill. wait 는 시스템 커밋이 기준 미만이고 그 프로세스가 커지지 않을 때만(정상 작업의 큰 메모리).',
+    '- 시스템 경로에서 「보호」 표시가 있는 것은 고르지 않는다(골라도 거절된다). 사용자가 쓰는 대화형 프로그램(터미널 안의 claude · 편집기)보다 백그라운드 부가 프로그램(브라우저 · 장치 에이전트 · 디스크 분석기 등)을 먼저 고른다.',
+    '- 뚜렷한 주범 없이 여러 프로세스가 고르게 쓰면 wait — 동기화 봉우리는 대개 10~20분 안에 스스로 내려온다.',
+    '- pid 는 위 표에 있는 것만.',
+    '',
+    '답(다른 글 없이 JSON 하나): {"action": "kill" 또는 "wait", "pid": 숫자 또는 null, "reason": "사람에게 보일 한 줄"}',
+  ].join('\n');
+}
+
+/** 감시기 판정 기록 — 나중에 판정이 맞았는지 대조한다. 자동 종료도 여기 남는다(전에는 로그에 없었다). */
+export function watchdogEventsFile(): string {
+  return process.env.MEMORY_WATCHDOG_EVENTS_FILE
+    || path.join(os.homedir(), '.claude', 'state', 'memory-watchdog-events.jsonl');
+}
+
+export interface WatchdogOptions {
+  /** 판정 세션 — 프롬프트를 받아 답 글을 돌려준다(실패하면 null). 없으면 규칙만. */
+  reviewer?: (prompt: string) => Promise<string | null>;
+  /** 파이프라인 러너 잠금 파일(`{"pid": …}`) — 러너 계보를 잡는 근거 */
+  pipelineLockFile?: string;
+  /** 폭주 경로 자동 종료 유예(초). 시스템 경로는 생성자의 autoKillDelaySec. */
+  runawayDelaySec?: number;
+}
+
 export class ProcessMemoryWatchdog {
   private checkTimer: ReturnType<typeof setInterval> | null = null;
   private pendingKills: Map<number, PendingKill> = new Map();
@@ -92,6 +286,14 @@ export class ProcessMemoryWatchdog {
   private cachedCommitLimitMB: number = 0;
   private logger = new Logger('MemoryWatchdog');
   private locale: Locale = 'ko';
+  /** PID → 최근 메모리(MB) · 3분 간격 몇 회차. 시작 시각이 바뀌면(번호 재사용) 새로 시작. */
+  private history: Map<number, { ticks: string; mb: number[] }> = new Map();
+  /** 판정 세션이 도는 중 — 겹쳐 띄우지 않는다. */
+  private reviewing = false;
+  /** 시스템 경로는 한 번 오른 봉우리에 한 번만 판정한다(전에는 3분마다 다음 큰 것을 겨눴다). */
+  private systemEpisodeOpen = false;
+  /** 폭주 경로에서 「기다림」을 받은 PID → 그때 크기. 1GB 넘게 더 커지기 전엔 다시 안 묻는다. */
+  private waitedAt: Map<number, { mb: number; at: number }> = new Map();
 
   constructor(
     private thresholdPct: number,
@@ -101,6 +303,7 @@ export class ProcessMemoryWatchdog {
     private sendMessage: SendMessageFn,
     private updateMessage: UpdateMessageFn,
     private onProcessKilled?: OnProcessKilledFn,
+    private opts: WatchdogOptions = {},
   ) {}
 
   start(): void {
@@ -418,40 +621,117 @@ export class ProcessMemoryWatchdog {
       }
     }
 
+    this.remember(processes);
+
     // Filter out protected processes, excluded PIDs, our own PID, and already-pending PIDs
     const myPid = process.pid;
-    const candidates = processes.filter(p =>
+    const base = processes.filter(p =>
       p.pid !== myPid &&
       !PROTECTED_PROCESSES.has(p.name.toLowerCase()) &&
       !this.excludedPids.has(p.pid) &&
       !this.pendingKills.has(p.pid),
     );
+    const runaways = base.filter(p => p.commitMB >= this.processThresholdMB && !this.waitStillHolds(p));
 
-    const target = candidates[0]; // already sorted descending by commitMB
-    const processHigh = target !== undefined && target.commitMB >= this.processThresholdMB;
+    // 봉우리가 내려오면(기준 −3%p) 다음 봉우리에 다시 판정한다
+    if (!systemHigh && status.usagePct < this.thresholdPct - 3) this.systemEpisodeOpen = false;
 
-    if (!systemHigh && !processHigh) {
-      this.logger.debug(`System commit: ${status.committedMB.toLocaleString()}/${status.limitMB.toLocaleString()} MB (${status.usagePct}%) — OK`);
+    const route: Path | null = runaways.length ? 'runaway'
+      : (systemHigh && !this.systemEpisodeOpen) ? 'system' : null;
+    if (!route) {
+      this.logger.debug(`System commit: ${status.committedMB.toLocaleString()}/${status.limitMB.toLocaleString()} MB (${status.usagePct}%) — ${systemHigh ? 'HIGH · 이미 판정한 봉우리' : 'OK'}`);
       return;
     }
+    if (this.reviewing) return;
 
     if (systemHigh) {
       this.logger.warn(`System commit HIGH: ${status.committedMB.toLocaleString()}/${status.limitMB.toLocaleString()} MB (${status.usagePct}%) — threshold ${this.thresholdPct}%`);
     }
-    if (processHigh && !systemHigh) {
-      this.logger.warn(`Process commit HIGH: ${target!.name} (PID ${target!.pid}, ${target!.commitMB} MB) — threshold ${this.processThresholdMB} MB`);
+    if (route === 'runaway') {
+      this.logger.warn(`Process commit HIGH: ${runaways[0].name} (PID ${runaways[0].pid}, ${runaways[0].commitMB} MB) — threshold ${this.processThresholdMB} MB`);
     }
 
-    if (!target) {
-      this.logger.warn('No killable candidates found despite high commit usage');
-      return;
+    this.reviewing = true;
+    try {
+      if (route === 'system') this.systemEpisodeOpen = true;
+      await this.judge(route, status, base, systemHigh);
+    } finally {
+      this.reviewing = false;
     }
-
-    await this.sendKillConfirmation(target, status, processHigh && !systemHigh);
   }
 
-  private async sendKillConfirmation(target: ProcessInfo, status: CommitStatus, processOnly: boolean): Promise<void> {
-    const text = t(processOnly ? 'watchdog.confirmProcess' : 'watchdog.confirm', this.locale, {
+  /** 상시 작업 계보를 붙이고 · AI 에게 묻고 · 규칙으로 최종 결정해 · 종료 예약이나 알림을 낸다. */
+  private async judge(route: Path, status: CommitStatus, base: ProcessInfo[], systemHigh: boolean): Promise<void> {
+    const rows = await this.getProcessTable();
+    const pipelinePid = this.readPipelinePid();
+    const roles = classifyRoles(rows, { botPid: process.pid, pipelinePid });
+    const byPid = new Map(rows.map(r => [r.pid, r]));
+    const candidates: Candidate[] = base.slice(0, 10).map(p => {
+      const row = byPid.get(p.pid);
+      return {
+        pid: p.pid, name: p.name, commitMB: p.commitMB, startTicks: p.startTicks,
+        role: roles.get(p.pid) ?? null, growthMB: this.growth(p.pid),
+        parent: row ? (byPid.get(row.ppid)?.name ?? `PID ${row.ppid}`) : '?',
+        cmd: row?.cmd ?? '',
+      };
+    }).filter(c => c.role !== 'host');   // 스탠리의 조상은 후보로도 안 보인다 — 죽이면 감시기도 죽는다
+
+    const delaySec = route === 'runaway' ? (this.opts.runawayDelaySec ?? 180) : this.autoKillDelaySec;
+    let verdict: Verdict | null = null;
+    let reviewMs = 0;
+    if (this.opts.reviewer && candidates.length && (route === 'runaway' || rows.length > 0)) {
+      const t0 = Date.now();
+      const prompt = buildReviewPrompt({
+        path: route, status, thresholdPct: this.thresholdPct, processThresholdMB: this.processThresholdMB,
+        candidates, pipelineRunning: !!pipelinePid && byPid.has(pipelinePid), delaySec,
+      });
+      verdict = parseVerdict(await this.opts.reviewer(prompt).catch(() => null));
+      reviewMs = Date.now() - t0;
+    }
+    const decision = decide({
+      path: route, candidates, verdict, systemHigh, processThresholdMB: this.processThresholdMB,
+      runawayDelaySec: this.opts.runawayDelaySec ?? 180, systemDelaySec: this.autoKillDelaySec,
+      lineageKnown: rows.length > 0,
+    });
+    this.record({
+      phase: 'decide', route, pct: status.usagePct, verdict, reviewMs, decision: {
+        kind: decision.kind, source: decision.source, reason: decision.reason,
+        target: decision.target ? { pid: decision.target.pid, name: decision.target.name, mb: decision.target.commitMB, role: decision.target.role } : null,
+      },
+      candidates: candidates.slice(0, 6).map(c => ({ pid: c.pid, name: c.name, mb: c.commitMB, role: c.role, growth: c.growthMB })),
+    });
+    this.logger.info(`판정 ${route} → ${decision.kind}(${decision.source}) ${decision.target ? `${decision.target.name} PID ${decision.target.pid}` : ''} — ${decision.reason}`);
+
+    if (decision.kind === 'kill' && decision.target) {
+      await this.sendKillConfirmation(decision.target, status, route, decision);
+      return;
+    }
+    if (route === 'runaway') {
+      // 기다리기로 한 폭주 — 1GB 넘게 더 커지기 전엔 다시 안 묻는다(3분마다 같은 DM 방지)
+      for (const c of candidates.filter(x => x.commitMB >= this.processThresholdMB)) {
+        this.waitedAt.set(c.pid, { mb: c.commitMB, at: Date.now() });
+      }
+    }
+    await this.sendAlert(status, decision, candidates);
+  }
+
+  private async sendAlert(status: CommitStatus, decision: Decision, candidates: Candidate[]): Promise<void> {
+    const top = candidates.slice(0, 3)
+      .map(c => `\`${c.name}\` ${c.commitMB.toLocaleString()} MB${c.role ? `(${ROLE_LABEL[c.role]})` : ''}`).join(' · ');
+    const text = t('watchdog.alertOnly', this.locale, {
+      committedMB: status.committedMB.toLocaleString(),
+      limitMB: status.limitMB.toLocaleString(),
+      pct: String(status.usagePct),
+      review: t('watchdog.review', this.locale, { source: decision.source, reason: decision.reason }),
+      top: top || '-',
+    });
+    await this.sendMessage(text).catch(e => this.logger.error('Failed to send watchdog alert', e));
+  }
+
+  private async sendKillConfirmation(target: Candidate, status: CommitStatus, route: Path,
+                                     decision: Decision): Promise<void> {
+    const delaySec = decision.delaySec;
+    const text = t(route === 'runaway' ? 'watchdog.confirmProcess' : 'watchdog.confirm', this.locale, {
       committedMB: status.committedMB.toLocaleString(),
       limitMB: status.limitMB.toLocaleString(),
       pct: String(status.usagePct),
@@ -459,8 +739,9 @@ export class ProcessMemoryWatchdog {
       name: target.name,
       commitMB: String(target.commitMB.toLocaleString()),
       processThresholdMB: this.processThresholdMB.toLocaleString(),
-      minutes: String(Math.round(this.autoKillDelaySec / 60)),
-    });
+      minutes: String(Math.max(1, Math.round(delaySec / 60))),
+    }) + '\n' + t('watchdog.review', this.locale, { source: decision.source, reason: decision.reason })
+      + (target.role ? `\n역할: ${ROLE_LABEL[target.role]} — 폭주로 판정돼 예외적으로 종료 대상` : '');
 
     const blocks = [
       {
@@ -501,10 +782,25 @@ export class ProcessMemoryWatchdog {
       if (!pending) return;
       this.pendingKills.delete(target.pid);
 
-      // 기본 10분 뒤에 도는 자리다. 그 사이 PID 가 재사용됐으면 쏘지 않는다.
+      // **쏘기 직전에 다시 잰다.** 그 사이 압박이 풀렸으면 쏘지 않는다 — 9/29 00:15 에는
+      // 커밋이 이미 89.4% 로 기준 아래였는데 그대로 동기화 커밋 데몬을 죽였다.
+      const now = route === 'system'
+        ? { usagePct: (await this.getSystemCommitStatus())?.usagePct ?? null, targetMB: null }
+        : { usagePct: null, targetMB: await this.getProcessMB(target.pid) };
+      if (!stillWarranted(route, now, { thresholdPct: this.thresholdPct, processThresholdMB: this.processThresholdMB })) {
+        const shown = route === 'system' ? `커밋 ${now.usagePct ?? '측정 실패'}%` : `${now.targetMB ?? '측정 실패'} MB`;
+        await this.updateMessage(pending.messageTs,
+          t('watchdog.cancelled', this.locale, { pid: String(target.pid), name: target.name, now: shown }),
+        ).catch(() => {});
+        this.record({ phase: 'cancel', route, pid: target.pid, name: target.name, now });
+        this.logger.info(`자동 종료 취소 — ${target.name} (PID ${target.pid}) · ${shown}`);
+        return;
+      }
+
+      // 그 사이 PID 가 재사용됐으면 쏘지 않는다.
       const outcome = this.killIfSame(target.pid, target.name, target.startTicks);
       const autoText = outcome === 'killed'
-        ? t('watchdog.autoKill', this.locale, { pid: String(target.pid), name: target.name, commitMB: String(target.commitMB), minutes: String(Math.round(this.autoKillDelaySec / 60)) })
+        ? t('watchdog.autoKill', this.locale, { pid: String(target.pid), name: target.name, commitMB: String(target.commitMB), minutes: String(Math.max(1, Math.round(delaySec / 60))) })
         : outcome === 'gone'
           ? t('watchdog.alreadyGone', this.locale, { pid: String(target.pid), name: target.name })
           : outcome === 'recycled'
@@ -514,12 +810,15 @@ export class ProcessMemoryWatchdog {
       await this.updateMessage(pending.messageTs, autoText).catch(e =>
         this.logger.error('Failed to update watchdog auto-kill message', e),
       );
+      // 자동 종료 결과를 남긴다 — 전에는 로그에 없어 「죽였나 · 스스로 끝났나」를 가를 수 없었다
+      this.record({ phase: 'auto-kill', route, pid: target.pid, name: target.name, mb: target.commitMB, outcome });
+      this.logger.info(`자동 종료 ${outcome} — ${target.name} (PID ${target.pid}, ${target.commitMB} MB)`);
 
       if (outcome === 'killed') {
         this.onProcessKilled?.(target.pid, target.name);
-        errorCollector.add('MemoryWatchdog', `Auto-killed ${target.name} (PID ${target.pid}, ${target.commitMB} MB) after ${this.autoKillDelaySec}s timeout`);
+        errorCollector.add('MemoryWatchdog', `Auto-killed ${target.name} (PID ${target.pid}, ${target.commitMB} MB) after ${delaySec}s timeout`);
       }
-    }, this.autoKillDelaySec * 1000);
+    }, delaySec * 1000);
 
     this.pendingKills.set(target.pid, {
       pid: target.pid,
@@ -531,6 +830,93 @@ export class ProcessMemoryWatchdog {
     });
 
     this.logger.info(`Kill confirmation sent for ${target.name} (PID ${target.pid}, ${target.commitMB} MB)`);
+  }
+
+  /** 회차마다 상위 프로세스 크기를 적어 둔다 — 「계속 커지는가」가 폭주를 가르는 재료다. */
+  private remember(processes: ProcessInfo[]): void {
+    const seen = new Set<number>();
+    for (const p of processes) {
+      seen.add(p.pid);
+      const h = this.history.get(p.pid);
+      if (!h || h.ticks !== p.startTicks) {
+        this.history.set(p.pid, { ticks: p.startTicks, mb: [p.commitMB] });
+      } else {
+        h.mb.push(p.commitMB);
+        if (h.mb.length > 5) h.mb.shift();
+      }
+    }
+    for (const pid of [...this.history.keys()]) if (!seen.has(pid)) this.history.delete(pid);
+    for (const pid of [...this.waitedAt.keys()]) if (!seen.has(pid)) this.waitedAt.delete(pid);
+  }
+
+  private growth(pid: number): number | null {
+    const h = this.history.get(pid);
+    return h && h.mb.length > 1 ? h.mb[h.mb.length - 1] - h.mb[0] : null;
+  }
+
+  /** 기다리기로 한 폭주가 그 뒤 1GB 넘게 더 커지지 않았으면 다시 묻지 않는다(최대 30분). */
+  private waitStillHolds(p: ProcessInfo): boolean {
+    const w = this.waitedAt.get(p.pid);
+    if (!w) return false;
+    if (p.commitMB - w.mb >= 1024 || Date.now() - w.at > 30 * 60_000) {
+      this.waitedAt.delete(p.pid);
+      return false;
+    }
+    return true;
+  }
+
+  /** 전체 프로세스 표(부모 · 명령줄) — 판정할 때만 부른다(3분마다 부르기엔 무겁다). */
+  private async getProcessTable(): Promise<ProcRow[]> {
+    try {
+      const ps = 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress';
+      const { stdout } = await execAsync(`powershell -NoProfile -Command "${ps}"`,
+        { timeout: 30_000, windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
+      const data = JSON.parse(stdout || '[]');
+      return (Array.isArray(data) ? data : [data]).map((r: any) => ({
+        pid: Number(r.ProcessId), ppid: Number(r.ParentProcessId),
+        name: String(r.Name || '').replace(/\.exe$/i, ''), cmd: String(r.CommandLine || ''),
+      }));
+    } catch (e) {
+      // 빈 표 = 계보를 모름. 부르는 쪽(`decide` 의 lineageKnown)이 시스템 경로 종료를 막는다 —
+      // 모두 계보 밖으로 보이면 동기화 프로세스가 후보가 되기 때문이다.
+      this.logger.warn('프로세스 표를 못 읽음', e as Error);
+      return [];
+    }
+  }
+
+  /** 자정 · 정오 파이프라인 러너 PID — 잠금 파일에서. 없거나 못 읽으면 null. */
+  private readPipelinePid(): number | null {
+    const f = this.opts.pipelineLockFile;
+    if (!f) return null;
+    try {
+      const pid = Number(JSON.parse(fs.readFileSync(f, 'utf-8')).pid);
+      return Number.isInteger(pid) && pid > 0 ? pid : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async getProcessMB(pid: number): Promise<number | null> {
+    try {
+      const { stdout } = await execAsync(
+        `powershell -NoProfile -Command "$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p) { $p.PM }"`,
+        { timeout: 15_000, windowsHide: true },
+      );
+      const b = parseInt(stdout.trim(), 10);
+      return Number.isFinite(b) ? Math.round(b / (1024 * 1024)) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private record(ev: Record<string, unknown>): void {
+    try {
+      const f = watchdogEventsFile();
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.appendFileSync(f, JSON.stringify({ ts: new Date().toISOString(), ...ev }) + '\n', 'utf-8');
+    } catch (e) {
+      this.logger.warn('감시기 판정 기록 실패', e as Error);
+    }
   }
 
   private async getSystemCommitStatus(): Promise<CommitStatus | null> {

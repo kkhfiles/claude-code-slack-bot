@@ -475,7 +475,12 @@ Register up to 3 Claude accounts for rate limit rotation and seamless switching.
 
 ### System Memory Watchdog (Windows only)
 
-Monitors system commit memory to prevent OOM crashes from runaway processes.
+Monitors system commit memory so that always-on work (the bot, its sessions, scheduled pipelines) is not taken down by memory exhaustion — and is not taken down by the watchdog itself.
+
+- **Runaway path** — one process above the per-process threshold is the usual cause of real exhaustion; it is killed after a short delay even if it belongs to always-on work.
+- **System path** — commit % above the threshold with no runaway: processes in the always-on lineage (the bot's ancestors and descendants, the pipeline runner and its children) are never killed; at most one decision per peak.
+- An optional AI review (Opus, medium, no tools) picks the target or chooses to wait, within those rules. If it fails, the runaway path falls back to the rule and the system path only alerts.
+- Right before an automatic kill the watchdog measures again and cancels if the pressure has eased. Decisions and kills are logged to `~/.claude/state/memory-watchdog-events.jsonl`.
 
 **Requirements:**
 - Windows only (uses PowerShell `Get-CimInstance`)
@@ -483,10 +488,13 @@ Monitors system commit memory to prevent OOM crashes from runaway processes.
 
 **Environment variables (all optional):**
 ```env
-MEMORY_WATCHDOG_ENABLED=1           # 0 to disable (default: enabled)
-MEMORY_WATCHDOG_THRESHOLD_PCT=80    # System commit % to trigger alert
-MEMORY_WATCHDOG_INTERVAL_SEC=300    # Check interval (default: 5 min)
-MEMORY_WATCHDOG_AUTO_KILL_SEC=300   # Auto-kill if no response (default: 5 min)
+MEMORY_WATCHDOG_ENABLED=1                  # 0 to disable (default: enabled)
+MEMORY_WATCHDOG_THRESHOLD_PCT=90           # System commit % for the system path
+MEMORY_WATCHDOG_PROCESS_THRESHOLD_MB=7168  # Per-process MB for the runaway path
+MEMORY_WATCHDOG_INTERVAL_SEC=180           # Check interval (default: 3 min)
+MEMORY_WATCHDOG_AUTO_KILL_SEC=600          # System path auto-kill delay (default: 10 min)
+MEMORY_WATCHDOG_RUNAWAY_KILL_SEC=180       # Runaway path auto-kill delay (default: 3 min)
+MEMORY_WATCHDOG_AI_REVIEW=1                # 0 to use rules only
 ```
 
 When triggered, sends a Slack message with Kill/Ignore/Exclude buttons. Auto-kills the largest non-system process after the timeout if no response. Exclude registers the PID as an exception for the current runtime (auto-cleared when the process exits).

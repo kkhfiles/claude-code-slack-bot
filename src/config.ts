@@ -91,6 +91,11 @@ export const config = {
     checkIntervalSec: parseInt(process.env.MEMORY_WATCHDOG_INTERVAL_SEC || '180', 10),
     autoKillDelaySec: parseInt(process.env.MEMORY_WATCHDOG_AUTO_KILL_SEC || '600', 10),
     processThresholdMB: parseInt(process.env.MEMORY_WATCHDOG_PROCESS_THRESHOLD_MB || '7168', 10),
+    // 폭주(프로세스 기준 초과) 자동 종료 유예 — 폭주는 모두를 넘어뜨리므로 시스템 경로보다 짧게.
+    // 실측: 감지 순간 이미 가상 메모리 부족이던 회차가 있다(2026-08-31 · 브라우저 7.5GB).
+    runawayKillDelaySec: parseInt(process.env.MEMORY_WATCHDOG_RUNAWAY_KILL_SEC || '180', 10),
+    // 종료 대상 AI 검토(Opus · medium) — 0 이면 규칙만
+    aiReview: process.env.MEMORY_WATCHDOG_AI_REVIEW !== '0',
   },
   // Lunch recruitment bot. Runs an external Python script that owns its own
   // Slack token and channel — this bot only supplies the 24/7 heartbeat.
