@@ -133,6 +133,8 @@ export function boardQueueDailyCalls(): number {
  */
 const MAIL_POLL_MS = 600_000;
 const MAIL_POLL_FROM_HOUR = 8;
+/** 보고서 파일 시각을 세션 시작과 견줄 때의 여유 — `reportWrittenSince` 참조. */
+const MTIME_SLACK_MS = 50;
 const MAIL_POLL_TO_HOUR = 20;
 /**
  * 시각 알림을 보는 간격. **이 값이 곧 늦게 울릴 수 있는 최대 시간이다** —
@@ -2701,7 +2703,9 @@ export class AssistantScheduler {
         for (const name of fs.readdirSync(base)) {
           if (!name.toLowerCase().endsWith('.md')) continue;
           const full = path.join(base, name);
-          if (fs.statSync(full).mtimeMs >= sinceMs) return full;
+          // 여유 50ms — 파일 시각이 시계보다 이르게 찍힌다(실측 2026-09-29: 시계를 읽고 바로 쓴 파일
+          // 2,000번 중 481번이 최대 1.52ms 앞섬). 없으면 세션 직후 쓴 보고서를 「전 것」으로 읽는다.
+          if (fs.statSync(full).mtimeMs >= sinceMs - MTIME_SLACK_MS) return full;
         }
       } catch {
         // 읽기 실패는 「산출물 없음」으로 두고 넘어간다 — 백스톱이 판정을
