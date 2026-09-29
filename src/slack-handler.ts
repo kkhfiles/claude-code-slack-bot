@@ -35,6 +35,7 @@ import { PremiumSeatSlack } from './premium-seat';
 import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
+import { markDecided } from './action-pipeline';
 import { captureToInbox, checkinMap, checkinNow, dropCapture, isWorkAssistantEnabled,
   markCaptureFailed, markCaptureTried, pendingCaptures, quickUpdate } from './work-assistant';
 import { boardLabel } from './board-queue';
@@ -956,6 +957,11 @@ export class SlackHandler {
         } catch (err) {
           this.logger.warn('NAS confirm queue check failed (manual briefing)', err);
         }
+        // 처리 제안 요약 (예약 · 놓친 브리핑과 같은 블록)
+        const actionBlocks = await this.assistantScheduler.actionDigestBlocks().catch(() => null);
+        if (actionBlocks) {
+          await say({ text: '🗂 처리 제안', blocks: actionBlocks, thread_ts: thread_ts || ts });
+        }
       } catch (error) {
         this.logger.error('Manual briefing failed', error);
         await say({ text: '❌ Briefing failed.', thread_ts: thread_ts || ts });
@@ -977,6 +983,12 @@ export class SlackHandler {
     // NAS confirm command — inbox auto-classify company 분류분 결정 버튼
     if (text && this.isNasCommand(text)) {
       await this.handleNasCommand(thread_ts || ts, say);
+      return;
+    }
+
+    // 처리 제안 — report-log 처리 흐름 (요약 · 지금 검토 · 지금 이어 가기)
+    if (text && this.isActionsCommand(text)) {
+      await this.handleActionsCommand(text, thread_ts || ts, locale, say);
       return;
     }
 
@@ -2565,6 +2577,33 @@ export class SlackHandler {
     }
   }
 
+  private isActionsCommand(text: string): boolean {
+    return /^`?-actions`?(?:\s|$)/i.test(text.trim());
+  }
+
+  /** `-actions` 요약 · `-actions review` 지금 검토 · `-actions run` 지금 이어 가기. */
+  private async handleActionsCommand(text: string, threadTs: string, locale: Locale, say: any): Promise<void> {
+    if (!this.assistantScheduler) {
+      await say({ text: t('assistant.notConfigured', locale), thread_ts: threadTs });
+      return;
+    }
+    const arg = text.trim().replace(/^`?-actions`?\s*/i, '').trim().toLowerCase();
+    if (arg === 'review' || arg === 'run') {
+      const r = this.assistantScheduler.runActionsNow(arg);
+      const key = r === 'unavailable' ? 'actions.unavailable'
+        : r === 'queued' ? 'actions.queued'
+          : arg === 'review' ? 'actions.reviewStarted' : 'actions.runStarted';
+      await say({ text: t(key, locale), thread_ts: threadTs });
+      return;
+    }
+    const blocks = await this.assistantScheduler.actionDigestBlocks().catch(() => null);
+    if (!blocks) {
+      await say({ text: t('actions.empty', locale), thread_ts: threadTs });
+      return;
+    }
+    await say({ text: '🗂 처리 제안', blocks, thread_ts: threadTs });
+  }
+
   /** CLI 결과를 사용자 표시용 한 줄로 (락 충돌은 안내 메시지). */
   private nasResultNote(ok: boolean, detail: string, okText: string): string {
     if (ok) return okText;
@@ -3035,6 +3074,7 @@ export class SlackHandler {
       tools: opts.tools,
       settings: opts.settings,
       settingSources: opts.settingSources,
+      additionalDirectories: opts.additionalDirectories,
       env,
     };
 
@@ -3847,6 +3887,33 @@ export class SlackHandler {
       } catch (error) {
         this.logger.error('NAS retarget failed', error);
         await respond({ response_type: 'ephemeral', text: '❌ 분류 변경 실패' });
+      }
+    });
+
+    // --- 처리 제안 버튼 (report-log) ---
+    // 값은 제안 번호뿐이고 결정은 action_id 에 있다. 번호 형식 · 결정 이름은 실행기가 다시 본다
+    // (버튼 값은 사용자 쪽에서 보이므로 믿지 않는다). 누른 제안의 버튼 줄만 결과 한 줄로 바꾼다.
+    this.action(/^actions_(approve|hold|reject|reopen)$/, async ({ ack, body, respond }) => {
+      await ack();
+      try {
+        if (!this.assistantScheduler) return;
+        const act = (body as any).actions[0];
+        const decision = String(act.action_id || '').replace(/^actions_/, '');
+        const id = String(act.value || '');
+        const r = await this.assistantScheduler.decideAction(id, decision);
+        if (!r.ok) {
+          await respond({ response_type: 'ephemeral', text: r.note });
+          return;
+        }
+        const msg = (body as any).message;
+        await respond({
+          replace_original: true,
+          text: msg?.text || '🗂 처리 제안',
+          blocks: markDecided(msg?.blocks || [], id, r.note),
+        });
+      } catch (error) {
+        this.logger.error('Action proposal decision failed', error);
+        await respond({ response_type: 'ephemeral', text: '❌ 처리 실패' }).catch(() => {});
       }
     });
 

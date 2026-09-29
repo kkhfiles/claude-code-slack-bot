@@ -316,6 +316,7 @@ Conversations in the same thread automatically continue the session (no command 
 |---------|-------------|
 | `-briefing` / `-br` | Run morning briefing now |
 | `-report [type]` / `-rp` | View reports — rollup summary (actionable uploaded individually, clean listed compactly) + bulk archive buttons (`🗂 all` / `🧹 clean`) |
+| `-actions [review\|run]` | Action proposals — list the ones awaiting a decision with approve / hold / reject buttons · `review` reviews queued proposals now · `run` resumes stalled ones. The rules live in a separate repo cloned at `~/.report-log/repo` (`tools/flow.py`); without it the command reports that it is not set up. The hourly timer is the `actions` section of the assistant `config.json` |
 | `-analyze [type]` / `-an` | Run analysis (single type or all) |
 | `-assistant config` / `-as config` | Show assistant configuration |
 | `-assistant briefing HH:MM` | Change briefing time |

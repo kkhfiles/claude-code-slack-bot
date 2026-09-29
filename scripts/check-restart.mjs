@@ -11,6 +11,7 @@
  *   ①-d 오래됐어도 포인터에 있으면(긴 차례가 도는 중) 멈추는가
  *   ② 큐가 방금 움직였으면 기다리는가
  *   ③ 아무것도 안 걸리면 통과시키는가 (막기만 하는 문도 고장이다)
+ *   ④ 처리 제안 세션(report-log 작업 잡기 표시)이 도는 중이면 멈추는가 · 시간 지난 표시는 막지 않는가
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -54,11 +55,26 @@ const liveC3 = path.join(tmp, 'state-live');
 fs.mkdirSync(liveC3);
 fs.writeFileSync(path.join(liveC3, 'work-capture-D1.json'), JSON.stringify({ id: 'c3', at: '2026-09-23T10:00:00' }));
 
+/** 처리 제안 작업 잡기 표시 — **진짜 `~/.report-log` 를 안 읽게** 빈 것 · 도는 중 · 시간 지난 것 셋. */
+const noJob = path.join(tmp, 'rl-empty');
+fs.mkdirSync(noJob);
+const jobState = (name, deadlineMs) => {
+  const dir = path.join(tmp, name);
+  fs.mkdirSync(path.join(dir, 'jobs'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'jobs', 'active.json'), JSON.stringify({
+    id: 'a-20260929-01', job: 'prepare', seq: 2, started_at: new Date().toISOString(),
+    deadline: new Date(Date.now() + deadlineMs).toISOString(),
+  }));
+  return dir;
+};
+const liveJob = jobState('rl-live', 30 * 60_000);
+const deadJob = jobState('rl-dead', -60_000);
+
 function run(env, extra = []) {
   const r = spawnSync(process.execPath, [SCRIPT, '--dry', ...extra], {
     encoding: 'utf-8',
     timeout: 30_000,
-    env: { ...process.env, WORK_CAPTURE_STATE_DIR: noLive, ...env },
+    env: { ...process.env, WORK_CAPTURE_STATE_DIR: noLive, REPORT_LOG_STATE: noJob, ...env },
   });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
@@ -98,6 +114,19 @@ if (forced.code !== 0) {
   fails.push('--force 로도 못 지나간다 — 급하면 스크립트를 건너뛰게 된다');
 }
 
+// ④ 처리 제안 세션이 도는 중이면 멈춘다 — 죽이면 작업 잡기 표시가 제한 시간까지 모든 제안을 막는다
+const job = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, REPORT_LOG_STATE: liveJob });
+if (job.code === 0) {
+  fails.push('처리 제안 세션이 도는 중인데 그냥 재시작한다');
+} else if (!job.out.includes('a-20260929-01')) {
+  fails.push('처리 제안 세션으로 막기는 했는데 어느 제안인지 안 보여준다');
+}
+// ④-b 제한 시간이 지난 표시는 죽은 세션이 남긴 것이다 — 막지 않는다
+const dead = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, REPORT_LOG_STATE: deadJob });
+if (dead.code !== 0) {
+  fails.push('제한 시간이 지난 작업 잡기 표시로 재시작을 막는다');
+}
+
 // ② 큐가 방금 움직였으면 기다린다 (여기서는 기다리기 시작하는 것까지만 본다)
 const busy = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: busyLog });
 if (!busy.out.includes('기다립니다')) {
@@ -111,5 +140,5 @@ if (fails.length) {
   for (const f of fails) console.log(`  ✗ ${f}`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 깨끗하면 지나가고 · 도는 사람 말이 있으면 멈추고 · 끝난 오래된 캡처는 알리기만 · 큐가 돌면 기다리고 · --force 는 뚫린다');
+  console.log('통과 — 깨끗하면 지나가고 · 도는 사람 말이 있으면 멈추고 · 도는 처리 제안 세션도 멈추고 · 끝난 오래된 캡처는 알리기만 · 큐가 돌면 기다리고 · --force 는 뚫린다');
 }

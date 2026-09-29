@@ -20,6 +20,7 @@
 import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -39,18 +40,25 @@ if (!fs.existsSync(TASKS)) {
 }
 
 // ---------- ① 파이썬이 받는 것 ----------
-const allowed = new Map();          // 서브커맨드 → 플래그 집합
-let cur = null;
-for (const line of fs.readFileSync(TASKS, 'utf-8').split('\n')) {
-  const sub = line.match(/add_parser\(\s*["']([a-z_-]+)["']/);
-  if (sub) {
-    cur = sub[1];
-    if (!allowed.has(cur)) allowed.set(cur, new Set());
-    continue;
+/** argparse 소스에서 서브커맨드 → 플래그 집합. */
+function parseCli(files) {
+  const out = new Map();
+  for (const file of files) {
+    let cur = null;
+    for (const line of fs.readFileSync(file, 'utf-8').split('\n')) {
+      const sub = line.match(/add_parser\(\s*["']([a-z_-]+)["']/);
+      if (sub) {
+        cur = sub[1];
+        if (!out.has(cur)) out.set(cur, new Set());
+        continue;
+      }
+      const flag = line.match(/\.add_argument\(\s*["'](--[a-z0-9-]+)["']/);
+      if (flag && cur) out.get(cur).add(flag[1]);
+    }
   }
-  const flag = line.match(/\.add_argument\(\s*["'](--[a-z0-9-]+)["']/);
-  if (flag && cur) allowed.get(cur).add(flag[1]);
+  return out;
 }
+const allowed = parseCli([TASKS]);
 if (allowed.size < 10) {
   // 0 이나 몇 개면 통과가 아니라 **안 본 것**이다. 뽑는 규칙이 헛돌면 이
   // 검사는 조용히 늘 통과하고, 그 사실조차 안 보인다.
@@ -61,20 +69,56 @@ if (allowed.size < 10) {
 // ---------- ② 봇이 부르는 것 ----------
 // 배열 리터럴 중 **첫 칸이 아는 서브커맨드**인 것만 본다. 안의 변수는 건너뛰고
 // 따옴표 친 토큰만 센다 — `['quick', '--file', file]` 이면 quick·--file 이다.
-const calls = [];
-const srcDir = path.join(ROOT, 'src');
-for (const f of fs.readdirSync(srcDir).filter((x) => x.endsWith('.ts'))) {
-  const text = fs.readFileSync(path.join(srcDir, f), 'utf-8');
-  for (const m of text.matchAll(/\[([^[\]\n]*)\]/g)) {
-    const toks = [...m[1].matchAll(/'([^']*)'/g)].map((x) => x[1]);
-    if (toks.length && allowed.has(toks[0])) calls.push({ file: f, toks });
+//
+// **report-log 를 부르는 파일은 따로 센다** — 처리 제안 실행기는 `tasks.py` 가 아니라
+// report-log 의 `flow.py` · `report_log.py` 를 부른다. 같이 세면 `pending` 처럼 이름이 겹치는
+// 서브커맨드가 엉뚱한 쪽과 대조된다.
+const RL_CALLERS = new Set(['action-pipeline.ts']);
+function findCalls(known, files) {
+  const out = [];
+  for (const f of files) {
+    const text = fs.readFileSync(path.join(srcDir, f), 'utf-8');
+    for (const m of text.matchAll(/\[([^[\]\n]*)\]/g)) {
+      const toks = [...m[1].matchAll(/'([^']*)'/g)].map((x) => x[1]);
+      if (toks.length && known.has(toks[0])) out.push({ file: f, toks });
+    }
   }
+  return out;
 }
+const srcDir = path.join(ROOT, 'src');
+const srcFiles = fs.readdirSync(srcDir).filter((x) => x.endsWith('.ts'));
+const calls = findCalls(allowed, srcFiles.filter((f) => !RL_CALLERS.has(f)));
 
 const fails = [];
+const notes = [];
 if (!calls.length) {
   fails.push('봇에서 tasks.py 호출을 하나도 못 찾았습니다 — 찾는 규칙이 헛돕니다');
 }
+
+// report-log — 자동 기록 클론이 있는 PC 에서만 대조한다(없으면 처리 제안도 안 돈다).
+const rlRepo = process.env.REPORT_LOG_REPO
+  || path.join(process.env.REPORT_LOG_STATE || path.join(os.homedir(), '.report-log'), 'repo');
+const rlFiles = ['flow.py', 'report_log.py'].map((x) => path.join(rlRepo, 'tools', x));
+let rlSeen = 0;
+if (rlFiles.every((x) => fs.existsSync(x))) {
+  const rlAllowed = parseCli(rlFiles);
+  const rlCalls = findCalls(rlAllowed, [...RL_CALLERS]);
+  if (rlAllowed.size < 6 || !rlCalls.length) {
+    fails.push(`report-log 대조가 헛돕니다 — 서브커맨드 ${rlAllowed.size}개 · 호출 ${rlCalls.length}개`);
+  }
+  for (const { file, toks } of rlCalls) {
+    rlSeen += 1;
+    const ok = rlAllowed.get(toks[0]);
+    const miss = toks.slice(1).filter((x) => x.startsWith('--') && !ok.has(x));
+    if (miss.length) {
+      fails.push(`${file}: \`${toks.join(' ')}\` — report-log «${toks[0]}» 에 없는 플래그 ${miss.join(' ')}`
+        + `\n    쓸 수 있는 것: ${[...ok].sort().join(' ') || '(없음)'}`);
+    }
+  }
+} else {
+  notes.push(`report-log 자동 기록 클론이 없어 처리 제안 호출은 대조 못 함 — 통과가 아니라 안 본 것 (${rlRepo})`);
+}
+
 const seen = new Set();
 for (const { file, toks } of calls) {
   const key = toks.join(' ');
@@ -93,11 +137,12 @@ for (const { file, toks } of calls) {
   }
 }
 
+for (const n of notes) console.log('⚠️  ' + n);
 if (fails.length) {
   console.log(`실패 ${fails.length}건\n`);
   for (const f of fails) console.log('  ✗ ' + f);
   process.exitCode = 1;
 } else {
   console.log(`통과 — 봇이 부르는 조합 ${seen.size}개가 tasks.py 서브커맨드`
-    + ` ${allowed.size}개 안에 다 있음`);
+    + ` ${allowed.size}개 안에 다 있음 · report-log 호출 ${rlSeen}개도 맞음`);
 }

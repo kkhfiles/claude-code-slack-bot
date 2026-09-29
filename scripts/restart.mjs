@@ -114,6 +114,20 @@ function openCaptures() {
   return { inFlight, stale };
 }
 
+/**
+ * 도는 중인 처리 제안 세션 — report-log 의 작업 잡기 표시(`jobs/active.json`). 없거나 제한 시간이
+ * 지났으면 null. 재시작하면 그 세션이 죽고, 표시는 제한 시간이 지나야 풀려 그동안 모든 제안이 멈춘다.
+ * **검사가 진짜 상태를 안 읽게 경로를 넣을 수 있다.**
+ */
+function activeActionJob() {
+  const dir = process.env.REPORT_LOG_STATE || path.join(os.homedir(), '.report-log');
+  try {
+    const a = JSON.parse(fs.readFileSync(path.join(dir, 'jobs', 'active.json'), 'utf-8'));
+    if (a && Date.parse(a.deadline) > Date.now()) return a;
+  } catch { /* 없으면 도는 세션도 없다 */ }
+  return null;
+}
+
 /** 로그 꼬리에서 마지막 큐 활동 시각. 없으면 null. 파일이 19MB 라 끝만 읽는다. */
 function lastQueueActivity(logPath) {
   if (!logPath) return null;
@@ -170,6 +184,14 @@ if (captures.length && !force) {
   console.log('\n   처리하거나 버린 뒤에 다시 하세요 —');
   console.log('     python -X utf8 bin/tasks.py inbox list');
   console.log('   그래도 지금 해야 하면 —  npm run restart -- --force');
+  process.exit(1);
+}
+
+const actionJob = activeActionJob();
+if (actionJob && !force) {
+  console.log(`⛔ 처리 제안 세션이 도는 중입니다(${actionJob.id} · ${actionJob.job} · `
+    + `${String(actionJob.started_at || '').slice(11, 16)} 시작 · ${String(actionJob.deadline).slice(11, 16)} 까지) — 재시작하지 않았습니다`);
+  console.log('   끝난 뒤에 다시 하세요 · 그래도 지금 해야 하면 —  npm run restart -- --force');
   process.exit(1);
 }
 

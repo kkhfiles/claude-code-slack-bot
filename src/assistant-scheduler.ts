@@ -21,6 +21,13 @@ import { boardLabel, boardQueueEnabled, drain, event as recordEvent } from './bo
 import type { ContactItem } from './board-queue';
 import { config } from './config';
 import { ladderEventLines, ladderTable, ladderText, sameTier } from './model-ladder';
+import { ActionPipeline, parseWindow, reportLogAvailable, runReportLog } from './action-pipeline';
+
+/**
+ * 처리 제안 타이머 간격. **이 값이 곧 멈춘 제안이 다시 움직이기까지의 최대 시간이다** —
+ * 사용량 한도가 풀린 뒤 · 병합 대기 한 시간 뒤. 밤 검토도 이 타이머가 시간대 안에서 시작한다.
+ */
+const ACTIONS_TICK_MS = 3_600_000;
 
 /**
  * 업무 넛지 시각. 09:00 데일리 미팅 직전이라는 것이 이 값의 전부다 —
@@ -314,6 +321,15 @@ export interface AssistantConfig {
       [key: string]: unknown;
     }>;
   };
+  /**
+   * 처리 제안(report-log). **분석 종류로 두지 않는다** — 완주 검사가 분석 종류마다 보고서
+   * 파일을 찾아 매일 「산출물 없음」을 낸다. 절이 없으면 타이머가 꺼지고 버튼 · 요약은 그대로 돈다.
+   */
+  actions?: {
+    enabled?: boolean;        // 한 시간 타이머(이어 가기)
+    nightlyReview?: boolean;  // 같은 타이머가 밤 검토도
+    reviewWindow?: string;    // "02:00-07:00" — 이 안에서만 새 검토를 시작
+  };
 }
 
 /** 분석 한 종을 돌린 결과. `resetsAt` 은 리미트가 풀리는 시각(epoch sec)으로,
@@ -347,6 +363,12 @@ export interface SpawnOpts {
   useSdk?: boolean;
   /** 사고 깊이 — 유일한 사고 손잡이. 생략하면 SDK 기본값 `'high'`(sdk-handler 주석). */
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /** 작업 폴더 밖에 읽고 쓸 폴더. **Claude Code 는 작업 폴더 밖 편집을 허용 없이 못 한다** —
+   *  결과 파일을 다른 폴더에 쓰는 세션(처리 흐름)은 여기에 그 폴더를 준다. */
+  additionalDirectories?: string[];
+  /** Codex 폴백이 쓸 수 있는 곳. 주면 **기본 폴더 목록(비서 · 볼트 · 판) 대신 이것만** 연다 —
+   *  폴백이 1차보다 넓게 쓰지 않게(2026-09-29 사용자 결정). `null` 이면 폴백을 안 한다. */
+  fallbackScope?: { cwd: string; writable: string[] } | null;
 }
 
 export interface SessionUsage {
@@ -446,6 +468,8 @@ export class AssistantScheduler {
   private mailPollBusy = false;
   private remindTimer: ReturnType<typeof setInterval> | null = null;
   private remindBusy = false;
+  private actionsTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly actionPipeline: ActionPipeline;
   /** 이 프로세스에서 이미 보낸 알림. **자국을 못 찍었을 때의 퓨즈다** — 파일
    *  자국이 정본이고 이것은 그 자국이 실패했을 때 2분마다 같은 DM 이 무한히
    *  나가는 것을 막는다(하루 08~20시면 360통). 재시작하면 비므로 한 번은 다시
@@ -482,6 +506,17 @@ export class AssistantScheduler {
     this.configPath = path.join(configDir, 'config.json');
     this.promptsDir = path.join(configDir, 'prompts');
     this.workingDir = path.resolve(configDir, '..');
+    this.actionPipeline = new ActionPipeline({
+      run: runReportLog,
+      // 분석 세션과 같은 1차 · 폴백 경로 — 폴백 범위는 `next` 가 준 것만(`SpawnOpts.fallbackScope`).
+      session: async (label, prompt, opts) => {
+        const result = await this.spawnOrFallback(label, prompt, opts);
+        this.recordSessionCost('actions', result);
+        return result;
+      },
+      post: (text, blocks) => this.sendMessage(text, blocks),
+      useSdk: shouldUseSdk('analysis:actions'),
+    });
   }
 
   // --- Public API ---
@@ -826,6 +861,9 @@ export class AssistantScheduler {
       this.startMailPoller();
       this.startRemindPoller();
     }
+    if (this.config.actions?.enabled) {
+      this.startActionsTicker();
+    }
 
     if (this.getEnabledAnalysisTypes().length > 0) {
       this.scheduleAnalysis();
@@ -869,6 +907,10 @@ export class AssistantScheduler {
       clearInterval(this.remindTimer);
       this.remindTimer = null;
     }
+    if (this.actionsTimer) {
+      clearInterval(this.actionsTimer);
+      this.actionsTimer = null;
+    }
     if (this.focusTimer) {
       clearTimeout(this.focusTimer);
       this.focusTimer = null;
@@ -881,6 +923,60 @@ export class AssistantScheduler {
       clearTimeout(this.offsitePushTimer);
       this.offsitePushTimer = null;
     }
+  }
+
+  // --- 처리 제안 (report-log) ---
+
+  /**
+   * 처리 제안 타이머 — 한 시간마다. 이어 가기(사용량 한도 · 병합 대기로 멈춘 제안)는 늘,
+   * 밤 검토는 업무일의 시간대 안에서만. 켜기 · 시간대는 `config.json` 의 `actions` 절.
+   */
+  private startActionsTicker(): void {
+    if (!reportLogAvailable()) {
+      this.logger.info('처리 제안 타이머 꺼짐 (report-log 자동 기록 클론 없음)');
+      return;
+    }
+    const a = this.config?.actions;
+    const window = parseWindow(a?.reviewWindow ?? '02:00-07:00');
+    this.logger.info('처리 제안 타이머 시작', { nightlyReview: !!a?.nightlyReview, window: a?.reviewWindow });
+    this.actionsTimer = setInterval(() => {
+      void this.actionPipeline.tick({
+        review: !!a?.nightlyReview, window, workingDay: !this.isNonWorkingDay().skip,
+      });
+    }, ACTIONS_TICK_MS);
+  }
+
+  /** 처리 제안 아침 요약 블록 — 결정이 필요한 것 · 멈춘 것. 없거나 못 읽으면 null. */
+  async actionDigestBlocks(): Promise<unknown[] | null> {
+    if (!reportLogAvailable()) return null;
+    return this.actionPipeline.digestBlocks();
+  }
+
+  /** 브리핑 셋(예약 · 놓친 것 · 수동 `-briefing`)이 같이 붙이는 요약. 실패해도 브리핑은 그대로. */
+  private async postActionDigest(): Promise<void> {
+    try {
+      const blocks = await this.actionDigestBlocks();
+      if (blocks) await this.sendMessage('🗂 처리 제안', blocks);
+    } catch (err) {
+      this.logger.warn('처리 제안 요약 실패', err);
+    }
+  }
+
+  /** 버튼 결정 — 진행이면 곧바로 실행을 시작한다. */
+  async decideAction(id: string, decision: string): Promise<{ ok: boolean; note: string }> {
+    if (!reportLogAvailable()) return { ok: false, note: '⚠️ report-log 자동 기록 클론이 없습니다' };
+    return this.actionPipeline.decide(id, decision);
+  }
+
+  /**
+   * `-actions review|run` — 시간대와 무관하게 지금 한 차례. 끝나면 요약을 DM 으로.
+   * 이미 도는 중이면 그 차례 뒤에 이어 돈다.
+   */
+  runActionsNow(kind: 'review' | 'run'): 'started' | 'queued' | 'unavailable' {
+    if (!reportLogAvailable()) return 'unavailable';
+    const busy = this.actionPipeline.isBusy();
+    void this.actionPipeline.request(kind).then(() => this.postActionDigest());
+    return busy ? 'queued' : 'started';
   }
 
   // --- 업무 (work-assistant) ---
@@ -1601,6 +1697,8 @@ export class AssistantScheduler {
           } catch (err) {
             this.logger.warn('NAS confirm queue check failed', err);
           }
+
+          await this.postActionDigest();
         }
       } catch (error) {
         const msg = (error as Error).message || '';
@@ -1657,6 +1755,8 @@ export class AssistantScheduler {
           }],
         }]).catch(() => {});
       }
+
+      await this.postActionDigest();
     } catch (error) {
       const msg = (error as Error).message || '';
       if (isRateLimitText(msg)) {
@@ -2045,6 +2145,10 @@ export class AssistantScheduler {
       recordEvent('session-fallback', { label, why, skipped: 'resume' });
       return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
     }
+    if (opts.fallbackScope === null) {
+      recordEvent('session-fallback', { label, why, skipped: 'off' });
+      return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
+    }
 
     const ran = result ? result.toolCalls : 0;
     if (ran !== 0) {
@@ -2071,8 +2175,11 @@ export class AssistantScheduler {
       if (got) { said = got.text; via = `${got.backend} ${got.model}`; }
     } else {
       const cell = await sameTier(primary, 'codex');
+      const scope = opts.fallbackScope;
       said = await codexSession(prompt, {
-        workingDirectory: opts.workingDirectory,
+        workingDirectory: scope ? scope.cwd : opts.workingDirectory,
+        // 범위를 받은 회차는 그 범위만 연다 — 작업 폴더(`-C`)는 이미 쓰기가 열려 있어 빼고 넘긴다.
+        writableDirs: scope ? scope.writable.filter((d) => d !== scope.cwd) : undefined,
         appendSystemPrompt: opts.appendSystemPrompt,
         timeoutMs: opts.maxDurationMs,
         // **1차와 같은 깊이로 돈다** — 폴백이 얕게 돌면 「돌긴 돌았는데 쓸 게 없는」

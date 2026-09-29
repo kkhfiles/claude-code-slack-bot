@@ -999,17 +999,18 @@ export function codexWritableDirs(): string[] {
  * 못 하면 **빈 글자**를 돌려준다 — 부르는 쪽이 오늘까지와 같이 물러난다.
  * `SESSION_FALLBACK=off` 로 끈다.
  */
-export async function codexSession(
-  prompt: string,
-  opts: {
-    workingDirectory: string;
-    appendSystemPrompt?: string;
-    timeoutMs?: number;
-    /** 1차가 쓰던 것과 같은 깊이로 돈다. 생략하면 `SESSION_CODEX_EFFORT`. */
-    effort?: string;
-    model?: string;
-  },
-): Promise<string> {
+export interface CodexSessionOpts {
+  workingDirectory: string;
+  appendSystemPrompt?: string;
+  timeoutMs?: number;
+  /** 1차가 쓰던 것과 같은 깊이로 돈다. 생략하면 `SESSION_CODEX_EFFORT`. */
+  effort?: string;
+  model?: string;
+  /** 작업 폴더 밖에 쓰기를 열 곳. **주면 이것만** — 생략하면 `codexWritableDirs()`. */
+  writableDirs?: string[];
+}
+
+export async function codexSession(prompt: string, opts: CodexSessionOpts): Promise<string> {
   if (process.env.SESSION_FALLBACK === 'off') return '';
   const id = randomId();
   const pf = path.join(os.tmpdir(), `wa-cs-${id}.txt`);
@@ -1017,28 +1018,7 @@ export async function codexSession(
   try {
     const head = opts.appendSystemPrompt ? `${opts.appendSystemPrompt}\n\n----\n\n` : '';
     fs.writeFileSync(pf, head + prompt, 'utf-8');
-    const args = [
-      'exec', '--ephemeral', '--skip-git-repo-check',
-      // **작업 디렉터리 밖에도 쓸 곳이 있다.** codex 모래상자는 그 밖을 막는데,
-      // `tasks.py` 는 `find` 조차 상태 파일을 쓴다(`analyze()` 가 체크인 스냅숏을
-      // 남긴다) — 안 열어 주면 `PermissionError` 로 넘어진다(2026-09-04 실측).
-      // 볼트와 판 배포 폴더도 같은 이유로 연다.
-      ...codexWritableDirs().flatMap((d) => ['--add-dir', d]),
-      // 승인을 사람에게 묻지 않는다 — 아무도 안 보는 시각에 도는 길이라
-      // 물으면 그대로 멈춘다.
-      //
-      // ⚠️ ** 를 같이 주면 안 된다** — codex 가 `--sandbox 는 --approve-for-me
-      // 와 같이 못 쓴다` 로 rc 2 를 내며 **매번 죽는다**(2026-09-04 실측).
-      // 이 깃발이 이미 workspace-write 로 돈다(도움말: 「using the
-      // workspace-write sandbox」)라 따로 줄 필요가 없다.
-      '--approve-for-me',
-      '--color', 'never',
-      '-C', opts.workingDirectory,
-      '-m', opts.model ?? SESSION_CODEX_MODEL,
-      '-c', `model_reasoning_effort=${opts.effort ?? SESSION_CODEX_EFFORT}`,
-      '-o', of, '-',
-    ];
-    const code = await runCodex(args, pf, opts.timeoutMs ?? 600_000);
+    const code = await runCodex(codexSessionArgs(opts, of), pf, opts.timeoutMs ?? 600_000);
     if (code !== 0) {
       logger.warn(`주 작업 폴백(codex) rc ${code}`);
       return '';
@@ -1052,4 +1032,29 @@ export async function codexSession(
       try { fs.unlinkSync(f); } catch { /* 이미 없다 */ }
     }
   }
+}
+
+/** `codexSession` 이 넘기는 깃발 묶음. **내보내는 이유는 검사가 쓰기 범위를 세기 위해서다.** */
+export function codexSessionArgs(opts: CodexSessionOpts, outFile: string): string[] {
+  return [
+    'exec', '--ephemeral', '--skip-git-repo-check',
+    // **작업 디렉터리 밖에도 쓸 곳이 있다.** codex 모래상자는 그 밖을 막는데,
+    // `tasks.py` 는 `find` 조차 상태 파일을 쓴다(`analyze()` 가 체크인 스냅숏을
+    // 남긴다) — 안 열어 주면 `PermissionError` 로 넘어진다(2026-09-04 실측).
+    // 볼트와 판 배포 폴더도 같은 이유로 연다. 범위를 받은 회차(처리 흐름)는 그 범위만.
+    ...(opts.writableDirs ?? codexWritableDirs()).flatMap((d) => ['--add-dir', d]),
+    // 승인을 사람에게 묻지 않는다 — 아무도 안 보는 시각에 도는 길이라
+    // 물으면 그대로 멈춘다.
+    //
+    // ⚠️ ** 를 같이 주면 안 된다** — codex 가 `--sandbox 는 --approve-for-me
+    // 와 같이 못 쓴다` 로 rc 2 를 내며 **매번 죽는다**(2026-09-04 실측).
+    // 이 깃발이 이미 workspace-write 로 돈다(도움말: 「using the
+    // workspace-write sandbox」)라 따로 줄 필요가 없다.
+    '--approve-for-me',
+    '--color', 'never',
+    '-C', opts.workingDirectory,
+    '-m', opts.model ?? SESSION_CODEX_MODEL,
+    '-c', `model_reasoning_effort=${opts.effort ?? SESSION_CODEX_EFFORT}`,
+    '-o', outFile, '-',
+  ];
 }

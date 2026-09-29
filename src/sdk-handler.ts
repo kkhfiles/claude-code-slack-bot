@@ -219,6 +219,8 @@ export interface SdkRunOptions {
    * **허용 규칙도 같이 사라진다** — `settings` 로 필요한 것만 직접 준다.
    */
   settingSources?: ('user' | 'project' | 'local')[];
+  /** 작업 폴더 밖에 읽고 쓸 폴더 — CLI 의 `--add-dir` 와 같다. */
+  additionalDirectories?: string[];
   /**
    * Skill catalog injected into the system prompt so the model can invoke the
    * `Skill` tool by name. SDK Options docs say "omitted = no SDK auto-config",
@@ -398,6 +400,7 @@ export class SdkHandler {
     // 이상)인 이 PC 에서는 세션 하나가 들고 시작하는 값이 여기서 갈린다. 대신
     // 허용 규칙도 같이 사라지니 `settings` 로 필요한 만큼만 직접 준다.
     if (opts.settingSources) sdkOptions.settingSources = opts.settingSources;
+    if (opts.additionalDirectories?.length) sdkOptions.additionalDirectories = opts.additionalDirectories;
 
     if (opts.skills !== undefined) sdkOptions.skills = opts.skills;
 

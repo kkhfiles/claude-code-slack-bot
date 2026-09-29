@@ -345,6 +345,26 @@ const messages: Record<string, Record<Locale, string>> = {
     en: 'Assistant not configured. Set `ASSISTANT_DM_CHANNEL` and `ASSISTANT_CONFIG_DIR` in `.env`',
     ko: '어시스턴트 미설정. `.env`에 `ASSISTANT_DM_CHANNEL`, `ASSISTANT_CONFIG_DIR` 설정 필요',
   },
+  'actions.unavailable': {
+    en: 'Action proposals are not set up — the report-log clone (`~/.report-log/repo`) is missing.',
+    ko: '처리 제안이 설정되지 않았습니다 — report-log 자동 기록 클론(`~/.report-log/repo`)이 없습니다.',
+  },
+  'actions.empty': {
+    en: '🗂 No action proposals need a decision.',
+    ko: '🗂 결정이 필요한 처리 제안이 없습니다.',
+  },
+  'actions.reviewStarted': {
+    en: '🔍 Reviewing queued proposals now — the summary comes by DM when done.',
+    ko: '🔍 검토 대기 제안을 지금 검토합니다 — 끝나면 요약을 DM 으로 보냅니다.',
+  },
+  'actions.runStarted': {
+    en: '▶️ Resuming proposals in progress — results come by DM.',
+    ko: '▶️ 진행 중인 제안을 이어 갑니다 — 결과는 DM 으로 보냅니다.',
+  },
+  'actions.queued': {
+    en: '⏳ Another round is running — this one follows right after.',
+    ko: '⏳ 다른 차례가 도는 중입니다 — 끝나는 대로 이어서 돕니다.',
+  },
   'analysis.running': {
     en: '🔬 Running analysis: {{type}}...',
     ko: '🔬 분석 실행 중: {{type}}...',
@@ -458,6 +478,7 @@ export function getHelpText(locale: Locale): string {
     help += `*어시스턴트*\n`;
     help += `\`-br\` / \`-briefing\` / \`브리핑\` — 브리핑 즉시 실행\n`;
     help += `\`-rp\` / \`-report [타입]\` — 최신 분석 보고서 조회\n`;
+    help += `\`-actions\` — 결정이 필요한 처리 제안 · \`-actions review\` 지금 검토 · \`-actions run\` 멈춘 제안 이어 가기\n`;
     help += `\`-as config\` / \`-assistant config\` — 어시스턴트 설정 표시\n`;
     help += `\`-as briefing HH:MM\` — 브리핑 시간 변경\n`;
     help += `\`-as reminder N\` — 리마인더 사전 알림 시간(분) 변경\n\n`;
@@ -508,6 +529,7 @@ export function getHelpText(locale: Locale): string {
   help += `*Assistant*\n`;
   help += `\`-br\` / \`-briefing\` — Run briefing now\n`;
   help += `\`-rp\` / \`-report [type]\` — View latest analysis report\n`;
+  help += `\`-actions\` — Action proposals awaiting a decision · \`-actions review\` review now · \`-actions run\` resume stalled ones\n`;
   help += `\`-an\` / \`-analyze [type]\` — Run analysis (single type or all)\n`;
   help += `\`-as config\` / \`-assistant config\` — Show assistant configuration\n`;
   help += `\`-as briefing HH:MM\` — Change briefing time\n`;

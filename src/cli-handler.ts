@@ -343,6 +343,8 @@ export class CliHandler {
     skipMcp?: boolean;
     noSessionPersistence?: boolean;
     tools?: string[];
+    /** 작업 폴더 밖에 읽고 쓸 폴더 — SDK 경로의 `additionalDirectories` 와 짝. */
+    additionalDirectories?: string[];
   }): CliProcess {
     // 입력도 stream-json — 메시지에 `client_composed` 를 붙여 `@경로` 펼침·슬래시 명령을 끄려고(아래 stdin).
     const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
@@ -405,6 +407,10 @@ export class CliHandler {
     // Session persistence disable (prevents .jsonl file creation)
     if (opts.noSessionPersistence) {
       args.push('--no-session-persistence');
+    }
+
+    if (opts.additionalDirectories?.length) {
+      args.push('--add-dir', ...opts.additionalDirectories);
     }
 
     // Prompt is passed via stdin (not positional arg)
