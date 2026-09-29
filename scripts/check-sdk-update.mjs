@@ -14,7 +14,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import {
-  bumpPyproject, busyReason, cmpVer, normalizeNpmView, parseVer, pickTarget, requestFresh,
+  bumpPyproject, busyReason, cmpVer, guardReason, normalizeNpmView, parseVer, pickTarget, requestFresh,
 } from './lib/sdk-update-lib.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -182,6 +182,75 @@ ok('실패는 멈춘 단계 이름이 앞에', formatResult({
   status: 'failed', startedAt: '2026-10-05T00:31:00Z', finishedAt: '2026-10-05T00:33:00Z',
   steps: [{ name: '점검', ok: true }, { name: '봇 시험', ok: false, detail: '두 번 다 실패 · 되돌림' }],
 }).startsWith('❌ 「봇 시험」에서 멈췄습니다'));
+
+// ── 재검토 반영(2026-09-29) ────────────────────────────────
+// 커밋 직전 — 시작 때 그대로인가
+const G = { branch: 'main', want: 'main', porcelain: ' M package.json\n M package-lock.json\n', allowed: ['package.json', 'package-lock.json'], head: 'aaa', base: 'aaa' };
+eq('판 맞춤이 바꾼 파일만이면 통과', guardReason(G), '');
+ok('도중에 다른 브랜치로 바뀌면 멈춤', guardReason({ ...G, branch: 'feature/x' }).includes('feature/x'));
+ok('시작한 뒤 커밋이 늘면 멈춤(남의 커밋을 같이 올리지 않게)', guardReason({ ...G, head: 'bbb' }).includes('커밋이 더해짐'));
+ok('판 맞춤이 안 건드린 파일이 바뀌면 멈춤', guardReason({ ...G, porcelain: `${G.porcelain} M src/a.ts\n` }).includes('src/a.ts'));
+{
+  // 두 번 눌러도 한 번만 — 작업 중 판정(1~2초) 사이에 또 누르면 두 번째가 첫째를 죽였다
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const { su, log } = harness();
+  su.opts.busyReason = async () => { await gate; return ''; };
+  const first = su.onRun(click());
+  await su.onRun(click());
+  release();
+  await first;
+  eq('누르는 사이에 또 누르면 한 번만 띄운다', log.launched.length, 1);
+  ok('두 번째 누름에는 띄우는 중이라고 답한다', log.replies.some((r) => r.t.includes('띄우는 중')));
+}
+{
+  const { su, log } = harness();
+  su.opts.launch = async () => { throw new Error('pm2 없음'); };
+  await su.onRun(click());
+  ok('pm2 로 못 띄우면 곧바로 스레드에 알린다', log.replies.some((r) => r.t.includes('pm2 로 못 띄움')));
+  ok('못 띄웠으면 카드에 버튼을 되살린다', log.updates.some((u) => (u.b ?? []).some((b) => b.type === 'actions')));
+}
+{
+  const { su, log } = harness();
+  await su.onRun(click());
+  const req = JSON.parse(fs.readFileSync(su.requestPath, 'utf-8'));
+  fs.writeFileSync(su.resultPath, JSON.stringify({
+    id: req.id, thread: '111.1', status: 'failed', startedAt: '2026-10-05T00:31:00Z', finishedAt: '2026-10-05T00:32:00Z',
+    steps: [{ name: '봇 시험', ok: false, detail: '두 번 다 실패 · 되돌림' }],
+  }));
+  log.updates.length = 0;
+  await su.watchResult();
+  const last = log.updates.at(-1);
+  ok('실패하면 카드에 버튼을 되살려 다음 주를 안 기다리고 다시 누를 수 있다',
+    last?.ts === '111.1' && last.b.some((b) => b.type === 'actions') && last.t.includes('다시 누를 수'));
+}
+{
+  const { su, log } = harness();
+  await su.onRun(click());
+  const req = JSON.parse(fs.readFileSync(su.requestPath, 'utf-8'));
+  fs.writeFileSync(su.resultPath, JSON.stringify({
+    id: req.id, thread: '111.1', status: 'running', startedAt: '2026-01-01T00:00:00Z', steps: [],
+  }));
+  eq('최종 결과 없이 오래 도는 중이면 멈춘 것으로 알린다', await su.watchResult(), true);
+  ok('멈춤 알림 문구', log.replies.at(-1)?.t.includes('멈춘 것으로'));
+  eq('멈춤도 한 번만 알린다', await su.watchResult(), false);
+}
+{
+  const { su, log } = harness();
+  su.opts.send = async () => { throw new Error('slack down'); };
+  eq('카드를 못 보내면 실패', await su.tick(MON(9, 31)), 'failed');
+  eq('못 보낸 주는 한 것으로 두지 않는다(15분 뒤 다시)', await su.tick(MON(9, 47)), 'failed');
+  eq('다시 해 본다(대조 두 번)', log.checks, 2);
+}
+// 안전장치가 소스에서 빠지면 조용히 옛 동작으로 돌아간다 — 줄을 못 박는다
+const src = (f) => fs.readFileSync(path.join(ROOT, f), 'utf-8');
+ok('SDK 경로는 프롬프트 속 `@경로`·슬래시 명령을 끈다', src('src/sdk-handler.ts').includes('verbatimPrompts: true'));
+ok('비상용 CLI 경로도 끈다(client_composed)', src('src/cli-handler.ts').includes('client_composed: true'));
+ok('판 맞춤은 pm2 저장 환경을 안 건드리게 재시작한다',
+  src('scripts/sdk-update.mjs').includes("'--keep-env'") && src('scripts/restart.mjs').includes("args.has('--keep-env')"));
+ok('재시작은 도는 판 맞춤을 기다린다(판 맞춤 자신만 통과)',
+  src('scripts/restart.mjs').includes('SDK_UPDATE_SELF') && src('scripts/sdk-update.mjs').includes("SDK_UPDATE_SELF: '1'"));
+ok('판 맞춤은 당겨 오지 않는다(원격과 같아야만 진행)', !src('scripts/sdk-update.mjs').includes("'pull'"));
 
 for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 

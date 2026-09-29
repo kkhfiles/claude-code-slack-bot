@@ -70,11 +70,22 @@ const jobState = (name, deadlineMs) => {
 const liveJob = jobState('rl-live', 30 * 60_000);
 const deadJob = jobState('rl-dead', -60_000);
 
+// SDK 판 맞춤 결과 — 진짜 파일을 안 읽게 기본은 없는 파일
+const noSdk = path.join(tmp, 'sdk-none.json');
+function sdkResult(name, ageMs) {
+  const f = path.join(tmp, `${name}.json`);
+  fs.writeFileSync(f, JSON.stringify({ id: `btn-${name}`, status: 'running', startedAt: new Date(Date.now() - ageMs).toISOString() }));
+  return f;
+}
+const liveSdk = sdkResult('sdk-live', 5 * 60_000);
+const staleSdk = sdkResult('sdk-stale', 3 * 60 * 60_000);
+
 function run(env, extra = []) {
   const r = spawnSync(process.execPath, [SCRIPT, '--dry', ...extra], {
     encoding: 'utf-8',
     timeout: 30_000,
-    env: { ...process.env, WORK_CAPTURE_STATE_DIR: noLive, REPORT_LOG_STATE: noJob, ...env },
+    env: { ...process.env, WORK_CAPTURE_STATE_DIR: noLive, REPORT_LOG_STATE: noJob, SDK_UPDATE_RESULT: noSdk,
+      SDK_UPDATE_SELF: '', ...env },
   });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
@@ -127,6 +138,17 @@ if (dead.code !== 0) {
   fails.push('제한 시간이 지난 작업 잡기 표시로 재시작을 막는다');
 }
 
+// ⑤ SDK 판 맞춤이 도는 중이면 멈춘다 — node_modules·dist 가 반쯤 바뀐 채 뜨면 시험 안 한 것이 돈다(검토 2026-09-29)
+const sdk = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, SDK_UPDATE_RESULT: liveSdk });
+if (sdk.code === 0 || !sdk.out.includes('SDK 판 맞춤')) {
+  fails.push('SDK 판 맞춤이 도는 중인데 그냥 재시작한다(또는 무엇이 걸렸는지 안 보여준다)');
+}
+// ⑤-b 판 맞춤 자신이 부른 재시작은 지나간다 · ⑤-c 오래 멈춘 기록은 막지 않는다
+const self = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, SDK_UPDATE_RESULT: liveSdk, SDK_UPDATE_SELF: '1' });
+if (self.code !== 0) fails.push('판 맞춤 자신이 부른 재시작을 막는다 — 판 맞춤이 끝을 못 낸다');
+const oldSdk = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, SDK_UPDATE_RESULT: staleSdk });
+if (oldSdk.code !== 0) fails.push('세 시간 전에 멈춘 판 맞춤 기록으로 재시작을 막는다');
+
 // ② 큐가 방금 움직였으면 기다린다 (여기서는 기다리기 시작하는 것까지만 본다)
 const busy = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: busyLog });
 if (!busy.out.includes('기다립니다')) {
@@ -140,5 +162,5 @@ if (fails.length) {
   for (const f of fails) console.log(`  ✗ ${f}`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 깨끗하면 지나가고 · 도는 사람 말이 있으면 멈추고 · 도는 처리 제안 세션도 멈추고 · 끝난 오래된 캡처는 알리기만 · 큐가 돌면 기다리고 · --force 는 뚫린다');
+  console.log('통과 — 깨끗하면 지나가고 · 도는 사람 말이 있으면 멈추고 · 도는 처리 제안 세션도 멈추고 · 도는 SDK 판 맞춤도 멈추고(자신은 통과) · 끝난 오래된 캡처는 알리기만 · 큐가 돌면 기다리고 · --force 는 뚫린다');
 }

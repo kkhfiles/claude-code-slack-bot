@@ -37,7 +37,8 @@ def newer(than: str) -> list[dict]:
     vs = sorted((v for v in meta["releases"] if _key(v) and _key(v) > base), key=_key, reverse=True)
     out = []
     for v in vs[:MAX_NEWER]:
-        sdist = [f for f in meta["releases"][v] if f.get("packagetype") == "sdist"]
+        # 회수된(yanked) 판은 안 고른다 — PyPI 가 목록에는 남겨 둔다
+        sdist = [f for f in meta["releases"][v] if f.get("packagetype") == "sdist" and not f.get("yanked")]
         if not sdist:
             continue
         with urllib.request.urlopen(sdist[0]["url"], timeout=60) as r:

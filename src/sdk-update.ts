@@ -32,8 +32,8 @@ const PM2_APP = 'claude-sdk-update';
 const WINDOW_MIN = 120;
 /** 판 대조가 실패하면(네트워크 등) 이만큼 뒤에 다시 — 창 안에서 매분 npm·PyPI 를 두드리지 않게. */
 const RETRY_MS = 15 * 60 * 1000;
-/** 결과가 이보다 오래 `running` 이면 멈춘 것으로 본다 — 다시 누를 수 있게. */
-const STALE_RUN_MS = 60 * 60 * 1000;
+/** 결과가 이보다 오래 `running` 이면 멈춘 것으로 본다 — 알리고 다시 누를 수 있게(`restart.mjs` 의 같은 값과 맞춘다). */
+const STALE_RUN_MS = 2 * 60 * 60 * 1000;
 
 export interface SdkUpdateOptions {
   at: string;
@@ -57,6 +57,8 @@ export class SdkUpdate {
   private ranWeek = '';
   private restDay = '';
   private retryAt = 0;
+  /** 누른 것을 띄우는 중 — 작업 중 판정(1~2초) 사이에 또 누르면 두 번째 판 맞춤이 첫째를 죽였다(검토 2026-09-29). */
+  private launching = false;
   private readonly dir: string;
   private readonly holidays = new Holidays('KR');
 
@@ -112,7 +114,16 @@ export class SdkUpdate {
       this.logger.info(`판이 맞습니다 — Claude Code ${c.cli} · 봇 SDK 짝 ${c.ts.pair} · 파이썬 SDK 짝 ${c.py.pair}`);
       return 'aligned';
     }
-    await this.opts.send(cardText(c), cardBlocks(c));
+    try {
+      await this.opts.send(cardText(c), cardBlocks(c));
+    } catch (e) {
+      // 못 보냈으면 이번 주를 한 것으로 두지 않는다 — 안 그러면 그 주 카드가 통째로 사라진다(검토 2026-09-29).
+      this.ranWeek = '';
+      this.saveState({});
+      this.retryAt = now.getTime() + RETRY_MS;
+      this.logger.warn('카드를 못 보냈습니다 — 15분 뒤 다시', e);
+      return 'failed';
+    }
     return 'asked';
   }
 
@@ -121,22 +132,43 @@ export class SdkUpdate {
     await ack();
     const ts: string | undefined = body?.message?.ts;
     if (body?.channel?.id !== this.opts.dmChannel || !ts) return;
+    if (this.launching) {
+      await this.opts.reply(ts, '방금 누르신 것을 띄우는 중입니다.');
+      return;
+    }
     const cur = this.result();
     if (cur?.status === 'running' && Date.now() - Date.parse(cur.startedAt) < STALE_RUN_MS) {
       await this.opts.reply(ts, '이미 판 맞춤이 돌고 있습니다 — 끝나면 그 스레드에 알립니다.');
       return;
     }
-    const busy = await (this.opts.busyReason ?? (() => this.busy()))();
-    if (busy) {
-      await this.opts.reply(ts, `지금은 못 올립니다. ${busy}. 끝난 뒤 버튼을 다시 누르세요.`);
-      return;
+    this.launching = true;
+    try {
+      const busy = await (this.opts.busyReason ?? (() => this.busy()))();
+      if (busy) {
+        await this.opts.reply(ts, `지금은 못 올립니다. ${busy}. 끝난 뒤 버튼을 다시 누르세요.`);
+        return;
+      }
+      const card = textOf(body);
+      const req = { id: `btn-${Date.now()}`, requestedAt: new Date().toISOString(), thread: ts, consumed: false, cardText: card };
+      writeJson(this.requestPath, req);
+      // **띄우기 전에 「도는 중」을 먼저 적는다** — 스크립트가 결과를 쓰기 전에 또 누르면 겹친다.
+      writeJson(this.resultPath, { id: req.id, thread: ts, status: 'running', startedAt: req.requestedAt, steps: [] });
+      try {
+        await (this.opts.launch ?? ((p: string) => this.launchPm2(p)))(this.requestPath);
+      } catch (e) {
+        writeJson(this.resultPath, {
+          id: req.id, thread: ts, status: 'failed', startedAt: req.requestedAt, finishedAt: new Date().toISOString(),
+          steps: [{ name: '띄우기', ok: false, detail: `pm2 로 못 띄움 — ${String((e as Error)?.message ?? e).slice(0, 120)}` }],
+        });
+        await this.watchResult();                     // 곧바로 알리고 버튼을 되살린다
+        return;
+      }
+      const text = `${card}\n\n⏳ 시작했습니다 — 몇 분 걸립니다. 끝나면 이 스레드에 알립니다.`;
+      await this.opts.update(ts, text, [section(text)]);
+      this.logger.info('판 맞춤을 띄웠습니다', { id: req.id });
+    } finally {
+      this.launching = false;
     }
-    const req = { id: `btn-${Date.now()}`, requestedAt: new Date().toISOString(), thread: ts, consumed: false };
-    writeJson(this.requestPath, req);
-    await (this.opts.launch ?? ((p: string) => this.launchPm2(p)))(this.requestPath);
-    const text = `${textOf(body)}\n\n⏳ 시작했습니다 — 몇 분 걸립니다. 끝나면 이 스레드에 알립니다.`;
-    await this.opts.update(ts, text, [section(text)]);
-    this.logger.info('판 맞춤을 띄웠습니다', { id: req.id });
   }
 
   /** [이번 주 건너뛰기]. */
@@ -151,13 +183,36 @@ export class SdkUpdate {
   /** 결과가 끝났고 아직 안 알렸으면 버튼을 누른 스레드에 한 번. 보낸 표시는 봇만 쓴다(스크립트와 한 파일을 안 나눈다). */
   async watchResult(): Promise<boolean> {
     const r = this.result();
-    if (!r || r.status === 'running' || !r.thread) return false;
+    if (!r || !r.thread) return false;
     const sent = this.sent();
     if (sent.includes(r.id)) return false;
-    await this.opts.reply(r.thread, formatResult(r));
+    let text: string;
+    if (r.status === 'running') {
+      // 스크립트가 최종 결과를 못 남기고 죽었으면 `running` 에 머문다 — 오래되면 멈춘 것으로 알린다(검토 2026-09-29).
+      if (Date.now() - Date.parse(r.startedAt) < STALE_RUN_MS) return false;
+      text = `⚠️ 판 맞춤이 끝났다는 기록 없이 ${STALE_RUN_MS / 3_600_000}시간이 지났습니다 — 멈춘 것으로 봅니다. `
+        + '기록: `~/.claude/state/sdk-update.log`';
+    } else {
+      text = formatResult(r);
+    }
+    await this.opts.reply(r.thread, text);
     writeJson(this.sentPath, [...sent, r.id].slice(-50));
-    if (!this.opts.launch) this.pm2(['delete', PM2_APP]);
+    if (r.status !== 'done') await this.restoreButtons(r);
+    if (!this.opts.launch) void this.pm2(['delete', PM2_APP]);
     return true;
+  }
+
+  /** 끝까지 못 간 판 맞춤 — 카드에 버튼을 되살린다(누를 때 걷었다). 다음 주를 안 기다리고 다시 누를 수 있게. */
+  private async restoreButtons(r: UpdateResult): Promise<void> {
+    const req = this.request();
+    const card = req?.id === r.id && req.cardText ? String(req.cardText) : '';
+    if (!card || !r.thread) return;
+    const text = `${card}\n\n↻ 지난 시도가 끝까지 못 갔습니다 — 스레드를 보고 다시 누를 수 있습니다.`;
+    try {
+      await this.opts.update(r.thread, text, [section(text), actionsBlock()]);
+    } catch (e) {
+      this.logger.warn('카드 버튼을 못 되살렸습니다', e);
+    }
   }
 
   // --- 기본 부품(시험에서는 옵션으로 바꿔 끼운다) --------------------------------
@@ -219,6 +274,10 @@ export class SdkUpdate {
     try { return JSON.parse(fs.readFileSync(this.resultPath, 'utf-8')); } catch { return null; }
   }
 
+  private request(): { id?: string; cardText?: string } | null {
+    try { return JSON.parse(fs.readFileSync(this.requestPath, 'utf-8')); } catch { return null; }
+  }
+
   private sent(): string[] {
     try {
       const v = JSON.parse(fs.readFileSync(this.sentPath, 'utf-8'));
@@ -249,16 +308,17 @@ export function cardText(c: SdkCheck): string {
 }
 
 export function cardBlocks(c: SdkCheck): any[] {
-  return [
-    section(cardText(c)),
-    {
-      type: 'actions',
-      elements: [
-        { type: 'button', text: { type: 'plain_text', text: '업데이트' }, style: 'primary', action_id: RUN_ACTION, value: 'run' },
-        { type: 'button', text: { type: 'plain_text', text: '이번 주 건너뛰기' }, action_id: SKIP_ACTION, value: 'skip' },
-      ],
-    },
-  ];
+  return [section(cardText(c)), actionsBlock()];
+}
+
+function actionsBlock(): any {
+  return {
+    type: 'actions',
+    elements: [
+      { type: 'button', text: { type: 'plain_text', text: '업데이트' }, style: 'primary', action_id: RUN_ACTION, value: 'run' },
+      { type: 'button', text: { type: 'plain_text', text: '이번 주 건너뛰기' }, action_id: SKIP_ACTION, value: 'skip' },
+    ],
+  };
 }
 
 export function formatResult(r: UpdateResult): string {

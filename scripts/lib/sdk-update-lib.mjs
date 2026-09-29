@@ -64,6 +64,21 @@ export function requestFresh(req, nowMs, maxAgeMs = 15 * 60 * 1000) {
   return Number.isFinite(at) && nowMs - at >= 0 && nowMs - at <= maxAgeMs;
 }
 
+/**
+ * 커밋 직전 — **시작할 때 본 그대로인가.** 기본 브랜치 · 시작한 뒤 커밋이 안 늘었나 · 판 맞춤이 안 건드린 파일이 안 바뀌었나.
+ * 판 맞춤은 몇 분~한 시간 돌므로, 그사이 다른 세션이 브랜치를 바꾸거나 작성 중인 수정을 올려 두면 그것이 커밋·배포에
+ * 섞인다(검토 2026-09-29). 이유 문장을 돌려준다(없으면 '').
+ */
+export function guardReason({ branch, want, porcelain, allowed = [], head, base }) {
+  if (branch !== want) return `기본 브랜치(${want})가 아니라 ${branch || '알 수 없는 브랜치'}에 있음`;
+  if (base && head !== base) return `시작한 뒤 커밋이 더해짐(${String(head || '').slice(0, 7)})`;
+  const extra = String(porcelain ?? '').split('\n').filter((l) => l.trim())
+    .map((l) => l.slice(3).trim().replace(/^"|"$/g, ''))
+    .filter((f) => !allowed.includes(f));
+  if (!extra.length) return '';
+  return `판 맞춤이 안 건드린 파일이 바뀜(${extra.slice(0, 3).join(', ')}${extra.length > 3 ? ' …' : ''})`;
+}
+
 /** `git status --porcelain` · 현재 브랜치로 「다른 작업 중」인지. 이유 문장을 돌려준다(없으면 ''). */
 export function busyReason(branch, want, porcelain) {
   if (branch !== want) return `기본 브랜치(${want})가 아니라 ${branch || '알 수 없는 브랜치'}에 있음`;

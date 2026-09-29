@@ -133,9 +133,9 @@ export function boardQueueDailyCalls(): number {
  */
 const MAIL_POLL_MS = 600_000;
 const MAIL_POLL_FROM_HOUR = 8;
+const MAIL_POLL_TO_HOUR = 20;
 /** 보고서 파일 시각을 세션 시작과 견줄 때의 여유 — `reportWrittenSince` 참조. */
 const MTIME_SLACK_MS = 50;
-const MAIL_POLL_TO_HOUR = 20;
 /**
  * 시각 알림을 보는 간격. **이 값이 곧 늦게 울릴 수 있는 최대 시간이다** —
  * 「11시에」 부탁한 것이 11:02 에 오는 것은 괜찮지만 11:10 은 늦다.

@@ -4,6 +4,12 @@
  *   npm run restart          -- 안전하면 재시작, 아니면 멈추고 무엇이 걸렸는지 말함
  *   npm run restart -- --force   -- 다 알고 그냥 함
  *   npm run restart -- --dry     -- 세기만 하고 재시작은 안 함
+ *   npm run restart -- --keep-env   -- pm2 에 저장된 환경을 그대로 두고 재시작(`--update-env` 없이)
+ *
+ * `--keep-env` 는 SDK 판 맞춤(`sdk-update.mjs`)이 쓴다 — 그 프로세스는 봇 환경(`.env` 를 읽은 값)을 물려받아서,
+ * `--update-env` 로 재시작하면 그 값이 pm2 저장 환경에 박혀 이후 `.env` 를 고쳐도 안 먹는다(검토 2026-09-29).
+ * **SDK 판 맞춤이 도는 동안은 멈춘다** — `node_modules`·`dist` 가 반쯤 바뀐 채로 뜨면 시험 안 한 것이 돈다.
+ * 판 맞춤 자신이 부른 재시작만 통과한다(`SDK_UPDATE_SELF=1`).
  *
  * **왜 있나.** 2026-08-21 에 판을 고치던 세션이 판을 쓰는 사람의 말을 죽였다.
  * 큐가 17:46:28 에 TSK-35 메모를 세션에 넘겼고, 6초 뒤 `pm2 restart` 가 그
@@ -51,6 +57,20 @@ const POLL_MS = 5_000;
 const args = new Set(process.argv.slice(2));
 const force = args.has('--force');
 const dry = args.has('--dry');
+const RESTART_CMD = `pm2 restart ${APP}${args.has('--keep-env') ? '' : ' --update-env'}`;
+/** SDK 판 맞춤 결과 — 이보다 오래 `running` 이면 멈춘 것으로 보고 막지 않는다. */
+const SDK_UPDATE_STALE_MS = 2 * 60 * 60_000;
+
+/** 도는 SDK 판 맞춤(`~/.claude/state/sdk-update-result.json` 의 `running`). 없거나 판 맞춤 자신이면 null. */
+function activeSdkUpdate() {
+  if (process.env.SDK_UPDATE_SELF === '1') return null;
+  const file = process.env.SDK_UPDATE_RESULT || path.join(os.homedir(), '.claude', 'state', 'sdk-update-result.json');
+  try {
+    const r = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (r?.status === 'running' && Date.now() - Date.parse(r.startedAt) < SDK_UPDATE_STALE_MS) return r;
+  } catch { /* 없으면 도는 것도 없다 */ }
+  return null;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -153,7 +173,7 @@ function lastQueueActivity(logPath) {
 const proc = pm2Info();
 if (!proc) {
   console.log(`⚠️ pm2 에 ${APP} 이 없습니다 — 셀 것이 없어 그냥 넘깁니다`);
-  if (!dry) execSync(`pm2 restart ${APP} --update-env`, { stdio: 'inherit' });
+  if (!dry) execSync(RESTART_CMD, { stdio: 'inherit' });
   process.exit(0);
 }
 
@@ -195,6 +215,14 @@ if (actionJob && !force) {
   process.exit(1);
 }
 
+const sdkUpdate = activeSdkUpdate();
+if (sdkUpdate && !force) {
+  console.log(`⛔ SDK 판 맞춤이 도는 중입니다(${sdkUpdate.id} · ${String(sdkUpdate.startedAt || '').slice(11, 16)} 시작) `
+    + '— 재시작하지 않았습니다(판 맞춤이 끝에 스스로 재시작합니다)');
+  console.log('   그래도 지금 해야 하면 —  npm run restart -- --force');
+  process.exit(1);
+}
+
 // **검사가 진짜 로그를 안 건드리게 경로를 넣을 수 있게 둔다.** 검사가 실제
 // 산출물에 쓰면 돌지도 않은 실행이 완주로 보인다(글로벌 규칙).
 const logPath = process.env.BOT_LOG_PATH || proc.pm2_env?.pm_out_log_path;
@@ -221,4 +249,4 @@ if (dry) {
   process.exit(0);
 }
 console.log('✅ 걸리는 것 없음 — 재시작합니다');
-execSync(`pm2 restart ${APP} --update-env`, { stdio: 'inherit' });
+execSync(RESTART_CMD, { stdio: 'inherit' });
