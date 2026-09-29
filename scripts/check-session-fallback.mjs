@@ -156,7 +156,7 @@ try { fs.unlinkSync(evFile); } catch { /* 없으면 그만 */ }
     'exec', '--ephemeral', '--skip-git-repo-check',
     ...dirs.flatMap((d) => ['--add-dir', d]),
     '--approve-for-me', '--color', 'never',
-    '-C', os.tmpdir(), '-m', 'gpt-6-sol',
+    '-C', os.tmpdir(), '-m', 'gpt-6.1-sol',
     '-c', 'model_reasoning_effort=low', '-',
   ];
   const r = spawnSync('codex', flags, {
