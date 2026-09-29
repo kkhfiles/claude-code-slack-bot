@@ -1522,8 +1522,9 @@ export class PremiumSeatSlack {
       }
       case 'BOOKING_CANCELLED': {
         const acct = accountShort(p.account ?? '');
-        const what = p.action === 'RELEASED' ? '지금 시간대부터 비웠습니다' : '취소했습니다';
-        return `실장이 *${acct}* 계정 *${p.label}* 예약을 ${what}.`;
+        // 취소는 하나다(2026-09-29 실장) — 쓰는 중이었으면 사이트가 그 전 시간대까지 쓴 기록을 남긴다(RELEASED).
+        const kept = p.action === 'RELEASED' ? ' 그 전 시간대까지 쓴 기록은 남아 있습니다.' : '';
+        return `실장이 *${acct}* 계정 *${p.label}* 예약을 취소했습니다.${kept}`;
       }
       case 'REQUEST_RETIRED':
         return `${svc} Premium 교환을 마쳐 기다리시던 요청을 닫았습니다. GPT Pro 계정은 통합 예약에서 잡아 쓰실 수 있습니다.`;
