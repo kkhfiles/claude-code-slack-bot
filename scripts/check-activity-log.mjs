@@ -17,7 +17,10 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { redactForeign, tagRooms } = require(path.join(ROOT, 'dist', 'activity-log.js'));
+// 기록 폴더는 임시로 — 운영 폴더에 시험 글이 쌓이면 안 된다. 불러오기 **전에** 정한다(모듈이 읽는 때).
+const TMP = require('node:fs').mkdtempSync(path.join(require('node:os').tmpdir(), 'check-activity-'));
+process.env.BOT_ACTIVITY_DIR = TMP;
+const { redactForeign, tagRooms, scrub, setRedactor, note } = require(path.join(ROOT, 'dist', 'activity-log.js'));
 
 let pass = 0;
 const fails = [];
@@ -76,6 +79,57 @@ check('들어오는 말을 적는 길목이 이 함수를 거친다', wired);
 const registers = /tagRooms\(this\.opts\.name/.test(
   require('node:fs').readFileSync(path.join(ROOT, 'src', 'chat-host.ts'), 'utf-8'));
 check('대화 봇이 맡은 방을 알려 준다', registers);
+
+// --- 실원이 봇에게 한 말 · 개인 글 조각은 원문을 안 남긴다 (2026-09-30) -----------------
+// 실장 「DM 이나 콩에게 전달한 말이 타인이나 채널에 공유되면 절대 안 됨」 → 「가리고 옮기기」.
+// `redactForeign` 은 방을 가르고, 그 뒤 `scrub` 이 사람 말을 가른다 — 위의 「1:1 은 그대로」는
+// 방 가르기까지의 이야기이고, 실원 DM 은 여기서 가려진다.
+{
+  const dm = (who, text = '요즘 너무 힘들어서요') => ({ 누가: who, 어디: 'D_X', 무엇: 'message', 말: text });
+  setRedactor(null);
+  let out = scrub('들음', dm('U_BOSS'));
+  check('가림 기준이 없으면 DM 은 누구 것이든 가린다(모르면 안 남김)', !('말' in out) && out.글자수 > 0, out);
+  check('가림 기준이 없어도 방 말은 남는다', scrub('들음', heard(MINE)).말 === '남의 업무 이야기');
+
+  setRedactor({ owner: 'U_BOSS', isPrivate: (t) => t.includes('비밀 조각') });
+  out = scrub('들음', dm('U_A'));
+  check('⛔ 실원이 봇에게 보낸 DM 은 원문이 안 남는다', !('말' in out) && out.글자수 === '요즘 너무 힘들어서요'.length && /원문은 안 남긴다/.test(out.가림), out);
+  check('실장 자신의 DM 은 남는다', scrub('들음', dm('U_BOSS')).말 === '요즘 너무 힘들어서요');
+  out = scrub('명령', { 누가: 'U_A', 어디: 'C_ANY', 무엇: '/coffeechat', 말: '누구에게 고맙다고' });
+  check('⛔ 실원이 슬래시 명령 뒤에 적은 말은 안 남는다', !('말' in out), out);
+  check('실장이 슬래시 명령 뒤에 적은 말은 남는다',
+    scrub('명령', { 누가: 'U_BOSS', 어디: 'C_ANY', 무엇: '/1on1', 말: '시험' }).말 === '시험');
+  out = scrub('보냄', { 어디: 'D_BOSS', 무엇: 'chat.postMessage', 말: '넘김: 비밀 조각 입니다' });
+  check('⛔ 개인 글 조각이 든 나가는 말은 원문이 안 남는다(실장에게 넘긴 글 포함)', !('말' in out), out);
+  out = scrub('보냄', { 어디: 'D_BOSS', 무엇: 'chat.postMessage', 말: ':speech_balloon: *가가* 님이 저에게 보낸 말이에요.\n\n> 네' });
+  check('⛔ 실장에게 넘긴 글은 짧은 말(지문 없음)이라도 통째로 가린다', !('말' in out), out);
+  const hostSrc = require('node:fs').readFileSync(path.join(ROOT, 'src', 'chat-host.ts'), 'utf-8');
+  check('넘김 글의 머리말을 활동 기록과 같은 상수로 만든다', /\$\{FORWARD_HEAD\}/.test(hostSrc));
+  scrub('들음', { 누가: 'U_A', 어디: 'D_A', 무엇: 'message', 말: '상의드릴 게 있어요' });
+  out = scrub('보냄', { 어디: 'D_A', 무엇: 'chat.postMessage', 말: '그런 사정이면 이렇게 해 보세요' });
+  check('⛔ 실원 DM 방으로 나간 봇의 답도 가린다(그 사람 사정이 실림)', !('말' in out), out);
+  scrub('들음', { 누가: 'U_BOSS', 어디: 'D_BOSS', 무엇: 'message', 말: '오늘 일정' });
+  check('실장 DM 방으로 나간 봇의 말은 남는다',
+    scrub('보냄', { 어디: 'D_BOSS', 무엇: 'chat.postMessage', 말: '오늘 일정은 셋입니다' }).말 === '오늘 일정은 셋입니다');
+  check('조각 없는 나가는 말은 남는다(봇이 한 일을 되짚는 기록)',
+    scrub('보냄', { 어디: 'C_MINE', 무엇: 'chat.postMessage', 말: '점심 12시에 모여요' }).말 === '점심 12시에 모여요');
+  check('방에서 부른 말은 조각이 없으면 남는다(방에 공개된 말)',
+    scrub('부름받음', { 누가: 'U_A', 어디: 'C_MINE', 무엇: 'app_mention', 말: '@소인 오늘 점심?' }).말 === '@소인 오늘 점심?');
+  setRedactor({ owner: 'U_BOSS', isPrivate: () => { throw new Error('고장'); } });
+  out = scrub('보냄', { 어디: 'C_MINE', 무엇: 'chat.postMessage', 말: '아무 말' });
+  check('⛔ 가림 점검이 넘어지면 가린다(모르면 안 남김)', !('말' in out), out);
+
+  // 파일에 실제로 안 남는지 — 순수 함수만 맞고 적는 길이 안 거치면 소용없다.
+  setRedactor({ owner: 'U_BOSS', isPrivate: () => false });
+  note('letter', '들음', dm('U_A', '파일에 남으면 안 되는 말'));
+  const fs = require('node:fs');
+  const written = fs.readdirSync(TMP).filter((f) => f.endsWith('.jsonl'))
+    .map((f) => fs.readFileSync(path.join(TMP, f), 'utf-8')).join('');
+  check('⛔ 기록 파일에 실원 DM 원문이 안 적힌다', written.length > 0 && !written.includes('파일에 남으면'), written.slice(0, 120));
+  const guardSrc = fs.readFileSync(path.join(ROOT, 'src', 'privacy-guard.ts'), 'utf-8');
+  check('개인 글 문이 걸릴 때 활동 기록에도 같은 자를 넘긴다', /setRedactor\(\{\s*owner:/.test(guardSrc));
+  fs.rmSync(TMP, { recursive: true, force: true });
+}
 
 console.log(`\n통과 ${pass} / 실패 ${fails.length}`);
 if (fails.length) process.exitCode = 1;

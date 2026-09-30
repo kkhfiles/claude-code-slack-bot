@@ -28,7 +28,8 @@ import { Logger } from './logger';
  *
  *   1. **절대 던지지 않는다.** 여기서 넘어지면 봇이 말을 못 한다. 전부 삼킨다.
  *   2. **토큰을 적지 않는다.** 남는 것은 사람이 읽을 말과 어디로 갔는지까지다.
- *   3. **달마다 파일을 가른다.** 실원 DM 이 그대로 쌓이므로 지울 때 파일째 지운다.
+ *   3. **달마다 파일을 가른다.** 지울 때 파일째 지운다. 실원이 봇에게 한 말과 개인 글 조각은
+ *      2026-09-30 부터 원문 대신 글자 수만 남는다(`scrub`) · 폴더는 작업 공간 밖에 둔다.
  *   4. **이 폴더를 `context_files` 에 넣지 않는다.** 거기 들어가면 사적인 대화가
  *      모델 프롬프트로 나간다. 폴더에 그 경고를 파일로 두고 온다.
  *   5. 자리(`BOT_ACTIVITY_DIR`)가 없으면 **안 남기고 그렇다고 말한다.** 개인 대화가
@@ -115,13 +116,69 @@ function stamp(d: Date): string {
     + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+/**
+ * 개인 글을 가리는 기준 — 개인 글 문(`privacy-guard.ts`)이 걸릴 때 넘겨준다(서로를 import 하면
+ * 고리가 생겨서 이쪽은 받기만 한다). 안 걸려 있으면 `null` — 그때는 DM 을 전부 가린다(아래).
+ */
+let redactor: { owner: string; isPrivate: (text: string) => boolean } | null = null;
+export function setRedactor(r: { owner: string; isPrivate: (text: string) => boolean } | null): void {
+  redactor = r;
+}
+
+/** 사람에게 온 말(DM·부름·명령)인가 — 나가는 말(`보냄`)·판단은 아니다. */
+const HEARD = new Set(['들음', '부름받음', '명령']);
+
+/**
+ * 명단 밖 DM 을 실장에게 넘기는 글의 머리말(`chat-host.ts` 가 이것으로 글을 만든다). **이 머리말이
+ * 든 글은 통째로 가린다** — 넘긴 말이 짧으면(여섯 자 아래) 지문을 안 남겨 조각으로는 못 잡는다.
+ */
+export const FORWARD_HEAD = '님이 저에게 보낸 말이에요';
+
+/**
+ * DM 방 → 그 방의 사람. 들어온 DM 에서 배운다. **실원 DM 방으로 나간 봇의 답도 가린다** — 1:1 대화의
+ * 봇 답에는 그 사람 사정이 실린다(파이썬 빗장 `dm_texts` 가 봇 답까지 넣는 것과 같은 이유).
+ */
+const dmOwner = new Map<string, string>();
+export function rememberDmOwner(channel: string, user: string): void {
+  if (channel.startsWith('D') && user) dmOwner.set(channel, user);
+}
+
+/**
+ * **실원이 봇에게 한 말과 개인 글 조각이 든 글은 원문을 안 남긴다**(실장 2026-09-30 「가리고
+ * 옮기기」 — 「DM 이나 콩에게 전달한 말이 타인이나 채널에 공유되면 절대 안 됨」). 글자 수와 까닭만.
+ *   - 실장이 아닌 사람이 DM 으로 한 말 · 슬래시 명령 뒤에 적은 말
+ *   - 들어오든 나가든 개인 글(1on1·커피챗·칭찬·1:1 대화·넘긴 DM)의 조각이 든 말
+ * 실장 자신의 DM 과 봇이 방에 쓴 말은 그대로 둔다 — 봇이 무엇을 했는지 되짚는 것이 이 기록의 일이다.
+ * 가림 기준이 아직 없으면(문이 안 걸림) DM 은 누구 것이든 가린다 — 모르면 안 남긴다.
+ */
+export function scrub(kind: string, detail: Record<string, unknown>): Record<string, unknown> {
+  const said = detail.말;
+  if (typeof said !== 'string' || !said) return detail;
+  const where = String(detail.어디 ?? '');
+  const who = String(detail.누가 ?? '');
+  if (HEARD.has(kind)) rememberDmOwner(where, who);
+  const fromPerson = HEARD.has(kind) && (where.startsWith('D') || kind === '명령')
+    && (!redactor || who !== redactor.owner);
+  const owner = dmOwner.get(where);
+  const toPersonDm = !HEARD.has(kind) && where.startsWith('D') && !!owner && (!redactor || owner !== redactor.owner);
+  let why = fromPerson ? '실원이 봇에게 한 말'
+    : said.includes(FORWARD_HEAD) ? '실장에게 넘긴 실원 DM'
+      : toPersonDm ? '실원 DM 방에 보낸 봇의 말' : '';
+  if (!why) {
+    try { if (redactor?.isPrivate(said)) why = '개인 글 조각'; } catch { why = '개인 글 점검 실패'; }
+  }
+  if (!why) return detail;
+  const { 말: _drop, ...rest } = detail;
+  return { ...rest, 글자수: said.length, 가림: `${why} — 원문은 안 남긴다` };
+}
+
 /** 한 줄 적는다. **여기서 넘어져도 부르는 쪽은 모른다.** */
 export function note(bot: string, kind: string, detail: Record<string, unknown> = {}): void {
   if (!DIR) return;
   try {
     const now = new Date();
     const file = path.join(DIR, `${bot || '?'}-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}.jsonl`);
-    const row = { at: stamp(now), bot: bot || '?', kind, ...detail };
+    const row = { at: stamp(now), bot: bot || '?', kind, ...scrub(kind, detail) };
     fs.appendFileSync(file, JSON.stringify(row) + '\n', 'utf-8');
   } catch {
     // 기록을 못 남긴다고 봇이 멈추면 안 된다.
@@ -188,8 +245,9 @@ export function installActivityLog(): void {
     if (!fs.existsSync(guard)) {
       fs.writeFileSync(guard,
         '# 봇 활동 기록\n\n'
-        + '봇이 주고받은 말이 **전문 그대로** 쌓입니다. 실원이 봇에게 보낸 DM(1on1 신청·\n'
-        + '개선 의견)도 여기 들어 있습니다.\n\n'
+        + '봇이 주고받은 말이 쌓입니다. **실원이 봇에게 한 말과 개인 글 조각은 원문 대신 글자 수만**\n'
+        + '남습니다(2026-09-30부터 · 그 전 기록도 같은 꼴로 가렸습니다).\n\n'
+        + '- **이 폴더를 작업 공간(Claude·Codex 가 도는 폴더) 안에 두지 마세요.** 넓게 찾다가 모델로 들어갑니다.\n'
         + '- **이 폴더를 봇 설정의 `context_files` 에 넣지 마세요.** 거기 넣으면 이 내용이\n'
         + '  모델 프롬프트로 나갑니다.\n'
         + '- **원격 저장소에 올리지 마세요.** 여기는 일부러 git 저장소 바깥입니다.\n'

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WebClient } from '@slack/web-api';
 import { Logger } from './logger';
-import { botOfToken, note } from './activity-log';
+import { botOfToken, note, setRedactor } from './activity-log';
 
 /**
  * **개인 글이 남에게·방으로 나가는 것을 슬랙으로 가는 마지막 길목에서 막는다.**
@@ -326,8 +326,17 @@ export function installPrivacyGuard(o: PrivacyGuardOptions): void {
     return call.call(this, method, options);
   } as typeof call;
   refresh();
+  // 활동 기록도 같은 자로 가린다 — 개인 글 조각이 든 말은 원문 대신 글자 수만 남는다.
+  setRedactor({ owner: o.ownerUserId, isPrivate: containsPrivate });
   const n = [...index.values()].reduce((a, m) => a + m.size, 0);
-  logger.info(`개인 글 문을 걸었습니다 — 지문 ${n}개 · 실장 DM·본인 DM 말고는 막음`);
+  logger.info(`개인 글 문을 걸었습니다 — 지문 ${n}개 · 실장 DM·본인 DM 말고는 막음 · 활동 기록도 가림`);
+}
+
+/** 이 글에 개인 글 조각이 들어 있나(누구에게 보내는지는 안 따진다) — 활동 기록 가림과 옛 기록 정리에 쓴다. */
+export function containsPrivate(text: string): boolean {
+  if (!opts || !text) return false;
+  refresh();
+  return hits(text).length > 0;
 }
 
 /** 시험 전용 — 기록을 다시 읽게 한다. */

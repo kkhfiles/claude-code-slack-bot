@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
-import { tagApp, tagToken, tagRooms, note } from './activity-log';
+import { tagApp, tagToken, tagRooms, note, FORWARD_HEAD } from './activity-log';
 import { rememberPrivate } from './privacy-guard';
 
 /**
@@ -720,7 +720,8 @@ export class ChatHost {
         if (im.channel?.id) {
           // 「전할 말이 있으면 저에게 맡기셔도 돼요」라고 적었었다 — 그런데 이 봇은 한 사람에게
           // 따로 전하는 길이 없다(방에 올리는 길뿐). 못 하는 일을 약속하지 않는다(2026-09-30).
-          const body = `:speech_balloon: *${name}* 님이 저에게 보낸 말이에요.\n\n`
+          // 머리말은 활동 기록과 같이 쓴다(`FORWARD_HEAD`) — 이 머리말이 든 글은 기록에서 통째로 가려진다.
+          const body = `:speech_balloon: *${name}* ${FORWARD_HEAD}.\n\n`
             + `> ${text.replace(/\n/g, '\n> ')}\n\n`
             + `_<@${user}> 에게는 직접 답해 주세요. 저는 한 사람에게 따로 말을 전하지 못해요._`;
           const extra = this.opts.bypassBlocks?.(user, text) ?? [];
