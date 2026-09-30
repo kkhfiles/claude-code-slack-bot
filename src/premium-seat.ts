@@ -70,6 +70,12 @@ const WAIT_ICON = '\u{23F3}';    // 기다리는 사람
 const CLOCK_ICON = '\u{1F553}';
 const BUSY_ICON = '\u{1F534}';   // 빨간 원 · 계정 사용 중
 const FREE_ICON = '\u{1F7E2}';   // 초록 원 · 계정 비어 있음
+const PART_ICON = '\u{1F7E1}';   // 노란 원 · 같이 쓰는 계정에 자리 남음
+
+/** 지금 그 계정을 쓰는 사람들 — 파이썬이 `users` 를 싣기 전 판은 `current` 하나뿐이다. */
+function proUsers(a: any): any[] {
+  return a.users ?? (a.current ? [a.current] : []);
+}
 
 const SERVICES = ['CHATGPT', 'CLAUDE'];
 
@@ -770,7 +776,8 @@ export class PremiumSeatSlack {
 
     blocks.push({
       type: 'context',
-      elements: [{ type: 'mrkdwn', text: this.legend(moving, waitingLines, seenBy, Boolean(pro)) }],
+      elements: [{ type: 'mrkdwn', text: this.legend(moving, waitingLines, seenBy, Boolean(pro),
+        (pro?.accounts ?? []).some((a: any) => proUsers(a).length && proUsers(a).length < (a.capacity ?? 1))) }],
     });
     return blocks;
   }
@@ -783,14 +790,21 @@ export class PremiumSeatSlack {
   private proField(pro: any): any {
     const lines = (pro?.accounts ?? []).map((a: any) => {
       const name = `*${accountShort(a.account)}*`;
-      if (a.current) return `${BUSY_ICON} ${name}  ${a.current.display_name} · ${a.current.until}`;
+      // 정원이 둘 이상이면 쓰는 사람이 여럿일 수 있다(2026-09-30 실장) — 모두 적고, 자리가 남으면 노란 원.
+      const users: any[] = proUsers(a);
+      const left = (a.capacity ?? 1) - users.length;
+      if (users.length) {
+        const who = users.map((u) => `${u.display_name} · ${u.until}`).join('  /  ');
+        return `${left > 0 ? PART_ICON : BUSY_ICON} ${name}  ${who}${left > 0 ? `  (${left}자리 남음)` : ''}`;
+      }
       const next = a.next ? ` · 다음 ${a.next.label} ${a.next.display_name}` : '';
       return `${FREE_ICON} ${name}  비어 있음${next}`;
     });
     // 판은 통합 예약 사이트에서 1분마다 받아 온다. 못 받고 있으면 낡은 판이라는 것을 밝힌다.
     if (!lines.length) lines.push('예약 현황을 아직 받아 오지 못했습니다');
     else if (pro?.stale) lines.push(':warning: 예약 현황 확인 지연');
-    return { type: 'mrkdwn', text: `${SERVICE_ICON.CHATGPT} *GPT Pro 계정*\n\n${lines.join('\n')}` };
+    const most = Math.max(1, ...(pro?.accounts ?? []).map((a: any) => a.capacity ?? 1));
+    return { type: 'mrkdwn', text: `${SERVICE_ICON.CHATGPT} *GPT Pro 계정*${most > 1 ? ` (계정마다 동시 ${most}명)` : ''}\n\n${lines.join('\n')}` };
   }
 
   /** 범례 — 화면에 있는 기호만 설명한다. 좌석 상태 두 항목은 눈금이 늘 쓰므로 항상 넣는다. */
@@ -799,9 +813,10 @@ export class PremiumSeatSlack {
     waitingLines: string[],
     seenBy: Array<{ short: string; seen: string; declared: boolean }>,
     pro = false,
+    partial = false,
   ): string {
     const items = [`${KEEP_TICK}${KEEP_ICON} 유지 필요`, `${GIVE_TICK}${GIVE_ICON} 양도 가능`];
-    if (pro) items.push(`${BUSY_ICON} 사용 중`, `${FREE_ICON} 비어 있음`);
+    if (pro) items.push(`${BUSY_ICON} 사용 중`, ...(partial ? [`${PART_ICON} 자리 남음`] : []), `${FREE_ICON} 비어 있음`);
     // 승인 대기·보류도 이 기호로 뜬다. 「바꾸는 중」이라고 적으면
     // 아무것도 안 바뀐 교환까지 움직이는 것처럼 읽힌다.
     if (moving.length) items.push(`${SWAP_ICON} 좌석 교환`);
@@ -1578,7 +1593,9 @@ export class PremiumSeatSlack {
         // 파이썬은 정오에 끝나는 예약에만 이 알림을 건다(자정에 끝나는 오후 예약은 안 건다).
         const acct = accountShort(p.account ?? '');
         const lines = [`*${acct}* 계정 예약이 10분 뒤 정오에 끝납니다.`];
-        if (p.next_is_adjacent && p.next) lines.push(`정오부터 ${p.next.display_name} 님이 이어서 씁니다.`);
+        // 같이 쓰는 계정(정원 둘 이상)에서는 뒤 사람이 내 자리를 이어받는 것이 아니다 — 자리가 남는지만 알린다.
+        if ((p.capacity ?? 1) > 1) lines.push(p.after_full ? '오후에는 자리가 다 찼습니다.' : '오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.');
+        else if (p.next_is_adjacent && p.next) lines.push(`정오부터 ${p.next.display_name} 님이 이어서 씁니다.`);
         else if (p.next) lines.push(`다음 예약은 ${p.next.label} ${p.next.display_name} 님입니다. 오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.`);
         else lines.push('뒤 예약이 없습니다. 오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.');
         return lines.join('\n');
