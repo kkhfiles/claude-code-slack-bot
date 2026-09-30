@@ -1,6 +1,7 @@
 /**
- * GPT Pro 계정 현황판 칸과 11:50 「곧 끝납니다」 글 — 정원(한 계정을 같은 시간에 여럿)이 들어온 뒤에도
- * 정원 1 계정의 글은 전과 같고, 같이 쓰는 계정은 쓰는 사람을 모두 · 남은 자리를 적는지 본다.
+ * GPT Pro 계정 현황판 칸과 끝날 때의 알림 글 — 정원(한 계정을 같은 시간에 여럿)이 들어온 뒤에도
+ * 정원 1 계정의 현황판 글은 전과 같고, 같이 쓰는 계정은 쓰는 사람을 모두 · 남은 자리를 적는지 본다.
+ * 알림은 계정 전환(정오 끝 11:55 · 자정 끝 17:55)과 긴 예약 미리 알림(08:00·15:00)의 글을 본다.
  *
  *   npm run check:proboard
  *
@@ -8,7 +9,7 @@
  */
 import './lib/fresh-dist.mjs';
 
-const { proFieldText, bookingEndingText } = await import('../dist/premium-seat.js');
+const { proFieldText, bookingEndingText, bookingHeadsupText } = await import('../dist/premium-seat.js');
 
 let fails = 0;
 function check(name, ok, detail = '') {
@@ -47,13 +48,29 @@ check('정원 2 · 두 사람이면 빨간 원 · 둘 다', shared.includes(`${B
 check('정원 2 · 아무도 없으면 초록 원', shared.includes(`${FREE} *pro-c*  비어 있음`), shared);
 
 // 11:50 알림 — 정원 1 은 전과 같고, 같이 쓰는 계정은 「이어서 씁니다」 대신 오후 자리
+// 끝날 때의 알림(2026-09-30 실장) — 계정 전환: 정오 끝 11:55 · 자정 끝 17:55(밤에는 안 보냄) · 긴 예약 미리 알림: 08:00·15:00
 const next = { display_name: '나', label: '오늘 오후' };
-check('알림 · 정원 1 · 바로 이어 쓰는 사람', bookingEndingText({ account: 'pro-a@ex.com', next, next_is_adjacent: true }).endsWith('정오부터 나 님이 이어서 씁니다.'));
-check('알림 · 정원 1 · 뒤 예약 없음', bookingEndingText({ account: 'pro-a@ex.com', next: null }).endsWith('뒤 예약이 없습니다. 오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.'));
-const full = bookingEndingText({ account: 'pro-a@ex.com', capacity: 2, next, next_is_adjacent: true, after_full: true });
-check('알림 · 정원 2 · 오후 자리 다 참(이어받는다고 안 함)', full.endsWith('오후에는 자리가 다 찼습니다.') && !full.includes('이어서'), full);
-const room = bookingEndingText({ account: 'pro-a@ex.com', capacity: 2, next, next_is_adjacent: true, after_full: false });
-check('알림 · 정원 2 · 오후 자리 남음', room.endsWith('오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.') && !room.includes('이어서'), room);
+const A = 'pro-a@ex.com';
+const lines = (t) => t.split('\n');
+const noonNext = bookingEndingText({ account: A, end_word: '정오', next, next_is_adjacent: true });
+check('전환 · 정오 · 바로 뒤 사람', lines(noonNext)[0] === '*pro-a* 계정 예약이 5분 뒤 정오에 끝납니다.'
+  && lines(noonNext)[1] === '정오부터 나 님이 씁니다. 다른 계정으로 전환해 주세요.', noonNext);
+const noonFree = bookingEndingText({ account: A, end_word: '정오', next: null });
+check('전환 · 정오 · 바로 뒤 빔', lines(noonFree)[1] === '끝나면 다른 계정으로 전환해 주세요. 바로 뒤 자리가 비어 있어 더 쓰시려면 TurnTable에서 늘려 주세요.', noonFree);
+const eveNext = bookingEndingText({ account: A, end_word: '자정', next, next_is_adjacent: true });
+check('전환 · 자정 끝(17:55) · 「5분 뒤」라 하지 않음', lines(eveNext)[0] === '*pro-a* 계정 예약이 오늘 자정에 끝납니다.'
+  && lines(eveNext)[1] === '자정부터 나 님이 씁니다. 오늘 사용을 마치면 다른 계정으로 전환해 주세요.', eveNext);
+const eveFree = bookingEndingText({ account: A, end_word: '자정', next: null });
+check('전환 · 자정 끝 · 바로 뒤 빔', lines(eveFree)[1] === '오늘 사용을 마치면 다른 계정으로 전환해 주세요. 바로 뒤 자리가 비어 있어 더 쓰시려면 TurnTable에서 늘려 주세요.', eveFree);
+check('전환 · 옛 자료(end_word 없음)는 정오로', lines(bookingEndingText({ account: A, next: null }))[0] === '*pro-a* 계정 예약이 5분 뒤 정오에 끝납니다.');
+const full = bookingEndingText({ account: A, end_word: '정오', capacity: 2, next, next_is_adjacent: true, after_full: true });
+check('전환 · 정원 2 · 뒤 자리 다 참(이어받는다고 안 함)', lines(full)[1] === '정오부터 이 계정 자리가 다 찹니다. 다른 계정으로 전환해 주세요.' && !full.includes('나 님'), full);
+const room = bookingEndingText({ account: A, end_word: '정오', capacity: 2, next, next_is_adjacent: true, after_full: false });
+check('전환 · 정원 2 · 뒤 자리 남음(누가 와도 늘릴 수 있음)', room.includes('늘려 주세요') && !room.includes('나 님'), room);
+const headNoon = bookingHeadsupText({ account: A, end_word: '정오', label: '9/28(월) 오전 ~ 오늘 오전', next, next_is_adjacent: true });
+check('미리 알림 · 정오 끝(08:00) · 바로 뒤 사람', headNoon === '*pro-a* 계정 예약(9/28(월) 오전 ~ 오늘 오전)이 오늘 정오에 끝납니다.\n정오부터 나 님이 씁니다. 그 전에 마무리해 주세요.', headNoon);
+const headEve = bookingHeadsupText({ account: A, end_word: '자정', label: '9/29(화) 오후 ~ 오늘 오후', next: null });
+check('미리 알림 · 자정 끝(15:00) · 바로 뒤 빔', headEve.endsWith('바로 뒤 자리가 비어 있어 더 쓰시려면 TurnTable에서 미리 늘려 주세요.') && headEve.includes('오늘 자정에 끝납니다'), headEve);
 
 if (fails) {
   console.log(`\n실패 ${fails}건`);

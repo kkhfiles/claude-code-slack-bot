@@ -7,7 +7,7 @@
  *
  *   changed  변경 번호가 올랐다 — 누가 웹에서 잡거나 바꾸거나 취소했다
  *   slot     칸이 바뀌었다 — 자정·정오. 현황판의 「오늘·내일」·「사용 중」을 다시 그린다
- *   timed    11:50 — 정오에 끝나는 예약 알림
+ *   timed    알림 시각 — 08:00·15:00(긴 예약 미리 알림) · 11:55·17:55(계정 전환 · 2026-09-30 실장)
  *   safety   10분 — 명단·계정 올리기·공휴일, 그리고 번호 확인이 틀렸을 때의 안전망
  *   fallback 번호를 못 읽음 — 예전처럼 1분마다
  *   first    처음
@@ -32,12 +32,14 @@ export const FALLBACK_MS = 60_000;
 const KST_MS = 9 * 3600_000;
 const DAY_MS = 86_400_000;
 
-/** 다음 11:50(서울) — 5초 뒤로 둬서 파이썬이 「11:50 이 됐다」로 본다. */
+/** 알림 시각(서울 시·분) — 파이썬 `bookings.SWITCH_AT`·`HEADSUP_AT` 과 같게 둔다. */
+export const TIMED_AT: Array<[number, number]> = [[8, 0], [11, 55], [15, 0], [17, 55]];
+
+/** 다음 알림 시각(서울) — 5초 뒤로 둬서 파이썬이 「그 시각이 됐다」로 본다. */
 export function nextTimedAt(now: number): number {
   const kstDay = Math.floor((now + KST_MS) / DAY_MS) * DAY_MS;
-  let at = kstDay + (11 * 60 + 50) * 60_000 + 5_000 - KST_MS;
-  if (at <= now) at += DAY_MS;
-  return at;
+  const times = TIMED_AT.map(([h, m]) => kstDay + (h * 60 + m) * 60_000 + 5_000 - KST_MS);
+  return times.find((at) => at > now) ?? times[0] + DAY_MS;
 }
 
 export function initialWatch(now: number): BookingWatch {

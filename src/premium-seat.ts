@@ -110,14 +110,36 @@ export function proFieldText(pro: any): string {
 
 /** 11:50 「곧 끝납니다」 글. 파이썬은 정오에 끝나는 예약에만 이 알림을 건다(자정에 끝나는 오후 예약은 안 건다). */
 export function bookingEndingText(p: any): string {
+  // 「계정 전환」 — 모든 예약(2026-09-30 실장 · 전에는 정오에 끝나는 예약만 10분 전). 정오에 끝나면 5분 전(11:55),
+  // 자정에 끝나면 그날 17:55 — 밤에는 안 보낸다(실장 「그 시간에 보내면 안 된다」). 그래서 자정 끝은 「오늘 사용을 마치면」.
   const acct = accountShort(p.account ?? '');
-  const lines = [`*${acct}* 계정 예약이 10분 뒤 정오에 끝납니다.`];
-  // 같이 쓰는 계정(정원 둘 이상)에서는 뒤 사람이 내 자리를 이어받는 것이 아니다 — 자리가 남는지만 알린다.
-  if ((p.capacity ?? 1) > 1) lines.push(p.after_full ? '오후에는 자리가 다 찼습니다.' : '오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.');
-  else if (p.next_is_adjacent && p.next) lines.push(`정오부터 ${p.next.display_name} 님이 이어서 씁니다.`);
-  else if (p.next) lines.push(`다음 예약은 ${p.next.label} ${p.next.display_name} 님입니다. 오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.`);
-  else lines.push('뒤 예약이 없습니다. 오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.');
+  const evening = p.end_word === '자정';
+  const lines = [evening ? `*${acct}* 계정 예약이 오늘 자정에 끝납니다.` : `*${acct}* 계정 예약이 5분 뒤 정오에 끝납니다.`];
+  const when = evening ? '오늘 사용을 마치면' : '끝나면';
+  const blocked = handoverBlocked(p);
+  if (blocked) lines.push(`${blocked} ${evening ? `${when} ` : ''}다른 계정으로 전환해 주세요.`);
+  else lines.push(`${when} 다른 계정으로 전환해 주세요. 바로 뒤 자리가 비어 있어 더 쓰시려면 TurnTable에서 늘려 주세요.`);
   return lines.join('\n');
+}
+
+/** 긴 예약(1일 이상)이 끝나는 날 미리 한 번 — 정오에 끝나면 08:00 · 자정에 끝나면 15:00(2026-09-30 실장). */
+export function bookingHeadsupText(p: any): string {
+  const acct = accountShort(p.account ?? '');
+  const lines = [`*${acct}* 계정 예약(${p.label})이 오늘 ${p.end_word ?? '정오'}에 끝납니다.`];
+  const blocked = handoverBlocked(p);
+  if (blocked) lines.push(`${blocked} 그 전에 마무리해 주세요.`);
+  else lines.push('바로 뒤 자리가 비어 있어 더 쓰시려면 TurnTable에서 미리 늘려 주세요.');
+  return lines.join('\n');
+}
+
+/**
+ * 끝난 뒤 이 계정을 더 쓸 수 없는 까닭 한 줄 — 없으면 ''(늘릴 수 있음).
+ * 같이 쓰는 계정(정원 둘 이상)에서는 뒤 사람이 내 자리를 이어받는 것이 아니다 — 뒤 자리가 다 차는지만 본다.
+ */
+function handoverBlocked(p: any): string {
+  const at = p.end_word ?? '정오';
+  if ((p.capacity ?? 1) > 1) return p.after_full ? `${at}부터 이 계정 자리가 다 찹니다.` : '';
+  return p.next_is_adjacent && p.next ? `${at}부터 ${p.next.display_name} 님이 씁니다.` : '';
 }
 
 /** 라디오에서 「바꾸지 않음」을 나타내는 값. 슬랙이 빈 문자열을 안 받는다. */
@@ -1515,7 +1537,7 @@ export class PremiumSeatSlack {
   /** 관리자에게 가는 알림에만 버튼을 단다. 팀원 알림은 읽는 것으로 끝난다. */
   private notificationButtons(row: any): any | null {
     // 예약이 곧 끝나거나 취소됐거나 교환 요청이 닫힌 사람에게는 예약 화면(TurnTable)으로 가는 길을 붙인다.
-    if (row.kind === 'BOOKING_ENDING' || row.kind === 'BOOKING_CANCELLED' || row.kind === 'REQUEST_RETIRED') {
+    if (row.kind === 'BOOKING_ENDING' || row.kind === 'BOOKING_HEADSUP' || row.kind === 'BOOKING_CANCELLED' || row.kind === 'REQUEST_RETIRED') {
       const link = this.bookingLink('TurnTable 열기', 'primary');
       return link ? { type: 'actions', elements: [link] } : null;
     }
@@ -1611,6 +1633,8 @@ export class PremiumSeatSlack {
       }
       case 'BOOKING_ENDING':
         return bookingEndingText(p);
+      case 'BOOKING_HEADSUP':
+        return bookingHeadsupText(p);
       case 'BOOKING_CANCELLED': {
         const acct = accountShort(p.account ?? '');
         // 취소는 하나다(2026-09-29 실장) — 쓰는 중이었으면 사이트가 그 전 시간대까지 쓴 기록을 남긴다(RELEASED).
