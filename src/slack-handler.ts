@@ -518,7 +518,11 @@ export class SlackHandler {
           calendar: () => {
             const poller = this.assistantScheduler?.getCalendarPoller();
             return poller
-              ? { add: (ev) => poller.addPrivateEvent(ev), remove: (id) => poller.removePrivateEvent(id) }
+              ? {
+                add: (ev) => poller.addPrivateEvent(ev),
+                remove: (cal, id) => poller.removePrivateEvent(cal, id),
+                setLocation: (cal, id, place) => poller.setPrivateEventLocation(cal, id, place),
+              }
               : null;
           },
         })

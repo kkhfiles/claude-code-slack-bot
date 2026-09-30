@@ -238,18 +238,52 @@ export class CalendarPoller {
 
   // --- 본인만 보는 캘린더에 넣고 빼기 (1on1 확정 · 2026-09-30) ---
   //
-  // **넣는 곳은 기본 캘린더(`primary`) 하나로 박는다 — 캘린더를 고르는 인자를 두지 않는다.**
-  // 이 계정의 캘린더 중 실 전체가 보는 팀 캘린더가 있고(소유·쓰기 12명), 거기 넣으면 누가 1on1 을
-  // 잡았는지가 전원에게 보인다. 소유자가 이 계정 하나뿐인 것은 기본 캘린더뿐이었다(2026-09-30 ACL
-  // 확인). 그래도 일정마다 `visibility: private` 를 건다 — 나중에 누가 공유를 켜도 내용은 안 보인다.
+  // **넣는 곳은 부르는 쪽이 이름으로 정하고(1on1 은 「업무」 · 실장 2026-09-30), 넣기 직전에 그
+  // 캘린더를 본인만 보는지 기계로 확인한다.** 이 계정의 캘린더 중 실 전체가 보는 팀 캘린더가 있고
+  // (소유·쓰기 12명), 이름을 잘못 적어 그리로 가면 누가 1on1 을 잡았는지가 전원에게 보인다. 공유 규칙이
+  // 「이 계정」과 「그 캘린더 자신」(보조 캘린더는 자기 주소를 소유자로 적는다) 말고 하나라도 있으면
+  // 넣지 않는다. 그래도 일정마다 `visibility: private` 를 건다.
 
-  /** 일정을 넣고 그 id 를 돌려준다. 못 넣으면 null(부르는 쪽이 「직접 넣어 주세요」라고 말한다). */
-  async addPrivateEvent(ev: { start: Date; minutes: number; title: string; description?: string }): Promise<string | null> {
+  /** 이름이 `name` 이고 **본인만 보는** 캘린더의 id. 없거나 공유돼 있으면 null(까닭은 로그에). */
+  private async privateCalendarId(accessToken: string, name: string): Promise<string | null> {
+    const get = async (url: string) => {
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json() as Promise<{ items?: Array<Record<string, any>> }>;
+    };
+    const list = (await get('https://www.googleapis.com/calendar/v3/users/me/calendarList')).items ?? [];
+    const me = String(list.find((c) => c.primary)?.id ?? '').toLowerCase();
+    const cal = list.find((c) => (c.summaryOverride || c.summary) === name && c.accessRole === 'owner');
+    if (!cal || !me) {
+      this.logger.warn(`「${name}」 캘린더를 못 찾았습니다(본인 소유) — 일정을 넣지 않습니다`);
+      return null;
+    }
+    const id = String(cal.id);
+    const acl = (await get(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(id)}/acl`)).items ?? [];
+    const others = acl.filter((a) => {
+      const v = String(a.scope?.value ?? '').toLowerCase();
+      return !(a.scope?.type === 'user' && (v === me || v === id.toLowerCase()));
+    });
+    if (others.length) {
+      this.logger.warn(`「${name}」 캘린더가 다른 사람과 공유돼 있습니다(규칙 ${others.length}개) — 일정을 넣지 않습니다`);
+      return null;
+    }
+    return id;
+  }
+
+  /**
+   * 일정을 넣고 {캘린더 id, 일정 id} 를 돌려준다. 못 넣으면 null(부르는 쪽이 「직접 넣어 주세요」라고
+   * 말한다). 캘린더는 이름으로 받는다 — 본인만 보는지 확인한 뒤에만 넣는다.
+   */
+  async addPrivateEvent(ev: { calendar: string; start: Date; minutes: number; title: string; description?: string }):
+    Promise<{ calendarId: string; eventId: string } | null> {
     const accessToken = await this.getAccessToken();
     if (!accessToken) return null;
     const end = new Date(ev.start.getTime() + ev.minutes * 60 * 1000);
     try {
-      const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+      const calendarId = await this.privateCalendarId(accessToken, ev.calendar);
+      if (!calendarId) return null;
+      const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -266,7 +300,7 @@ export class CalendarPoller {
         return null;
       }
       const data = await response.json() as { id?: string };
-      return data.id ?? null;
+      return data.id ? { calendarId, eventId: data.id } : null;
     } catch (error) {
       this.logger.warn('본인 캘린더에 일정을 못 넣었습니다', error);
       return null;
@@ -274,17 +308,37 @@ export class CalendarPoller {
   }
 
   /** 넣었던 일정을 뺀다. 이미 없으면(410·404) 뺀 것으로 친다. */
-  async removePrivateEvent(id: string): Promise<boolean> {
+  async removePrivateEvent(calendarId: string, id: string): Promise<boolean> {
     const accessToken = await this.getAccessToken();
-    if (!accessToken || !id) return false;
+    if (!accessToken || !id || !calendarId) return false;
     try {
       const response = await fetch(
-        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(id)}`,
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(id)}`,
         { method: 'DELETE', headers: { Authorization: `Bearer ${accessToken}` } },
       );
       return response.ok || response.status === 404 || response.status === 410;
     } catch (error) {
       this.logger.warn('본인 캘린더에서 일정을 못 뺐습니다', error);
+      return false;
+    }
+  }
+
+  /** 넣었던 일정의 장소 칸을 채운다(1on1 「장소 알리기」). */
+  async setPrivateEventLocation(calendarId: string, id: string, location: string): Promise<boolean> {
+    const accessToken = await this.getAccessToken();
+    if (!accessToken || !id || !calendarId) return false;
+    try {
+      const response = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(id)}`,
+        {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ location }),
+        },
+      );
+      return response.ok;
+    } catch (error) {
+      this.logger.warn('캘린더 일정의 장소를 못 채웠습니다', error);
       return false;
     }
   }

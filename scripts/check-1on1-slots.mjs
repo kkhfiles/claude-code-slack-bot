@@ -50,9 +50,11 @@ const client = {
   },
 };
 const cal = { added: [], removed: [], up: true };
+cal.located = [];
 const calendar = () => (cal.up ? {
-  add: async (ev) => { cal.added.push(ev); return `ev${cal.added.length}`; },
-  remove: async (id) => { cal.removed.push(id); return true; },
+  add: async (ev) => { cal.added.push(ev); return { calendarId: 'cal-work', eventId: `ev${cal.added.length}` }; },
+  remove: async (calendarId, id) => { cal.removed.push(`${calendarId}/${id}`); return true; },
+  setLocation: async (calendarId, id, place) => { cal.located.push({ calendarId, id, place }); return true; },
 } : null);
 
 const b = new LetterBooking({
@@ -192,10 +194,13 @@ const t2 = at(1, '10:30');
   ok('신청자에게 가는 글에 길이가 없다', !/분\)|길이/.test(offerButtons('UA').msg?.text ?? ''));
   ok('캘린더 제목에 이름이 없다(화면을 옆에서 볼 수 있다)', cal.added[0]?.title === '1:1 미팅');
   ok('⛔ 캘린더에 신청 메모가 안 들어간다', !JSON.stringify(cal.added[0]).includes('팀 이동'));
-  ok('일정 id 가 기록된다(무를 때 뺀다)', st?.calendar === 'ev1');
+  ok('일정 id 와 캘린더가 기록된다(무를 때 뺀다)', st?.calendar === 'ev1' && st?.calendarId === 'cal-work');
+  // 실장 2026-09-30 「캘린더는 업무라는 이름의 캘린더에」 — 이름으로 넘기고, 본인만 보는지는 캘린더 쪽이 확인한다.
+  ok('「업무」 캘린더로 넣으라고 넘긴다', cal.added[0]?.calendar === '업무');
   const upd = after(n).find((c) => c.kind === 'update');
   ok('누른 메시지의 버튼이 결과 한 줄로 바뀐다', !!upd && !carried(upd).includes('booking_pick') && carried(upd).includes('잡혔습니다'));
   ok('실장에게 확정과 캘린더를 알린다', toUser(BOSS, n).some((c) => /확정/.test(c.text) && /캘린더에 넣었습니다/.test(c.text)));
+  ok('확정 알림에 「장소 알리기」 버튼이 붙는다', toUser(BOSS, n).some((c) => /확정/.test(c.text) && carried(c).includes('booking_place')));
   ok('확정한 건은 그 달 몫을 쓴 것이다', b['thisMonth']('UA') !== null);
 
   const n2 = since();
@@ -247,12 +252,83 @@ const idC = ask('UC', 2);
   ok('다 안 된다고 돌아온 건(이틀째)은 재촉한다', weekend || (nudges.length === 1 && /다다/.test(nudges[0].text)));
 }
 
+// ── 7-1. 장소 알리기 (실장 2026-09-30 · 기본 장소 없음) ─────────────────────
+async function sendPlace(entryId, { text = '', pick = '' } = {}, by = BOSS) {
+  const values = {};
+  if (text) values.place_text = { place_text: { value: text } };
+  if (pick) values.place_pick = { place_pick: { selected_option: { value: pick } } };
+  let acked;
+  await H.booking_place_send({
+    ack: async (a) => { acked = a; }, client,
+    body: { user: { id: by }, view: { private_metadata: JSON.stringify({ id: entryId }) } },
+    view: { state: { values } },
+  });
+  return acked;
+}
+{
+  const n0 = since();
+  await H.booking_place({ ack: async () => {}, client, body: { user: { id: 'UB' }, trigger_id: 't', actions: [{ value: idB }] } });
+  ok('실장 말고는 장소 창을 못 연다', after(n0).length === 0);
+
+  const n1 = since();
+  await H.booking_place({ ack: async () => {}, client, body: { user: { id: BOSS }, trigger_id: 't', actions: [{ value: idB }] } });
+  const view = after(n1).find((c) => c.kind === 'open')?.view;
+  ok('DM 버튼에서 누르면 장소 창이 새로 열린다', view?.callback_id === 'booking_place_send');
+  ok('처음엔 최근 장소 목록이 없다(기본 장소 없음)', !(view?.blocks ?? []).some((x) => x.block_id === 'place_pick'));
+  ok('처음엔 장소를 반드시 적는다', (view?.blocks ?? []).find((x) => x.block_id === 'place_text')?.optional === false);
+
+  const empty = await sendPlace(idB);
+  ok('장소가 비면 막는다', empty?.response_action === 'errors' && !!empty.errors.place_text);
+  const long = await sendPlace(idB, { text: '가'.repeat(101) });
+  ok('장소가 너무 길면 막는다', long?.response_action === 'errors' && !!long.errors.place_text);
+
+  const n2 = since();
+  const okAck = await sendPlace(idB, { text: '3층 소회의실' });
+  ok('장소를 보내면 창이 닫힌다', okAck?.response_action === 'clear');
+  const toB = toUser('UB', n2);
+  ok('신청자에게 장소를 전한다', toB.length === 1 && carried(toB[0]).includes('3층 소회의실'));
+  ok('캘린더 장소 칸을 그 캘린더·그 일정에 채운다',
+    cal.located.some((l) => l.calendarId === 'cal-work' && l.id === 'ev2' && l.place === '3층 소회의실'));
+  ok('실장에게 「알렸습니다」와 「장소 바꾸기」', toUser(BOSS, n2).some((c) => /알렸습니다/.test(c.text) && carried(c).includes('장소 바꾸기')));
+  ok('기록에 장소가 남는다', b['alive']().get(idB)?.place === '3층 소회의실');
+  ok('신청자의 /1on1 화면에 장소가 보인다', JSON.stringify(b['memberView']('UB')).includes('3층 소회의실'));
+  const mv = JSON.stringify(b['managerView']());
+  ok('실장 목록의 「잡힌 1on1」에 장소가 보인다', mv.includes('잡힌 1on1') && mv.includes('3층 소회의실'));
+
+  const n3 = since();
+  await sendPlace(idB, { text: '3층 소회의실' });
+  ok('같은 장소를 또 보내면 신청자에게 다시 안 간다', toUser('UB', n3).length === 0
+    && toUser(BOSS, n3).some((c) => /이미 같은 장소/.test(c.text)));
+
+  const n4 = since();
+  await sendPlace(idB, { text: '2층 라운지' });
+  ok('장소를 바꾸면 「바뀌었습니다」로 전한다', toUser('UB', n4).some((c) => /바뀌었습니다/.test(c.text) && carried(c).includes('2층 라운지')));
+
+  const n5 = since();
+  await H.booking_place({ ack: async () => {}, client, body: { user: { id: BOSS }, trigger_id: 't', view: { id: 'V1' }, actions: [{ value: idB }] } });
+  const again = after(n5).find((c) => c.kind === 'push')?.view;
+  const recent = (again?.blocks ?? []).find((x) => x.block_id === 'place_pick')?.element?.options?.map((o) => o.value) ?? [];
+  ok('목록 창에서 누르면 그 위에 쌓인다', !!again);
+  ok('최근 장소가 새것 먼저 목록에 뜬다', recent[0] === '2층 라운지' && recent[1] === '3층 소회의실');
+  const n6 = since();
+  await sendPlace(idB, { pick: '3층 소회의실' });
+  ok('최근 장소에서 골라도 전한다', toUser('UB', n6).some((c) => carried(c).includes('3층 소회의실')));
+  const n7 = since();
+  await sendPlace(idB, { text: '5층 회의실', pick: '2층 라운지' });
+  ok('적은 것이 고른 것보다 앞선다', toUser('UB', n7).some((c) => carried(c).includes('5층 회의실') && !carried(c).includes('2층 라운지')));
+  ok('⛔ 장소 알림에 신청 메모가 안 실린다', toUser('UB', n2).every((c) => !carried(c).includes('팀 이동')));
+}
+
 // ── 8. 무르기 — 캘린더에서도 뺀다 ──────────────────────────────────────────
 {
   const n = since();
   await H.booking_cancel({ ack: async () => {}, client, body: { user: { id: 'UA' }, actions: [{ value: idA }] } });
-  ok('잡힌 1on1 을 무르면 캘린더에서 뺀다', cal.removed.includes('ev1'));
+  ok('잡힌 1on1 을 무르면 그 캘린더에서 뺀다', cal.removed.includes('cal-work/ev1'));
   ok('실장에게 「캘린더에서도 뺐습니다」', toUser(BOSS, n).some((c) => /캘린더에서도 뺐습니다/.test(c.text)));
+  const n2 = since();
+  await sendPlace(idA, { text: '3층 소회의실' });
+  ok('무른 1on1 에는 장소를 안 알리고 실장에게 그렇다고 말한다', toUser('UA', n2).length === 0
+    && toUser(BOSS, n2).some((c) => /장소를 알리지 않았습니다/.test(c.text)));
 }
 
 // ── 9. 캘린더가 없어도 확정은 된다 ─────────────────────────────────────────

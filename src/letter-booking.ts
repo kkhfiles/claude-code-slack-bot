@@ -76,6 +76,21 @@ for (let m = 7 * 60; m <= 19 * 60; m += 30) {
 const EVENT_MINUTES = 60;
 /** 캘린더 일정 제목 — **이름을 안 넣는다.** 화면을 옆에서 볼 수 있다(누구인지는 설명 칸에). */
 const EVENT_TITLE = '1:1 미팅';
+/**
+ * 확정된 1on1 을 넣을 캘린더 이름(실장 2026-09-30 「업무라는 이름의 캘린더에」). 넣기 직전에 그
+ * 캘린더를 본인만 보는지 확인하고, 공유돼 있으면 넣지 않는다(`CalendarPoller.addPrivateEvent`).
+ */
+const ONE_ON_ONE_CALENDAR = '업무';
+/**
+ * 장소 알리기(실장 2026-09-30) — 시간이 확정된 뒤 실장이 방을 잡고 알리면 봇이 신청자에게 나른다.
+ * **기본 장소는 없다**(실장). 최근에 쓴 장소 몇 개만 목록으로 준다.
+ */
+const PLACE = 'booking_place';
+const PLACE_SEND = 'booking_place_send';
+const BLOCK_PLACE_PICK = 'place_pick';
+const BLOCK_PLACE_TEXT = 'place_text';
+const PLACE_MAX = 100;
+const RECENT_PLACES = 5;
 
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토'];
 
@@ -98,24 +113,27 @@ export interface LetterBookingOptions {
    */
   open: boolean;
   /**
-   * 확정된 1on1 을 넣을 캘린더 — **실장 본인만 보는 기본 캘린더**(`CalendarPoller.addPrivateEvent`).
+   * 확정된 1on1 을 넣을 캘린더 — **실장 본인만 보는 캘린더**(`CalendarPoller.addPrivateEvent`).
    * 부를 때마다 묻는다(캘린더 연동이 늦게 뜨거나 꺼질 수 있다). 없으면 「직접 넣어 주세요」로 알린다.
    */
   calendar?: () => PrivateCalendar | null;
 }
 
 export interface PrivateCalendar {
-  add(ev: { start: Date; minutes: number; title: string; description?: string }): Promise<string | null>;
-  remove(id: string): Promise<boolean>;
+  add(ev: { calendar: string; start: Date; minutes: number; title: string; description?: string }):
+    Promise<{ calendarId: string; eventId: string } | null>;
+  remove(calendarId: string, eventId: string): Promise<boolean>;
+  setLocation(calendarId: string, eventId: string, location: string): Promise<boolean>;
 }
 
 interface Entry {
   ts: string;
   /**
    * `ask` 신청 · `cancel` 무름 · `done` 실장이 내림(시간을 적었으면 `when`) ·
-   * `propose` 실장이 시간 여럿을 보냄 · `pick` 신청자가 하나를 고름 · `decline` 다 안 된다고 함
+   * `propose` 실장이 시간 여럿을 보냄 · `pick` 신청자가 하나를 고름 · `decline` 다 안 된다고 함 ·
+   * `place` 실장이 장소를 알림(다시 알리면 바뀜)
    */
-  action: 'ask' | 'cancel' | 'done' | 'propose' | 'pick' | 'decline';
+  action: 'ask' | 'cancel' | 'done' | 'propose' | 'pick' | 'decline' | 'place';
   /** 신청 하나를 가리키는 열쇠. 신청한 순간의 시각을 그대로 쓴다. */
   id: string;
   user: string;
@@ -130,9 +148,12 @@ interface Entry {
    * 같아져 옛 메시지의 버튼이 살아난다(검사가 실제로 잡았다). 신청자가 누른 버튼에 이 값이 실린다.
    */
   v?: string;
-  /** `pick` — 고른 시작 시각(ISO) · 넣은 캘린더 일정. */
+  /** `pick` — 고른 시작 시각(ISO) · 넣은 캘린더 일정 · 그 캘린더(없으면 옛 기록 — 기본 캘린더). */
   at?: string;
   calendar?: string;
+  calendar_id?: string;
+  /** `place` — 알린 장소. */
+  place?: string;
 }
 
 /** 살아 있는 신청 하나. `done` 이면 시간까지 잡힌 것이고, `fixed` 가 그 시각이다. */
@@ -144,8 +165,13 @@ interface Alive {
   proposal?: { ts: string; v: string; slots: string[]; memo?: string };
   /** 신청자가 「다 안 돼요」를 눌렀다 — 실장이 다시 보낼 차례다. */
   declined?: boolean;
-  /** 캘린더에 넣은 일정(무르면 같이 뺀다). */
+  /** 캘린더에 넣은 일정과 그 캘린더(무르면 같이 뺀다 · 장소를 알리면 장소 칸을 채운다). */
   calendar?: string;
+  calendarId?: string;
+  /** 신청자가 고른 시작 시각(ISO) — 「잡힌 1on1」 목록과 장소 알림에 쓴다. */
+  at?: string;
+  /** 알린 장소. */
+  place?: string;
 }
 
 export class LetterBooking {
@@ -355,7 +381,8 @@ export class LetterBooking {
       // 캘린더에 넣어 둔 것도 뺀다 — 무른 약속이 실장 달력에 남아 있으면 그 시간을 비워 두게 된다.
       let calLine = '';
       if (asked.calendar) {
-        const removed = await (this.opts.calendar?.()?.remove(asked.calendar) ?? Promise.resolve(false)).catch(() => false);
+        const removed = await (this.opts.calendar?.()?.remove(asked.calendarId ?? 'primary', asked.calendar)
+          ?? Promise.resolve(false)).catch(() => false);
         calLine = removed ? ' 캘린더에서도 뺐습니다.' : ' 캘린더 일정은 직접 지워 주세요.';
       }
 
@@ -481,6 +508,47 @@ export class LetterBooking {
       await this.settleOffer(client, payload, result);
     });
 
+    // 장소 알리기 — 확정 알림(실장 DM)과 목록의 「잡힌 1on1」에 붙는 버튼. 실장만.
+    app.action({ action_id: PLACE }, async ({ ack, body, client }) => {
+      await ack();
+      const payload = body as any;
+      if (payload.user?.id !== this.opts.managerUserId) return;
+      const id = payload.actions?.[0]?.value as string;
+      const cur = this.alive().get(id);
+      if (!cur || !cur.done) {
+        await this.tell(client, this.opts.managerUserId, '그새 취소된 1on1 입니다. 장소를 알리지 않았습니다.');
+        return;
+      }
+      const view = this.placeView(cur);
+      try {
+        // 목록 창에서 눌렀으면 그 위에 쌓고, DM 메시지에서 눌렀으면 새로 연다.
+        if (payload.view?.id) await client.views.push({ trigger_id: payload.trigger_id, view });
+        else await client.views.open({ trigger_id: payload.trigger_id, view });
+      } catch (error) {
+        this.logger.warn('장소 창을 못 열었습니다', error);
+      }
+    });
+
+    app.view(PLACE_SEND, async ({ ack, body, view, client }) => {
+      if (body.user.id !== this.opts.managerUserId) { await ack(); return; }
+      const values = view.state.values as Record<string, Record<string, any>>;
+      const typed = String(values[BLOCK_PLACE_TEXT]?.[BLOCK_PLACE_TEXT]?.value ?? '').trim();
+      const chosen = String(values[BLOCK_PLACE_PICK]?.[BLOCK_PLACE_PICK]?.selected_option?.value ?? '').trim();
+      const place = typed || chosen;      // 적은 것이 고른 것보다 앞선다
+      if (!place) {
+        await ack({ response_action: 'errors', errors: { [BLOCK_PLACE_TEXT]: '장소를 적거나 최근 장소에서 골라 주세요.' } });
+        return;
+      }
+      if (place.length > PLACE_MAX) {
+        await ack({ response_action: 'errors', errors: { [BLOCK_PLACE_TEXT]: `${PLACE_MAX}자까지만 됩니다 (지금 ${place.length}자).` } });
+        return;
+      }
+      await ack({ response_action: 'clear' });
+      let id = '';
+      try { id = JSON.parse(String(body.view.private_metadata || '{}')).id ?? ''; } catch { /* 아래에서 막힌다 */ }
+      await this.sendPlace(client, id, place);
+    });
+
     // 그냥 내리기 — 실장이 이미 직접 말했을 때. **신청자에게는 아무 말도 안 간다**
     // (같은 말이 두 번 가지 않게).
     app.action({ action_id: DONE }, async ({ ack, body, client }) => {
@@ -595,7 +663,7 @@ export class LetterBooking {
         text: {
           type: 'mrkdwn',
           text: mine.done
-            ? `*잡힌 1on1*\n${mine.fixed || '실장이 따로 알려드렸습니다'}`
+            ? `*잡힌 1on1*\n${mine.fixed || '실장이 따로 알려드렸습니다'}${mine.place ? `\n장소: ${mine.place}` : ''}`
             : `*넣어 두신 신청*\n${this.day(mine.entry.ts)} 신청`
               + `${mine.entry.when ? `\n편한 때: ${mine.entry.when}` : ''}`
               + `${mine.proposal
@@ -685,9 +753,25 @@ export class LetterBooking {
         });
       }
     }
+    // 잡힌 1on1 — 확정 알림을 놓쳐도 여기서 장소를 알리거나 바꿀 수 있게. 지난 것(한 시간 넘게)은 뺀다.
+    const soon = [...this.alive().values()]
+      .filter((a) => a.done && a.at && Date.parse(a.at) >= Date.now() - 60 * 60 * 1000)
+      .sort((a, b) => a.at!.localeCompare(b.at!));
+    if (soon.length) {
+      blocks.push({ type: 'divider' }, { type: 'section', text: { type: 'mrkdwn', text: `*잡힌 1on1 ${soon.length}건*` } });
+      for (const a of soon) {
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*${a.entry.user_name}* · ${this.slotLabel(a.at!)}\n${a.place ? `장소: ${a.place}` : '장소: 아직 안 알림'}`,
+          },
+        }, this.placeButton(a.entry.id, Boolean(a.place)));
+      }
+    }
     blocks.push({
       type: 'context',
-      elements: [{ type: 'mrkdwn', text: `*시간 제안하기* 로 가능한 시간을 여럿 보내면 받는 분이 고르고, 고르면 확정·알림·캘린더 등록까지 봇이 합니다. 이미 직접 말씀하셨으면 *그냥 내리기* 를 쓰세요(그때는 아무 말도 안 갑니다).\n신청은 \`${COMMAND}\` — 실장도 그쪽으로 넣습니다.` }],
+      elements: [{ type: 'mrkdwn', text: `*시간 제안하기* 로 가능한 시간을 여럿 보내면 받는 분이 고르고, 고르면 확정·알림·캘린더 등록까지 봇이 합니다. 방을 잡으시면 *장소 알리기* 로 알려 주세요. 이미 직접 말씀하셨으면 *그냥 내리기* 를 쓰세요(그때는 아무 말도 안 갑니다).\n신청은 \`${COMMAND}\` — 실장도 그쪽으로 넣습니다.` }],
     });
     return this.modal(blocks, undefined, undefined, '들어온 1on1 신청');
   }
@@ -792,22 +876,24 @@ export class LetterBooking {
       const label = this.slotLabel(at);
       const name = cur!.entry.user_name;
       const cal = this.opts.calendar?.() ?? null;
-      let eventId: string | null = null;
+      let put: { calendarId: string; eventId: string } | null = null;
       if (cal) {
         // 설명 칸에는 이름만 — 신청 메모는 캘린더에 안 옮긴다(사본을 늘리지 않는다).
-        eventId = await cal.add({
-          start: new Date(at), minutes: EVENT_MINUTES, title: EVENT_TITLE,
+        put = await cal.add({
+          calendar: ONE_ON_ONE_CALENDAR, start: new Date(at), minutes: EVENT_MINUTES, title: EVENT_TITLE,
           description: `신청: ${name}\n커피콩 1on1 창구에서 확정`,
         }).catch(() => null);
       }
       this.note({ ts: new Date().toISOString(), action: 'pick', id, user: me, user_name: name,
-                  when: label, at, calendar: eventId ?? undefined });
-      this.logger.info(`1on1 확정 ← ${name} (${label})${eventId ? ' · 캘린더' : ' · 캘린더 없음'}`);
+                  when: label, at, calendar: put?.eventId, calendar_id: put?.calendarId });
+      this.logger.info(`1on1 확정 ← ${name} (${label})${put ? ' · 캘린더' : ' · 캘린더 없음'}`);
       await this.tell(client, this.opts.managerUserId,
         `:white_check_mark: 1on1 확정 · *${name}* · ${label}\n`
-        + (eventId
-          ? `_본인만 보는 캘린더에 넣었습니다 — 제목 「${EVENT_TITLE}」 · 이름은 설명 칸._`
-          : '_캘린더에는 못 넣었습니다 — 직접 넣어 주세요._'));
+        + (put
+          ? `_「${ONE_ON_ONE_CALENDAR}」 캘린더에 넣었습니다 — 제목 「${EVENT_TITLE}」 · 이름은 설명 칸._`
+          : '_캘린더에는 못 넣었습니다 — 직접 넣어 주세요._')
+        + '\n방을 잡으시면 *장소 알리기* 로 알려 주세요. 제가 전해 드립니다.',
+        [this.placeButton(id, false)]);
       return `:white_check_mark: *${label}* 로 잡혔습니다. 실장에게 알렸습니다.\n`
         + `안 되시면 \`${COMMAND}\` 에서 취소하시면 됩니다. 이유는 안 물어봅니다.`;
     } finally {
@@ -860,6 +946,96 @@ export class LetterBooking {
       this.logger.warn('시간 제안 메시지를 못 바꿨습니다 — 한 줄로 따로 알립니다', error);
       await this.tell(client, payload.user?.id, line);
     }
+  }
+
+  // ── 장소 알리기 ────────────────────────────────────────────────────────
+  /** 「장소 알리기」(이미 알렸으면 「장소 바꾸기」) 버튼 한 줄. */
+  private placeButton(id: string, changing: boolean): any {
+    return {
+      type: 'actions',
+      elements: [{
+        type: 'button', action_id: PLACE, value: id, ...(changing ? {} : { style: 'primary' }),
+        text: { type: 'plain_text', text: changing ? '장소 바꾸기' : '장소 알리기' },
+      }],
+    };
+  }
+
+  /** 최근에 알린 장소(새것 먼저 · 겹치지 않게). 기본 장소는 없다 — 쓴 것만 되돌려 준다. */
+  private recentPlaces(): string[] {
+    const out: string[] = [];
+    for (const e of [...this.history()].reverse()) {
+      if (e.action === 'place' && e.place && !out.includes(e.place)) out.push(e.place);
+      if (out.length >= RECENT_PLACES) break;
+    }
+    return out;
+  }
+
+  private placeView(cur: Alive): any {
+    const recent = this.recentPlaces();
+    const blocks: any[] = [{
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*${cur.entry.user_name}* · ${cur.at ? this.slotLabel(cur.at) : cur.fixed ?? ''}\n`
+          + (cur.place ? `지금 알린 장소: *${cur.place}* — 새로 보내면 바뀐 장소로 다시 알려 드립니다.` : '잡으신 방을 알려 주시면 제가 전해 드립니다.'),
+      },
+    }];
+    // 슬랙 목록은 항목이 하나도 없으면 창 자체가 거부된다 — 최근 장소가 있을 때만 붙인다.
+    if (recent.length) {
+      blocks.push({
+        type: 'input', block_id: BLOCK_PLACE_PICK, optional: true,
+        label: { type: 'plain_text', text: '최근 장소에서 고르기' },
+        element: {
+          type: 'static_select', action_id: BLOCK_PLACE_PICK,
+          options: recent.map((p) => ({ text: { type: 'plain_text', text: p.slice(0, 75) }, value: p.slice(0, 150) })),
+        },
+      });
+    }
+    blocks.push({
+      type: 'input', block_id: BLOCK_PLACE_TEXT, optional: recent.length > 0,
+      label: { type: 'plain_text', text: recent.length ? '또는 직접 적기' : '장소' },
+      hint: { type: 'plain_text', text: '받는 분께 그대로 갑니다. 예: 3층 소회의실' },
+      element: { type: 'plain_text_input', action_id: BLOCK_PLACE_TEXT, max_length: PLACE_MAX },
+    });
+    return {
+      type: 'modal',
+      callback_id: PLACE_SEND,
+      private_metadata: JSON.stringify({ id: cur.entry.id }),
+      title: { type: 'plain_text', text: '장소 알리기' },
+      submit: { type: 'plain_text', text: '보내기' },
+      close: { type: 'plain_text', text: '취소' },
+      blocks,
+    };
+  }
+
+  /** 장소를 기록하고 신청자에게 나른다 · 캘린더 일정의 장소 칸도 채운다. */
+  private async sendPlace(client: App['client'], id: string, place: string): Promise<void> {
+    const cur = this.alive().get(id);
+    if (!cur || !cur.done) {
+      // 창이 열린 사이 신청자가 물렀다 — 조용히 넘어가면 실장은 알린 줄 안다.
+      await this.tell(client, this.opts.managerUserId, '그새 취소된 1on1 입니다. *장소를 알리지 않았습니다.*');
+      return;
+    }
+    const changed = Boolean(cur.place) && cur.place !== place;
+    if (cur.place === place) {
+      await this.tell(client, this.opts.managerUserId, `*${cur.entry.user_name}* 님께 이미 같은 장소(*${place}*)를 알렸습니다.`);
+      return;
+    }
+    const name = cur.entry.user_name;
+    const when = cur.at ? this.slotLabel(cur.at) : cur.fixed ?? '';
+    this.note({ ts: new Date().toISOString(), action: 'place', id, user: cur.entry.user, user_name: name, place });
+    this.logger.info(`장소 알림 → ${name}${changed ? ' (바뀜)' : ''}`);
+    await this.tell(client, cur.entry.user,
+      `:round_pushpin: 1on1 장소${changed ? '가 바뀌었습니다' : ''} · *${place}*${when ? `\n${when}` : ''}\n`
+      + `안 되시면 \`${COMMAND}\` 에서 취소하시면 됩니다. 이유는 안 물어봅니다.`);
+    let calLine = '';
+    if (cur.calendar) {
+      const cal = this.opts.calendar?.() ?? null;
+      const ok = cal ? await cal.setLocation(cur.calendarId ?? 'primary', cur.calendar, place).catch(() => false) : false;
+      calLine = ok ? ' · 캘린더 장소 칸도 채웠습니다' : ' · 캘린더 장소 칸은 못 채웠습니다';
+    }
+    await this.tell(client, this.opts.managerUserId,
+      `알렸습니다 · *${name}* · ${place}${calLine}`, [this.placeButton(id, true)]);
   }
 
   private modal(blocks: any[], callback?: string, submit?: string, title?: string): any {
@@ -917,10 +1093,13 @@ export class LetterBooking {
         });
       } else if (entry.action === 'pick' && !cur.done) {
         alive.set(entry.id, {
-          ...cur, done: true, fixed: entry.when, proposal: undefined, declined: false, calendar: entry.calendar,
+          ...cur, done: true, fixed: entry.when, proposal: undefined, declined: false,
+          at: entry.at, calendar: entry.calendar, calendarId: entry.calendar_id ?? (entry.calendar ? 'primary' : undefined),
         });
       } else if (entry.action === 'decline' && !cur.done) {
         alive.set(entry.id, { ...cur, proposal: undefined, declined: true });
+      } else if (entry.action === 'place' && cur.done && entry.place) {
+        alive.set(entry.id, { ...cur, place: entry.place });
       }
     }
     return alive;
