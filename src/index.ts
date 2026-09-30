@@ -6,6 +6,7 @@ import { SlackHandler } from './slack-handler';
 import { McpManager } from './mcp-manager';
 import { Logger } from './logger';
 import { installActivityLog, tagApp, tagToken } from './activity-log';
+import { installPrivacyGuard } from './privacy-guard';
 import { getVersionInfo, checkForUpdates } from './version';
 import { ReportServer } from './report-server';
 
@@ -29,6 +30,17 @@ async function start() {
 
     // 봇이 한 일을 로컬에 남긴다. **슬랙에 붙기 전에** 길목을 감싸야 첫 말부터 잡힌다.
     installActivityLog();
+    // 개인 글 문 — **활동 기록 다음에** 걸어야 가장 바깥이 된다(막힌 글은 활동 기록에도 안 남게).
+    // 실장 2026-09-30 「DM 이나 콩에게 전달한 말이 타인이나 채널에 공유되면 절대 안 됨」.
+    if (config.chat.turnScript) {
+      const bots = path.join(path.dirname(config.chat.turnScript), 'bots');
+      installPrivacyGuard({
+        ownerUserId: config.letter.managerUserId,
+        botsDir: bots,
+        registryPath: path.join(bots, '_shared', 'data', 'private-registry.jsonl'),
+        keyPath: path.join(bots, '_shared', 'data', 'private-registry.key'),
+      });
+    }
 
     // Initialize Slack app
     const app = new App({

@@ -55,6 +55,11 @@ export function tagToken(token: string | undefined, bot: string): void {
   if (token) byToken.set(token, bot);
 }
 
+/** 이 토큰이 어느 봇 것인가(개인 글 문이 막은 것을 적을 때). 모르면 `?`. */
+export function botOfToken(token: string | undefined): string {
+  return byToken.get(token ?? '') ?? '?';
+}
+
 /** 이 App 으로 들어오는 말은 이 봇 것이다. */
 export function tagApp(app: App, bot: string): void {
   byApp.set(app, bot);

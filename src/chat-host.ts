@@ -5,6 +5,7 @@ import * as path from 'path';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
 import { tagApp, tagToken, tagRooms, note } from './activity-log';
+import { rememberPrivate } from './privacy-guard';
 
 /**
  * agy 위에 얹은 슬랙 대화 계층. **봇 여러 개가 이 한 클래스를 같이 쓴다.**
@@ -709,6 +710,9 @@ export class ChatHost {
   ): Promise<void> {
     const manager = this.opts.managerUserId;
     const name = await this.displayName(client, user);
+    // **넘기기 전에 지문부터** — 이 말은 이제 실장과 보낸 사람에게만 나갈 수 있다(개인 글 문).
+    // 원문은 적지 않는다. 문이 안 걸려 있으면 아무 일도 안 한다.
+    rememberPrivate(text, [user]);
     let passed = false;
     if (manager) {
       try {

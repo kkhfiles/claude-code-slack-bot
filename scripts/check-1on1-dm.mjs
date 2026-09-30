@@ -96,7 +96,19 @@ function makeHost(bypassBlocks) {
   const b = makeBooking();
   const host = makeHost(b.dmBlocks);
   const client = fakeClient();
-  await host['bypassToManager'](client, MEMBER, `D-${MEMBER}`, SECRET);
+  // 로그를 잡는다 — 넘긴 말이 로그에 찍히면 pm2 로그 파일에 원문이 쌓인다.
+  const logged = [];
+  const saved = {};
+  for (const k of ['log', 'info', 'warn', 'error', 'debug']) {
+    saved[k] = console[k];
+    console[k] = (...a) => logged.push(a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' '));
+  }
+  try {
+    await host['bypassToManager'](client, MEMBER, `D-${MEMBER}`, SECRET);
+  } finally {
+    Object.assign(console, saved);
+  }
+  ok('⛔ 넘기는 동안 로그에 보낸 말이 안 찍힌다', !logged.join('\n').includes('둘만 아는'));
   const toBoss = client.calls.filter((c) => c.channel === `D-${BOSS}`);
   const elsewhere = client.calls.filter((c) => c.channel !== `D-${BOSS}` && carried(c).includes('둘만 아는'));
   ok('넘긴 글이 실장 DM 에 간다', toBoss.length === 1 && carried(toBoss[0]).includes('둘만 아는'));
