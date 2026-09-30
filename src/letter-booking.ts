@@ -49,7 +49,6 @@ const NUDGE_AT = '10:00';
 
 const BLOCK_WHEN = 'when';
 const BLOCK_NOTE = 'note';
-const BLOCK_MINUTES = 'minutes';
 const BLOCK_MEMO = 'memo';
 const MAX_TEXT = 500;
 /** 신청자가 시간 하나를 고르는 버튼 · 「다 안 돼요」. */
@@ -61,7 +60,11 @@ const DECLINE = 'booking_decline';
  * 다시 사람끼리 주고받게 되고, 그건 이 창구가 없애려던 일이다. 너무 많으면 고르기가 일이 된다.
  */
 const SLOT_MAX = 5;
-const SLOT_MINUTES = [30, 60, 90];
+/**
+ * 캘린더 일정의 끝 시각에만 쓰는 길이. **사람에게는 안 묻고 안 보인다** — 실장 2026-09-30
+ * 「길이는 빼고 시작 시간만 정하면 될 것 같다」(길이는 만나서 정한다 · 캘린더는 끝 시각이 있어야 한다).
+ */
+const EVENT_MINUTES = 60;
 /** 캘린더 일정 제목 — **이름을 안 넣는다.** 화면을 옆에서 볼 수 있다(누구인지는 설명 칸에). */
 const EVENT_TITLE = '1:1 미팅';
 
@@ -110,9 +113,8 @@ interface Entry {
   user_name: string;
   when?: string;
   note?: string;
-  /** `propose` — 보낸 시작 시각들(ISO) · 길이(분) · 받는 분께 가는 덧붙인 말 · 판 번호. */
+  /** `propose` — 보낸 시작 시각들(ISO) · 받는 분께 가는 덧붙인 말 · 판 번호. */
   slots?: string[];
-  minutes?: number;
   memo?: string;
   /**
    * 제안의 판 번호. **기록 시각으로 대신하지 않는다** — 같은 밀리초에 두 번 보내면 판 번호가
@@ -130,7 +132,7 @@ interface Alive {
   done: boolean;
   fixed?: string;
   /** 보내 놓고 고르기를 기다리는 제안. **다시 보내면 바뀐다 — `ts` 가 판 번호다**(옛 메시지의 버튼을 막는다). */
-  proposal?: { ts: string; v: string; slots: string[]; minutes: number; memo?: string };
+  proposal?: { ts: string; v: string; slots: string[]; memo?: string };
   /** 신청자가 「다 안 돼요」를 눌렀다 — 실장이 다시 보낼 차례다. */
   declined?: boolean;
   /** 캘린더에 넣은 일정(무르면 같이 뺀다). */
@@ -404,7 +406,6 @@ export class LetterBooking {
         return;
       }
       await ack({ response_action: 'clear' });
-      const minutes = Number(values[BLOCK_MINUTES]?.[BLOCK_MINUTES]?.selected_option?.value) || 60;
       // 같은 시각을 두 칸에 골랐으면 하나로 · 이른 순서로
       const slots = [...new Set(picked.map((p) => p.ms))].sort((a, b) => a - b)
         .map((ms) => new Date(ms).toISOString());
@@ -435,12 +436,12 @@ export class LetterBooking {
 
       const v = crypto.randomBytes(6).toString('hex');
       this.note({ ts: new Date().toISOString(), action: 'propose', id: who.id, user: who.user, user_name: who.name,
-                  slots, minutes, memo: memo || undefined, v });
-      this.logger.info(`시간 제안 → ${who.name} (${slots.length}개 · ${minutes}분)`);
-      await this.tell(client, who.user, this.offerText(slots, minutes, memo, Boolean(still.proposal || still.declined)),
+                  slots, memo: memo || undefined, v });
+      this.logger.info(`시간 제안 → ${who.name} (${slots.length}개)`);
+      await this.tell(client, who.user, this.offerText(slots, memo, Boolean(still.proposal || still.declined)),
         this.offerBlocks(who.id, v, slots));
       await this.tell(client, this.opts.managerUserId,
-        `보냈습니다 · *${who.name}* · ${slots.map((s) => this.slotLabel(s)).join(' / ')} (${minutes}분)\n`
+        `보냈습니다 · *${who.name}* · ${slots.map((s) => this.slotLabel(s)).join(' / ')}\n`
         + '_하나를 고르면 확정해 알려 드리고 본인만 보는 캘린더에 넣습니다. 다 안 되면 다시 보내 달라고 알려 드립니다._');
     });
 
@@ -679,7 +680,6 @@ export class LetterBooking {
   /** 실장이 가능한 시간을 여럿 고르는 창. 첫 칸만 반드시 · 나머지는 비워도 된다. */
   private proposeView(entry: Entry): any {
     const cur = this.alive().get(entry.id);
-    const minutes = (m: number) => ({ text: { type: 'plain_text', text: `${m}분` }, value: String(m) });
     const blocks: any[] = [{
       type: 'section',
       text: {
@@ -694,26 +694,16 @@ export class LetterBooking {
     for (let i = 0; i < SLOT_MAX; i++) {
       blocks.push({
         type: 'input', block_id: `slot${i}`, optional: i > 0,
-        label: { type: 'plain_text', text: `가능한 시간 ${i + 1}` },
+        label: { type: 'plain_text', text: `가능한 시작 시간 ${i + 1}` },
         element: { type: 'datetimepicker', action_id: `slot${i}` },
       });
     }
-    blocks.push(
-      {
-        type: 'input', block_id: BLOCK_MINUTES,
-        label: { type: 'plain_text', text: '길이' },
-        element: {
-          type: 'static_select', action_id: BLOCK_MINUTES,
-          initial_option: minutes(60), options: SLOT_MINUTES.map(minutes),
-        },
-      },
-      {
-        type: 'input', block_id: BLOCK_MEMO, optional: true,
-        label: { type: 'plain_text', text: '덧붙일 말 (안 적으셔도 됩니다)' },
-        hint: { type: 'plain_text', text: '받는 분께 그대로 갑니다. 예: 회의실은 따로 알려드릴게요' },
-        element: { type: 'plain_text_input', action_id: BLOCK_MEMO },
-      },
-    );
+    blocks.push({
+      type: 'input', block_id: BLOCK_MEMO, optional: true,
+      label: { type: 'plain_text', text: '덧붙일 말 (안 적으셔도 됩니다)' },
+      hint: { type: 'plain_text', text: '받는 분께 그대로 갑니다. 예: 회의실은 따로 알려드릴게요' },
+      element: { type: 'plain_text_input', action_id: BLOCK_MEMO },
+    });
     return {
       type: 'modal',
       callback_id: TELL_SEND,
@@ -726,9 +716,8 @@ export class LetterBooking {
   }
 
   /** 신청자에게 가는 제안 글. 신청 메모는 싣지 않는다(실장 말만). */
-  private offerText(slots: string[], minutes: number, memo: string, again: boolean): string {
-    return `${again ? '실장이 1on1 시간을 다시 보냈습니다.' : '실장이 1on1 가능한 시간을 보냈습니다.'} 편한 시간을 하나 골라 주세요.`
-      + `\n길이 ${minutes}분${slots.length > 1 ? ` · ${slots.length}개 중 하나` : ''}`
+  private offerText(slots: string[], memo: string, again: boolean): string {
+    return `${again ? '실장이 1on1 시간을 다시 보냈습니다.' : '실장이 1on1 가능한 시간을 보냈습니다.'} 편한 시작 시간을 하나 골라 주세요.`
       + `${memo ? `\n> ${memo.replace(/\n/g, '\n> ')}` : ''}`;
   }
 
@@ -781,7 +770,7 @@ export class LetterBooking {
       if (cal) {
         // 설명 칸에는 이름만 — 신청 메모는 캘린더에 안 옮긴다(사본을 늘리지 않는다).
         eventId = await cal.add({
-          start: new Date(at), minutes: offer.minutes, title: EVENT_TITLE,
+          start: new Date(at), minutes: EVENT_MINUTES, title: EVENT_TITLE,
           description: `신청: ${name}\n커피콩 1on1 창구에서 확정`,
         }).catch(() => null);
       }
@@ -789,7 +778,7 @@ export class LetterBooking {
                   when: label, at, calendar: eventId ?? undefined });
       this.logger.info(`1on1 확정 ← ${name} (${label})${eventId ? ' · 캘린더' : ' · 캘린더 없음'}`);
       await this.tell(client, this.opts.managerUserId,
-        `:white_check_mark: 1on1 확정 · *${name}* · ${label} (${offer.minutes}분)\n`
+        `:white_check_mark: 1on1 확정 · *${name}* · ${label}\n`
         + (eventId
           ? `_본인만 보는 캘린더에 넣었습니다 — 제목 「${EVENT_TITLE}」 · 이름은 설명 칸._`
           : '_캘린더에는 못 넣었습니다 — 직접 넣어 주세요._'));
@@ -898,7 +887,7 @@ export class LetterBooking {
       } else if (entry.action === 'propose' && !cur.done && entry.slots?.length) {
         alive.set(entry.id, {
           ...cur, declined: false,
-          proposal: { ts: entry.ts, v: entry.v ?? entry.ts, slots: entry.slots, minutes: entry.minutes ?? 60, memo: entry.memo },
+          proposal: { ts: entry.ts, v: entry.v ?? entry.ts, slots: entry.slots, memo: entry.memo },
         });
       } else if (entry.action === 'pick' && !cur.done) {
         alive.set(entry.id, {

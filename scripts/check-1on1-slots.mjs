@@ -82,7 +82,6 @@ const ask = (user, daysAgo = 0, note) => {
 async function propose(entryId, user, slots, extra = {}, by = BOSS) {
   const values = {};
   slots.forEach((ms, i) => { values[`slot${i}`] = { [`slot${i}`]: { selected_date_time: Math.floor(ms / 1000) } }; });
-  values.minutes = { minutes: { selected_option: { value: String(extra.minutes ?? 60) } } };
   values.memo = { memo: { value: extra.memo ?? '' } };
   let acked;
   await H.booking_tell_send({
@@ -117,7 +116,9 @@ const idA = ask('UA', 0, NOTE);
   const pickers = (view?.blocks ?? []).filter((x) => x.element?.type === 'datetimepicker');
   ok('실장 창에 시간 칸이 다섯 개 뜬다', pickers.length === 5);
   ok('첫 칸만 반드시다', pickers[0]?.optional === false && pickers.slice(1).every((x) => x.optional));
-  ok('길이를 고를 수 있다(기본 60분)', (view?.blocks ?? []).some((x) => x.element?.initial_option?.value === '60'));
+  // 실장 2026-09-30 「길이는 빼고 시작 시간만」 — 길이를 묻는 칸이 없어야 한다.
+  ok('길이는 안 묻는다(시작 시간만)', !(view?.blocks ?? []).some((x) => x.element?.type === 'static_select'
+    || /길이/.test(x.label?.text ?? '')));
 }
 
 // ── 2. 보내기 — 막히는 것 ────────────────────────────────────────────────────
@@ -164,7 +165,8 @@ const t2 = Date.now() + 1 * DAY;
   ok('고르면 확정된다', st?.done === true && !!st.fixed);
   ok('캘린더에 한 번 들어간다', cal.added.length === 1);
   ok('고른 그 시각으로 들어간다', cal.added[0]?.start.getTime() === Math.floor(t1 / 1000) * 1000);
-  ok('길이가 따라간다', cal.added[0]?.minutes === 60);
+  ok('캘린더에는 끝 시각용으로 한 시간을 둔다(사람에게는 안 보임)', cal.added[0]?.minutes === 60);
+  ok('신청자에게 가는 글에 길이가 없다', !/분\)|길이/.test(offerButtons('UA').msg?.text ?? ''));
   ok('캘린더 제목에 이름이 없다(화면을 옆에서 볼 수 있다)', cal.added[0]?.title === '1:1 미팅');
   ok('⛔ 캘린더에 신청 메모가 안 들어간다', !JSON.stringify(cal.added[0]).includes('팀 이동'));
   ok('일정 id 가 기록된다(무를 때 뺀다)', st?.calendar === 'ev1');
