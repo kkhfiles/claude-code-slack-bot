@@ -56,13 +56,10 @@ async function start() {
     const mcpManager = new McpManager();
     const mcpConfig = mcpManager.loadConfiguration();
 
-    // Optionally start the local report HTTP server (127.0.0.1)
+    // Optionally start the local HTTP server (127.0.0.1) — 업무 칸반 · 수동 분석 실행
     let reportServer: ReportServer | undefined;
     if (config.reports.localServer.enabled && config.assistant.configDir) {
-      // Only regular reports (CLAUDE.md §9). Ad-hoc work reports under
-      // reports/<other>/ are intentionally excluded from the report viewer.
-      const reportsDir = path.resolve(config.assistant.configDir, '..', 'reports', 'scheduled-reports');
-      const server = new ReportServer(reportsDir);
+      const server = new ReportServer();
       try {
         await server.start(config.reports.localServer.port);
         reportServer = server;

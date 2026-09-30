@@ -329,13 +329,9 @@ const messages: Record<string, Record<Locale, string>> = {
     en: '⚠️ Calendar auth renewal needed — reminders paused',
     ko: '⚠️ 캘린더 인증 갱신 필요 — 리마인더 일시 중지됨',
   },
-  'assistant.reportNotFound': {
-    en: '📄 No reports found for: {{type}}',
-    ko: '📄 보고서를 찾을 수 없습니다: {{type}}',
-  },
-  'assistant.reportAvailableTypes': {
-    en: 'Available types',
-    ko: '조회 가능한 유형',
+  'report.archiveRetired': {
+    en: 'The archive button is retired — reports now stay in report-log per run (see desk). Only action proposals need a decision.',
+    ko: '보관 버튼은 폐지됐습니다 — 보고서는 report-log 에 회차별로 쌓이고(desk 에서 봄), 결정은 처리 제안에서만 합니다.',
   },
   'assistant.analysisRunning': {
     en: '📊 Running {{type}} analysis...',
@@ -344,6 +340,10 @@ const messages: Record<string, Record<Locale, string>> = {
   'assistant.notConfigured': {
     en: 'Assistant not configured. Set `ASSISTANT_DM_CHANNEL` and `ASSISTANT_CONFIG_DIR` in `.env`',
     ko: '어시스턴트 미설정. `.env`에 `ASSISTANT_DM_CHANNEL`, `ASSISTANT_CONFIG_DIR` 설정 필요',
+  },
+  'actions.readFailed': {
+    en: 'Could not read report-log — check the bot log for `[ActionPipeline]`.',
+    ko: 'report-log 를 읽지 못했습니다 — 봇 로그의 `[ActionPipeline]` 줄을 확인하세요.',
   },
   'actions.unavailable': {
     en: 'Action proposals are not set up — the report-log clone (`~/.report-log/repo`) is missing.',
@@ -489,7 +489,7 @@ export function getHelpText(locale: Locale): string {
 
     help += `*어시스턴트*\n`;
     help += `\`-br\` / \`-briefing\` / \`브리핑\` — 브리핑 즉시 실행\n`;
-    help += `\`-rp\` / \`-report [타입]\` — 최신 분석 보고서 조회\n`;
+    help += `\`-rp\` / \`-report [타입]\` — 처리 제안 요약 · desk 의 보고서 링크\n`;
     help += `\`-actions\` — 결정이 필요한 처리 제안 · \`-actions review\` 지금 검토 · \`-actions run\` 멈춘 제안 이어 가기\n`;
     help += `\`-as config\` / \`-assistant config\` — 어시스턴트 설정 표시\n`;
     help += `\`-as briefing HH:MM\` — 브리핑 시간 변경\n`;
@@ -540,7 +540,7 @@ export function getHelpText(locale: Locale): string {
 
   help += `*Assistant*\n`;
   help += `\`-br\` / \`-briefing\` — Run briefing now\n`;
-  help += `\`-rp\` / \`-report [type]\` — View latest analysis report\n`;
+  help += `\`-rp\` / \`-report [type]\` — Action proposal summary · link to reports on desk\n`;
   help += `\`-actions\` — Action proposals awaiting a decision · \`-actions review\` review now · \`-actions run\` resume stalled ones\n`;
   help += `\`-an\` / \`-analyze [type]\` — Run analysis (single type or all)\n`;
   help += `\`-as config\` / \`-assistant config\` — Show assistant configuration\n`;

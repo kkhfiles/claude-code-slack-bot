@@ -31,7 +31,7 @@ const EVENTS_FILE = path.join(os.tmpdir(), `actions-check-ev-${Date.now()}.jsonl
 process.env.WORK_EVENTS_FILE = EVENTS_FILE;
 process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
 const {
-  ActionPipeline, buildDigestBlocks, markDecided, parseWindow,
+  ActionPipeline, buildDigestBlocks, buildReportReplyBlocks, markDecided, parseWindow,
 } = require(path.join(ROOT, 'dist', 'action-pipeline.js'));
 const { codexSessionArgs } = require(path.join(ROOT, 'dist', 'work-assistant.js'));
 const { SdkHandler } = require(path.join(ROOT, 'dist', 'sdk-handler.js'));
@@ -268,6 +268,32 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   ok('놓친 브리핑에 처리 제안 요약', body(sched, 'catchUpBriefingIfNeeded').includes('postActionDigest('));
   const manual = handler.slice(handler.indexOf('this.isBriefingCommand(text)'), handler.indexOf('this.isReportCommand(text)'));
   ok('수동 -briefing 에 처리 제안 요약', manual.includes('actionDigestBlocks('));
+}
+
+// ── ⑥b 읽는 쪽 전환(report-log 4단계) — `-report` 는 요약 + desk 링크 · 옛 보고서 훑기는 없음 ──
+{
+  const site = 'https://desk.example';
+  const none = buildReportReplyBlocks({ need_you: [], stuck: [], site });
+  const text = JSON.stringify(none);
+  ok('결정할 것이 없어도 답이 있다(빈 답 금지)', none.length === 2 && text.includes('결정할 것 없음'));
+  ok('종류가 없으면 desk 첫 화면', text.includes(`<${site}/|desk 에서 보고서 보기>`));
+  const typed = JSON.stringify(buildReportReplyBlocks({ need_you: [], stuck: [], site }, 'kg-health'));
+  ok('종류를 주면 그 종류의 회차 목록', typed.includes(`${site}/reports/kg-health/`));
+  const need = buildReportReplyBlocks({
+    need_you: [NOTICE('a-20260929-02', 'digest', 'proposed', ['approve', 'hold', 'reject'])], stuck: [], site,
+  });
+  ok('결정할 것이 있으면 요약 버튼이 먼저 · 링크는 끝', need.some((x) => x.type === 'actions')
+     && need[need.length - 1].type === 'context' && JSON.stringify(need[need.length - 1]).includes('📚'));
+
+  // 옛 보고서 훑기가 남아 있지 않은가 — 다시 들어오면 브리핑 뒤 「보고서 확인」 버튼이 되살아난다
+  const src = ['assistant-scheduler.ts', 'slack-handler.ts', 'report-server.ts']
+    .map((f) => fs.readFileSync(path.join(ROOT, 'src', f), 'utf-8')).join('\n');
+  ok('「보고서 확인」 버튼을 새로 만들지 않는다', !/action_id: 'briefing_view_reports'/.test(src));
+  ok('보관 버튼을 새로 만들지 않는다', !/action_id: 'archive_(report|all_reports|clean_reports)'/.test(src));
+  ok('매니페스트(_status.json)를 읽지 않는다', !src.includes('_status.json'));
+  const handler = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
+  ok('옛 버튼은 처리기가 남아 있다(이미 올라간 메시지)', handler.includes("this.action('briefing_view_reports'")
+     && handler.includes('archive_(report|all_reports|clean_reports)'));
 }
 
 // ── 명령이 다른 명령에 먹히지 않는가 — `-actions` 가 계정 명령(`-ac…`)으로 읽혔다(2026-09-29) ──

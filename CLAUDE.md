@@ -164,9 +164,8 @@ npm test        # 빌드 + check:* 전부
   - 예약 문서 리마인더: 이벤트 description에 `[scheduled-doc] reports/scheduled/{파일명}` → type `"scheduled-doc"`, dispatch 시 `## 요약` 섹션 읽어서 Slack 메시지에 포함
   - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
-- `-report [type]`/`-rp [type]`: `reports/scheduled-reports/<type>/`의 정기 보고서만 탐색 (1단계; 작업 보고서는 `reports/` 다른 하위라 제외 — claude-workflow §9. 같은 scope를 `hasUnreadReports()`·`report-server.ts`도 공유). **롤업 출력**: 요약 한 줄(전체 N · 🔴/🟡 M · clean K) → actionable(🔴/🟡)만 개별 파일 업로드(`filesUploadV2`, `files:write` 스코프) → clean은 compact 목록. 심각도·clean 판정은 `reports/scheduled-reports/_status.json` 매니페스트(데일리 `auto_archive_reports.py` 산출, claude-workflow §9) 소비, 없으면 전체 업로드로 graceful degrade(`loadReportManifest()`). 매니페스트에 없는 신규 보고서는 숨기지 않고 업로드. 아카이브: 개별 `📂 Archive` + 일괄 `🗂 전체`/`🧹 clean 전체`(`archiveReportsBulk()`, `archive_all_reports`/`archive_clean_reports` 액션) → `reports/archived/<type>/`로 이동. 업로드 실패 시 텍스트 fallback
-  - 로컬 HTML 보고서 서버 (`src/report-server.ts`, `marked` 의존): 127.0.0.1 바인딩, per-process 토큰(`?t=<hex>`) 인증, `path.resolve` traversal 가드. `index.ts`에서 `config.reports.localServer.enabled && config.assistant.configDir` 조건으로 부팅. `EADDRINUSE` 시 +5까지 재시도 후 비활성화.
-  - 서버 활성 시 `-rp` 메시지에 인덱스 URL + 보고서별 URL 추가 — 브라우저 클릭 한 번으로 렌더된 HTML 열림 (`file:///`은 Slack 클라이언트가 차단하므로 HTTP 사용)
+- `-report [type]`/`-rp [type]`: 처리 제안 요약(🗂 · 결정 버튼) + desk 의 보고서 링크(`buildReportReplyBlocks`). 보고서 본문은 report-log 저장소에 회차별로 쌓이고 desk 사이트가 그린다 — 링크 주소는 `flow.py digest` 의 `site` 를 쓴다(이 저장소에 주소를 적지 않는다). report-log 4단계(읽는 쪽 전환)로 `reports/scheduled-reports/` 훑기 · 파일 업로드 · 매니페스트(`_status.json`) · 보관 버튼 · 브리핑 뒤 「📄 보고서 확인」 버튼을 뺐다. 이미 올라간 메시지의 옛 버튼은 처리기만 남겨 새 답이나 폐지 안내를 낸다.
+  - 로컬 HTTP 서버 (`src/report-server.ts`): 업무 칸반(`/board`)과 수동 분석 실행(`POST /trigger`)만 남음 · 127.0.0.1 바인딩, per-process 토큰(`?t=<hex>`) 인증. 옛 `/` 는 칸반으로 돌리고 `/report/…` 는 410. `index.ts`에서 `config.reports.localServer.enabled && config.assistant.configDir` 조건으로 부팅. `EADDRINUSE` 시 +5까지 재시도 후 비활성화.
   - 환경변수: `REPORTS_SERVER_ENABLED` (0이면 비활성), `REPORTS_SERVER_PORT` (기본 8765)
 - `-analyze [type]`/`-an [type]`/`분석 [타입]`: 분석 수동 실행 — 타입 지정 시 단일 실행, 미지정 시 전체 실행
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
@@ -333,7 +332,7 @@ git checkout -b feature/<name>
 | `src/version.ts` | 버전 정보 + 업데이트 체크 (`getVersionInfo()`, `checkForUpdates()`) |
 | `src/rate-limit-utils.ts` | 공유 rate limit 감지 유틸 (`isRateLimitText()`, `isRateLimitError()`) |
 | `src/process-memory-watchdog.ts` | 시스템 메모리 워치독 — 커밋 메모리 감시, 프로세스 kill, Slack 확인 UI |
-| `src/report-server.ts` | 로컬 HTML 보고서 서버 — Node http + marked, 127.0.0.1, 토큰 인증, traversal 가드 |
+| `src/report-server.ts` | 로컬 HTTP 서버 — 업무 칸반 · 수동 분석 실행, 127.0.0.1, 토큰 인증 |
 | `src/config.ts` | 환경변수 로드 |
 | `src/types.ts` | TypeScript 타입 정의 |
 | `src/logger.ts` | 구조화된 로깅 |

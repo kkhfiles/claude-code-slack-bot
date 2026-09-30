@@ -36,7 +36,7 @@ import { PremiumSeatSlack } from './premium-seat';
 import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
-import { markDecided } from './action-pipeline';
+import { markDecided, reportLogAvailable } from './action-pipeline';
 import { captureToInbox, checkinMap, checkinNow, dropCapture, isWorkAssistantEnabled,
   markCaptureFailed, markCaptureTried, pendingCaptures, quickUpdate } from './work-assistant';
 import { boardLabel } from './board-queue';
@@ -980,23 +980,6 @@ export class SlackHandler {
       try {
         const result = await this.assistantScheduler.runBriefing();
         await say({ text: result.text, thread_ts: thread_ts || ts });
-        if (result.hasReports) {
-          await say({
-            text: '📄 대기 중인 보고서가 있습니다.',
-            blocks: [{
-              type: 'section',
-              text: { type: 'mrkdwn', text: '📄 대기 중인 보고서가 있습니다.' },
-            }, {
-              type: 'actions',
-              elements: [{
-                type: 'button',
-                text: { type: 'plain_text', text: '📄 보고서 확인' },
-                action_id: 'briefing_view_reports',
-              }],
-            }],
-            thread_ts: thread_ts || ts,
-          });
-        }
         // NAS 이동 컨펌 큐 버튼 (스케줄 브리핑 후처리와 동일)
         try {
           const nasBlocks = await buildNasQueueBlocks(await listNasQueue());
@@ -1025,7 +1008,7 @@ export class SlackHandler {
         return;
       }
       const { type } = this.parseReportCommand(text);
-      await this.handleReportCommand(type, channel, thread_ts || ts, locale, say);
+      await this.handleReportCommand(type, thread_ts || ts, locale, say);
       return;
     }
 
@@ -2691,192 +2674,23 @@ export class SlackHandler {
   }
 
   /**
-   * Reads reports/scheduled-reports/_status.json (produced by the daily
-   * auto_archive_reports step) → Map<relPath, {clean, severity, oneLine}>.
-   * Best-effort: missing/corrupt manifest yields an empty map (callers degrade
-   * gracefully — reports show without severity, bulk "all" still works).
+   * `-report [종류]` — 처리 제안 요약과 desk 보고서 링크 (report-log 4단계 · 읽는 쪽 전환).
+   *
+   * 예전에는 `reports/scheduled-reports/` 를 훑어 파일을 올리고 보관 버튼을 달았다. 보관이 곧 읽음
+   * 표시였고, 사람이 보는 단위가 보고서였다. 지금은 보고서가 report-log 에 회차별로 쌓이고(desk),
+   * 사람은 검토를 거친 처리 제안만 결정한다 — 그래서 여기서는 요약과 링크만 낸다.
    */
-  private loadReportManifest(reportsDir: string): Map<string, { clean: boolean; severity: string; oneLine: string }> {
-    const map = new Map<string, { clean: boolean; severity: string; oneLine: string }>();
-    try {
-      const p = path.join(reportsDir, '_status.json');
-      if (!fs.existsSync(p)) return map;
-      const data = JSON.parse(fs.readFileSync(p, 'utf-8'));
-      for (const r of (data.active || [])) {
-        map.set(r.relPath, { clean: !!r.clean, severity: r.severity || '', oneLine: r.oneLine || '' });
-      }
-    } catch { /* best-effort */ }
-    return map;
-  }
-
-  /**
-   * Bulk-archive scheduled reports → reports/archived/<type>/ (CLAUDE.md §9,
-   * sibling of scheduled-reports/). scope='all' archives every report; 'clean'
-   * archives only those flagged clean in the manifest. Returns moved/failed relPaths.
-   */
-  private archiveReportsBulk(scope: 'all' | 'clean', typeFilter: string): { moved: string[]; failed: string[] } {
-    const reportsDir = path.join(config.assistant.configDir, '..', 'reports', 'scheduled-reports');
-    const manifest = scope === 'clean' ? this.loadReportManifest(reportsDir) : null;
-    const moved: string[] = [];
-    const failed: string[] = [];
-    if (!fs.existsSync(reportsDir)) return { moved, failed };
-    for (const dir of fs.readdirSync(reportsDir)) {
-      if (dir === 'archived') continue;
-      const subdir = path.join(reportsDir, dir);
-      if (!fs.statSync(subdir).isDirectory()) continue;
-      if (typeFilter && !dir.includes(typeFilter)) continue;
-      for (const fname of fs.readdirSync(subdir)) {
-        if (!fname.endsWith('.md') || fname === '.gitkeep' || fname === 'README.md') continue;
-        // **날짜 없는 상시 파일은 아카이브 대상이 아니다**(competitors/summary.md 등).
-        // 파이썬 쪽 `auto_archive_reports.py` 는 `has_date` 를 요구하는데 이 버튼에만
-        // 그 조건이 빠져 있었다. 2026-09-08 09:01 에 일괄 버튼이 summary.md 를
-        // dated 보고서 6개와 함께 옮겼고, 그대로 뒀으면 다음 월간 회차가 종합본을
-        // 못 읽고 처음부터 다시 만들며 `notion_page_id` 를 잃을 뻔했다.
-        if (!/\d{4}-\d{2}-\d{2}/.test(fname)) continue;
-        const relPath = `${dir}/${fname}`;
-        if (scope === 'clean') {
-          const m = manifest!.get(relPath);
-          if (!m || !m.clean) continue; // only known-clean
-        }
-        const absPath = path.resolve(path.join(subdir, fname));
-        const archivedDir = path.join(reportsDir, '..', 'archived', dir);
-        try {
-          fs.mkdirSync(archivedDir, { recursive: true });
-          fs.renameSync(absPath, path.join(archivedDir, fname));
-          moved.push(relPath);
-        } catch {
-          failed.push(relPath);
-        }
-      }
-    }
-    return { moved, failed };
-  }
-
-  private async handleReportCommand(type: string | undefined, channel: string, threadTs: string, locale: Locale, say: any): Promise<void> {
-    // Only regular reports (CLAUDE.md §9). Ad-hoc work reports under
-    // reports/<other>/ are intentionally excluded from this surface.
-    const reportsDir = path.join(config.assistant.configDir, '..', 'reports', 'scheduled-reports');
-    if (!fs.existsSync(reportsDir)) {
-      await say({ text: t('assistant.reportNotFound', locale, { type: type || 'all' }), thread_ts: threadTs });
+  private async handleReportCommand(type: string | undefined, threadTs: string, locale: Locale, say: any): Promise<void> {
+    if (!reportLogAvailable()) {
+      await say({ text: t('actions.unavailable', locale), thread_ts: threadTs });
       return;
     }
-
-    // Scan subdirectories for .md files: scheduled-reports/<type>/<date>.md (skip archived/)
-    const files: { relPath: string; absPath: string; type: string; name: string }[] = [];
-    for (const dir of fs.readdirSync(reportsDir)) {
-      if (dir === 'archived') continue;
-      const subdir = path.join(reportsDir, dir);
-      if (!fs.statSync(subdir).isDirectory()) continue;
-      for (const fname of fs.readdirSync(subdir)) {
-        if (!fname.endsWith('.md') || fname === '.gitkeep' || fname === 'README.md') continue;
-        files.push({
-          relPath: `${dir}/${fname}`,
-          absPath: path.resolve(path.join(subdir, fname)),
-          type: dir,
-          name: fname,
-        });
-      }
-    }
-
-    // Filter by type if specified
-    const filtered = type ? files.filter(f => f.type.includes(type) || f.name.includes(type)) : files;
-
-    if (filtered.length === 0) {
-      const types = [...new Set(files.map(f => f.type))];
-      const hint = types.length > 0
-        ? `\n${t('assistant.reportAvailableTypes', locale)}: ${types.join(', ')}`
-        : '';
-      await say({ text: t('assistant.reportNotFound', locale, { type: type || 'all' }) + hint, thread_ts: threadTs });
+    const blocks = await this.assistantScheduler?.reportReplyBlocks(type).catch(() => null);
+    if (!blocks) {
+      await say({ text: t('actions.readFailed', locale), thread_ts: threadTs });
       return;
     }
-
-    // Enrich with the daily status manifest (clean/severity) when available.
-    const manifest = this.loadReportManifest(reportsDir);
-    type Row = { relPath: string; absPath: string; type: string; name: string; clean: boolean | null; severity: string };
-    const rows: Row[] = filtered.map(f => {
-      const m = manifest.get(f.relPath);
-      return { ...f, clean: m ? m.clean : null, severity: m ? m.severity : '' };
-    });
-    // actionable (🔴/🟡) first, then unknown, then clean; each newest-first.
-    const rank = (r: Row) => (r.clean === false ? 0 : r.clean === null ? 1 : 2);
-    rows.sort((a, b) => rank(a) - rank(b) || b.name.localeCompare(a.name));
-
-    const actionable = rows.filter(r => r.clean === false);
-    const cleanRows = rows.filter(r => r.clean === true);
-    const haveManifest = manifest.size > 0;
-
-    // Summary line + web index (one rollup instead of N individual headers).
-    let summary = `📊 보고서 ${rows.length}건`;
-    if (haveManifest) summary += ` — 🔴/🟡 ${actionable.length}건 · clean ${cleanRows.length}건`;
-    if (this.reportServer) summary += `\n📚 ${this.reportServer.buildIndexUrl()}`;
-    await say({ text: summary, thread_ts: threadTs });
-
-    // Upload individually: when manifest present, upload everything except known-clean
-    // (actionable + unknown — a report not yet in the manifest must never be hidden).
-    // Without a manifest, upload all (legacy fallback).
-    const toUpload = haveManifest ? rows.filter(r => r.clean !== true) : rows;
-    for (const report of toUpload) {
-      const content = fs.readFileSync(report.absPath, 'utf-8');
-      const firstLines = content.split('\n').filter(l => l.trim()).slice(0, 3).join('\n');
-      const linkLine = this.reportServer ? `🔗 ${this.reportServer.buildReportUrl(report.relPath)}\n` : '';
-      const badge = report.severity ? `${report.severity} ` : '';
-
-      try {
-        await this.app.client.filesUploadV2({
-          channel_id: channel,
-          thread_ts: threadTs,
-          filename: report.relPath.replace('/', '_'),
-          content,
-          title: `📄 ${badge}${report.relPath}`,
-          initial_comment: `${linkLine}\`${report.absPath}\`\n>${firstLines.split('\n').join('\n>')}`,
-        });
-        await say({
-          text: '',
-          blocks: [{
-            type: 'actions',
-            elements: [{
-              type: 'button',
-              text: { type: 'plain_text', text: `📂 Archive ${report.type}` },
-              action_id: 'archive_report',
-              value: JSON.stringify({ absPath: report.absPath, relPath: report.relPath }),
-            }],
-          }],
-          thread_ts: threadTs,
-        });
-      } catch (error) {
-        this.logger.warn('File upload failed, falling back to text', { file: report.relPath, error });
-        const maxLen = 3900;
-        const truncated = content.length > maxLen ? content.substring(0, maxLen) + '\n\n…(truncated)' : content;
-        await say({ text: `📄 *${report.relPath}*\n${linkLine}\`${report.absPath}\`\n\n${truncated}`, thread_ts: threadTs });
-      }
-    }
-
-    // Clean reports: compact list (no upload — they auto-archive). Only when manifest present.
-    if (haveManifest && cleanRows.length > 0) {
-      const lines = cleanRows.map(r => {
-        const link = this.reportServer ? ` — ${this.reportServer.buildReportUrl(r.relPath)}` : '';
-        return `• 🟢 \`${r.relPath}\`${link}`;
-      }).join('\n');
-      await say({ text: `🧹 *clean ${cleanRows.length}건* _(자동 정리 예정)_\n${lines}`, thread_ts: threadTs });
-    }
-
-    // Bulk archive buttons — one click instead of N.
-    const bulkElements: any[] = [{
-      type: 'button',
-      text: { type: 'plain_text', text: `🗂 전체 아카이브 (${rows.length})` },
-      style: 'danger',
-      action_id: 'archive_all_reports',
-      value: JSON.stringify({ scope: 'all', type: type || '' }),
-    }];
-    if (haveManifest && cleanRows.length > 0) {
-      bulkElements.unshift({
-        type: 'button',
-        text: { type: 'plain_text', text: `🧹 clean 전체 (${cleanRows.length})` },
-        action_id: 'archive_clean_reports',
-        value: JSON.stringify({ scope: 'clean', type: type || '' }),
-      });
-    }
-    await say({ text: '🗂 일괄 아카이브', blocks: [{ type: 'actions', elements: bulkElements }], thread_ts: threadTs });
+    await say({ text: '🗂 처리 제안 · 보고서', blocks, thread_ts: threadTs });
   }
 
   private async handleAssistantSubcommand(
@@ -3831,7 +3645,7 @@ export class SlackHandler {
 
     // --- Interactive button handlers ---
 
-    // Briefing: "보고서 확인" button — trigger -rp command
+    // 옛 「📄 보고서 확인」 버튼 — 이미 올라간 브리핑 메시지에 남아 있다. 새 `-report` 와 같은 답을 낸다.
     this.action('briefing_view_reports', async ({ ack, body }) => {
       await ack();
       const channel = (body as any).channel?.id || (body as any).container?.channel_id;
@@ -3839,57 +3653,16 @@ export class SlackHandler {
       const userId = (body as any).user?.id;
       if (!channel) return;
       const locale = await this.getUserLocale(userId).catch(() => 'ko' as Locale);
-      await this.handleReportCommand(undefined, channel, threadTs, locale, async (msg: any) => {
+      await this.handleReportCommand(undefined, threadTs, locale, async (msg: any) => {
         await this.app.client.chat.postMessage({ channel, ...msg });
       });
     });
 
-    // Report: "Archive" button — move report to archived/
-    this.action('archive_report', async ({ ack, body, respond }) => {
+    // 옛 보관 버튼 셋 — 보관(= 읽음 표시)은 폐지됐다. 누르면 처리기가 없다는 오류 대신 까닭을 알린다.
+    this.action(/^archive_(report|all_reports|clean_reports)$/, async ({ ack, body, respond }) => {
       await ack();
-      try {
-        const { absPath, relPath } = JSON.parse((body as any).actions[0].value);
-        if (!fs.existsSync(absPath)) {
-          await respond({ response_type: 'ephemeral', text: '⚠️ File not found (already archived?)' });
-          return;
-        }
-        // absPath = reports/scheduled-reports/<type>/<file>; archive to reports/archived/<type>/ (§9).
-        // Two '..' from the type dir reach reports/, so archived/ stays a sibling of scheduled-reports/.
-        const archivedDir = path.join(path.dirname(absPath), '..', '..', 'archived', path.dirname(relPath));
-        fs.mkdirSync(archivedDir, { recursive: true });
-        fs.renameSync(absPath, path.join(archivedDir, path.basename(absPath)));
-        await respond({ response_type: 'ephemeral', text: `📂 Archived: ${relPath}` });
-      } catch (error) {
-        this.logger.error('Failed to archive report', error);
-        await respond({ response_type: 'ephemeral', text: '❌ Archive failed' });
-      }
-    });
-
-    // Report: "Archive all" button — bulk-archive every currently-listed report.
-    this.action('archive_all_reports', async ({ ack, body, respond }) => {
-      await ack();
-      try {
-        const { type } = JSON.parse((body as any).actions[0].value);
-        const { moved, failed } = this.archiveReportsBulk('all', type || '');
-        const tail = failed.length ? ` (실패 ${failed.length})` : '';
-        await respond({ response_type: 'ephemeral', text: `🗂 ${moved.length}건 아카이브 완료${tail}` });
-      } catch (error) {
-        this.logger.error('Failed to bulk-archive reports', error);
-        await respond({ response_type: 'ephemeral', text: '❌ 일괄 아카이브 실패' });
-      }
-    });
-
-    // Report: "Archive clean" button — bulk-archive only manifest-clean reports.
-    this.action('archive_clean_reports', async ({ ack, body, respond }) => {
-      await ack();
-      try {
-        const { moved, failed } = this.archiveReportsBulk('clean', '');
-        const tail = failed.length ? ` (실패 ${failed.length})` : '';
-        await respond({ response_type: 'ephemeral', text: `🧹 clean ${moved.length}건 아카이브 완료${tail}` });
-      } catch (error) {
-        this.logger.error('Failed to bulk-archive clean reports', error);
-        await respond({ response_type: 'ephemeral', text: '❌ clean 일괄 아카이브 실패' });
-      }
+      const locale = await this.getUserLocale((body as any).user?.id).catch(() => 'ko' as Locale);
+      await respond({ response_type: 'ephemeral', text: t('report.archiveRetired', locale) }).catch(() => {});
     });
 
     // --- NAS 이동 컨펌 버튼 (inbox auto-classify) ---

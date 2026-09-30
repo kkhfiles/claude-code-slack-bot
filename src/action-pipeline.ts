@@ -281,6 +281,24 @@ export function buildDigestBlocks(d: FlowDigest): unknown[] | null {
   return blocks;
 }
 
+/**
+ * `-report [종류]` 답 — 처리 제안 요약 + desk 의 보고서 링크 (report-log 4단계 · 읽는 쪽 전환).
+ *
+ * 사람이 보는 단위는 보고서가 아니라 검토를 거친 처리 제안이라 요약을 먼저 둔다. 보고서 본문은
+ * desk 가 회차별로 보여 준다(하루 한 번 01:00 쯤 옮겨짐). 결정할 것이 없어도 링크는 늘 준다.
+ */
+export function buildReportReplyBlocks(d: FlowDigest, type?: string): unknown[] {
+  const blocks = buildDigestBlocks(d) || [{
+    type: 'section',
+    text: { type: 'mrkdwn', text: `*🗂 처리 제안* — 결정할 것 없음 · <${d.site}/actions/|desk 에서 보기>` },
+  }];
+  const where = type
+    ? `<${d.site}/reports/${encodeURIComponent(type)}/|${plain(type)} 회차 보기>`
+    : `<${d.site}/|desk 에서 보고서 보기>`;
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `📚 ${where} · 새 보고서는 매일 01:00 쯤 올라옵니다` }] });
+  return blocks;
+}
+
 /** 버튼을 누른 뒤 그 제안의 버튼 줄만 결과 한 줄로 바꾼다. 같은 메시지의 다른 제안은 그대로. */
 export function markDecided(blocks: any[], id: string, note: string): any[] {
   return (blocks || []).map((b) => (b && b.block_id === `actb_${id}`
@@ -482,6 +500,16 @@ export class ActionPipeline {
       return null;
     }
     return buildDigestBlocks(d as FlowDigest);
+  }
+
+  /** `-report` 답 블록. report-log 를 못 읽으면 null — 부르는 쪽이 그 사실을 알린다. */
+  async reportReplyBlocks(type?: string): Promise<unknown[] | null> {
+    const d = await this.deps.run('flow', ['digest']);
+    if (!d || d.error || !d.site) {
+      this.logger.warn(`보고서 안내를 못 만듦 — ${d?.error ?? 'site 없음'}`);
+      return null;
+    }
+    return buildReportReplyBlocks(d as FlowDigest, type);
   }
 
   /** 버튼 결정. 진행이면 곧바로 차례를 청한다(승인 즉시 실행 · 2026-09-29 사용자 결정). */

@@ -315,7 +315,7 @@ Conversations in the same thread automatically continue the session (no command 
 | Command | Description |
 |---------|-------------|
 | `-briefing` / `-br` | Run morning briefing now |
-| `-report [type]` / `-rp` | View reports — rollup summary (actionable uploaded individually, clean listed compactly) + bulk archive buttons (`🗂 all` / `🧹 clean`) |
+| `-report [type]` / `-rp` | Action proposal summary (with decision buttons) + a link to the reports site. Reports themselves live in a separate report store, one file per run |
 | `-actions [review\|run]` | Action proposals — list the ones awaiting a decision with approve / hold / reject buttons · `review` reviews queued proposals now · `run` resumes stalled ones. The rules live in a separate repo cloned at `~/.report-log/repo` (`tools/flow.py`); without it the command reports that it is not set up. The hourly timer is the `actions` section of the assistant `config.json` |
 | `-analyze [type]` / `-an` | Run analysis (single type or all) |
 | `-assistant config` / `-as config` | Show assistant configuration |
@@ -580,7 +580,7 @@ src/
 ├── error-collector.ts           # Error collection for briefing reports
 ├── rate-limit-utils.ts          # Shared rate limit detection
 ├── process-memory-watchdog.ts   # System memory watchdog (Windows)
-├── report-server.ts             # Local HTML report server (127.0.0.1, token auth)
+├── report-server.ts             # Local HTTP server — work board + manual analysis trigger (127.0.0.1, token auth)
 ├── version.ts                   # Version info and update checker
 └── logger.ts                    # Logging utility
 ```

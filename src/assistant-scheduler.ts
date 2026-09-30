@@ -580,16 +580,13 @@ export class AssistantScheduler {
   }
 
   /** Manual trigger for -briefing command. */
-  async runBriefing(): Promise<{ text: string; hasReports: boolean }> {
+  async runBriefing(): Promise<{ text: string }> {
     if (!this.config?.briefing.enabled) {
-      return { text: 'Briefing is disabled in config.', hasReports: false };
+      return { text: 'Briefing is disabled in config.' };
     }
     const result = await this.executeBriefing();
     this.recordSessionCost('briefing', result);
-    return {
-      text: result.text + this.formatErrorReport() + this.formatCostLine(),
-      hasReports: this.hasUnreadReports(),
-    };
+    return { text: result.text + this.formatErrorReport() + this.formatCostLine() };
   }
 
   /** Manual trigger for -analyze command. Run single type or all default-schedule types. */
@@ -815,26 +812,6 @@ export class AssistantScheduler {
     return line;
   }
 
-  /**
-   * Check if there are unread regular reports.
-   * Scans only reports/scheduled-reports/<type>/ — the same scope the briefing
-   * prompt uses (CLAUDE.md §9). Ad-hoc work reports under reports/<other>/ are
-   * intentionally excluded so they never leak into the briefing surface.
-   */
-  private hasUnreadReports(): boolean {
-    const reportsDir = path.join(this.workingDir, 'reports', 'scheduled-reports');
-    if (!fs.existsSync(reportsDir)) return false;
-    for (const dir of fs.readdirSync(reportsDir)) {
-      if (dir === 'archived') continue;
-      const subdir = path.join(reportsDir, dir);
-      if (!fs.statSync(subdir).isDirectory()) continue;
-      for (const fname of fs.readdirSync(subdir)) {
-        if (fname.endsWith('.md') && fname !== '.gitkeep' && fname !== 'README.md') return true;
-      }
-    }
-    return false;
-  }
-
   // --- Timer orchestration ---
 
   private scheduleAll(): void {
@@ -946,6 +923,12 @@ export class AssistantScheduler {
         review: !!a?.nightlyReview, window, workingDay: !this.isNonWorkingDay().skip,
       });
     }, ACTIONS_TICK_MS);
+  }
+
+  /** `-report` 답 — 처리 제안 요약 + desk 보고서 링크. report-log 가 없거나 못 읽으면 null. */
+  async reportReplyBlocks(type?: string): Promise<unknown[] | null> {
+    if (!reportLogAvailable()) return null;
+    return this.actionPipeline.reportReplyBlocks(type);
   }
 
   /** 처리 제안 아침 요약 블록 — 결정이 필요한 것 · 멈춘 것. 없거나 못 읽으면 null. */
@@ -1675,21 +1658,6 @@ export class AssistantScheduler {
           await this.sendMessage(result.text +
             this.formatErrorReport() + this.formatCostLine());
 
-          // If reports exist, add a button to view them
-          if (this.hasUnreadReports()) {
-            await this.sendMessage('📄 대기 중인 보고서가 있습니다.', [{
-              type: 'section',
-              text: { type: 'mrkdwn', text: '📄 대기 중인 보고서가 있습니다.' },
-            }, {
-              type: 'actions',
-              elements: [{
-                type: 'button',
-                text: { type: 'plain_text', text: '📄 보고서 확인' },
-                action_id: 'briefing_view_reports',
-              }],
-            }]).catch(() => {});
-          }
-
           // NAS 이동 컨펌 큐 — 항목별 결정 버튼 (inbox auto-classify company 분류분)
           try {
             const nasBlocks = await buildNasQueueBlocks(await listNasQueue());
@@ -1746,17 +1714,6 @@ export class AssistantScheduler {
       this.recordSessionCost('briefing', result);
       await this.sendMessage(result.text +
         this.formatErrorReport() + this.formatCostLine());
-
-      if (this.hasUnreadReports()) {
-        await this.sendMessage('', [{
-          type: 'actions',
-          elements: [{
-            type: 'button',
-            text: { type: 'plain_text', text: '📄 보고서 확인' },
-            action_id: 'briefing_view_reports',
-          }],
-        }]).catch(() => {});
-      }
 
       await this.postActionDigest();
     } catch (error) {
