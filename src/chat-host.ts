@@ -186,6 +186,11 @@ export interface ChatBotOptions {
    */
   attach?: (app: App) => void;
   /**
+   * 명단 밖 사람의 DM 을 주인에게 넘길 때 그 메시지에 붙일 블록(레터의 「1on1 신청으로
+   * 올리기」 버튼). 없거나 비면 글만 넘긴다. 붙는 곳은 **주인 DM 한 곳**이다.
+   */
+  bypassBlocks?: (user: string, text: string) => any[] | undefined;
+  /**
    * 파이썬이 **실장 확인을 거쳐야 나가는 부탁**(`ask`)을 실었을 때 부른다 — 「실원들에게
    * 전해 줘」 같은 것. 여기서 방에 올리지 않는다. 받는 쪽(`letter-notice.ts`)이 실장 DM
    * 에 확인 카드를 띄우고, 실장이 창에서 「보내기」를 눌러야 나간다.
@@ -709,12 +714,25 @@ export class ChatHost {
       try {
         const im = await client.conversations.open({ users: manager });
         if (im.channel?.id) {
-          await client.chat.postMessage({
-            channel: im.channel.id,
-            text: `:speech_balloon: *${name}* 님이 저에게 보낸 말이에요.\n\n`
-              + `> ${text.replace(/\n/g, '\n> ')}\n\n`
-              + `_<@${user}> 에게 바로 답하셔도 되고, 전할 말이 있으면 저에게 맡기셔도 돼요._`,
-          });
+          // 「전할 말이 있으면 저에게 맡기셔도 돼요」라고 적었었다 — 그런데 이 봇은 한 사람에게
+          // 따로 전하는 길이 없다(방에 올리는 길뿐). 못 하는 일을 약속하지 않는다(2026-09-30).
+          const body = `:speech_balloon: *${name}* 님이 저에게 보낸 말이에요.\n\n`
+            + `> ${text.replace(/\n/g, '\n> ')}\n\n`
+            + `_<@${user}> 에게는 직접 답해 주세요. 저는 한 사람에게 따로 말을 전하지 못해요._`;
+          const extra = this.opts.bypassBlocks?.(user, text) ?? [];
+          // 섹션 한 칸은 3,000자까지라 긴 말은 나눠 담는다. 블록이 안 받히면 글만이라도 넘긴다 —
+          // 버튼 때문에 넘기기 자체가 실패하면 안 된다.
+          const blocks = extra.length
+            ? [...(body.match(/[\s\S]{1,2900}/g) ?? [])
+              .map((part) => ({ type: 'section', text: { type: 'mrkdwn', text: part } })), ...extra]
+            : undefined;
+          try {
+            await client.chat.postMessage({ channel: im.channel.id, text: body, ...(blocks ? { blocks } : {}) });
+          } catch (error) {
+            if (!blocks) throw error;
+            this.logger.warn('버튼을 붙여 넘기지 못해 글만 넘깁니다', error);
+            await client.chat.postMessage({ channel: im.channel.id, text: body });
+          }
           passed = true;
         }
       } catch (error) {

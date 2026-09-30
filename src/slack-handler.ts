@@ -502,6 +502,19 @@ export class SlackHandler {
         offer: letterNotice.enabled ? letterNotice.offer : undefined,
         logger: new Logger('Lunch:initiative'),
       });
+      // 1on1 신청 창구는 대화 호스트보다 먼저 만든다 — 명단 밖 DM 을 실장에게 넘길 때
+      // 「1on1 신청으로 올리기」 버튼을 붙이는 것도 이 창구라서(`bypassBlocks`).
+      const booking = config.letter.booking.enabled
+        ? new LetterBooking({
+          managerUserId: config.letter.managerUserId,
+          members: config.letter.members,
+          logPath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', '1on1.jsonl'),
+          // 커피챗 주간 알림과 같은 이유로 파일을 나눈다 — 한쪽의 날짜 초기화가
+          // 남의 칸을 지우면 안 된다.
+          nudgePath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', '1on1-nudge.json'),
+          open: config.letter.booking.open,
+        })
+        : null;
       letterHost = new ChatHost({
         name: 'letter',
         botToken: config.letter.botToken,
@@ -518,6 +531,7 @@ export class SlackHandler {
         greetOnJoin: config.letter.greetOnJoin && !!config.letter.chatChannel,
         managerUserId: config.letter.managerUserId,
         onAsk: letterNotice.enabled ? letterNotice.offer : undefined,
+        bypassBlocks: booking?.enabled ? booking.dmBlocks : undefined,
         // 칭찬 전달과 1on1 예약은 대화가 아니다 — 같은 앱에 슬래시 명령·모달로 따로 붙는다.
         // **앱은 하나뿐이다**(소켓을 두 번 열면 슬랙이 한쪽에만 보내 조용히 실패한다).
         // 그래서 둘 다 같은 앱에 얹는다.
@@ -547,17 +561,7 @@ export class SlackHandler {
               notionPython: config.letter.coffeechat.notionPython,
             }).register(app);
           }
-          if (config.letter.booking.enabled) {
-            new LetterBooking({
-              managerUserId: config.letter.managerUserId,
-              members: config.letter.members,
-              logPath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', '1on1.jsonl'),
-              // 커피챗 주간 알림과 같은 이유로 파일을 나눈다 — 한쪽의 날짜 초기화가
-              // 남의 칸을 지우면 안 된다.
-              nudgePath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', '1on1-nudge.json'),
-              open: config.letter.booking.open,
-            }).register(app);
-          }
+          booking?.register(app);
           // 주 첫 업무일 아침, 후보 다섯 중 하나를 고르는 버튼. **글을 만드는 일은
           // 전부 파이썬 쪽이고** 여기는 눌린 것을 넘겨 주기만 한다.
           new LetterBoost({

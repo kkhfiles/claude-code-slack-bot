@@ -32,6 +32,9 @@ const DONE = 'booking_done';
 const TELL = 'booking_tell';
 const TELL_SEND = 'booking_tell_send';
 const NUDGE_OPEN = 'booking_nudge_open';
+/** 커피콩이 실장에게 넘긴 DM 을 1on1 신청으로 올리는 버튼. */
+const FROM_DM = 'booking_from_dm';
+const FROM_DM_HINT = 'booking_from_dm_hint';
 
 /**
  * 기다린 지 이만큼 지나면 실장에게 **다시** 알린다.
@@ -98,6 +101,52 @@ export class LetterBooking {
   get enabled(): boolean {
     return Boolean(this.opts.managerUserId) && this.opts.members.length > 0;
   }
+
+  /**
+   * 커피콩이 대화 명단 밖 DM 을 실장에게 넘길 때 붙이는 버튼(`ChatHost` 의 `bypassBlocks`).
+   *
+   * **신청을 `/1on1` 이 아니라 DM 으로 보낸 실원이 있었다**(2026-09-30) — 그 말은 실장 DM 으로
+   * 넘어갔지만 기록에 안 남아 `/1on1-list` 가 비어 있었다. 그래서 실장이 누르면 그 말을 신청으로
+   * 올린다. 낱말로 알아서 올리지 않는 것은 「면담」이 들어간 말이 다 신청은 아니어서다.
+   *
+   * **넘긴 말은 실장 DM 과 실장만 보는 목록 밖으로 안 나간다**(실장 2026-09-30 「DM 이나 콩에게
+   * 전달한 말이 타인이나 채널에 공유되면 절대 안 됨」). 버튼 값에 실린 말은 그 메시지 안에만
+   * 있고, 누르면 메모 칸으로만 간다 — 메모는 실장 알림·목록에만 보이고 방 답 빗장
+   * (`privacy_gate.py`)이 원문 조각으로 막는 칸이다. 본인에게 가는 알림에는 말을 다시 싣지 않는다.
+   *
+   * 신청할 수 있는 사람의 말에만 붙는다. 실장 자신의 DM 은 넘어오지 않으므로 뺀다.
+   */
+  dmBlocks = (user: string, text: string): any[] | undefined => {
+    if (!this.enabled || user === this.opts.managerUserId || !this.allowed(user)) return undefined;
+    return [
+      {
+        type: 'context', block_id: FROM_DM_HINT,
+        elements: [{
+          type: 'mrkdwn',
+          text: `면담 신청이면 아래 버튼으로 1on1 목록에 올릴 수 있어요. 시간은 \`${LIST_COMMAND}\` 에서 `
+            + '알리시면 제가 본인에게 전해요.',
+        }],
+      },
+      {
+        type: 'actions', block_id: FROM_DM,
+        elements: [{
+          type: 'button', action_id: FROM_DM, style: 'primary',
+          text: { type: 'plain_text', text: '1on1 신청으로 올리기' },
+          // 말까지 싣는 것은 누를 때 파일을 다시 뒤지지 않기 위해서다 — 값은 이 메시지에만 있다.
+          value: JSON.stringify({ u: user, t: text.slice(0, MAX_TEXT) }),
+          confirm: {
+            title: { type: 'plain_text', text: '1on1 신청으로 올릴까요?' },
+            text: {
+              type: 'plain_text',
+              text: '이 말을 1on1 신청으로 올리고, 본인에게는 신청이 들어갔다고만 알립니다(보낸 말은 다시 싣지 않습니다).',
+            },
+            confirm: { type: 'plain_text', text: '올리기' },
+            deny: { type: 'plain_text', text: '그만두기' },
+          },
+        }],
+      },
+    ];
+  };
 
   /** 지금 이 사람이 신청할 수 있는가. 안 열렸으면 실장뿐이다. */
   private allowed(user: string): boolean {
@@ -201,6 +250,31 @@ export class LetterBooking {
         + `${when ? `편한 때: ${when}\n` : '편한 때: 안 적음\n'}`
         + `${note ? `> ${note}\n` : ''}`
         + `\`${LIST_COMMAND}\` 에서 시간을 알려주시면 됩니다.`);
+    });
+
+    // 넘긴 DM 을 신청으로 — 실장 DM 에만 뜨는 버튼이지만 누른 사람을 한 번 더 본다.
+    app.action({ action_id: FROM_DM }, async ({ ack, body, client }) => {
+      await ack();
+      const payload = body as any;
+      if (payload.user?.id !== this.opts.managerUserId) return;
+      let value: { u?: string; t?: string } = {};
+      try { value = JSON.parse(payload.actions?.[0]?.value ?? '{}'); } catch { /* 아래에서 막힌다 */ }
+      const done = await this.fromDm(client, value.u ?? '', value.t ?? '', payload.message?.ts);
+
+      // 버튼을 결과 한 줄로 바꾼다 — 두 번 눌러 두 건이 되지 않게(두 번째는 한 달 제한에도 걸린다).
+      const channel = payload.channel?.id as string | undefined;
+      const ts = payload.message?.ts as string | undefined;
+      if (!channel || !ts) return;
+      const kept = (payload.message?.blocks ?? [])
+        .filter((b: any) => b.block_id !== FROM_DM && b.block_id !== FROM_DM_HINT);
+      try {
+        await client.chat.update({
+          channel, ts, text: payload.message?.text ?? '',
+          blocks: [...kept, { type: 'context', elements: [{ type: 'mrkdwn', text: done }] }],
+        });
+      } catch (error) {
+        this.logger.warn('넘긴 DM 의 버튼을 못 바꿨습니다', error);
+      }
     });
 
     // 취소 — 되돌릴 수 있는 일이라 확인 단계를 두지 않는다. 한 단계를 더 붙이면
@@ -589,6 +663,32 @@ export class LetterBooking {
   private pending(): Entry[] {
     return [...this.alive().values()].filter((a) => !a.done).map((a) => a.entry)
       .sort((a, b) => a.ts.localeCompare(b.ts));
+  }
+
+  /**
+   * 넘긴 DM 을 신청으로 올린다(`dmBlocks` 의 버튼). 돌려주는 것은 버튼 대신 남길 한 줄.
+   *
+   * 신청 시각은 **넘긴 메시지의 시각**이다 — 실장이 다음 날 눌러도 그 사람이 말한 날로 센다.
+   * 한 달 한 번은 `/1on1` 과 같게 막는다(창구가 둘이라고 몫이 둘이 되면 안 된다).
+   */
+  private async fromDm(client: App['client'], user: string, text: string, at?: string): Promise<string> {
+    if (!user || user === this.opts.managerUserId || !this.allowed(user)) {
+      return '신청할 수 있는 사람이 아니라 올리지 않았어요.';
+    }
+    if (this.thisMonth(user)) {
+      return `이번 달 신청이 이미 있어 올리지 않았어요 — \`${LIST_COMMAND}\` 에서 보세요.`;
+    }
+    const sec = Number(at);
+    const ts = (Number.isFinite(sec) && sec > 0 ? new Date(sec * 1000) : new Date()).toISOString();
+    const name = await this.person(client, user);
+    const note = text.trim().slice(0, MAX_TEXT);
+    this.note({ ts, action: 'ask', id: ts, user, user_name: name, note: note || undefined });
+    this.logger.info(`신청 ← ${name} (넘긴 DM 을 실장이 올림)`);
+    // 보낸 말은 다시 싣지 않는다 — 본인 DM 이라도 알림 미리보기로 옆 사람 화면에 뜰 수 있다.
+    await this.tell(client, user,
+      '보내 주신 말을 1on1 신청으로 받았습니다. 실장이 시간을 잡아 다시 알려드립니다.\n'
+      + `취소하시려면 \`${COMMAND}\` 를 부르세요. 이유는 안 물어봅니다.`);
+    return `:white_check_mark: 1on1 목록에 올렸어요 — \`${LIST_COMMAND}\` 에서 시간을 알리시면 제가 본인에게 전해요.`;
   }
 
   /**
