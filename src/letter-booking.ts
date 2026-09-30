@@ -61,6 +61,15 @@ const DECLINE = 'booking_decline';
  */
 const SLOT_MAX = 5;
 /**
+ * 고를 수 있는 시작 시각 — 07:00~19:00 · 30분 단위(실장 2026-09-30 「오전 7시부터 오후 7시 정도
+ * 범위만 보이게」). 슬랙의 날짜·시각 칸(`datetimepicker`)은 범위를 좁히는 설정이 없어서 **날짜 칸 +
+ * 시각 목록** 두 칸으로 나눴다 — 목록에 없는 시각은 아예 못 고른다.
+ */
+const SLOT_TIMES: string[] = [];
+for (let m = 7 * 60; m <= 19 * 60; m += 30) {
+  SLOT_TIMES.push(`${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`);
+}
+/**
  * 캘린더 일정의 끝 시각에만 쓰는 길이. **사람에게는 안 묻고 안 보인다** — 실장 2026-09-30
  * 「길이는 빼고 시작 시간만 정하면 될 것 같다」(길이는 만나서 정한다 · 캘린더는 끝 시각이 있어야 한다).
  */
@@ -390,12 +399,18 @@ export class LetterBooking {
       const values = view.state.values as Record<string, Record<string, any>>;
       const now = Date.now();
       const picked: { block: string; ms: number }[] = [];
-      for (let i = 0; i < SLOT_MAX; i++) {
-        const sec = values[`slot${i}`]?.[`slot${i}`]?.selected_date_time;
-        if (typeof sec === 'number') picked.push({ block: `slot${i}`, ms: sec * 1000 });
-      }
       const errors: Record<string, string> = {};
-      if (!picked.length) errors.slot0 = '가능한 시간을 하나 이상 골라 주세요.';
+      for (let i = 0; i < SLOT_MAX; i++) {
+        const date = values[`date${i}`]?.[`date${i}`]?.selected_date as string | undefined;
+        const time = values[`time${i}`]?.[`time${i}`]?.selected_option?.value as string | undefined;
+        if (!date && !time) continue;
+        // 한쪽만 고르면 어느 쪽이 빠졌는지 그 칸을 짚는다 — 조용히 버리면 보낸 줄 안다.
+        if (!date) { errors[`date${i}`] = '날짜도 골라 주세요.'; continue; }
+        if (!time || !SLOT_TIMES.includes(time)) { errors[`time${i}`] = '시각도 골라 주세요.'; continue; }
+        // 한국 시각으로 읽는다(봇이 도는 PC 의 시간대와 무관하게).
+        picked.push({ block: `date${i}`, ms: Date.parse(`${date}T${time}:00+09:00`) });
+      }
+      if (!picked.length && !Object.keys(errors).length) errors.date0 = '가능한 시간을 하나 이상 골라 주세요.';
       for (const p of picked) {
         if (p.ms < now + 5 * 60 * 1000) errors[p.block] = '지난 시각이거나 너무 가깝습니다.';
       }
@@ -691,12 +706,23 @@ export class LetterBooking {
           + `${cur?.proposal ? `\n_앞서 보낸 것(${cur.proposal.slots.map((s) => this.slotLabel(s)).join(' / ')})은 새로 보내면 고를 수 없게 됩니다._` : ''}`,
       },
     }];
+    const times = SLOT_TIMES.map((t) => ({ text: { type: 'plain_text', text: t }, value: t }));
     for (let i = 0; i < SLOT_MAX; i++) {
-      blocks.push({
-        type: 'input', block_id: `slot${i}`, optional: i > 0,
-        label: { type: 'plain_text', text: `가능한 시작 시간 ${i + 1}` },
-        element: { type: 'datetimepicker', action_id: `slot${i}` },
-      });
+      blocks.push(
+        {
+          type: 'input', block_id: `date${i}`, optional: i > 0,
+          label: { type: 'plain_text', text: `후보 ${i + 1} · 날짜` },
+          element: { type: 'datepicker', action_id: `date${i}` },
+        },
+        {
+          type: 'input', block_id: `time${i}`, optional: i > 0,
+          label: { type: 'plain_text', text: `후보 ${i + 1} · 시작 시각` },
+          element: {
+            type: 'static_select', action_id: `time${i}`, options: times,
+            placeholder: { type: 'plain_text', text: '07:00 ~ 19:00' },
+          },
+        },
+      );
     }
     blocks.push({
       type: 'input', block_id: BLOCK_MEMO, optional: true,

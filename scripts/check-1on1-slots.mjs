@@ -78,10 +78,23 @@ const ask = (user, daysAgo = 0, note) => {
   return ts;
 };
 
-/** 실장이 창에서 시간을 골라 보낸다(`slots` 는 밀리초). 돌려주는 것은 ack 에 넘긴 것. */
+/** 한국 시각으로 `days` 날 뒤 `hhmm` 의 밀리초 — 창의 시각 목록(07:00~19:00 · 30분)에 있는 값만 쓴다. */
+const at = (days, hhmm) => Date.parse(
+  `${new Date(Date.now() + days * DAY + 9 * 3600e3).toISOString().slice(0, 10)}T${hhmm}:00+09:00`);
+/** 밀리초 → 창의 두 칸(날짜 · 시각) 값. 한국 시각으로 가른다. */
+const cells = (ms) => {
+  const k = new Date(ms + 9 * 3600e3).toISOString();
+  return { date: k.slice(0, 10), time: k.slice(11, 16) };
+};
+
+/** 실장이 창에서 시간을 골라 보낸다(`slots` 는 밀리초 또는 {date, time}). 돌려주는 것은 ack 에 넘긴 것. */
 async function propose(entryId, user, slots, extra = {}, by = BOSS) {
   const values = {};
-  slots.forEach((ms, i) => { values[`slot${i}`] = { [`slot${i}`]: { selected_date_time: Math.floor(ms / 1000) } }; });
+  slots.forEach((s, i) => {
+    const c = typeof s === 'number' ? cells(s) : s;
+    if (c.date) values[`date${i}`] = { [`date${i}`]: { selected_date: c.date } };
+    if (c.time) values[`time${i}`] = { [`time${i}`]: { selected_option: { value: c.time } } };
+  });
   values.memo = { memo: { value: extra.memo ?? '' } };
   let acked;
   await H.booking_tell_send({
@@ -113,30 +126,40 @@ const idA = ask('UA', 0, NOTE);
   const n = since();
   await H.booking_tell({ ack: async () => {}, client, body: { user: { id: BOSS }, trigger_id: 't', actions: [{ value: idA }] } });
   const view = after(n).find((c) => c.kind === 'push')?.view;
-  const pickers = (view?.blocks ?? []).filter((x) => x.element?.type === 'datetimepicker');
-  ok('실장 창에 시간 칸이 다섯 개 뜬다', pickers.length === 5);
-  ok('첫 칸만 반드시다', pickers[0]?.optional === false && pickers.slice(1).every((x) => x.optional));
+  const dates = (view?.blocks ?? []).filter((x) => x.element?.type === 'datepicker');
+  const times = (view?.blocks ?? []).filter((x) => /^time\d$/.test(x.block_id ?? ''));
+  ok('실장 창에 후보 다섯 개 — 날짜 칸 · 시각 칸', dates.length === 5 && times.length === 5);
+  ok('첫 후보만 반드시다', dates[0]?.optional === false && times[0]?.optional === false
+    && dates.slice(1).every((x) => x.optional) && times.slice(1).every((x) => x.optional));
+  // 실장 2026-09-30 「오전 7시부터 오후 7시 정도 범위만 보이게」 — 슬랙 날짜·시각 칸은 범위를 못 좁혀 목록으로.
+  const opts = (times[0]?.element?.options ?? []).map((o) => o.value);
+  ok('시각은 07:00 부터 19:00 까지만 · 30분 단위', opts[0] === '07:00' && opts.at(-1) === '19:00' && opts.length === 25,
+    `${opts[0]}~${opts.at(-1)} · ${opts.length}개`);
+  ok('범위를 못 좁히는 날짜·시각 칸은 안 쓴다', !(view?.blocks ?? []).some((x) => x.element?.type === 'datetimepicker'));
   // 실장 2026-09-30 「길이는 빼고 시작 시간만」 — 길이를 묻는 칸이 없어야 한다.
-  ok('길이는 안 묻는다(시작 시간만)', !(view?.blocks ?? []).some((x) => x.element?.type === 'static_select'
-    || /길이/.test(x.label?.text ?? '')));
+  ok('길이는 안 묻는다(시작 시간만)', !(view?.blocks ?? []).some((x) => /길이/.test(x.label?.text ?? '')));
 }
 
 // ── 2. 보내기 — 막히는 것 ────────────────────────────────────────────────────
 {
   const n = since();
   const none = await propose(idA, 'UA', []);
-  ok('시간을 하나도 안 고르면 막는다', none?.response_action === 'errors' && !!none.errors.slot0);
-  const past = await propose(idA, 'UA', [Date.now() + DAY, Date.now() - DAY]);
-  ok('지난 시각이 있으면 그 칸을 짚어 막는다', past?.response_action === 'errors' && !!past.errors.slot1);
-  const long = await propose(idA, 'UA', [Date.now() + DAY], { memo: '가'.repeat(501) });
+  ok('시간을 하나도 안 고르면 막는다', none?.response_action === 'errors' && !!none.errors.date0);
+  const past = await propose(idA, 'UA', [at(1, '10:00'), at(-1, '10:00')]);
+  ok('지난 시각이 있으면 그 칸을 짚어 막는다', past?.response_action === 'errors' && !!past.errors.date1);
+  const half = await propose(idA, 'UA', [at(1, '10:00'), { date: cells(at(2, '10:00')).date }]);
+  ok('날짜만 고르면 시각 칸을 짚어 막는다', half?.response_action === 'errors' && !!half.errors.time1);
+  const early = await propose(idA, 'UA', [{ ...cells(at(1, '10:00')), time: '06:00' }]);
+  ok('목록 밖 시각(06:00)이 와도 막는다', early?.response_action === 'errors' && !!early.errors.time0);
+  const long = await propose(idA, 'UA', [at(1, '10:00')], { memo: '가'.repeat(501) });
   ok('덧붙일 말이 너무 길면 막는다', long?.response_action === 'errors' && !!long.errors.memo);
-  await propose(idA, 'UA', [Date.now() + DAY], {}, 'UA');
+  await propose(idA, 'UA', [at(1, '10:00')], {}, 'UA');
   ok('실장 말고는 못 보낸다', toUser('UA', n).length === 0);
 }
 
 // ── 3. 보내기 — 신청자가 받는 것 ────────────────────────────────────────────
-const t1 = Date.now() + 2 * DAY + 3 * 60 * 60 * 1000;
-const t2 = Date.now() + 1 * DAY;
+const t1 = at(2, '13:00');
+const t2 = at(1, '10:30');
 {
   const n = since();
   const acked = await propose(idA, 'UA', [t1, t2, t1], { memo: '회의실은 따로 알려드릴게요' });
@@ -184,9 +207,9 @@ const t2 = Date.now() + 1 * DAY;
 // ── 5. 다시 보내면 옛 버튼은 못 쓴다 ───────────────────────────────────────
 const idB = ask('UB', 0);
 {
-  await propose(idB, 'UB', [Date.now() + DAY]);
+  await propose(idB, 'UB', [at(1, '10:00')]);
   const old = offerButtons('UB');
-  await propose(idB, 'UB', [Date.now() + 3 * DAY, Date.now() + 4 * DAY]);
+  await propose(idB, 'UB', [at(3, '09:00'), at(4, '15:30')]);
   const neu = offerButtons('UB');
   ok('다시 보내면 「다시 보냈습니다」로 간다', carried(neu.msg).includes('다시 보냈습니다'));
   const n = since();
@@ -200,7 +223,7 @@ const idB = ask('UB', 0);
 // ── 6. 다 안 돼요 ─────────────────────────────────────────────────────────
 const idC = ask('UC', 2);
 {
-  await propose(idC, 'UC', [Date.now() + DAY, Date.now() + 2 * DAY]);
+  await propose(idC, 'UC', [at(1, '11:00'), at(2, '16:00')]);
   const { msg, buttons } = offerButtons('UC');
   const n = since();
   await press('UC', buttons.find((x) => x.action_id === 'booking_decline'), msg);
@@ -236,7 +259,7 @@ const idC = ask('UC', 2);
 {
   cal.up = false;
   const idD = ask('UA', 0);    // 무른 뒤라 그 달에 다시 넣을 수 있다
-  await propose(idD, 'UA', [Date.now() + DAY]);
+  await propose(idD, 'UA', [at(1, '10:00')]);
   const { msg, buttons } = offerButtons('UA');
   const n = since();
   await press('UA', buttons.find((x) => x.action_id === 'booking_pick_0'), msg);
