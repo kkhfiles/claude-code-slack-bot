@@ -90,7 +90,12 @@ ok('두 사람이 각각 잡힌다', make().pending().length === 2);
 // ── 망가진 기록 ──────────────────────────────────────────────────────────
 fs.appendFileSync(log, '{망가진 줄\n');
 let threw = false;
-try { make().pending(); } catch { threw = true; }
+let seen = -1;
+try { seen = make().pending().length; } catch { threw = true; }
+// **증상이 났던 그 모양으로 잰다** — 예전에는 터지지만 않고 목록이 통째로 비었다.
+ok('망가진 줄이 있어도 나머지 신청은 그대로 보인다', seen === 2);
+put(c, 'ask', at(4, 9), 'UC');
+ok('망가진 줄 뒤에 들어온 신청도 보인다', make().pending().length === 3);
 // ── 달이 바뀌는 날 ────────────────────────────────────────────────────────
 //
 // **UTC 로 달을 세면 한국 시각 자정~오전 9시가 전달로 보인다.** 기록은

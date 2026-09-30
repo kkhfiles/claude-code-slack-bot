@@ -729,13 +729,26 @@ export class LetterBooking {
     return this.alive().get(id) ?? null;
   }
 
+  /**
+   * **망가진 줄은 그 줄만 건너뛴다.** 예전에는 한 줄이라도 못 읽으면 파일 전체를 빈 것으로
+   * 봤다 — 그러면 `/1on1-list` 가 「기다리는 신청이 없습니다」를 띄운다. 신청이 있는데 없다고
+   * 말하는 것이 이 창구에서 가장 나쁜 실패다(2026-09-30 「목록이 안 뜬다」를 짚다가 찾음).
+   */
   private history(): Entry[] {
+    let raw = '';
     try {
-      return fs.readFileSync(this.opts.logPath, 'utf-8').trim().split('\n')
-        .filter(Boolean).map((line) => JSON.parse(line) as Entry);
+      raw = fs.readFileSync(this.opts.logPath, 'utf-8');
     } catch {
       return [];   // 아직 아무도 안 넣었다.
     }
+    const out: Entry[] = [];
+    let broken = 0;
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      try { out.push(JSON.parse(line) as Entry); } catch { broken++; }
+    }
+    if (broken) this.logger.warn(`신청 기록에 못 읽는 줄이 ${broken}개 있어 건너뜁니다 — ${this.opts.logPath}`);
+    return out;
   }
 
   private note(entry: Entry): void {
