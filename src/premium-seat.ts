@@ -108,7 +108,7 @@ export function proFieldText(pro: any): string {
   return `${SERVICE_ICON.CHATGPT} *GPT Pro 계정*${most > 1 ? ` (계정마다 동시 ${most}명)` : ''}\n\n${lines.join('\n')}`;
 }
 
-/** 11:50 「곧 끝납니다」 글. 파이썬은 정오에 끝나는 예약에만 이 알림을 건다(자정에 끝나는 오후 예약은 안 건다). */
+/** 계정 전환 알림 글 — 정오에 끝나면 11:55 · 자정에 끝나면 그날 17:55(파이썬 `bookings.SWITCH_AT`). */
 export function bookingEndingText(p: any): string {
   // 「계정 전환」 — 모든 예약(2026-09-30 실장 · 전에는 정오에 끝나는 예약만 10분 전). 정오에 끝나면 5분 전(11:55),
   // 자정에 끝나면 그날 17:55 — 밤에는 안 보낸다(실장 「그 시간에 보내면 안 된다」). 그래서 자정 끝은 「오늘 사용을 마치면」.
@@ -379,8 +379,8 @@ export class PremiumSeatSlack {
     this.every(60_000, () => this.pumpNotifications());
     this.every(60_000, () => this.syncAnnouncements());
     this.every(60_000, () => this.scheduleReconciles());
-    // 통합 예약 사이트와 잇기 — 명단 올리기 · 판 받기 · 11:50 알림 · 실장 취소 알림.
-    // 15초마다 사이트의 변경 번호만 보고(파이썬 안 띄움), 바뀌었을 때·자정·정오·11:50·10분마다만
+    // 통합 예약 사이트와 잇기 — 명단 올리기 · 판 받기 · 끝날 때의 알림 · 실장 취소 알림.
+    // 15초마다 사이트의 변경 번호만 보고(파이썬 안 띄움), 바뀌었을 때·자정·정오·알림 시각·10분마다만
     // 회차를 돈다. 번호를 못 읽으면 예전처럼 1분 회차(`booking-watch.ts`).
     this.every(15_000, () => this.watchBooking());
     setTimeout(() => {

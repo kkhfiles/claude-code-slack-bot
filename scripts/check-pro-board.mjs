@@ -47,7 +47,6 @@ check('정원 2 · 한 사람이면 노란 원 · 1자리 남음', shared.includ
 check('정원 2 · 두 사람이면 빨간 원 · 둘 다', shared.includes(`${BUSY} *pro-b*  나 · 오늘 오후까지  /  다 · 내일 오전까지`) && !shared.includes('*pro-b*  나 · 오늘 오후까지  /  다 · 내일 오전까지  ('), shared);
 check('정원 2 · 아무도 없으면 초록 원', shared.includes(`${FREE} *pro-c*  비어 있음`), shared);
 
-// 11:50 알림 — 정원 1 은 전과 같고, 같이 쓰는 계정은 「이어서 씁니다」 대신 오후 자리
 // 끝날 때의 알림(2026-09-30 실장) — 계정 전환: 정오 끝 11:55 · 자정 끝 17:55(밤에는 안 보냄) · 긴 예약 미리 알림: 08:00·15:00
 const next = { display_name: '나', label: '오늘 오후' };
 const A = 'pro-a@ex.com';
