@@ -10,6 +10,7 @@
     "prod": "node dist/index.js",
     "check:1on1": "node scripts/check-1on1.js",
     "check:1on1dm": "node scripts/check-1on1-dm.mjs",
+    "check:1on1slots": "node scripts/check-1on1-slots.mjs",
     "check:board": "node scripts/check-board-queue.mjs",
     "check:timers": "node scripts/check-timers.mjs",
     "check:daou": "node scripts/check-daou-login.mjs",

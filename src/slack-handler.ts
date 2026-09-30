@@ -513,6 +513,14 @@ export class SlackHandler {
           // 남의 칸을 지우면 안 된다.
           nudgePath: path.join(path.dirname(turnScript), 'bots', 'letter', 'data', '1on1-nudge.json'),
           open: config.letter.booking.open,
+          // 확정된 1on1 은 **실장 본인만 보는 기본 캘린더**에 — 비서의 캘린더 연동을 부를 때마다
+          // 찾는다(늦게 뜨거나 꺼질 수 있다). 없으면 「직접 넣어 주세요」로 알린다.
+          calendar: () => {
+            const poller = this.assistantScheduler?.getCalendarPoller();
+            return poller
+              ? { add: (ev) => poller.addPrivateEvent(ev), remove: (id) => poller.removePrivateEvent(id) }
+              : null;
+          },
         })
         : null;
       letterHost = new ChatHost({

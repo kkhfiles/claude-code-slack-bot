@@ -236,6 +236,59 @@ export class CalendarPoller {
     }
   }
 
+  // --- 본인만 보는 캘린더에 넣고 빼기 (1on1 확정 · 2026-09-30) ---
+  //
+  // **넣는 곳은 기본 캘린더(`primary`) 하나로 박는다 — 캘린더를 고르는 인자를 두지 않는다.**
+  // 이 계정의 캘린더 중 실 전체가 보는 팀 캘린더가 있고(소유·쓰기 12명), 거기 넣으면 누가 1on1 을
+  // 잡았는지가 전원에게 보인다. 소유자가 이 계정 하나뿐인 것은 기본 캘린더뿐이었다(2026-09-30 ACL
+  // 확인). 그래도 일정마다 `visibility: private` 를 건다 — 나중에 누가 공유를 켜도 내용은 안 보인다.
+
+  /** 일정을 넣고 그 id 를 돌려준다. 못 넣으면 null(부르는 쪽이 「직접 넣어 주세요」라고 말한다). */
+  async addPrivateEvent(ev: { start: Date; minutes: number; title: string; description?: string }): Promise<string | null> {
+    const accessToken = await this.getAccessToken();
+    if (!accessToken) return null;
+    const end = new Date(ev.start.getTime() + ev.minutes * 60 * 1000);
+    try {
+      const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          summary: ev.title,
+          description: ev.description,
+          start: { dateTime: ev.start.toISOString(), timeZone: 'Asia/Seoul' },
+          end: { dateTime: end.toISOString(), timeZone: 'Asia/Seoul' },
+          visibility: 'private',
+          reminders: { useDefault: true },
+        }),
+      });
+      if (!response.ok) {
+        this.logger.warn(`본인 캘린더에 일정을 못 넣었습니다 (HTTP ${response.status})`);
+        return null;
+      }
+      const data = await response.json() as { id?: string };
+      return data.id ?? null;
+    } catch (error) {
+      this.logger.warn('본인 캘린더에 일정을 못 넣었습니다', error);
+      return null;
+    }
+  }
+
+  /** 넣었던 일정을 뺀다. 이미 없으면(410·404) 뺀 것으로 친다. */
+  async removePrivateEvent(id: string): Promise<boolean> {
+    const accessToken = await this.getAccessToken();
+    if (!accessToken || !id) return false;
+    try {
+      const response = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(id)}`,
+        { method: 'DELETE', headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      return response.ok || response.status === 404 || response.status === 410;
+    } catch (error) {
+      this.logger.warn('본인 캘린더에서 일정을 못 뺐습니다', error);
+      return false;
+    }
+  }
+
   // --- Token management ---
 
   private loadTokens(): GCalTokens | null {

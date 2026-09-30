@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { App } from '@slack/bolt';
@@ -48,8 +49,21 @@ const NUDGE_AT = '10:00';
 
 const BLOCK_WHEN = 'when';
 const BLOCK_NOTE = 'note';
-const BLOCK_FIXED = 'fixed';
+const BLOCK_MINUTES = 'minutes';
+const BLOCK_MEMO = 'memo';
 const MAX_TEXT = 500;
+/** 신청자가 시간 하나를 고르는 버튼 · 「다 안 돼요」. */
+const PICK = 'booking_pick';
+const PICK_RE = /^booking_pick_\d+$/;
+const DECLINE = 'booking_decline';
+/**
+ * 한 번에 보낼 수 있는 시간 수. **하나만 보내면 성사되기 어렵다**(실장 2026-09-30) — 안 맞으면
+ * 다시 사람끼리 주고받게 되고, 그건 이 창구가 없애려던 일이다. 너무 많으면 고르기가 일이 된다.
+ */
+const SLOT_MAX = 5;
+const SLOT_MINUTES = [30, 60, 90];
+/** 캘린더 일정 제목 — **이름을 안 넣는다.** 화면을 옆에서 볼 수 있다(누구인지는 설명 칸에). */
+const EVENT_TITLE = '1:1 미팅';
 
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토'];
 
@@ -71,17 +85,43 @@ export interface LetterBookingOptions {
    * 실원 신청이 들어오고, **들어온 신청은 없던 일이 안 된다.**
    */
   open: boolean;
+  /**
+   * 확정된 1on1 을 넣을 캘린더 — **실장 본인만 보는 기본 캘린더**(`CalendarPoller.addPrivateEvent`).
+   * 부를 때마다 묻는다(캘린더 연동이 늦게 뜨거나 꺼질 수 있다). 없으면 「직접 넣어 주세요」로 알린다.
+   */
+  calendar?: () => PrivateCalendar | null;
+}
+
+export interface PrivateCalendar {
+  add(ev: { start: Date; minutes: number; title: string; description?: string }): Promise<string | null>;
+  remove(id: string): Promise<boolean>;
 }
 
 interface Entry {
   ts: string;
-  action: 'ask' | 'cancel' | 'done';
+  /**
+   * `ask` 신청 · `cancel` 무름 · `done` 실장이 내림(시간을 적었으면 `when`) ·
+   * `propose` 실장이 시간 여럿을 보냄 · `pick` 신청자가 하나를 고름 · `decline` 다 안 된다고 함
+   */
+  action: 'ask' | 'cancel' | 'done' | 'propose' | 'pick' | 'decline';
   /** 신청 하나를 가리키는 열쇠. 신청한 순간의 시각을 그대로 쓴다. */
   id: string;
   user: string;
   user_name: string;
   when?: string;
   note?: string;
+  /** `propose` — 보낸 시작 시각들(ISO) · 길이(분) · 받는 분께 가는 덧붙인 말 · 판 번호. */
+  slots?: string[];
+  minutes?: number;
+  memo?: string;
+  /**
+   * 제안의 판 번호. **기록 시각으로 대신하지 않는다** — 같은 밀리초에 두 번 보내면 판 번호가
+   * 같아져 옛 메시지의 버튼이 살아난다(검사가 실제로 잡았다). 신청자가 누른 버튼에 이 값이 실린다.
+   */
+  v?: string;
+  /** `pick` — 고른 시작 시각(ISO) · 넣은 캘린더 일정. */
+  at?: string;
+  calendar?: string;
 }
 
 /** 살아 있는 신청 하나. `done` 이면 시간까지 잡힌 것이고, `fixed` 가 그 시각이다. */
@@ -89,6 +129,12 @@ interface Alive {
   entry: Entry;
   done: boolean;
   fixed?: string;
+  /** 보내 놓고 고르기를 기다리는 제안. **다시 보내면 바뀐다 — `ts` 가 판 번호다**(옛 메시지의 버튼을 막는다). */
+  proposal?: { ts: string; v: string; slots: string[]; minutes: number; memo?: string };
+  /** 신청자가 「다 안 돼요」를 눌렀다 — 실장이 다시 보낼 차례다. */
+  declined?: boolean;
+  /** 캘린더에 넣은 일정(무르면 같이 뺀다). */
+  calendar?: string;
 }
 
 export class LetterBooking {
@@ -123,8 +169,8 @@ export class LetterBooking {
         type: 'context', block_id: FROM_DM_HINT,
         elements: [{
           type: 'mrkdwn',
-          text: `면담 신청이면 아래 버튼으로 1on1 목록에 올릴 수 있어요. 시간은 \`${LIST_COMMAND}\` 에서 `
-            + '알리시면 제가 본인에게 전해요.',
+          text: `면담 신청이면 아래 버튼으로 1on1 목록에 올릴 수 있어요. \`${LIST_COMMAND}\` 에서 가능한 시간을 `
+            + '보내시면 본인이 고르고, 확정까지 제가 나릅니다.',
         }],
       },
       {
@@ -243,13 +289,13 @@ export class LetterBooking {
       this.logger.info(`신청 ← ${name}${when ? ` (${when})` : ''}`);
 
       await this.tell(client, me,
-        '1on1 신청이 들어갔습니다. 실장이 시간을 잡아 다시 알려드립니다.\n'
+        '1on1 신청이 들어갔습니다. 실장이 가능한 시간을 보내 드리면 하나를 고르시면 됩니다.\n'
         + `취소하시려면 \`${COMMAND}\` 를 다시 부르세요. 이유는 안 물어봅니다.`);
       await this.tell(client, this.opts.managerUserId,
         `*1on1 신청 · ${name}*\n`
         + `${when ? `편한 때: ${when}\n` : '편한 때: 안 적음\n'}`
         + `${note ? `> ${note}\n` : ''}`
-        + `\`${LIST_COMMAND}\` 에서 시간을 알려주시면 됩니다.`);
+        + `\`${LIST_COMMAND}\` 에서 가능한 시간을 보내 주시면 됩니다.`);
     });
 
     // 넘긴 DM 을 신청으로 — 실장 DM 에만 뜨는 버튼이지만 누른 사람을 한 번 더 본다.
@@ -295,6 +341,12 @@ export class LetterBooking {
       const name = await this.person(client, me);
       this.note({ ts: new Date().toISOString(), action: 'cancel', id, user: me, user_name: name });
       this.logger.info(`무름 ← ${name}${asked.done ? ' (시간이 잡혀 있던 건)' : ''}`);
+      // 캘린더에 넣어 둔 것도 뺀다 — 무른 약속이 실장 달력에 남아 있으면 그 시간을 비워 두게 된다.
+      let calLine = '';
+      if (asked.calendar) {
+        const removed = await (this.opts.calendar?.()?.remove(asked.calendar) ?? Promise.resolve(false)).catch(() => false);
+        calLine = removed ? ' 캘린더에서도 뺐습니다.' : ' 캘린더 일정은 직접 지워 주세요.';
+      }
 
       const when = asked.fixed ? ` (${asked.fixed})` : '';
       await this.refresh(client, payload.view?.id, this.memberView(me, asked.done
@@ -306,12 +358,13 @@ export class LetterBooking {
         ? `잡혀 있던 1on1 을 취소했습니다${when}. 실장에게 알렸습니다 — 이유는 안 물어봅니다.`
         : '1on1 신청을 취소했습니다. 이번 달에 다시 넣으실 수 있습니다.');
       await this.tell(client, this.opts.managerUserId, asked.done
-        ? `1on1 *무름* · *${name}* — 시간까지 잡혔던 건입니다${when}.`
-        : `1on1 신청 무름 · *${name}*`);
+        ? `1on1 *무름* · *${name}* — 시간까지 잡혔던 건입니다${when}.${calLine}`
+        : `1on1 신청 무름 · *${name}*${asked.proposal ? ' — 보낸 시간을 고르기 전에 물렀습니다.' : ''}`);
     });
 
-    // 시간 알리기 — 실장이 정한 시각을 **봇이 나른다.** 사람이 사람에게 말 거는 구간을
-    // 만들지 않는 것이 이 창구의 설계다(2026-08-03 결정). 실장이 직접 말했으면 아래 DONE 을 쓴다.
+    // 시간 제안하기 — 실장이 **가능한 시간을 여럿** 보내면 신청자가 고른다(2026-09-30 실장
+    // 「시간을 딱 하나만 전달하는건 성사되기 어렵다」). 나르는 것은 봇이다 — 사람이 사람에게 말
+    // 거는 구간을 만들지 않는 것이 이 창구의 설계다(2026-08-03). 실장이 직접 말했으면 아래 DONE.
     app.action({ action_id: TELL }, async ({ ack, body, client }) => {
       await ack();
       const payload = body as any;
@@ -324,27 +377,37 @@ export class LetterBooking {
         return;
       }
       try {
-        await client.views.push({ trigger_id: payload.trigger_id, view: this.tellView(asked) });
+        await client.views.push({ trigger_id: payload.trigger_id, view: this.proposeView(asked) });
       } catch (error) {
-        this.logger.warn('시간 알림 창을 못 열었습니다', error);
+        this.logger.warn('시간 제안 창을 못 열었습니다', error);
       }
     });
 
     app.view(TELL_SEND, async ({ ack, body, view, client }) => {
       if (body.user.id !== this.opts.managerUserId) { await ack(); return; }
-      const fixed = (view.state.values[BLOCK_FIXED]?.[BLOCK_FIXED]?.value ?? '').trim();
-      if (!fixed) {
-        await ack({ response_action: 'errors', errors: { [BLOCK_FIXED]: '언제로 잡았는지 적어 주세요.' } });
-        return;
+      const values = view.state.values as Record<string, Record<string, any>>;
+      const now = Date.now();
+      const picked: { block: string; ms: number }[] = [];
+      for (let i = 0; i < SLOT_MAX; i++) {
+        const sec = values[`slot${i}`]?.[`slot${i}`]?.selected_date_time;
+        if (typeof sec === 'number') picked.push({ block: `slot${i}`, ms: sec * 1000 });
       }
-      if (fixed.length > MAX_TEXT) {
-        await ack({
-          response_action: 'errors',
-          errors: { [BLOCK_FIXED]: `${MAX_TEXT}자까지만 됩니다 (지금 ${fixed.length}자).` },
-        });
+      const errors: Record<string, string> = {};
+      if (!picked.length) errors.slot0 = '가능한 시간을 하나 이상 골라 주세요.';
+      for (const p of picked) {
+        if (p.ms < now + 5 * 60 * 1000) errors[p.block] = '지난 시각이거나 너무 가깝습니다.';
+      }
+      const memo = String(values[BLOCK_MEMO]?.[BLOCK_MEMO]?.value ?? '').trim();
+      if (memo.length > MAX_TEXT) errors[BLOCK_MEMO] = `${MAX_TEXT}자까지만 됩니다 (지금 ${memo.length}자).`;
+      if (Object.keys(errors).length) {
+        await ack({ response_action: 'errors', errors });
         return;
       }
       await ack({ response_action: 'clear' });
+      const minutes = Number(values[BLOCK_MINUTES]?.[BLOCK_MINUTES]?.selected_option?.value) || 60;
+      // 같은 시각을 두 칸에 골랐으면 하나로 · 이른 순서로
+      const slots = [...new Set(picked.map((p) => p.ms))].sort((a, b) => a - b)
+        .map((ms) => new Date(ms).toISOString());
 
       let who: { id: string; user: string; name: string };
       try {
@@ -362,7 +425,7 @@ export class LetterBooking {
       const still = this.alive().get(who.id);
       if (!still || still.done) {
         const why = still
-          ? '이미 시간을 알려드린 건입니다.'
+          ? '이미 시간이 잡힌 건입니다.'
           : '그새 신청을 취소했습니다.';
         this.logger.info(`보내지 않았습니다 (${who.name}) — ${why}`);
         await this.tell(client, this.opts.managerUserId,
@@ -370,13 +433,36 @@ export class LetterBooking {
         return;
       }
 
-      this.note({ ts: new Date().toISOString(), action: 'done', id: who.id, user: who.user, user_name: who.name, when: fixed });
-      this.logger.info(`시간 알림 → ${who.name} (${fixed})`);
-      // **취소하는 길도 봇으로 알린다.** 「실장에게 말씀 주세요」로 보내면, 사람에게
-      // 취소를 말하는 부담을 없애려고 만든 창구가 마지막 한 걸음에서 그 부담을 돌려준다.
-      await this.tell(client, who.user,
-        `1on1 시간이 잡혔습니다 · *${fixed}*\n안 되시면 \`${COMMAND}\` 에서 취소하시면 됩니다. 이유는 안 물어봅니다.`);
-      await this.tell(client, this.opts.managerUserId, `알려드렸습니다 · *${who.name}* · ${fixed}`);
+      const v = crypto.randomBytes(6).toString('hex');
+      this.note({ ts: new Date().toISOString(), action: 'propose', id: who.id, user: who.user, user_name: who.name,
+                  slots, minutes, memo: memo || undefined, v });
+      this.logger.info(`시간 제안 → ${who.name} (${slots.length}개 · ${minutes}분)`);
+      await this.tell(client, who.user, this.offerText(slots, minutes, memo, Boolean(still.proposal || still.declined)),
+        this.offerBlocks(who.id, v, slots));
+      await this.tell(client, this.opts.managerUserId,
+        `보냈습니다 · *${who.name}* · ${slots.map((s) => this.slotLabel(s)).join(' / ')} (${minutes}분)\n`
+        + '_하나를 고르면 확정해 알려 드리고 본인만 보는 캘린더에 넣습니다. 다 안 되면 다시 보내 달라고 알려 드립니다._');
+    });
+
+    // 신청자가 시간 하나를 고름 — **그 자리에서 확정**한다(다시 묻지 않는다).
+    // 한 줄에 버튼이 여럿이라 이름이 겹치면 안 된다(`booking_pick_0` …) — 앞머리로 받는다.
+    app.action({ action_id: PICK_RE }, async ({ ack, body, client }) => {
+      await ack();
+      const payload = body as any;
+      let v: { id?: string; v?: string; i?: number } = {};
+      try { v = JSON.parse(payload.actions?.[0]?.value ?? '{}'); } catch { /* 아래에서 막힌다 */ }
+      const result = await this.pick(client, payload.user?.id ?? '', v.id ?? '', v.v ?? '', Number(v.i));
+      await this.settleOffer(client, payload, result);
+    });
+
+    // 「다 안 돼요」 — 실장에게 다시 보내 달라고 알린다. 이유는 안 묻는다.
+    app.action({ action_id: DECLINE }, async ({ ack, body, client }) => {
+      await ack();
+      const payload = body as any;
+      let v: { id?: string; v?: string } = {};
+      try { v = JSON.parse(payload.actions?.[0]?.value ?? '{}'); } catch { /* 아래에서 막힌다 */ }
+      const result = await this.decline(client, payload.user?.id ?? '', v.id ?? '', v.v ?? '');
+      await this.settleOffer(client, payload, result);
     });
 
     // 그냥 내리기 — 실장이 이미 직접 말했을 때. **신청자에게는 아무 말도 안 간다**
@@ -449,7 +535,8 @@ export class LetterBooking {
     try { seen = JSON.parse(fs.readFileSync(this.opts.nudgePath, 'utf-8')); } catch { seen = {}; }
     if (seen.day === today) return;
 
-    const waited = this.pending()
+    // **실장 차례인 것만** — 시간을 보내 놓고 고르기를 기다리는 건은 실장이 할 것이 없다.
+    const waited = this.managerTurn()
       .filter((entry) => now.getTime() - new Date(entry.ts).getTime() >= NUDGE_AFTER_MS)
       .sort((a, b) => a.ts.localeCompare(b.ts));
     // **없으면 도장을 안 찍는다.** 찍어 두면 오늘 낮에 하루를 넘기는 건이 생겨도 내일로
@@ -464,7 +551,7 @@ export class LetterBooking {
     try {
       await this.tell(app.client, this.opts.managerUserId,
         `:hourglass_flowing_sand: *1on1 신청 ${waited.length}건이 그대로 있습니다*\n${who}\n`
-        + '시간을 잡으셨으면 *시간 알리기*, 이미 직접 말씀하셨으면 *그냥 내리기* 를 눌러 주세요.',
+        + '*시간 제안하기* 로 가능한 시간을 보내시거나, 이미 직접 말씀하셨으면 *그냥 내리기* 를 눌러 주세요.',
         [{
           type: 'actions',
           elements: [{
@@ -494,7 +581,10 @@ export class LetterBooking {
           text: mine.done
             ? `*잡힌 1on1*\n${mine.fixed || '실장이 따로 알려드렸습니다'}`
             : `*넣어 두신 신청*\n${this.day(mine.entry.ts)} 신청`
-              + `${mine.entry.when ? `\n편한 때: ${mine.entry.when}` : ''}`,
+              + `${mine.entry.when ? `\n편한 때: ${mine.entry.when}` : ''}`
+              + `${mine.proposal
+                ? `\n받은 시간: ${mine.proposal.slots.map((s) => this.slotLabel(s)).join(' / ')} — 봇 DM 의 버튼으로 골라 주세요.`
+                : mine.declined ? '\n다 안 된다고 알려 두었습니다. 실장이 다른 시간을 보내 드립니다.' : ''}`,
         },
         accessory: {
           type: 'button', action_id: CANCEL, value: mine.entry.id,
@@ -507,7 +597,7 @@ export class LetterBooking {
           type: 'mrkdwn',
           text: mine.done
             ? '못 가시게 되면 여기서 취소하시면 됩니다. 이유는 안 물어봅니다.'
-            : '실장이 시간을 잡아 알려드립니다. 취소하셔도 이유는 안 물어봅니다.',
+            : '실장이 가능한 시간을 보내 드리면 하나를 고르시면 됩니다. 취소하셔도 이유는 안 물어봅니다.',
         }],
       });
       return this.modal(blocks);
@@ -547,12 +637,19 @@ export class LetterBooking {
       blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*기다리는 신청이 없습니다.*' } });
     } else {
       blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*기다리는 신청 ${waiting.length}건*` } });
+      const states = this.alive();
       for (const entry of waiting) {
+        const st = states.get(entry.id);
+        const state = st?.proposal
+          ? `:hourglass_flowing_sand: 시간 ${st.proposal.slots.length}개 보냄 · 고르는 중 (${this.day(st.proposal.ts)} 보냄)\n`
+          : st?.declined
+            ? ':warning: 보낸 시간이 다 안 된다고 함 · *다시 보내 주세요*\n'
+            : '';
         blocks.push({
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: `*${entry.user_name}* · ${this.day(entry.ts)} 신청\n`
+            text: `*${entry.user_name}* · ${this.day(entry.ts)} 신청\n${state}`
               + `${entry.when ? `편한 때: ${entry.when}\n` : '편한 때: 안 적음\n'}`
               + `${entry.note ? `> ${entry.note}` : ''}`,
           },
@@ -561,8 +658,8 @@ export class LetterBooking {
           type: 'actions',
           elements: [
             {
-              type: 'button', action_id: TELL, value: entry.id, style: 'primary',
-              text: { type: 'plain_text', text: '시간 알리기' },
+              type: 'button', action_id: TELL, value: entry.id, ...(st?.proposal ? {} : { style: 'primary' }),
+              text: { type: 'plain_text', text: st?.proposal || st?.declined ? '다시 제안' : '시간 제안하기' },
             },
             {
               type: 'button', action_id: DONE, value: entry.id,
@@ -574,37 +671,180 @@ export class LetterBooking {
     }
     blocks.push({
       type: 'context',
-      elements: [{ type: 'mrkdwn', text: `*시간 알리기* 는 봇이 대신 알려 드립니다. 이미 직접 말씀하셨으면 *그냥 내리기* 를 쓰세요(그때는 아무 말도 안 갑니다).\n신청은 \`${COMMAND}\` — 실장도 그쪽으로 넣습니다.` }],
+      elements: [{ type: 'mrkdwn', text: `*시간 제안하기* 로 가능한 시간을 여럿 보내면 받는 분이 고르고, 고르면 확정·알림·캘린더 등록까지 봇이 합니다. 이미 직접 말씀하셨으면 *그냥 내리기* 를 쓰세요(그때는 아무 말도 안 갑니다).\n신청은 \`${COMMAND}\` — 실장도 그쪽으로 넣습니다.` }],
     });
     return this.modal(blocks, undefined, undefined, '들어온 1on1 신청');
   }
 
-  /** 실장이 정한 시각을 적는 창. 이 칸에 적은 그대로 신청자에게 간다. */
-  private tellView(entry: Entry): any {
+  /** 실장이 가능한 시간을 여럿 고르는 창. 첫 칸만 반드시 · 나머지는 비워도 된다. */
+  private proposeView(entry: Entry): any {
+    const cur = this.alive().get(entry.id);
+    const minutes = (m: number) => ({ text: { type: 'plain_text', text: `${m}분` }, value: String(m) });
+    const blocks: any[] = [{
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*${entry.user_name}* 님께 가능한 시간을 보냅니다. 받는 분이 하나를 고르면 그 자리에서 확정되고, `
+          + '본인만 보는 캘린더에 넣습니다.'
+          + `${entry.when ? `\n적어 주신 편한 때: ${entry.when}` : ''}`
+          + `${cur?.declined ? '\n_앞서 보낸 시간은 다 안 된다고 했습니다._' : ''}`
+          + `${cur?.proposal ? `\n_앞서 보낸 것(${cur.proposal.slots.map((s) => this.slotLabel(s)).join(' / ')})은 새로 보내면 고를 수 없게 됩니다._` : ''}`,
+      },
+    }];
+    for (let i = 0; i < SLOT_MAX; i++) {
+      blocks.push({
+        type: 'input', block_id: `slot${i}`, optional: i > 0,
+        label: { type: 'plain_text', text: `가능한 시간 ${i + 1}` },
+        element: { type: 'datetimepicker', action_id: `slot${i}` },
+      });
+    }
+    blocks.push(
+      {
+        type: 'input', block_id: BLOCK_MINUTES,
+        label: { type: 'plain_text', text: '길이' },
+        element: {
+          type: 'static_select', action_id: BLOCK_MINUTES,
+          initial_option: minutes(60), options: SLOT_MINUTES.map(minutes),
+        },
+      },
+      {
+        type: 'input', block_id: BLOCK_MEMO, optional: true,
+        label: { type: 'plain_text', text: '덧붙일 말 (안 적으셔도 됩니다)' },
+        hint: { type: 'plain_text', text: '받는 분께 그대로 갑니다. 예: 회의실은 따로 알려드릴게요' },
+        element: { type: 'plain_text_input', action_id: BLOCK_MEMO },
+      },
+    );
     return {
       type: 'modal',
       callback_id: TELL_SEND,
       private_metadata: JSON.stringify({ id: entry.id, user: entry.user, name: entry.user_name }),
-      title: { type: 'plain_text', text: '시간 알리기' },
+      title: { type: 'plain_text', text: '시간 제안하기' },
       submit: { type: 'plain_text', text: '보내기' },
       close: { type: 'plain_text', text: '취소' },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*${entry.user_name}* 님께 보냅니다.`
-              + `${entry.when ? `\n적어 주신 편한 때: ${entry.when}` : ''}`,
-          },
-        },
-        {
-          type: 'input', block_id: BLOCK_FIXED,
-          label: { type: 'plain_text', text: '언제로 잡으셨나요' },
-          hint: { type: 'plain_text', text: '적으신 그대로 갑니다. 예: 8월 7일(금) 16:00, 회의실은 따로 알려드릴게요' },
-          element: { type: 'plain_text_input', action_id: BLOCK_FIXED },
-        },
-      ],
+      blocks,
     };
+  }
+
+  /** 신청자에게 가는 제안 글. 신청 메모는 싣지 않는다(실장 말만). */
+  private offerText(slots: string[], minutes: number, memo: string, again: boolean): string {
+    return `${again ? '실장이 1on1 시간을 다시 보냈습니다.' : '실장이 1on1 가능한 시간을 보냈습니다.'} 편한 시간을 하나 골라 주세요.`
+      + `\n길이 ${minutes}분${slots.length > 1 ? ` · ${slots.length}개 중 하나` : ''}`
+      + `${memo ? `\n> ${memo.replace(/\n/g, '\n> ')}` : ''}`;
+  }
+
+  /** 시간마다 버튼 하나 + 「다 안 돼요」. 값에 제안의 판 번호(`v`)를 실어 옛 메시지의 버튼을 막는다. */
+  private offerBlocks(id: string, version: string, slots: string[]): any[] {
+    return [
+      {
+        type: 'actions',
+        elements: [
+          ...slots.map((s, i) => ({
+            type: 'button', action_id: `${PICK}_${i}`, value: JSON.stringify({ id, v: version, i }),
+            text: { type: 'plain_text', text: this.slotLabel(s) },
+          })),
+          {
+            type: 'button', action_id: DECLINE, value: JSON.stringify({ id, v: version }),
+            text: { type: 'plain_text', text: '다 안 돼요' },
+          },
+        ],
+      },
+      {
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: '고르면 바로 확정되고 실장에게 알려 드립니다. 다 안 되면 *다 안 돼요* — 이유는 안 물어봅니다.',
+        }],
+      },
+    ];
+  }
+
+  private picking = new Set<string>();
+
+  /**
+   * 고름을 확정한다. 돌려주는 것은 신청자 메시지의 버튼 대신 남길 한 줄(`null` 이면 그대로 둔다).
+   * **먼저 캘린더에 넣고 기록한다** — 기록이 먼저면 캘린더가 늦는 사이 무른 건에 일정이 생긴다.
+   */
+  private async pick(client: App['client'], me: string, id: string, version: string, i: number): Promise<string | null> {
+    const cur = this.alive().get(id);
+    const stale = this.offerStale(cur, me, version);
+    if (stale) return stale;
+    const offer = cur!.proposal!;
+    const at = offer.slots[i];
+    if (!at) return '고른 시간을 못 찾았습니다 — 가장 최근 메시지에서 다시 골라 주세요.';
+    if (this.picking.has(id)) return null;
+    this.picking.add(id);
+    try {
+      const label = this.slotLabel(at);
+      const name = cur!.entry.user_name;
+      const cal = this.opts.calendar?.() ?? null;
+      let eventId: string | null = null;
+      if (cal) {
+        // 설명 칸에는 이름만 — 신청 메모는 캘린더에 안 옮긴다(사본을 늘리지 않는다).
+        eventId = await cal.add({
+          start: new Date(at), minutes: offer.minutes, title: EVENT_TITLE,
+          description: `신청: ${name}\n커피콩 1on1 창구에서 확정`,
+        }).catch(() => null);
+      }
+      this.note({ ts: new Date().toISOString(), action: 'pick', id, user: me, user_name: name,
+                  when: label, at, calendar: eventId ?? undefined });
+      this.logger.info(`1on1 확정 ← ${name} (${label})${eventId ? ' · 캘린더' : ' · 캘린더 없음'}`);
+      await this.tell(client, this.opts.managerUserId,
+        `:white_check_mark: 1on1 확정 · *${name}* · ${label} (${offer.minutes}분)\n`
+        + (eventId
+          ? `_본인만 보는 캘린더에 넣었습니다 — 제목 「${EVENT_TITLE}」 · 이름은 설명 칸._`
+          : '_캘린더에는 못 넣었습니다 — 직접 넣어 주세요._'));
+      return `:white_check_mark: *${label}* 로 잡혔습니다. 실장에게 알렸습니다.\n`
+        + `안 되시면 \`${COMMAND}\` 에서 취소하시면 됩니다. 이유는 안 물어봅니다.`;
+    } finally {
+      this.picking.delete(id);
+    }
+  }
+
+  /** 「다 안 돼요」. 실장에게 다시 보내 달라고 알린다. */
+  private async decline(client: App['client'], me: string, id: string, version: string): Promise<string | null> {
+    const cur = this.alive().get(id);
+    const stale = this.offerStale(cur, me, version);
+    if (stale) return stale;
+    const name = cur!.entry.user_name;
+    this.note({ ts: new Date().toISOString(), action: 'decline', id, user: me, user_name: name });
+    this.logger.info(`제안 시간 다 안 됨 ← ${name}`);
+    await this.tell(client, this.opts.managerUserId,
+      `:calendar: *${name}* 님 — 보낸 시간이 다 안 된다고 합니다. 다른 시간을 보내 주세요.`,
+      [{
+        type: 'actions',
+        elements: [{ type: 'button', action_id: NUDGE_OPEN, style: 'primary', text: { type: 'plain_text', text: '목록 열기' } }],
+      }]);
+    return '실장에게 알렸습니다. 다른 시간을 다시 보내 드립니다. 이유는 안 물어봅니다.';
+  }
+
+  /** 이 제안에 지금 답할 수 있나. 못 하면 그 까닭(버튼 대신 남길 한 줄). */
+  private offerStale(cur: Alive | undefined, me: string, version: string): string | null {
+    if (!cur || cur.entry.user !== me) return '그새 취소된 신청입니다.';
+    if (cur.done) return `이미 잡힌 1on1 입니다${cur.fixed ? ` · *${cur.fixed}*` : ''}.`;
+    if (!cur.proposal || cur.proposal.v !== version) {
+      return cur.declined
+        ? '다 안 된다고 알려 두었습니다. 실장이 다른 시간을 보내 드립니다.'
+        : '실장이 시간을 다시 보냈습니다 — 가장 최근 메시지에서 골라 주세요.';
+    }
+    return null;
+  }
+
+  /** 누른 메시지의 버튼을 결과 한 줄로 바꾼다 — 두 번 눌러 두 번 확정되지 않게. */
+  private async settleOffer(client: App['client'], payload: any, line: string | null): Promise<void> {
+    if (!line) return;
+    const channel = payload.channel?.id as string | undefined;
+    const ts = payload.message?.ts as string | undefined;
+    if (!channel || !ts) { await this.tell(client, payload.user?.id, line); return; }
+    const kept = (payload.message?.blocks ?? []).filter((b: any) => b.type !== 'actions' && b.type !== 'context');
+    try {
+      await client.chat.update({
+        channel, ts, text: payload.message?.text ?? line,
+        blocks: [...kept, { type: 'context', elements: [{ type: 'mrkdwn', text: line }] }],
+      });
+    } catch (error) {
+      this.logger.warn('시간 제안 메시지를 못 바꿨습니다 — 한 줄로 따로 알립니다', error);
+      await this.tell(client, payload.user?.id, line);
+    }
   }
 
   private modal(blocks: any[], callback?: string, submit?: string, title?: string): any {
@@ -648,21 +888,49 @@ export class LetterBooking {
   private alive(): Map<string, Alive> {
     const alive = new Map<string, Alive>();
     for (const entry of this.history()) {
-      if (entry.action === 'ask') alive.set(entry.id, { entry, done: false });
-      else if (entry.action === 'cancel') alive.delete(entry.id);
-      else if (entry.action === 'done') {
+      if (entry.action === 'ask') { alive.set(entry.id, { entry, done: false }); continue; }
+      if (entry.action === 'cancel') { alive.delete(entry.id); continue; }
+      const cur = alive.get(entry.id);
+      if (!cur) continue;
+      if (entry.action === 'done') {
         // 시간이 잡힌 것도 **살아 있다** — 실장 목록에서만 내려간다.
-        const cur = alive.get(entry.id);
-        if (cur) alive.set(entry.id, { ...cur, done: true, fixed: entry.when || cur.fixed });
+        alive.set(entry.id, { ...cur, done: true, fixed: entry.when || cur.fixed, proposal: undefined, declined: false });
+      } else if (entry.action === 'propose' && !cur.done && entry.slots?.length) {
+        alive.set(entry.id, {
+          ...cur, declined: false,
+          proposal: { ts: entry.ts, v: entry.v ?? entry.ts, slots: entry.slots, minutes: entry.minutes ?? 60, memo: entry.memo },
+        });
+      } else if (entry.action === 'pick' && !cur.done) {
+        alive.set(entry.id, {
+          ...cur, done: true, fixed: entry.when, proposal: undefined, declined: false, calendar: entry.calendar,
+        });
+      } else if (entry.action === 'decline' && !cur.done) {
+        alive.set(entry.id, { ...cur, proposal: undefined, declined: true });
       }
     }
     return alive;
   }
 
-  /** 아직 실장이 안 내린 신청들. */
+  /** 아직 실장이 안 내린 신청들(보내 놓고 고르기를 기다리는 것도 포함 — 목록에서 상태로 보인다). */
   private pending(): Entry[] {
     return [...this.alive().values()].filter((a) => !a.done).map((a) => a.entry)
       .sort((a, b) => a.ts.localeCompare(b.ts));
+  }
+
+  /**
+   * **실장 차례인** 신청들 — 아직 시간을 안 보냈거나, 보낸 것이 다 안 된다고 돌아온 것.
+   * 보내 놓고 고르기를 기다리는 것은 뺀다(그때 실장을 재촉하면 할 수 있는 것이 없다).
+   */
+  private managerTurn(): Entry[] {
+    return [...this.alive().values()].filter((a) => !a.done && !a.proposal).map((a) => a.entry)
+      .sort((a, b) => a.ts.localeCompare(b.ts));
+  }
+
+  /** 시각 하나를 사람이 읽는 꼴로 — 「10월 2일(목) 14:00」. 봇이 도는 PC 의 시간대(한국)로 읽는다. */
+  private slotLabel(iso: string): string {
+    const d = new Date(iso);
+    return `${d.getMonth() + 1}월 ${d.getDate()}일(${WEEKDAYS[d.getDay()]}) `
+      + `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   }
 
   /**
@@ -686,9 +954,9 @@ export class LetterBooking {
     this.logger.info(`신청 ← ${name} (넘긴 DM 을 실장이 올림)`);
     // 보낸 말은 다시 싣지 않는다 — 본인 DM 이라도 알림 미리보기로 옆 사람 화면에 뜰 수 있다.
     await this.tell(client, user,
-      '보내 주신 말을 1on1 신청으로 받았습니다. 실장이 시간을 잡아 다시 알려드립니다.\n'
+      '보내 주신 말을 1on1 신청으로 받았습니다. 실장이 가능한 시간을 보내 드리면 하나를 고르시면 됩니다.\n'
       + `취소하시려면 \`${COMMAND}\` 를 부르세요. 이유는 안 물어봅니다.`);
-    return `:white_check_mark: 1on1 목록에 올렸어요 — \`${LIST_COMMAND}\` 에서 시간을 알리시면 제가 본인에게 전해요.`;
+    return `:white_check_mark: 1on1 목록에 올렸어요 — \`${LIST_COMMAND}\` 에서 가능한 시간을 보내시면 본인이 고릅니다.`;
   }
 
   /**
