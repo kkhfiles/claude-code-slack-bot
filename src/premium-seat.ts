@@ -84,6 +84,42 @@ function accountShort(account: string): string {
   return account.split('@')[0] || account;
 }
 
+/**
+ * GPT Pro 계정 칸 글 — 계정마다 지금 쓰는 사람과 언제 비는지, 비었으면 다음 예약.
+ * 클래스 밖에 둔 것은 시험(`check:proboard`)이 직접 부르게 하려고다.
+ */
+export function proFieldText(pro: any): string {
+  const lines = (pro?.accounts ?? []).map((a: any) => {
+    const name = `*${accountShort(a.account)}*`;
+    // 정원이 둘 이상이면 쓰는 사람이 여럿일 수 있다(2026-09-30 실장) — 모두 적고, 자리가 남으면 노란 원.
+    const users: any[] = proUsers(a);
+    const left = (a.capacity ?? 1) - users.length;
+    if (users.length) {
+      const who = users.map((u) => `${u.display_name} · ${u.until}`).join('  /  ');
+      return `${left > 0 ? PART_ICON : BUSY_ICON} ${name}  ${who}${left > 0 ? `  (${left}자리 남음)` : ''}`;
+    }
+    const next = a.next ? ` · 다음 ${a.next.label} ${a.next.display_name}` : '';
+    return `${FREE_ICON} ${name}  비어 있음${next}`;
+  });
+  // 판은 통합 예약 사이트에서 1분마다 받아 온다. 못 받고 있으면 낡은 판이라는 것을 밝힌다.
+  if (!lines.length) lines.push('예약 현황을 아직 받아 오지 못했습니다');
+  else if (pro?.stale) lines.push(':warning: 예약 현황 확인 지연');
+  const most = Math.max(1, ...(pro?.accounts ?? []).map((a: any) => a.capacity ?? 1));
+  return `${SERVICE_ICON.CHATGPT} *GPT Pro 계정*${most > 1 ? ` (계정마다 동시 ${most}명)` : ''}\n\n${lines.join('\n')}`;
+}
+
+/** 11:50 「곧 끝납니다」 글. 파이썬은 정오에 끝나는 예약에만 이 알림을 건다(자정에 끝나는 오후 예약은 안 건다). */
+export function bookingEndingText(p: any): string {
+  const acct = accountShort(p.account ?? '');
+  const lines = [`*${acct}* 계정 예약이 10분 뒤 정오에 끝납니다.`];
+  // 같이 쓰는 계정(정원 둘 이상)에서는 뒤 사람이 내 자리를 이어받는 것이 아니다 — 자리가 남는지만 알린다.
+  if ((p.capacity ?? 1) > 1) lines.push(p.after_full ? '오후에는 자리가 다 찼습니다.' : '오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.');
+  else if (p.next_is_adjacent && p.next) lines.push(`정오부터 ${p.next.display_name} 님이 이어서 씁니다.`);
+  else if (p.next) lines.push(`다음 예약은 ${p.next.label} ${p.next.display_name} 님입니다. 오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.`);
+  else lines.push('뒤 예약이 없습니다. 오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.');
+  return lines.join('\n');
+}
+
 /** 라디오에서 「바꾸지 않음」을 나타내는 값. 슬랙이 빈 문자열을 안 받는다. */
 const KEEP_AS_IS = '__keep__';
 
@@ -788,23 +824,7 @@ export class PremiumSeatSlack {
    * 도구는 누가 예약했는지만 안다. 실제로 로그인해 쓰는지는 모른다 — 본인 신고가 정본이다.
    */
   private proField(pro: any): any {
-    const lines = (pro?.accounts ?? []).map((a: any) => {
-      const name = `*${accountShort(a.account)}*`;
-      // 정원이 둘 이상이면 쓰는 사람이 여럿일 수 있다(2026-09-30 실장) — 모두 적고, 자리가 남으면 노란 원.
-      const users: any[] = proUsers(a);
-      const left = (a.capacity ?? 1) - users.length;
-      if (users.length) {
-        const who = users.map((u) => `${u.display_name} · ${u.until}`).join('  /  ');
-        return `${left > 0 ? PART_ICON : BUSY_ICON} ${name}  ${who}${left > 0 ? `  (${left}자리 남음)` : ''}`;
-      }
-      const next = a.next ? ` · 다음 ${a.next.label} ${a.next.display_name}` : '';
-      return `${FREE_ICON} ${name}  비어 있음${next}`;
-    });
-    // 판은 통합 예약 사이트에서 1분마다 받아 온다. 못 받고 있으면 낡은 판이라는 것을 밝힌다.
-    if (!lines.length) lines.push('예약 현황을 아직 받아 오지 못했습니다');
-    else if (pro?.stale) lines.push(':warning: 예약 현황 확인 지연');
-    const most = Math.max(1, ...(pro?.accounts ?? []).map((a: any) => a.capacity ?? 1));
-    return { type: 'mrkdwn', text: `${SERVICE_ICON.CHATGPT} *GPT Pro 계정*${most > 1 ? ` (계정마다 동시 ${most}명)` : ''}\n\n${lines.join('\n')}` };
+    return { type: 'mrkdwn', text: proFieldText(pro) };
   }
 
   /** 범례 — 화면에 있는 기호만 설명한다. 좌석 상태 두 항목은 눈금이 늘 쓰므로 항상 넣는다. */
@@ -1589,17 +1609,8 @@ export class PremiumSeatSlack {
         lines.push('', '판이 갱신되지 않고 있습니다. 관리 화면 문구가 바뀌었거나 로그인이 풀렸을 수 있습니다 — 봇 로그의 [PremiumSeat] 를 보세요.');
         return lines.join('\n');
       }
-      case 'BOOKING_ENDING': {
-        // 파이썬은 정오에 끝나는 예약에만 이 알림을 건다(자정에 끝나는 오후 예약은 안 건다).
-        const acct = accountShort(p.account ?? '');
-        const lines = [`*${acct}* 계정 예약이 10분 뒤 정오에 끝납니다.`];
-        // 같이 쓰는 계정(정원 둘 이상)에서는 뒤 사람이 내 자리를 이어받는 것이 아니다 — 자리가 남는지만 알린다.
-        if ((p.capacity ?? 1) > 1) lines.push(p.after_full ? '오후에는 자리가 다 찼습니다.' : '오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.');
-        else if (p.next_is_adjacent && p.next) lines.push(`정오부터 ${p.next.display_name} 님이 이어서 씁니다.`);
-        else if (p.next) lines.push(`다음 예약은 ${p.next.label} ${p.next.display_name} 님입니다. 오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.`);
-        else lines.push('뒤 예약이 없습니다. 오후에도 쓰시려면 TurnTable에서 오후를 잡아 주세요.');
-        return lines.join('\n');
-      }
+      case 'BOOKING_ENDING':
+        return bookingEndingText(p);
       case 'BOOKING_CANCELLED': {
         const acct = accountShort(p.account ?? '');
         // 취소는 하나다(2026-09-29 실장) — 쓰는 중이었으면 사이트가 그 전 시간대까지 쓴 기록을 남긴다(RELEASED).
