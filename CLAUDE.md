@@ -10,6 +10,26 @@
 
 # Claude Code Slack Bot - Project Conventions
 
+## 개인 글 — 실원이 봇에게 전한 말은 남·방으로 안 나간다 (2026-09-30 · 최우선)
+
+**원칙(실장 결정)**: 실원이 봇에게 DM·슬래시 명령·창구(1on1 신청·커피챗·칭찬)로 전한 말은 **실장 DM 과 그 말의 당사자 DM 말고는 어디로도 안 나간다.** 방·다른 사람 DM 은 물론이고 로그 원문·저장소·AI 가 도는 작업 폴더·외부 모델도 「나간다」에 든다. 기능을 새로 만들거나 고칠 때 이 원칙이 다른 모든 편의보다 앞선다.
+
+지키는 장치는 세 겹이고, **새 코드가 이 장치를 돌아가면 안 된다**:
+
+- **개인 글 문**(`src/privacy-guard.ts`) — `WebClient.prototype.apiCall` 의 가장 바깥(활동 기록 다음에 설치). 개인 글 조각이 실린 글은 실장·당사자 DM 말고는 막고 실장에게 「막았다」만 알린다. 조각 기준은 파이썬 방 답 빗장(`work-assistant/chatbot/privacy_gate.py`)과 같다(10자 · 1:1 대화 12자 · 짧은 원문 통째)
+- **활동 기록 가림**(`src/activity-log.ts` `scrub`) — 실원이 봇에게 한 말 · 실장에게 넘긴 DM · 실원 DM 방의 봇 답 · 개인 글 조각은 원문 대신 글자 수만
+- **시험**(`check:privacy` · `check:activity` · `check:1on1dm`) — 막을 것·통과시킬 것 · 로그에 원문 없음 · 문을 돌아가는 길을 소스에서 센다
+
+그래서 코드를 쓸 때:
+
+1. **슬랙에 보내는 길은 `WebClient` 하나** — `slack.com/api` 에 직접 HTTP 를 쏘거나 `apiCall` 을 새로 감싸지 않는다(`check:privacy` 가 실패한다). 창(모달)은 문이 안 보므로 **여는 쪽이 누른 사람을 가린다**
+2. **개인 글을 새 파일에 쌓으면 문의 원천(`privacy-guard.ts` `SOURCES`)에 넣는다** — 안 넣으면 문이 그 글을 모른다. 파일은 `bots/<봇>/data/`(Git 추적 제외)
+3. **로그·활동 기록에 사용자 글을 넣지 않는다** — 로그 줄에는 이름·글자 수·까닭만. 활동 기록은 `note()` 로만 적는다(`scrub` 을 거친다). 시험·점검 스크립트도 개인 글을 찍지 않는다(건수·길이만)
+4. **개인 글이 쌓이는 폴더는 AI 작업 폴더(Claude·Codex 가 도는 곳) 밖** — 넓게 찾다가 모델 프롬프트로 들어간다. 활동 기록은 `%LOCALAPPDATA%/bot-activity`(`BOT_ACTIVITY_DIR`)
+5. **대화 명단 밖 DM 은 모델에 안 태운다** — 모델은 외부 서비스다. 실장에게 그대로 넘기고(`bypassToManager` · 지문만 적음) 명단을 넓히는 것은 실장 결정
+6. **외부 서비스에 쓸 때는 넣기 전에 공유 범위를 본다** — 예: 1on1 확정 일정은 「업무」 캘린더에 넣되 그 캘린더가 이 계정만 보는지 먼저 확인하고, 공유돼 있으면 안 넣는다(`CalendarPoller.privateCalendarId`)
+7. **남에게 보내는 알림에는 그 사람 글만** — 신청 메모·넘긴 DM 을 다른 알림(신청자 확정·장소 알림·캘린더 설명)에 다시 싣지 않는다
+
 ## Overview
 - Fork of [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot)
 - Cross-platform (Windows/macOS/Linux), CLI (`claude -p`) 기반 프로세스 스폰
