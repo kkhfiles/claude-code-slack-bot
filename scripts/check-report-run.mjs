@@ -245,6 +245,93 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
     ['kg-regression', 'probe', 'second', 'third']);
 }
 
+// ── S2 프롬프트 자리 치환 · 남은 `{{` 거부 ────────────────────────────
+{
+  const f = S.fillPrompt('A {{SLOT}} B {{REPORT_OUT}}', { SLOT: '2026-10-03', REPORT_OUT: 'C:/x/y.md' });
+  eq('아는 자리는 다 채운다', f, { text: 'A 2026-10-03 B C:/x/y.md', left: [] });
+  eq('값이 없는 자리는 남김으로 센다', S.fillPrompt('{{SLOT}} {{FOO}}', { SLOT: 'd' }).left, ['{{FOO}}']);
+  eq('이름 모양이 아닌 {{ 도 남김', S.fillPrompt('x {{ foo }} y', {}).left, ['{{ foo }}']);
+  const v = S.fillPrompt('{{PREV_REPORT}}', { PREV_REPORT: '본문에 {{SLOT}} 과 {{ 가 있다' });
+  eq('넣은 값 안의 {{ 는 세지 않고 다시 바꾸지도 않는다', v, { text: '본문에 {{SLOT}} 과 {{ 가 있다', left: [] });
+  eq('$ 가 든 값도 그대로', S.fillPrompt('{{SLOT}}', { SLOT: '$& $1' }).text, '$& $1');
+  eq('경로는 / 로', S.slashPath('C:\\Users\\a\\.report-log\\tmp\\r.md'), 'C:/Users/a/.report-log/tmp/r.md');
+
+  ok('직전 보고서 없음', S.renderPrevReport(null).includes('직전 보고서 없음'));
+  const prev = S.renderPrevReport({ id: 'cli-usage/2026-09-26', slot: '2026-09-26', status: 'complete', title: 'CLI 사용 분석', body: '# 본문\n내용' });
+  ok(`직전 보고서 머리 · 본문 — 받음 ${prev}`, prev.includes('cli-usage/2026-09-26') && prev.includes('complete')
+    && prev.includes('CLI 사용 분석') && prev.includes('# 본문\n내용'));
+  const long = S.renderPrevReport({ id: 'a/b', slot: 's', status: 'complete', body: 'x'.repeat(13_000) });
+  ok('긴 본문은 상한에서 자른다', long.length < 12_400 && long.includes('1000자 생략'));
+  eq('피할 권고 없음', S.renderAvoidList([]), '(피할 권고 없음)');
+  eq('피할 권고 목록', S.renderAvoidList([{ id: 'a-20260926-01', title: '훅 추가', state: 'rejected' },
+    { id: 'a-20260926-02', title: '정리', state: 'held' }]), '- a-20260926-01 · 거절 · 훅 추가\n- a-20260926-02 · 보류 · 정리');
+  const wk = S.renderWeekInput([{ type: 'cli-usage', slot: '2026-09-26', status: 'complete', title: 'CLI', actions: '## 권장 액션\n- [ ] 하나' }]);
+  ok(`그 주 판 목록 — 받음 ${wk}`, wk.includes('cli-usage · 2026-09-26 · complete — CLI') && wk.includes('- [ ] 하나'));
+  eq('그 주 판 없음', S.renderWeekInput([]), '(이 기간에 저장된 판 없음)');
+  ok('모르는 모양은 JSON 그대로', S.renderWeekInput({ odd: 1 }).includes('"odd": 1'));
+}
+{
+  // 다섯 자리를 다 쓰는 틀 — 값이 본문에 들어가고 남은 `{{` 가 없다.
+  writePrompt('probe', '# probe\n\n출력 {{REPORT_OUT}} · 예정일 {{SLOT}}\n\n## 직전\n{{PREV_REPORT}}\n\n## 피할 것\n{{AVOID_LIST}}\n\n## 그 주\n{{WEEK_INPUT}}\n');
+  const rl = fakeReportLog({
+    context: { prev: { id: 'probe/2026-09-26', slot: '2026-09-26', status: 'complete', title: '지난주', body: '지난주 본문 {{SLOT}}' },
+      avoid: [{ id: 'a-20260926-01', title: '훅 추가', state: 'rejected' }] },
+    week: [{ type: 'second', slot: '2026-10-03', status: 'complete', title: '둘째', actions: '- [ ] 권고' }],
+  });
+  const { sched, spawns } = harness({ rl, results: [WORKED] });
+  const run = { runId: 'r-probe', out: path.join(STATE, 'tmp', 'r-probe.md'), type: 'probe', slot: '2026-10-03' };
+  await sched.runSingleAnalysis('probe', undefined, false, { slot: '2026-10-03', run });
+  const p = spawns[0]?.prompt ?? '';
+  ok('출력 자리 = 회차 임시 파일(/ 경로)', p.includes(`출력 ${S.slashPath(run.out)}`));
+  ok('예정일 자리', p.includes('예정일 2026-10-03'));
+  ok('직전 보고서 본문이 들어간다', p.includes('지난주 본문 {{SLOT}}'));
+  ok('피할 권고가 들어간다', p.includes('a-20260926-01 · 거절 · 훅 추가'));
+  ok('그 주 판 목록이 들어간다', p.includes('second · 2026-10-03 · complete — 둘째') && p.includes('- [ ] 권고'));
+  ok('틀의 자리는 남지 않는다', !/\{\{(REPORT_OUT|SLOT|PREV_REPORT|AVOID_LIST|WEEK_INPUT)\}\}/.test(p.replace('지난주 본문 {{SLOT}}', '')));
+  eq('prompt-context 는 종류로 묻는다', rl.of('prompt-context').map((c) => argOf(c, '--type')), ['probe']);
+  eq('week-input 은 예정일 7일 전부터', rl.of('week-input').map((c) => argOf(c, '--since')), ['2026-09-26']);
+  // 안 쓰는 자리는 안 묻는다
+  writePrompt('second', '# second\n\n{{REPORT_OUT}} {{SLOT}}\n');
+  const rl2 = fakeReportLog();
+  const { sched: s2 } = harness({ rl: rl2, results: [WORKED] });
+  await s2.runSingleAnalysis('second', undefined, false, { slot: '2026-10-03', run: { ...run, type: 'second' } });
+  eq('틀에 없는 자리는 report-log 에 안 묻는다', rl2.calls.length, 0);
+}
+{
+  // 남은 `{{` → 세션을 안 띄움 · 오류
+  writePrompt('third', '# third\n\n{{REPORT_OUT}} {{SLOT}} {{FOO}}\n');
+  const { sched, spawns } = harness({ results: [WORKED] });
+  const run = { runId: 'r3', out: path.join(STATE, 'tmp', 'r3.md'), type: 'third', slot: '2026-10-03' };
+  let err = null;
+  try { await sched.runSingleAnalysis('third', undefined, false, { slot: '2026-10-03', run }); } catch (e) { err = e; }
+  eq('모르는 자리가 남으면 세션을 안 띄운다', spawns.length, 0);
+  ok(`오류로 끝난다 — 받음 ${err && err.message}`, !!err && /\{\{FOO\}\}/.test(err.message));
+  writePrompt('third', '# third\n\n보고서를 {{REPORT_OUT}} 에 쓴다. 예정일 {{SLOT}}.\n');
+
+  // 회차를 못 열면 출력 자리가 비어 → 세션을 안 띄움 · 그룹은 오류 결과로 적는다
+  resetJournal();
+  const rl = fakeReportLog({ openError: '잠금 없음 시험' });
+  const g = harness({ rl, results: [WORKED, WORKED, WORKED] });
+  await g.sched.runAnalysisGroup('saturday-00:00', ['third'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('회차를 못 열면 세션 0회', g.spawns.length, 0);
+  eq('그룹은 오류 결과를 남긴다', journal().filter((r) => r.kind === 'outcome').map((r) => [r.type, r.outcome]), [['third', 'error']]);
+
+  // prompt-context 가 실패하면 직전 보고서 자리가 비어 → 안 띄움
+  writePrompt('third', '# third\n\n{{REPORT_OUT}} {{SLOT}}\n{{PREV_REPORT}}\n');
+  const rl3 = fakeReportLog({ context: { error: 'rc 1 · 시험' } });
+  const h3 = harness({ rl: rl3, results: [WORKED] });
+  let err3 = null;
+  try { await h3.sched.runSingleAnalysis('third', undefined, false, { slot: '2026-10-03', run }); } catch (e) { err3 = e; }
+  ok('prompt-context 실패면 안 띄운다', h3.spawns.length === 0 && !!err3 && err3.message.includes('{{PREV_REPORT}}'));
+
+  // 이어받는 회차는 채울 것이 없다 — 'continue' 한 낱말 · report-log 를 안 부른다
+  const rl4 = fakeReportLog();
+  const h4 = harness({ rl: rl4, results: [WORKED] });
+  await h4.sched.runSingleAnalysis('third', 'resume-1', false, { slot: '2026-10-03', run });
+  eq('이어받기는 continue 그대로', [h4.spawns[0]?.prompt, rl4.calls.length], ['continue', 0]);
+  writePrompt('third', '# third\n\n보고서를 {{REPORT_OUT}} 에 쓴다. 예정일 {{SLOT}}.\n');
+}
+
 // ── S6 처리 백엔드 — servedBy ───────────────────────────────────────
 {
   // 1차가 해냄 → claude
@@ -307,5 +394,5 @@ if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 처리 백엔드 · agy 위임 경로 걷힘)');
+  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 처리 백엔드 · agy 위임 경로 걷힘)');
 }

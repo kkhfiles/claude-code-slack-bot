@@ -398,6 +398,73 @@ export function shiftDate(ymdText: string, days: number): string {
   return new Date(t).toISOString().slice(0, 10);
 }
 
+/** 경로를 `/` 로 — 세션이 Bash 로 넘길 때 역슬래시가 이스케이프로 먹히지 않게(윈도에서도 파이썬 · Write 는 `/` 를 받는다). */
+export function slashPath(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+// ── 프롬프트 자리 ────────────────────────────────────────────────────
+//
+// 값은 **프롬프트 본문에 직접** 넣는다 — Codex 폴백은 환경 변수를 못 받는다. 직전 보고서 ·
+// 피할 권고를 세션이 읽게 두지 않고 여기서 넣는 까닭은 Bash 가 없는 종류(6종)도 받게 하려는 것이다.
+
+/** 이름 모양의 자리 — `{{REPORT_OUT}}` · `{{SLOT}}` · `{{PREV_REPORT}}` · `{{AVOID_LIST}}` · `{{WEEK_INPUT}}`. */
+const PLACEHOLDER_RE = /\{\{([A-Z_]+)\}\}/g;
+/** 직전 보고서 본문을 프롬프트에 넣는 상한(글자) — report-log `prompt-context --max-chars` 기본값과 같다. */
+const PREV_REPORT_MAX = 12_000;
+
+/**
+ * 틀의 자리를 값으로 채운다. `left` 는 **못 채운 자리** — 값이 없는 이름과 이름 모양이 아닌 `{{`.
+ *
+ * 판정은 틀에서 한다 — 넣은 값(직전 보고서 본문 등) 안에 `{{` 가 있어도 세지 않는다. 한 번에
+ * 바꾸므로 넣은 값 안의 자리 이름이 다시 바뀌지도 않는다.
+ */
+export function fillPrompt(template: string, values: Record<string, string | undefined>): { text: string; left: string[] } {
+  const text = template.replace(PLACEHOLDER_RE, (whole, name: string) => values[name] ?? whole);
+  const residue = template.replace(PLACEHOLDER_RE, (whole, name: string) => (values[name] === undefined ? whole : ''));
+  const left = [...new Set(residue.match(/\{\{[^}\n]{0,40}\}{0,2}/g) ?? [])];
+  return { text, left };
+}
+
+/** `prompt-context` 의 `prev` → 읽을 수 있는 마크다운. 없으면 첫 회차라고 적는다. */
+export function renderPrevReport(prev: any): string {
+  if (!prev) return '(직전 보고서 없음 — 이 종류의 첫 회차입니다)';
+  let body = String(prev.body ?? '').trim();
+  if (body.length > PREV_REPORT_MAX) {
+    body = `${body.slice(0, PREV_REPORT_MAX)}\n\n…(뒤 ${body.length - PREV_REPORT_MAX}자 생략)`;
+  }
+  const head = [`- 판: ${prev.id ?? '?'} · 예정일 ${prev.slot ?? '?'} · 상태 ${prev.status ?? '?'}`];
+  if (prev.title) head.push(`- 제목: ${prev.title}`);
+  return `${head.join('\n')}\n\n${body || '(본문 없음)'}`;
+}
+
+const AVOID_STATE_LABEL: Record<string, string> = { rejected: '거절', held: '보류' };
+
+/** `prompt-context` 의 `avoid` → 목록. 비었으면 없다고 적는다. */
+export function renderAvoidList(avoid: any): string {
+  if (!Array.isArray(avoid) || avoid.length === 0) return '(피할 권고 없음)';
+  return avoid.map((a: any) => {
+    const state = AVOID_STATE_LABEL[a?.state] ?? a?.state ?? '?';
+    return `- ${a?.id ?? '?'} · ${state} · ${a?.title ?? ''}`.trimEnd();
+  }).join('\n');
+}
+
+/**
+ * `week-input` → 그 주 판 목록. 판마다 머리 한 줄(종류 · 예정일 · 상태 · 제목)과 「권장 액션」 절 원문.
+ * 모양을 못 알아보면 JSON 그대로 싣는다 — 버리면 다이제스트가 빈 주로 읽는다.
+ */
+export function renderWeekInput(w: any): string {
+  const list = Array.isArray(w) ? w
+    : ['versions', 'items', 'reports'].map((k) => w?.[k]).find(Array.isArray);
+  if (!list) return '```json\n' + JSON.stringify(w, null, 1) + '\n```';
+  if (list.length === 0) return '(이 기간에 저장된 판 없음)';
+  return list.map((v: any) => {
+    const head = `### ${v?.type ?? '?'} · ${v?.slot ?? '?'} · ${v?.status ?? '?'}${v?.title ? ` — ${v.title}` : ''}`;
+    const section = [v?.actions, v?.section, v?.recommended_actions].find((x) => typeof x === 'string') as string | undefined;
+    return `${head}\n\n${section?.trim() || '(「권장 액션」 절 없음)'}`;
+  }).join('\n\n');
+}
+
 /** 재시도 큐 한 칸. **회차를 같이 들고 간다** — 재시도 · 이어받기 · 다른 날 재시도가 같은 회차를 쓴다. */
 interface RetryEntry {
   type: string;
@@ -2916,6 +2983,30 @@ export class AssistantScheduler {
     '[지시] 아래는 지금 실행할 절차다. 되묻지 말고 첫 단계부터 수행한다.\n\n';
 
   /**
+   * 프롬프트 자리의 값. **틀에 있는 자리만** report-log 에 묻는다 — 안 쓰는 종류가 명령을
+   * 부르지 않게. 명령이 실패하면 그 자리는 값이 없다(→ 남은 `{{` 로 세션을 안 띄움).
+   */
+  private async promptValues(type: string, template: string, ctx: AnalysisCtx): Promise<Record<string, string>> {
+    const values: Record<string, string> = { SLOT: ctx.slot };
+    if (ctx.run) values.REPORT_OUT = slashPath(ctx.run.out);
+    if (template.includes('{{PREV_REPORT}}') || template.includes('{{AVOID_LIST}}')) {
+      const c = await this.reportLog('report_log', ['prompt-context', '--type', type]);
+      if (c && !c.error) {
+        values.PREV_REPORT = renderPrevReport(c.prev);
+        values.AVOID_LIST = renderAvoidList(c.avoid);
+      } else {
+        this.logger.warn('prompt-context 실패 — 직전 보고서 · 피할 권고 자리를 못 채움', { type, error: c?.error });
+      }
+    }
+    if (template.includes('{{WEEK_INPUT}}')) {
+      const w = await this.reportLog('report_log', ['week-input', '--since', shiftDate(ctx.slot, -7)]);
+      if (w && !w.error) values.WEEK_INPUT = renderWeekInput(w);
+      else this.logger.warn('week-input 실패 — 그 주 판 목록 자리를 못 채움', { type, error: w?.error });
+    }
+    return values;
+  }
+
+  /**
    * 분석 한 종 한 번. `ctx` 는 회차 문맥이다 — 예정일과 열린 회차(못 열었으면 `null`).
    * 없으면 오늘 날짜 · 회차 없음으로 돈다(시험 · 옛 호출).
    */
@@ -2931,8 +3022,7 @@ export class AssistantScheduler {
       return { rateLimited: false, timedOut: false, costUsd: 0 };
     }
 
-    const prompt = (nudged ? AssistantScheduler.NUDGE_PREAMBLE : '')
-      + fs.readFileSync(promptPath, 'utf-8');
+    const template = fs.readFileSync(promptPath, 'utf-8');
     const defaults = this.config!.analysis.defaults;
     const typeConfig = this.config!.analysis.types[type];
     const allowedTools = typeConfig?.allowedTools ?? defaults.allowedTools;
@@ -2963,11 +3053,27 @@ export class AssistantScheduler {
       await this.launchPipelineRunner(type, prelaunch);
     }
 
+    // **프롬프트 자리를 채운다** — 이어받는 회차는 `'continue'` 한 낱말이라 채울 것이 없다.
+    // 못 채운 자리(`{{`)가 남으면 **세션을 안 띄운다.** 모르는 경로 · 빈 날짜로 돈 세션은
+    // 보고서를 엉뚱한 곳에 쓰거나 날짜를 지어낸다 — 그것이 옛 흐름의 실패 모양이다.
+    // 러너는 위에서 이미 띄웠다(데이터 작업은 보고서와 무관하게 돌아야 한다).
+    let prompt = 'continue';
+    if (!resumeSessionId) {
+      const filled = fillPrompt(template, await this.promptValues(type, template, ctx));
+      if (filled.left.length > 0) {
+        const why = `프롬프트 자리를 못 채워 세션을 안 띄움 (${type}): ${filled.left.join(', ')}`;
+        this.logger.error(why, { slot: ctx.slot, runId: ctx.run?.runId ?? null });
+        errorCollector.add('AssistantScheduler', why);
+        throw new Error(why);
+      }
+      prompt = (nudged ? AssistantScheduler.NUDGE_PREAMBLE : '') + filled.text;
+    }
+
     // 산출물 백스톱의 기준선 — **이 시각 이후에 쓰인 파일만** 이 세션의 성과다.
     const startedAtMs = Date.now();
 
     const result = await this.spawnOrFallback('분석',
-      resumeSessionId ? 'continue' : prompt,
+      prompt,
       {
         workingDirectory: this.workingDir,
         model: analysisModel,
