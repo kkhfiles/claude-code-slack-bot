@@ -426,6 +426,46 @@ export function reportProduced(out: string, sinceMs: number): boolean {
   }
 }
 
+/** 임시 파일에 머리말을 뺀 본문이 없나(없는 파일 포함). */
+export function outIsEmpty(out: string): boolean {
+  try {
+    return !fs.readFileSync(out, 'utf-8').replace(FRONT_MATTER_RE, '').trim();
+  } catch {
+    return true;
+  }
+}
+
+/** 회차가 끝난 모양 — 저장 여부를 가른다(「쓰는 흐름」 5번). */
+export type RunEnd =
+  | 'completed'   // 세션이 정상으로 끝남(한도 백스톱으로 완료가 된 것 포함)
+  | 'resume'      // 한도로 멈췄고 재시도가 이어받을 예정
+  | 'failed'      // 마지막 시도까지 실패 · 타임아웃 · 더 이어받지 않는 한도 · 세션을 못 띄움
+  | 'no-output'   // 두 번 다 되묻고 끝남
+  | 'not-tried';  // 재시도 큐에서 한도가 안 풀려 손도 안 댐
+
+/**
+ * 저장할지 · `--partial` 을 붙일지. `null` 이면 **저장하지 않는다** — 정리 작업(`sweep`)의 몫.
+ *
+ *   - 이어받을 예정 · 손도 안 댐 → 저장 안 함(반쪽을 저장하면 이어받은 판이 강등 거부에 걸린다)
+ *   - 러너 종류인데 임시 파일이 비었음 → 저장 안 함. 러너가 아직 기계본을 쓰는 중일 수 있고,
+ *     지금 저장하면 `no-output` 으로 닫혀 뒤에 온 기계본이 버려진다(sweep 이 `machine` 으로 받는다)
+ *   - 완료이고 이번 세션이 냈음 → 그대로 저장(상태는 report-log 가 본문으로 가름)
+ *   - 그 밖(실패 · 되물음 · 완료인데 이번 세션이 안 냄) → `--partial`. 앞 시도가 남긴 반쪽이 있으면
+ *     `partial` 로, 비었으면 report-log 가 `no-output` 으로, 대기 표식이면 `machine` 으로 닫는다
+ */
+export function commitPlan(
+  end: RunEnd, s: { runner: boolean; empty: boolean; produced: boolean },
+): { partial: boolean } | null {
+  if (end === 'resume' || end === 'not-tried') return null;
+  if (s.runner && s.empty) return null;
+  return { partial: !(end === 'completed' && s.produced) };
+}
+
+/** report-log 쓰기 잠금 실패인가 — 그때만 저장을 한 번 더 부른다. */
+function isLockError(r: any): boolean {
+  return r?.code === 'lock' || /잠금|\block\b/i.test(String(r?.error ?? ''));
+}
+
 /**
  * 분석 세션의 쓰기 허용 목록 — 설정의 `writablePaths` 에서 옛 보고서 폴더(`reports/`)를 빼고
  * 임시 파일 폴더를 더한다. 세션이 옛 경로에 쓰면 아무도 안 읽어 조용히 유실된다(5단계).
@@ -810,16 +850,23 @@ export class AssistantScheduler {
       }
       // 수동 실행은 `manual` 회차 · 예정일은 오늘(한국 날짜) — `-analyze <종류>` 와 로컬 `POST /trigger` 가 이 길이다.
       const slot = kstDate(new Date());
+      let run: ReportRun | null = null;
       try {
-        const run = await this.openReportRun(type, slot, 'manual');
+        run = await this.openReportRun(type, slot, 'manual');
         const result = await this.runSingleAnalysis(type, undefined, false, { slot, run });
-        // **처리한 백엔드를 같이 적는다** — Codex 가 받은 회차를 Claude 경로 확인으로 읽지 않게.
-        const by = ` · 처리 ${result.servedBy ?? '(세션 없음)'}`;
-        if (result.timedOut) return `⏱️ 분석 타임아웃: ${type}${by}`;
-        if (result.rateLimited) return `⚠️ 세션 리미트 초과: ${type}${by}`;
-        return `✅ 분석 완료: ${type} ($${result.costUsd.toFixed(4)})${by}`;
+        // 수동 실행은 재시도를 안 잡는다 — 한도 · 타임아웃도 마지막 시도다.
+        const end: RunEnd = result.timedOut || result.rateLimited ? 'failed'
+          : result.noOutput ? 'no-output' : 'completed';
+        const saved = await this.finishReportRun(run, end, result);
+        // **처리한 백엔드 · 저장 상태를 같이 적는다** — Codex 가 받은 회차를 Claude 경로 확인으로 읽지 않게.
+        const tail = ` · 처리 ${result.servedBy ?? '(세션 없음)'}${this.savedNote(run, saved)}`;
+        if (result.timedOut) return `⏱️ 분석 타임아웃: ${type}${tail}`;
+        if (result.rateLimited) return `⚠️ 세션 리미트 초과: ${type}${tail}`;
+        if (result.noOutput) return `🫥 분석 산출물 없음(세션이 되묻고 끝남): ${type}${tail}`;
+        return `✅ 분석 완료: ${type} ($${result.costUsd.toFixed(4)})${tail}`;
       } catch (error) {
-        return `❌ 분석 실패 (${type}): ${(error as Error).message}`;
+        const saved = await this.finishReportRun(run, 'failed', null);
+        return `❌ 분석 실패 (${type}): ${(error as Error).message}${this.savedNote(run, saved)}`;
       }
     }
 
@@ -832,6 +879,14 @@ export class AssistantScheduler {
     // 그룹 수동 실행도 `manual` 회차 · 예정일은 오늘 — 예약 회차와 섞이지 않게.
     await this.runAnalysisGroup(defaultSchedule, defaultTypes, { slot: kstDate(new Date()), trigger: 'manual' });
     return '✅ 분석 실행 완료 — 결과는 위 메시지 참고';
+  }
+
+  /** 결과 메시지 꼬리 — 회차를 어떻게 저장했나. */
+  private savedNote(run: ReportRun | null, saved: any | null): string {
+    if (!run) return ' · 회차 없음(못 엶)';
+    if (!saved) return ' · 저장 안 함(정리 작업 몫)';
+    if (saved.error) return ` · 저장 실패: ${String(saved.error).slice(0, 120)}`;
+    return ` · 저장 ${saved.status ?? '?'}${saved.id ? ` (${saved.id})` : ''}`;
   }
 
   /** Access CalendarPoller instance (for mute actions, etc.). */
@@ -2678,6 +2733,47 @@ export class AssistantScheduler {
   }
 
   /**
+   * 회차가 끝난 모양대로 저장한다 — 「쓰는 흐름」 5번(`commitPlan`). 저장하지 않으면 `null`.
+   * 처리한 백엔드를 `--backend` 로 남긴다(세션을 못 띄웠으면 `claude` — 열려던 백엔드).
+   */
+  private async finishReportRun(
+    run: ReportRun | null, end: RunEnd, result: AnalysisRunResult | null,
+  ): Promise<any | null> {
+    if (!run) return null;
+    const runner = !!AssistantScheduler.RUNNER_PRELAUNCH_BY_TYPE[run.type];
+    const plan = commitPlan(end, { runner, empty: outIsEmpty(run.out), produced: result?.produced === true });
+    if (!plan) {
+      this.logger.info('회차를 지금 저장하지 않음 — 이어받을 예정이거나 러너가 아직 쓰는 중(정리 작업 몫)', {
+        type: run.type, slot: run.slot, runId: run.runId, end,
+      });
+      return null;
+    }
+    return this.commitReportRun(run, plan.partial, result?.servedBy ?? 'claude');
+  }
+
+  /**
+   * `report_log.py commit` — 쓰기 잠금에 막히면 **한 번 더**, 그래도 실패면 그대로 둔다.
+   * 회차가 열린 채 남으므로 정리 작업(`sweep`)이 임시 파일을 받아 저장한다.
+   */
+  private async commitReportRun(run: ReportRun, partial: boolean, backend: Backend): Promise<any> {
+    const args = ['commit', '--run', run.runId, '--backend', backend];
+    if (partial) args.push('--partial');
+    let r = await this.reportLog('report_log', args);
+    if (r?.error && isLockError(r)) {
+      this.logger.warn('회차 저장이 잠금에 막힘 — 한 번 더', { runId: run.runId, error: r.error });
+      r = await this.reportLog('report_log', args);
+    }
+    if (!r || r.error) {
+      const why = String(r?.error ?? '답 없음');
+      this.logger.error('회차 저장 실패 — 정리 작업(sweep)이 받는다', { runId: run.runId, why });
+      errorCollector.add('AssistantScheduler', `회차 저장 실패 (${run.type} ${run.slot}): ${why.slice(0, 200)}`);
+      return r ?? { error: why };
+    }
+    this.logger.info('회차 저장', { runId: run.runId, status: r.status, partial, backend, commit: r.commit });
+    return r;
+  }
+
+  /**
    * 분석 그룹 한 번. `origin` 이 예정일과 시작 방식이다 — 예약이면 그 그룹의 예약 발화
    * 시각(`nextFire`)의 한국 날짜와 `scheduled`, 수동이면 오늘과 `manual`.
    */
@@ -2741,11 +2837,15 @@ export class AssistantScheduler {
       // 회차는 첫 시도 전에 한 번 연다 — 같은 종류의 다음 시도(타임아웃 · 오류 재시도)는
       // 같은 회차를 다시 쓴다. 열기가 실패했으면 다음 시도에서 다시 연다.
       let run: ReportRun | null = null;
+      /** 시도들이 끝난 모양과 마지막 결과 — 루프를 나온 뒤 저장을 가른다(`finishReportRun`). */
+      let end: RunEnd = 'failed';
+      let last: AnalysisRunResult | null = null;
       let succeeded = false;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
           run = run ?? await this.openReportRun(type, origin.slot, origin.trigger);
           const result = await this.runSingleAnalysis(type, undefined, false, { slot: origin.slot, run });
+          last = result;
 
           if (result.timedOut) {
             if (attempt < maxRetries) {
@@ -2773,6 +2873,7 @@ export class AssistantScheduler {
               failedRetryTypes.push(result.sessionId
                 ? { type, sessionId: result.sessionId, run }
                 : { type, run });
+              end = 'resume';
             }
             // **뒤쪽 타입도 같은 큐에 넣는다.** 리미트는 그룹 전체를 끊는데
             // 재시도는 당사자만 돌리던 비대칭이 2026-08-22에 보고서 4종을
@@ -2798,6 +2899,7 @@ export class AssistantScheduler {
             // 되묻고 두 번 끝난 회차 — 「완료」가 아니다. 다음 타입으로 넘어간다
             // (리미트가 아니라 그룹을 끊을 이유가 없다).
             noOutputTypes.push(type);
+            end = 'no-output';
             this.appendAnalysisJournal(schedule, {
               kind: 'outcome', type, outcome: 'no-output', sessionId: result.sessionId, runId: run?.runId,
             });
@@ -2805,6 +2907,7 @@ export class AssistantScheduler {
           }
 
           succeeded = true;
+          end = 'completed';
           // Claude 가 아닌 백엔드가 받았으면 이름 옆에 적는다 — 「완료」가 어느 경로였는지 보이게.
           completedTypes.push(result.servedBy && result.servedBy !== 'claude'
             ? `${type}(${result.servedBy})` : type);
@@ -2831,6 +2934,10 @@ export class AssistantScheduler {
           break;
         }
       }
+
+      // **결과대로 저장한다** — 완료는 그대로 · 이어받을 예정이면 안 함 · 마지막 시도까지 실패면
+      // `--partial` · 되물음은 비었으면 report-log 가 `no-output` 으로 닫는다(`commitPlan`).
+      await this.finishReportRun(run, end, last);
 
       // Rate limit breaks the entire group
       if (failedRetryTypes.length > 0) break;
@@ -2922,6 +3029,9 @@ export class AssistantScheduler {
         this.appendAnalysisJournal(schedule, {
           kind: 'outcome', type, outcome, viaRetry: true, sessionId: r.sessionId, runId: run?.runId,
         });
+        // 재시도 뒤에는 더 이어받지 않는다 — 또 막혀도 마지막 시도로 보고 `--partial` 로 저장한다.
+        await this.finishReportRun(run, outcome === 'completed' ? 'completed'
+          : outcome === 'no-output' ? 'no-output' : 'failed', r);
         // **또 막히면 거기서 멈춘다.** 큐에 잔여 타입까지 담게 되면서 큐 길이가
         // 1 에서 최대 그룹 크기로 늘었는데, 한도가 아직 안 풀린 상태로 전부
         // 돌리면 그만큼을 그대로 낭비한다. 한 번 막히면 그 시점의 한도는
@@ -2934,8 +3044,10 @@ export class AssistantScheduler {
           kind: 'outcome', type, outcome: 'error', viaRetry: true,
           error: ((error as Error).message || '').slice(0, 300), runId: run?.runId,
         });
+        await this.finishReportRun(run, 'failed', null);
       }
     }
+    // 한도로 멈춘 뒤 손도 안 댄 칸의 회차는 저장하지 않는다(열린 채 → 정리 작업이 `abandoned` 로).
     // 멈춘 뒤로 아예 손도 안 댄 것 — 저널에 남기지 않는다(무기록이 곧
     // M12 의 「그룹 중단」 신호다). 다만 사람에게는 적는다.
     const notTried = stoppedAt >= 0

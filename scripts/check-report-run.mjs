@@ -8,7 +8,7 @@
  *
  *   - 회차 열기 · 예정일(예약 발화 시각의 한국 날짜) · 재시도는 같은 회차 · 수동은 오늘
  *   - 프롬프트 자리 치환 · 남은 `{{` 면 세션을 안 띄움
- *   - 쓰기 범위(임시 파일 폴더) · 저장 시점 · 「썼나」 판정 · 처리 백엔드
+ *   - 쓰기 범위(임시 파일 폴더) · 저장 시점 · 「썼나」 판정 · 저장 시점 · 처리 백엔드
  *   - 러너 미리 띄우기의 환경 변수 · `--date` · 월요일 보고의 `{{WEEK_INPUT}}`
  *   - agy 위임 경로가 걷혔나
  *
@@ -55,6 +55,12 @@ const S = require('../dist/assistant-scheduler.js');
 const { AssistantScheduler } = S;
 const wa = require('../dist/work-assistant.js');
 const ladder = require('../dist/model-ladder.js');
+// 폴백 둘을 시험 내내 빈손으로 — 시험이 엇나가 1차가 터져도 진짜 codex · 사다리를 띄우지 않게.
+// (없는 실행체 이름이 두 번째 문이다.) 폴백을 재는 절만 잠깐 갈아 끼운다.
+const quietCodex = async () => '';
+const quietLadder = async () => null;
+wa.codexSession = quietCodex;
+ladder.ladderText = quietLadder;
 
 // ── 임시 레포 모양 — assistant/config.json + prompts ─────────────────
 const REPO = path.join(TMP, 'repo');
@@ -89,9 +95,13 @@ const argOf = (args, flag) => { const i = args.indexOf(flag); return i >= 0 ? ar
  * 가짜 report-log — 부른 명령을 모으고 약속대로 답한다. `commit` 답은 차례로 줄 수 있다
  * (잠금 실패 → 성공 같은 순서). 회차 번호는 부를 때마다 새로 짓는다.
  */
+let fakeSeq = 0;
 function fakeReportLog(o = {}) {
   const calls = [];
   let n = 0;
+  // 임시 파일 이름은 가짜마다 다르게 — 회차 번호가 같아도(r1) 앞 시험이 남긴 파일을 이번 성과로
+  // 읽지 않게(진짜 report-log 는 번호에 무작위 꼬리가 붙는다).
+  const tag = `f${++fakeSeq}`;
   const commits = [...(o.commits ?? [])];
   const fn = async (script, args) => {
     calls.push([script, ...args]);
@@ -102,7 +112,7 @@ function fakeReportLog(o = {}) {
       const type = argOf(args, '--type');
       const slot = argOf(args, '--slot');
       const runId = `${slot}-${type}-r${n}`;
-      return { run_id: runId, out: path.join(STATE, 'tmp', `${runId}.md`), type, slot };
+      return { run_id: runId, out: path.join(STATE, 'tmp', `${tag}-${runId}.md`), type, slot };
     }
     if (cmd === 'commit') {
       if (commits.length) return commits.shift();
@@ -412,6 +422,125 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
   writePrompt('second', '# second\n\n보고서를 {{REPORT_OUT}} 에 쓴다. 예정일 {{SLOT}}.\n');
 }
 
+// ── S4 저장 시점 · --partial · 이어받을 때 저장 안 함 · 잠금 재시도 ────────
+const commitsOf = (rl) => rl.of('commit').map((c) => [argOf(c, '--run'), argOf(c, '--backend'), c.includes('--partial')]);
+{
+  const P = S.commitPlan;
+  const n = { runner: false, empty: false, produced: true };
+  eq('완료 + 냄 → 그대로', P('completed', n), { partial: false });
+  eq('완료인데 이번 세션이 안 냄 → partial', P('completed', { ...n, produced: false }), { partial: true });
+  eq('이어받을 예정 → 저장 안 함', P('resume', n), null);
+  eq('손도 안 댐 → 저장 안 함', P('not-tried', n), null);
+  eq('마지막 시도까지 실패 → partial', P('failed', { ...n, produced: false }), { partial: true });
+  eq('되물음 → 저장(비었으면 report-log 가 no-output)', P('no-output', { ...n, empty: true, produced: false }), { partial: true });
+  eq('러너 종류 · 빈 임시 파일 → 저장 안 함(러너가 아직 씀)', P('failed', { runner: true, empty: true, produced: false }), null);
+  eq('러너 종류 · 기계본 있음 → partial(report-log 가 machine 으로)', P('completed', { runner: true, empty: false, produced: false }), { partial: true });
+  ok('빈 파일 판정 — 없는 파일', S.outIsEmpty(path.join(STATE, 'tmp', '없음.md')));
+}
+const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, rateLimitResetsAt: Math.floor(Date.now() / 1000) + 600 });
+{
+  // 완료 → --partial 없이 · 처리 백엔드
+  const rl = fakeReportLog();
+  const { sched } = harness({ rl, results: [writes('# probe\n본문\n')] });
+  writePrompt('probe', '# probe\n\n보고서를 {{REPORT_OUT}} 에 쓴다. 예정일 {{SLOT}}.\n');
+  await sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('완료는 그대로 저장 · --backend claude', commitsOf(rl), [['2026-10-03-probe-r1', 'claude', false]]);
+}
+{
+  // 한도로 이어받을 예정 → 당사자도 뒤쪽도 지금은 저장 안 함 → 재시도에서 저장.
+  // (한도에 걸린 세션이 판정까지 된 본문을 남겼으면 백스톱이 완료로 친다 — 여기서는 안 남긴다.)
+  const rl = fakeReportLog();
+  let resumedOut = null;
+  const { sched } = harness({
+    rl,
+    results: [
+      LIMIT(),
+      () => { fs.writeFileSync(resumedOut, '# probe 이어받아 끝\n', 'utf-8'); return { ...WORKED }; },
+      writes('# second\n'),
+    ],
+  });
+  let q = null;
+  sched.scheduleAnalysisRetry = (schedule, origin, queue) => { q = { schedule, origin, queue }; };
+  await sched.runAnalysisGroup('saturday-00:00', ['probe', 'second'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('이어받을 예정이면 저장 안 함', rl.of('commit').length, 0);
+  resumedOut = q.queue[0].run.out;
+  await sched.runAnalysisRetry(q.schedule, q.origin, q.queue);
+  eq('재시도가 끝나면 같은 회차로 저장', commitsOf(rl),
+    [['2026-10-03-probe-r1', 'claude', false], ['2026-10-03-second-r2', 'claude', false]]);
+}
+{
+  // 재시도가 또 막히면 그 칸은 --partial · 손도 안 댄 칸은 남김
+  const rl = fakeReportLog();
+  const { sched } = harness({ rl, results: [LIMIT(), LIMIT('sL2')] });
+  let q = null;
+  sched.scheduleAnalysisRetry = (schedule, origin, queue) => { q = { schedule, origin, queue }; };
+  await sched.runAnalysisGroup('saturday-00:00', ['probe', 'second'], { slot: '2026-10-03', trigger: 'scheduled' });
+  await sched.runAnalysisRetry(q.schedule, q.origin, q.queue);
+  eq('재시도도 막힘 → 당사자만 --partial · 미시도 칸은 저장 안 함', commitsOf(rl), [['2026-10-03-probe-r1', 'claude', true]]);
+}
+{
+  // 데일리(재시도 안 잡음) 한도 → 마지막 시도 → --partial
+  writeConfig({ probe: { enabled: true, schedule: 'daily-12:00', model: 'sonnet', effort: 'low' } });
+  const rl = fakeReportLog();
+  const { sched } = harness({ rl, results: [LIMIT()] });
+  let scheduled = false;
+  sched.scheduleAnalysisRetry = () => { scheduled = true; };
+  await sched.runAnalysisGroup('daily-12:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('재시도를 안 잡는 한도는 마지막 시도 → --partial', [scheduled, commitsOf(rl)], [false, [['2026-10-03-probe-r1', 'claude', true]]]);
+  writeConfig();
+}
+{
+  // 타임아웃 — 시도가 남으면 저장 안 하고 다시 · 마지막이면 --partial
+  const rl = fakeReportLog();
+  const TO = { ...WORKED, subtype: 'error_timeout' };
+  const { sched, spawns } = harness({ rl, results: [writes('# 1차 반쪽\n', TO), writes('# 2차 반쪽\n', TO)] });
+  await sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('타임아웃 두 번(maxRetries 1) → 한 번만 --partial 저장', [spawns.length, commitsOf(rl)], [2, [['2026-10-03-probe-r1', 'claude', true]]]);
+}
+{
+  // 되물음 두 번(아무것도 안 씀) → 저장(빈 파일 → report-log 가 no-output)
+  const rl = fakeReportLog();
+  const ASK = { ...WORKED, toolCalls: 0, text: 'what would you like me to do?' };
+  const { sched } = harness({ rl, results: [ASK, ASK] });
+  await sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('되물음 → 저장한다(--partial · 비었으므로 no-output 판정은 report-log)', commitsOf(rl), [['2026-10-03-probe-r1', 'claude', true]]);
+}
+{
+  // 잠금 실패 → 한 번 더 · 그래도 실패면 그대로 둔다(정리 작업 몫)
+  const LOCK = { error: '잠금을 120초 안에 못 얻음: …/lock' };
+  const rl = fakeReportLog({ commits: [LOCK, { run_id: 'x', status: 'complete' }] });
+  const { sched } = harness({ rl, results: [writes('# probe\n')] });
+  await sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('잠금 실패면 한 번 더 부른다', rl.of('commit').length, 2);
+  const rl2 = fakeReportLog({ commits: [LOCK, LOCK, LOCK] });
+  const h2 = harness({ rl: rl2, results: [writes('# probe\n')] });
+  await h2.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('두 번째도 잠금이면 거기서 멈춘다(세 번째 없음)', rl2.of('commit').length, 2);
+  const rl3 = fakeReportLog({ commits: [{ error: 'downgrade — complete 를 낮추려 함' }] });
+  const h3 = harness({ rl: rl3, results: [writes('# probe\n')] });
+  await h3.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('잠금이 아닌 실패는 다시 안 부른다', rl3.of('commit').length, 1);
+}
+{
+  // 러너 종류 — 임시 파일이 비었으면 저장 안 함(러너가 아직 씀) · 기계본만 있으면 --partial(→ machine)
+  const rl = fakeReportLog();
+  const h = harness({ rl, results: [{ ...WORKED, subtype: 'error_timeout' }, { ...WORKED, subtype: 'error_timeout' }] });
+  await h.sched.runAnalysisGroup('saturday-00:00', ['kg-regression'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('러너 종류 · 빈 임시 파일 → 저장 안 함', rl.of('commit').length, 0);
+  const rl2 = fakeReportLog();
+  const h2 = harness({ rl: rl2, results: [writes(`# 기계본\n${S.PENDING_MARK}\n`)] });
+  await h2.sched.runAnalysisGroup('saturday-00:00', ['kg-regression'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('러너 종류 · 판정 안 된 기계본 → --partial', commitsOf(rl2), [['2026-10-03-kg-regression-r1', 'claude', true]]);
+}
+{
+  // 수동 단일 — 결과 메시지에 저장 상태
+  const rl = fakeReportLog();
+  const { sched } = harness({ rl, results: [writes('# probe\n본문\n')] });
+  const msg = await sched.runAnalysisManual('probe');
+  ok(`수동 결과 메시지에 저장 상태 — 받음 ${msg}`, msg.includes('저장 complete') && msg.includes('처리 claude'));
+  eq('수동도 저장한다', rl.of('commit').length, 1);
+}
+
 // ── S6 처리 백엔드 — servedBy ───────────────────────────────────────
 {
   // 1차가 해냄 → claude
@@ -420,7 +549,7 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
   eq('1차가 해내면 servedBy=claude', r.servedBy, 'claude');
 
   // 1차가 도구 0회로 실패 → codex 가 받음 → codex
-  const realCodex = wa.codexSession;
+  const prevCodex = wa.codexSession;
   // codex 가 보고서를 남겼다고 친다 — 안 남기면 도구 0회 재시도(되물음)가 Claude 로 다시 돈다.
   wa.codexSession = async (prompt) => {
     const out = outIn(prompt);
@@ -437,18 +566,18 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
     const msg = await s3.runAnalysisManual('probe');
     ok(`수동 실행 메시지에 「처리 codex」 — 받음 ${msg}`, msg.includes('처리 codex'));
   } finally {
-    wa.codexSession = realCodex;
+    wa.codexSession = prevCodex;
   }
 
   // 도구 없는 회차가 사다리의 agy 로 넘어가면 → agy
-  const realLadder = ladder.ladderText;
+  const prevLadder = ladder.ladderText;
   ladder.ladderText = async () => ({ text: 'agy 가 답함', backend: 'agy', model: 'm' });
   try {
     const { sched: s4 } = harness({ results: [{ ...WORKED, text: '', isError: true, subtype: 'error', toolCalls: 0 }] });
     const r4 = await s4.spawnOrFallback('시험', '아무 말', { workingDirectory: TMP, tools: [] });
     eq('사다리의 agy 가 받으면 servedBy=agy', r4.servedBy, 'agy');
   } finally {
-    ladder.ladderText = realLadder;
+    ladder.ladderText = prevLadder;
   }
 
   const { sched: s5 } = harness({ results: [WORKED] });
@@ -473,5 +602,5 @@ if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 「썼나」 판정 · 처리 백엔드 · agy 위임 경로 걷힘)');
+  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 「썼나」 판정 · 저장 시점 · 처리 백엔드 · agy 위임 경로 걷힘)');
 }
