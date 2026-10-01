@@ -2,7 +2,7 @@
  * 좁은 길을 **운영 코드로** 재생한다 — 흉내내지 않는다.
  *
  *   node scripts/replay-narrow.mjs --truth truth81.jsonl --out replay10-prod.jsonl
- *                                  [--n 3] [--rules lab/board-prompt/narrow10.md]
+ *                                  [--n 3] [--rules lab/board-prompt/narrow12.md]
  *                                  [--extras] [--tag a]
  *
  * ⛔ **왜 파이썬 하네스를 안 쓰나** (2026-09-10) — `lab/board-prompt/replay.py` 가
@@ -33,7 +33,8 @@ const arg = (name, dflt) => {
 const ROOT = 'P:/github/work-assistant';
 const TMP = path.join(process.env.TEMP, 'perf');
 const TRUTH = arg('--truth', 'truth81.jsonl');
-const RULES = arg('--rules', 'lab/board-prompt/narrow10.md');
+// 기본값은 운영의 `NARROW_RULES` 와 같아야 한다 — `check:replaynarrow` 가 대조한다.
+const RULES = arg('--rules', 'lab/board-prompt/narrow12.md');
 // **계약·예시는 기본으로 안 싣는다** — 운영이 안 싣기 때문이다. `--extras` 는
 // 「넣으면 나아지나」를 재는 갈래이고, 그때는 산출물 이름이 갈린다.
 const EXTRAS = process.argv.includes('--extras');

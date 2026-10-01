@@ -206,8 +206,13 @@ const SUMMARY_TIME = '19:30';
  * 둘 중 하나는 반드시 낡는다. 다음 판을 올리는 일 = 이 줄을 고치는 일.
  *
  * `BOARD_NARROW=off` 로 끈다. 끄면 오늘까지와 완전히 같은 길(세션)로 돈다.
+ *
+ * **narrow12** (2026-10-01) — narrow10 에 「짧게 쓴다」 절 하나를 더했다. 99건 짝 비교에서
+ * 정확도 같고 출력 −30% · 끝까지 −0.6초. 되돌리는 기준(work-assistant `docs/design.md`
+ * 「확정 전 마지막 시험」): 틀린 반영이 한 건이라도 확인되거나 최근 50건에서 다음 행동·제목
+ * 놓침이 5%p 넘게 늘면 이 줄을 narrow10 으로 되돌린다.
  */
-const NARROW_RULES = 'lab/board-prompt/narrow10.md';
+const NARROW_RULES = 'lab/board-prompt/narrow12.md';
 const NARROW_MODEL = 'opus';
 const NARROW_EFFORT = 'low' as const;
 

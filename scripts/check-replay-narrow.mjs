@@ -38,8 +38,17 @@ if (parts.CONTRACT) {
   ok('EXTRA4 에 입력 예시가 들어 있다', (parts.EXTRA4 || '').includes('입력:'));
 }
 
+// ── 재생 기본 판이 운영 판과 같은가 — 판을 올리면서 한쪽만 고치면 재생이 옛 판을 잰다
+const BOT = new URL('..', import.meta.url);
+const prodRules = (readFileSync(new URL('src/assistant-scheduler.ts', BOT), 'utf-8')
+  .match(/^const NARROW_RULES = '([^']+)';/m) || [])[1];
+const replayRules = (readFileSync(new URL('scripts/replay-narrow.mjs', BOT), 'utf-8')
+  .match(/arg\('--rules', '([^']+)'\)/) || [])[1];
+ok('운영의 NARROW_RULES 를 읽는다', !!prodRules);
+eq('재생 기본 판 = 운영 판', replayRules, prodRules);
+
 // ── 두 갈래가 정말 다른가
-const rules = readFileSync(`${ROOT}/lab/board-prompt/narrow10.md`, 'utf-8');
+const rules = readFileSync(`${ROOT}/${prodRules || 'lab/board-prompt/narrow12.md'}`, 'utf-8');
 const A = rules;
 const B = rules + (parts.CONTRACT || '') + (parts.EXAMPLES || '') + (parts.EXTRA4 || '');
 ok('두 갈래의 덧붙임이 다르다', A !== B);
@@ -84,7 +93,8 @@ if (fails.length) {
   for (const f of fails) console.log('  ✗ ' + f);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 계약·예시 뽑기 · 두 갈래가 다름 · 운영 모양에 계약·예시 없음'
+  console.log(`통과 — 재생 기본 판 = 운영 판(${prodRules}) · 계약·예시 뽑기 · 두 갈래가 다름`
+    + ' · 운영 모양에 계약·예시 없음'
     + ' · 사람 쪽 말 순서 · 짝 순서 번갈기 · 채점 필드');
 }
 process.exit(process.exitCode ?? 0);
