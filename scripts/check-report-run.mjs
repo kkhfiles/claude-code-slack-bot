@@ -8,7 +8,7 @@
  *
  *   - 회차 열기 · 예정일(예약 발화 시각의 한국 날짜) · 재시도는 같은 회차 · 수동은 오늘
  *   - 프롬프트 자리 치환 · 남은 `{{` 면 세션을 안 띄움
- *   - 쓰기 범위(임시 파일 폴더) · 저장 시점 · 「썼나」 판정 · 저장 시점 · 러너 환경 · 월요일 보고 WEEK_INPUT · 처리 백엔드
+ *   - 쓰기 범위(임시 파일 폴더) · 저장 시점 · 「썼나」 판정 · 저장 시점 · 산출물 없음이 정상인 종류 · 판정 필요 종류 · 러너 환경 · 월요일 보고 WEEK_INPUT · 처리 백엔드
  *   - 러너 미리 띄우기의 환경 변수 · `--date` · 월요일 보고의 `{{WEEK_INPUT}}`
  *   - agy 위임 경로가 걷혔나
  *
@@ -578,6 +578,63 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   eq('Claude 도구 0회는 그대로 다시 돌린다', h3.spawns.length, 2);
   writeConfig();
 }
+
+// ── S11 산출물 없음이 정상인 종류 — 설정 `noOutputOk: true` (옛 표기 mode: change-detection 도) ──
+{
+  eq('noOutputOk: true', S.noOutputOkType({ noOutputOk: true }), true);
+  eq('옛 표기 mode: change-detection', S.noOutputOkType({ mode: 'change-detection' }), true);
+  eq('표시 없음', S.noOutputOkType({}), false);
+  eq('설정 없음', S.noOutputOkType(undefined), false);
+  eq('참 글자는 안 받음(true 만)', S.noOutputOkType({ noOutputOk: 'true' }), false);
+
+  const prevCodex = wa.codexSession;
+  wa.codexSession = async () => '조용한 날 — 쓸 것 없음';
+  const FAIL0 = { ...WORKED, text: '', isError: true, subtype: 'error', toolCalls: 0 };
+  try {
+    // mode 없이 noOutputOk 만 — 폴백 빈손은 되물음 아님 · 완료 · --partial 없이(no-output)
+    writeConfig({ probe: { enabled: true, model: 'sonnet', effort: 'low', noOutputOk: true } });
+    resetJournal();
+    const rl = fakeReportLog();
+    const h = harness({ rl, results: [FAIL0] });
+    await h.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+    eq('noOutputOk — 폴백 빈손은 다시 안 돌림 · codex 로 no-output 저장', [h.spawns.length, commitsOf(rl)], [1, [['2026-10-03-probe-r1', 'codex', false]]]);
+    eq('noOutputOk — 완료로 적는다', journal().filter((r) => r.kind === 'outcome').map((r) => r.outcome), ['completed']);
+    // 표시가 없는 종류는 같은 모양이 되물음 — 다시 돌린다(대조군)
+    writeConfig();
+    const rl2 = fakeReportLog();
+    const h2 = harness({ rl: rl2, results: [FAIL0, FAIL0] });
+    await h2.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+    eq('표시 없는 종류 — 폴백 빈손은 되물음으로 다시 돌림', h2.spawns.length, 2);
+  } finally {
+    wa.codexSession = prevCodex;
+    writeConfig();
+  }
+}
+
+// ── 판정이 필요한 종류 두 모양 — 러너 기계본(대기 표식) · kg-health(자리표시자) ──────────
+{
+  writeConfig({ 'kg-health': { enabled: true, model: 'sonnet', effort: 'low' } });
+  writePrompt('kg-health', '# kg-health\n\naudit 를 --out {{REPORT_OUT}} 로 돌리고 같은 파일을 고친다. 예정일 {{SLOT}}.\n');
+  const AUDIT = '# KG health 2026-10-03\n\n수치 표\n\n## 해설\n_(filled in by analysis-kg-health prompt)_\n';
+  // 세션이 audit 만 돌리고 정상 종료 → 「안 냄」 → --partial(report-log 가 partial)
+  const rl = fakeReportLog();
+  const h = harness({ rl, results: [writes(AUDIT)] });
+  await h.sched.runAnalysisGroup('saturday-00:00', ['kg-health'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('kg-health — 자리표시자가 남으면 판정 전 → --partial', commitsOf(rl), [['2026-10-03-kg-health-r1', 'claude', true]]);
+  // 한도로 끊겼는데 자리표시자만 있음 → 완료로 바꾸지 않고 이어받음(저장 안 함)
+  const rl2 = fakeReportLog();
+  const h2 = harness({ rl: rl2, results: [writes(AUDIT, LIMIT())] });
+  let q = null;
+  h2.sched.scheduleAnalysisRetry = (schedule, origin, queue) => { q = queue; };
+  await h2.sched.runAnalysisGroup('saturday-00:00', ['kg-health'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('kg-health — 자리표시자만 남은 채 한도 → 이어받기 · 저장 안 함', [q && q.map((e) => e.type), rl2.of('commit').length], [['kg-health'], 0]);
+  // 해설을 채웠으면 완료 → --partial 없이
+  const rl3 = fakeReportLog();
+  const h3 = harness({ rl: rl3, results: [writes('# KG health 2026-10-03\n\n수치 표\n\n## 해설\n판정 끝\n')] });
+  await h3.sched.runAnalysisGroup('saturday-00:00', ['kg-health'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('kg-health — 해설을 채우면 그대로 저장', commitsOf(rl3), [['2026-10-03-kg-health-r1', 'claude', false]]);
+  writeConfig();
+}
 {
   // 잠금 실패 → 한 번 더 · 그래도 실패면 그대로 둔다(정리 작업 몫)
   const LOCK = { error: '잠금을 120초 안에 못 얻음: …/lock' };
@@ -756,5 +813,5 @@ if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 「썼나」 판정 · 저장 시점 · 러너 환경 · 월요일 보고 WEEK_INPUT · 처리 백엔드 · agy 위임 경로 걷힘)');
+  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 「썼나」 판정 · 저장 시점 · 산출물 없음이 정상인 종류 · 판정 필요 종류 · 러너 환경 · 월요일 보고 WEEK_INPUT · 처리 백엔드 · agy 위임 경로 걷힘)');
 }

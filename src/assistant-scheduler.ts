@@ -324,6 +324,8 @@ export interface AssistantConfig {
       cadenceFrom?: string;        // biweekly anchor date (ISO YYYY-MM-DD)
       monthlyWeek?: 'first' | 'last';  // monthly: which week's Saturday
       mode?: 'change-detection';   // reports optional (no-file-generated is OK)
+      /** 산출물 없음이 정상인 종류 — 조용한 날 · 변경 없는 달(`noOutputOkType` 참조). */
+      noOutputOk?: boolean;
       tools?: string[];            // type-specific data (e.g. competitors.tools)
       allowedTools?: string[];
       writablePaths?: string[];
@@ -451,7 +453,7 @@ export type RunEnd =
  *   - 러너 종류인데 임시 파일이 비었음 → 저장 안 함. 러너가 아직 기계본을 쓰는 중일 수 있고,
  *     지금 저장하면 `no-output` 으로 닫혀 뒤에 온 기계본이 버려진다(sweep 이 `machine` 으로 받는다)
  *   - 임시 파일이 비었음 → `--partial` 없이 저장 — report-log 가 `no-output` 으로 닫는다. 변경이
- *     없으면 안 쓰는 것이 정상인 종류(`mode: 'change-detection'`)의 조용한 회차가 이 길이다
+ *     없으면 안 쓰는 것이 정상인 종류(`noOutputOkType`)의 조용한 회차가 이 길이다
  *   - 완료이고 이번 세션이 냈음 → 그대로 저장(상태는 report-log 가 본문으로 가름)
  *   - 그 밖(실패 · 되물음 · 완료인데 이번 세션이 안 냄 — 내용은 있음) → `--partial`. 앞 시도가 남긴
  *     반쪽은 `partial` 로, 대기 표식이면 report-log 가 `machine` 으로 닫는다
@@ -463,6 +465,14 @@ export function commitPlan(
   if (s.runner && s.empty) return null;
   if (s.empty) return { partial: false };
   return { partial: !(end === 'completed' && s.produced) };
+}
+
+/**
+ * 산출물 없음이 정상인 종류인가 — 설정의 `noOutputOk: true`(5단계 · 조용한 날 · 변경 없는 달) 또는
+ * 옛 표기 `mode: 'change-detection'`. 이 종류는 빈 임시 파일이 실패가 아니라 `no-output` 이다.
+ */
+export function noOutputOkType(cfg: { noOutputOk?: unknown; mode?: unknown } | undefined): boolean {
+  return cfg?.noOutputOk === true || cfg?.mode === 'change-detection';
 }
 
 /** report-log 쓰기 잠금 실패인가 — 그때만 저장을 한 번 더 부른다. */
@@ -3331,10 +3341,10 @@ export class AssistantScheduler {
     // 0 으로 읽으면 두 번 돈다 — `spawnOrFallback` 과 같은 규칙). 보고서 검사는 codex
     // 폴백(`toolCalls: 0` 으로 돌아온다)이 이미 보고서를 남긴 경우를 거른다.
     // 이어받는 회차는 안 한다 — 그 프롬프트는 `'continue'` 한 낱말이다.
-    // 변경이 없으면 안 쓰는 것이 정상인 종류(`mode: 'change-detection'`)는 폴백(codex · 도구 횟수를
-    // 0 으로 돌려준다)이 빈손으로 끝내도 되물음으로 치지 않는다 — 정말 바뀐 것이 없었을 수 있고,
-    // Claude 로 다시 돌리면 1차가 막혀 폴백했던 그 회차를 또 부른다. 저장은 `no-output` 이다.
-    const quietOk = typeConfig?.mode === 'change-detection' && result.servedBy !== undefined
+    // 산출물 없음이 정상인 종류(`noOutputOkType`)는 폴백(codex · 도구 횟수를 0 으로 돌려준다)이
+    // 빈손으로 끝내도 되물음으로 치지 않는다 — 정말 바뀐 것이 없었을 수 있고, Claude 로 다시
+    // 돌리면 1차가 막혀 폴백했던 그 회차를 또 부른다. 저장은 `no-output` 이다.
+    const quietOk = noOutputOkType(typeConfig) && result.servedBy !== undefined
       && result.servedBy !== 'claude';
     if (!resumeSessionId && result.toolCalls === 0 && !result.isError && !produced && !quietOk) {
       if (!nudged) {

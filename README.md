@@ -436,7 +436,7 @@ assistant/
 - `weekly` (default) — runs every firing of the analysis schedule
 - `biweekly` — runs every 14 days from `cadenceFrom` (ISO date anchor)
 - `monthly` + `monthlyWeek: "first" | "last"` — runs only on the first/last Saturday of the month
-- `mode: "change-detection"` — report file is optional (no file generated is treated as success; the run is closed as `no-output`)
+- `mode: "change-detection"` or `noOutputOk: true` — report file is optional (no file generated is treated as success; the run is closed as `no-output`, and an empty result from the Codex fallback is not retried as an ask-back)
 
 Off-cycle types are automatically skipped at scheduled firing time.
 
@@ -449,7 +449,7 @@ Reports are stored in a separate report store (the `report-log` repo, cloned at 
 1. **Open a run** — before a type's first attempt: `report_log.py open --type <type> --slot <date> --trigger <scheduled|manual|retry>`. The date (slot) is the KST date of the group's *scheduled* fire time, so a late wake-up or a group that runs past midnight keeps its date. Manual runs (`-analyze`, `-analyze <type>`, `POST /trigger?type=<type>` on the loopback server) use today.
 2. **Fill the prompt** — `{{REPORT_OUT}}` (the run's temp file, forward slashes), `{{SLOT}}`, `{{PREV_REPORT}}` / `{{AVOID_LIST}}` (`prompt-context --type`), `{{PREV_REPORT:<type>}}` (another type's previous report, same length cap), `{{WEEK_INPUT}}` (`week-input --since <slot − 7 days>`). Only placeholders present in the template are fetched. Values go straight into the prompt text in a single pass (text inside an inserted report is never re-substituted) because the Codex fallback cannot read environment variables. If any `{{` from the template is left unfilled, the session is not started and the attempt is recorded as an error.
 3. **Run** — the session (and, for runner types, the pre-launched runner, which gets `REPORT_RUN` / `REPORT_OUT` / `REPORT_SLOT` / `REPORT_TYPE` and `--date <slot>`) writes only to the temp file. The temp folder is passed as a Claude additional directory and a Codex writable directory.
-4. **Save** — by outcome: completed → `commit`; stopped by a usage limit with a retry scheduled → not saved (the retry, even on another day, reuses the same run); last attempt failed or timed out → `commit --partial`; an empty temp file → `commit` without `--partial`, closed as `no-output` (a quiet `mode: "change-detection"` run, or a session that only asked back). A runner type whose temp file is still empty is left open for the store's `sweep`. `--backend` records who served it (`claude` / `codex`). A lock failure is retried once, then left for `sweep`.
+4. **Save** — by outcome: completed → `commit`; stopped by a usage limit with a retry scheduled → not saved (the retry, even on another day, reuses the same run); last attempt failed or timed out → `commit --partial`; an empty temp file → `commit` without `--partial`, closed as `no-output` (a quiet `noOutputOk` / `mode: "change-detection"` run, or a session that only asked back). A runner type whose temp file is still empty is left open for the store's `sweep`. `--backend` records who served it (`claude` / `codex`). A lock failure is retried once, then left for `sweep`.
 
 "Did the session produce the report?" (used by the ask-back retry and the usage-limit backstop) means: the temp file was modified after the session started, has a body, and carries neither the runner's `<!-- judgment: pending -->` mark nor an unfilled placeholder.
 
