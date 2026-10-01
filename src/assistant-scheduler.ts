@@ -403,6 +403,8 @@ export interface SessionResult {
   /** result 이벤트의 `is_error`. 본문 정규식 검사를 **에러일 때만** 열어 주는
    *  열쇠다(사용자 세션 경로가 이미 쓰는 형태 — slack-handler.ts의 NOTE 참조). */
   isError?: boolean;
+  /** 띄우기 시작부터 잰 구간(ms) — 원장(`CostEntry`)에 그대로 옮긴다. */
+  timing?: { initMs?: number; firstMs?: number; resultMs?: number };
 }
 
 // Google Calendar MCP tools via local @cocal/google-calendar-mcp server
@@ -441,6 +443,14 @@ interface CostEntry {
    *  되불러서였는데, 원장에 값만 있어 그것을 세는 길이 금지된 자료뿐이었다. */
   turns?: number;
   toolCalls?: number;
+  /** 띄우기 시작부터 잰 구간(ms) — 뜸(init) · 첫 글자 · 끝. **어디가 느린지는 합계로
+   *  안 보인다** (2026-10-01) — 좁은 길 7.2초가 띄우기·첫 글자·써 내려가기 중 어디인지를
+   *  운영에서 가를 길이 없어 따로 하네스를 짰다. 그 하네스는 운영과 입력 크기가 달랐다. */
+  initMs?: number;
+  firstMs?: number;
+  resultMs?: number;
+  /** 모델이 낸 글 길이 — 써 내려가는 시간이 이것에 비례한다(한글은 거의 글자당 1토큰). */
+  textChars?: number;
 }
 
 const COST_FILE = path.join(__dirname, '..', '.assistant-costs.json');
@@ -760,6 +770,8 @@ export class AssistantScheduler {
       via: result.usage ? 'sdk' : 'cli',
       turns: result.turns,
       toolCalls: result.toolCalls,
+      timing: result.timing,
+      textChars: result.text ? result.text.length : undefined,
     });
   }
 
@@ -767,7 +779,8 @@ export class AssistantScheduler {
     type: string,
     costUsd: number,
     sessionId: string,
-    extras?: { usage?: SessionUsage; via?: 'cli' | 'sdk'; turns?: number; toolCalls?: number },
+    extras?: { usage?: SessionUsage; via?: 'cli' | 'sdk'; turns?: number; toolCalls?: number;
+               timing?: SessionResult['timing']; textChars?: number },
   ): void {
     if (costUsd <= 0) return;
     const entry: CostEntry = {
@@ -785,6 +798,10 @@ export class AssistantScheduler {
     if (extras?.via) entry.via = extras.via;
     if (extras?.turns) entry.turns = extras.turns;
     if (extras?.toolCalls) entry.toolCalls = extras.toolCalls;
+    if (extras?.timing?.initMs !== undefined) entry.initMs = extras.timing.initMs;
+    if (extras?.timing?.firstMs !== undefined) entry.firstMs = extras.timing.firstMs;
+    if (extras?.timing?.resultMs !== undefined) entry.resultMs = extras.timing.resultMs;
+    if (extras?.textChars !== undefined) entry.textChars = extras.textChars;
     this.costEntries.push(entry);
     this.saveCosts();
     this.logger.info('Recorded cost', {
@@ -795,6 +812,11 @@ export class AssistantScheduler {
       cacheRead: extras?.usage?.cacheReadTokens,
       turns: extras?.turns,
       toolCalls: extras?.toolCalls,
+      initMs: extras?.timing?.initMs,
+      firstMs: extras?.timing?.firstMs,
+      resultMs: extras?.timing?.resultMs,
+      outputTokens: extras?.usage?.outputTokens,
+      textChars: extras?.textChars,
     });
   }
 

@@ -2966,6 +2966,10 @@ export class SlackHandler {
       env,
     };
 
+    // **구간을 잰다** (2026-10-01) — 띄우기 시작부터 뜸(init) · 첫 글자 · 끝. 합계만 남으면
+    // 느린 곳이 띄우기인지 써 내려가기인지 운영에서 가를 수 없다. 원장에 그대로 옮긴다.
+    const t0 = Date.now();
+    const timing: { initMs?: number; firstMs?: number; resultMs?: number } = {};
     const proc = opts.useSdk
       ? this.sdkHandler.runQuery(prompt, { ...commonOpts, effort: opts.effort })
       : this.cliHandler.runQuery(prompt, { ...commonOpts, effort: opts.effort });
@@ -3008,6 +3012,12 @@ export class SlackHandler {
     for await (const event of proc) {
       if (event.type === 'system' && (event as any).subtype === 'init') {
         sessionId = (event as CliInitEvent).session_id;
+        if (timing.initMs === undefined) timing.initMs = Date.now() - t0;
+      }
+      // 첫 글자 — 부분 메시지(`stream_event`)가 켜진 길(SDK)에서만 잡힌다.
+      if (timing.firstMs === undefined && event.type === 'stream_event'
+          && (event as any).event?.type === 'content_block_delta') {
+        timing.firstMs = Date.now() - t0;
       }
       // status: 'allowed' | 'allowed_warning' | 'rejected'.
       // **'rejected' 만 실제 차단이다** — 'allowed_warning' 은 한도에 가까워졌다는
@@ -3033,6 +3043,7 @@ export class SlackHandler {
       }
       if (event.type === 'result' && !resultReceived) {
         resultReceived = true;
+        timing.resultMs = Date.now() - t0;
         const resultEvent = event as CliResultEvent;
         costUsd = resultEvent.total_cost_usd || 0;
         subtype = resultEvent.subtype || 'success';
@@ -3065,11 +3076,11 @@ export class SlackHandler {
     // result를 받은 뒤의 abort(grace/wall-clock)는 timeout이 아니라 정상 완료.
     if (timedOut && !resultReceived) {
       return { text, costUsd, sessionId, subtype: 'error_timeout', usage, turns, toolCalls,
-               rateLimited, rateLimitResetsAt, isError: true };
+               rateLimited, rateLimitResetsAt, isError: true, timing };
     }
 
     return { text, costUsd, sessionId, subtype, usage, turns, toolCalls,
-             rateLimited, rateLimitResetsAt, isError };
+             rateLimited, rateLimitResetsAt, isError, timing };
   }
 
   /**
