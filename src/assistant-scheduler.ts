@@ -14,14 +14,14 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
-  offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexSession } from './work-assistant';
+  offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexSession, codexWritableDirs } from './work-assistant';
 import type { QuickOutcome } from './work-assistant';
 import { boardLabel, boardPushAuthBroken, boardPushTarget, boardQueueEnabled, drain, event as recordEvent } from './board-queue';
 import { BoardPush } from './board-push';
 import type { ContactItem } from './board-queue';
 import { config } from './config';
 import { ladderEventLines, ladderTable, ladderText, sameTier } from './model-ladder';
-import { ActionPipeline, parseWindow, reportLogAvailable, runReportLog } from './action-pipeline';
+import { ActionPipeline, parseWindow, reportLogAvailable, reportLogState, runReportLog } from './action-pipeline';
 
 /**
  * 처리 제안 타이머 간격. **이 값이 곧 멈춘 제안이 다시 움직이기까지의 최대 시간이다** —
@@ -396,6 +396,16 @@ export function kstDate(d: Date): string {
 export function shiftDate(ymdText: string, days: number): string {
   const t = Date.parse(`${ymdText}T00:00:00Z`) + days * 86_400_000;
   return new Date(t).toISOString().slice(0, 10);
+}
+
+/**
+ * 분석 세션의 쓰기 허용 목록 — 설정의 `writablePaths` 에서 옛 보고서 폴더(`reports/`)를 빼고
+ * 임시 파일 폴더를 더한다. 세션이 옛 경로에 쓰면 아무도 안 읽어 조용히 유실된다(5단계).
+ * `reports/eval/` 같은 하위 폴더는 설정에 적혀 있으면 그대로 둔다.
+ */
+export function analysisWritable(writablePaths: string[], tmpDir: string): string[] {
+  const old = (p: string) => slashPath(p).replace(/\/+$/, '') === 'reports';
+  return [...writablePaths.filter((p) => !old(p)), slashPath(tmpDir)];
 }
 
 /** 경로를 `/` 로 — 세션이 Bash 로 넘길 때 역슬래시가 이스케이프로 먹히지 않게(윈도에서도 파이썬 · Write 는 `/` 를 받는다). */
@@ -3069,6 +3079,13 @@ export class AssistantScheduler {
       prompt = (nudged ? AssistantScheduler.NUDGE_PREAMBLE : '') + filled.text;
     }
 
+    // **쓰기 범위** — 보고서는 회차 임시 파일 폴더에만 쓴다. Claude 는 작업 폴더 밖을 허용
+    // 없이 못 고치므로 추가 폴더로, Codex 폴백은 쓰기 허용 폴더로 연다(기존 폴더 목록에 더함).
+    // 폴더가 아직 없으면(회차를 한 번도 못 엶) 열지 않는다 — 없는 폴더를 넘기면 실행체가 넘어진다.
+    const tmpDir = path.join(reportLogState(), 'tmp');
+    const tmpOpen = fs.existsSync(tmpDir) ? [tmpDir] : [];
+    const writable = analysisWritable(writablePaths, tmpDir);
+
     // 산출물 백스톱의 기준선 — **이 시각 이후에 쓰인 파일만** 이 세션의 성과다.
     const startedAtMs = Date.now();
 
@@ -3079,8 +3096,10 @@ export class AssistantScheduler {
         model: analysisModel,
         permissionMode: 'default',
         allowedTools,
-        appendSystemPrompt: `CRITICAL: ${writablePaths.join(', ')} 디렉토리에만 새 파일 생성/수정. 그 외 파일 수정/삭제 금지.\n`
+        appendSystemPrompt: `CRITICAL: ${writable.join(', ')} 디렉토리에만 새 파일 생성/수정. 그 외 파일 수정/삭제 금지.\n`
           + AssistantScheduler.SCHEDULED_SESSION_DIRECTIVE,
+        additionalDirectories: tmpOpen,
+        fallbackScope: { cwd: this.workingDir, writable: [...codexWritableDirs(), ...tmpOpen] },
         env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1' },
         resumeSessionId,
         skipMcp: true,

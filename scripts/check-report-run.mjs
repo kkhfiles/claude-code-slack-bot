@@ -332,6 +332,36 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
   writePrompt('third', '# third\n\n보고서를 {{REPORT_OUT}} 에 쓴다. 예정일 {{SLOT}}.\n');
 }
 
+// ── S3 쓰기 범위 — 임시 파일 폴더 ───────────────────────────────────
+{
+  const TMPDIR_RL = path.join(STATE, 'tmp');
+  eq('옛 보고서 폴더만 빼고 임시 파일 폴더를 더한다',
+    S.analysisWritable(['reports/', 'references/', 'reports/eval/', 'reports'], TMPDIR_RL),
+    ['references/', 'reports/eval/', S.slashPath(TMPDIR_RL)]);
+
+  const { sched, spawns } = harness({ results: [WORKED] });
+  const run = { runId: 'r-s3', out: path.join(TMPDIR_RL, 'r-s3.md'), type: 'second', slot: '2026-10-03' };
+  await sched.runSingleAnalysis('second', undefined, false, { slot: '2026-10-03', run });
+  const o = spawns[0].opts;
+  eq('Claude 추가 폴더 = 임시 파일 폴더', o.additionalDirectories, [TMPDIR_RL]);
+  ok('Codex 쓰기 허용에 임시 파일 폴더', o.fallbackScope && o.fallbackScope.writable.includes(TMPDIR_RL));
+  eq('Codex 작업 폴더는 그대로', o.fallbackScope && o.fallbackScope.cwd, REPO);
+  ok(`시스템 문구의 쓰기 허용 = 설정(reports/ 뺌) + 임시 파일 폴더 — 받음 ${o.appendSystemPrompt.split('\n')[0]}`,
+    o.appendSystemPrompt.startsWith(`CRITICAL: references/, ${S.slashPath(TMPDIR_RL)} 디렉토리에만`));
+  ok('예약 실행 지시는 그대로 붙는다', o.appendSystemPrompt.includes('사람이 없는 예약 실행'));
+
+  // 폴더가 아직 없으면 실행체에 안 넘긴다(넘기면 넘어진다) — 시스템 문구에는 남는다.
+  const saved = process.env.REPORT_LOG_STATE;
+  process.env.REPORT_LOG_STATE = path.join(TMP, 'tmp-없는-상태');
+  try {
+    const h = harness({ results: [WORKED] });
+    await h.sched.runSingleAnalysis('second', undefined, false, { slot: '2026-10-03', run });
+    eq('없는 폴더는 추가 폴더로 안 넘긴다', h.spawns[0].opts.additionalDirectories, []);
+  } finally {
+    process.env.REPORT_LOG_STATE = saved;
+  }
+}
+
 // ── S6 처리 백엔드 — servedBy ───────────────────────────────────────
 {
   // 1차가 해냄 → claude
@@ -394,5 +424,5 @@ if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 처리 백엔드 · agy 위임 경로 걷힘)');
+  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 처리 백엔드 · agy 위임 경로 걷힘)');
 }

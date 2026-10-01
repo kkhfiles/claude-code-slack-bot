@@ -33,6 +33,10 @@ const ok = (label, cond) => { if (!cond) fails.push(label); };
 
 const evFile = path.join(os.tmpdir(), `wa-askback-${Date.now()}.jsonl`);
 process.env.WORK_EVENTS_FILE = evFile;
+// report-log 상태(임시 파일 폴더)도 모듈을 읽기 전에 임시로 — 운영 `~/.report-log` 를 안 건드리게.
+const rlState = fs.mkdtempSync(path.join(os.tmpdir(), 'askback-rl-'));
+fs.mkdirSync(path.join(rlState, 'tmp'), { recursive: true });
+process.env.REPORT_LOG_STATE = rlState;
 function readEvents() {
   if (!fs.existsSync(evFile)) return [];
   return fs.readFileSync(evFile, 'utf-8').trim().split('\n')
@@ -95,8 +99,10 @@ function harness(results) {
   eq('두 번째가 일하면 완료로 돌아온다', [r.noOutput ?? false, r.rateLimited, r.timedOut], [false, false, false]);
   ok('시스템 프롬프트에 예약 실행 지시가 붙는다',
      /사람이 없는 예약 실행/.test(calls[0].opts.appendSystemPrompt || ''));
-  ok('쓰기 경로 제한도 그대로 남는다',
-     /CRITICAL: reports\//.test(calls[0].opts.appendSystemPrompt || ''));
+  // 쓰기 허용은 report-log 임시 파일 폴더 — 옛 보고서 폴더(reports/)는 빠진다(5단계).
+  const tmpDir = path.join(rlState, 'tmp').replace(/\\/g, '/');
+  ok('쓰기 경로 제한도 그대로 남는다(임시 파일 폴더)',
+     (calls[0].opts.appendSystemPrompt || '').startsWith(`CRITICAL: ${tmpDir} 디렉토리에만`));
   const ev = readEvents().slice(before);
   eq('재시도를 관찰 기록에 남긴다', ev.map((e) => [e.type, e.retried]), [['probe', true]]);
 }
@@ -145,6 +151,7 @@ function harness(results) {
 delete process.env.WORK_EVENTS_FILE;
 try { fs.unlinkSync(evFile); } catch { /* 없으면 그만 */ }
 fs.rmSync(root, { recursive: true, force: true });
+fs.rmSync(rlState, { recursive: true, force: true });
 
 if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
