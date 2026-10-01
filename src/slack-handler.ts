@@ -356,9 +356,18 @@ export class SlackHandler {
       );
 
       // Loopback trigger endpoint for manual analysis (Phase 1.7 / 1.8 / 1.9).
+      // 결과 한 줄(처리한 백엔드 · 저장 상태)을 DM 으로 낸다 — 호출한 쪽은 202 만 받으므로
+      // 여기서 안 내면 그 회차가 Codex 로 처리됐는지 아무 데도 안 보인다.
       if (this.reportServer) {
         const scheduler = this.assistantScheduler;
-        this.reportServer.setTriggerCallback(async (type: string) => scheduler.runAnalysisManual(type));
+        this.reportServer.setTriggerCallback(async (type: string) => {
+          const text = await scheduler.runAnalysisManual(type);
+          await this.app.client.chat.postMessage({
+            channel: config.assistant.dmChannel,
+            text: `🔧 수동 실행(로컬 트리거) — ${text}`,
+          });
+          return text;
+        });
       }
     }
 

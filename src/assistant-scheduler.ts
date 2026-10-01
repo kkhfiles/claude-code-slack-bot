@@ -359,6 +359,8 @@ export interface AnalysisRunResult {
   sessionId?: string;
   costUsd: number;
   resetsAt?: number;
+  /** 이 회차를 처리한 백엔드(`SessionResult.servedBy`). 세션을 안 띄웠으면 없다. */
+  servedBy?: Backend;
 }
 
 export interface SpawnOpts {
@@ -425,7 +427,16 @@ export interface SessionResult {
   isError?: boolean;
   /** 띄우기 시작부터 잰 구간(ms) — 원장(`CostEntry`)에 그대로 옮긴다. */
   timing?: { initMs?: number; firstMs?: number; resultMs?: number };
+  /**
+   * 이 결과를 낸 백엔드 — `spawnOrFallback` 이 붙인다. **폴백이 받은 회차를 Claude 가 한
+   * 것으로 읽지 않게** 둔다(5단계 확인에서 Codex 가 처리한 회차를 Claude 경로 확인으로 치면
+   * 안 된다). report-log 회차 기록의 `--backend` 와 수동 실행 결과 메시지로 간다.
+   */
+  servedBy?: Backend;
 }
+
+/** 세션을 처리한 백엔드. */
+export type Backend = 'claude' | 'codex' | 'agy';
 
 // Google Calendar MCP tools via local @cocal/google-calendar-mcp server
 const GCAL_READ_TOOLS = [
@@ -640,9 +651,11 @@ export class AssistantScheduler {
       }
       try {
         const result = await this.runSingleAnalysis(type);
-        if (result.timedOut) return `⏱️ 분석 타임아웃: ${type}`;
-        if (result.rateLimited) return `⚠️ 세션 리미트 초과: ${type}`;
-        return `✅ 분석 완료: ${type} ($${result.costUsd.toFixed(4)})`;
+        // **처리한 백엔드를 같이 적는다** — Codex 가 받은 회차를 Claude 경로 확인으로 읽지 않게.
+        const by = ` · 처리 ${result.servedBy ?? '(세션 없음)'}`;
+        if (result.timedOut) return `⏱️ 분석 타임아웃: ${type}${by}`;
+        if (result.rateLimited) return `⚠️ 세션 리미트 초과: ${type}${by}`;
+        return `✅ 분석 완료: ${type} ($${result.costUsd.toFixed(4)})${by}`;
       } catch (error) {
         return `❌ 분석 실패 (${type}): ${(error as Error).message}`;
       }
@@ -2164,6 +2177,8 @@ export class AssistantScheduler {
     let why = '';
     try {
       result = await this.spawnSession(prompt, opts);
+      // 1차가 낸 결과는 실패든 성공이든 Claude 몫이다 — 폴백이 받을 때만 아래에서 바꾼다.
+      result.servedBy = 'claude';
       const said = (result.text || '').trim();
       if (result.isError || result.rateLimited) {
         why = result.rateLimited ? 'rate-limited' : (result.subtype || 'error');
@@ -2205,6 +2220,7 @@ export class AssistantScheduler {
     const toolFree = Array.isArray(opts.tools) && opts.tools.length === 0;
     let said = '';
     let via = '';
+    let servedBy: Backend = 'codex';
     if (toolFree) {
       // **도구 없는 회차는 사다리로**(읽기 전용 codex → agy) — 글만 주고받는 일이다. codex 세션으로
       // 넘기면 작업 폴더 쓰기 권한까지 붙어 1차보다 권한이 넓어진다(2026-09-23 점검).
@@ -2213,7 +2229,11 @@ export class AssistantScheduler {
         system: opts.systemPrompt ?? opts.appendSystemPrompt,
         timeoutMs: opts.maxDurationMs,
       });
-      if (got) { said = got.text; via = `${got.backend} ${got.model}`; }
+      if (got) {
+        said = got.text;
+        via = `${got.backend} ${got.model}`;
+        servedBy = got.backend === 'agy' ? 'agy' : 'codex';
+      }
     } else {
       const cell = await sameTier(primary, 'codex');
       const scope = opts.fallbackScope;
@@ -2235,7 +2255,7 @@ export class AssistantScheduler {
     recordEvent('session-fallback', { label, why, ok: !!said, via });
     if (said) {
       this.logger.warn(`${label} 1차가 못 해서(${why}) ${via} 로 처리했습니다`);
-      return { text: said, costUsd: 0, sessionId: '', subtype: 'success', isError: false, toolCalls: 0 };
+      return { text: said, costUsd: 0, sessionId: '', subtype: 'success', isError: false, toolCalls: 0, servedBy };
     }
     this.logger.warn(`${label} 1차·폴백 둘 다 못 했습니다(${why})`);
     return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
@@ -2585,7 +2605,9 @@ export class AssistantScheduler {
           }
 
           succeeded = true;
-          completedTypes.push(type);
+          // Claude 가 아닌 백엔드가 받았으면 이름 옆에 적는다 — 「완료」가 어느 경로였는지 보이게.
+          completedTypes.push(result.servedBy && result.servedBy !== 'claude'
+            ? `${type}(${result.servedBy})` : type);
           this.appendAnalysisJournal(schedule, { kind: 'outcome', type, outcome: 'completed' });
           break;
         } catch (error) {
@@ -2849,6 +2871,8 @@ export class AssistantScheduler {
     );
 
     this.recordSessionCost(`analysis-${type}`, result);
+    /** 돌려줄 때마다 붙는 것 — 세션 번호 · 비용 · 처리한 백엔드. */
+    const base = { sessionId: result.sessionId, costUsd: result.costUsd, servedBy: result.servedBy };
 
     this.logger.info('Analysis session completed', {
       type,
@@ -2861,7 +2885,7 @@ export class AssistantScheduler {
 
     // Timeout detection
     if (result.subtype === 'error_timeout') {
-      return { rateLimited: false, timedOut: true, sessionId: result.sessionId, costUsd: result.costUsd };
+      return { rateLimited: false, timedOut: true, ...base };
     }
 
     // **되묻고 끝난 회차 — 도구 0회 + 보고서 없음.** 2026-09-12 archive-sync·product-docs
@@ -2885,10 +2909,7 @@ export class AssistantScheduler {
       this.logger.error('분석 세션이 재시도에서도 도구 0회로 끝났다 — no-output', { type });
       recordEvent('analysis-askback', { type, retried: false });
       errorCollector.add('AssistantScheduler', `분석 산출물 없음 (${type}): 세션이 두 번 다 되묻고 끝남`);
-      return {
-        rateLimited: false, timedOut: false, noOutput: true,
-        sessionId: result.sessionId, costUsd: result.costUsd,
-      };
+      return { rateLimited: false, timedOut: false, noOutput: true, ...base };
     }
 
     // Rate limit / session limit detection
@@ -2914,15 +2935,12 @@ export class AssistantScheduler {
         this.logger.warn('리미트로 찍혔지만 이번 세션이 보고서를 남겼다 — 완료로 처리', {
           type, produced, subtype: result.subtype, rateLimitEvent: result.rateLimited === true,
         });
-        return { rateLimited: false, timedOut: false, sessionId: result.sessionId, costUsd: result.costUsd };
+        return { rateLimited: false, timedOut: false, ...base };
       }
-      return {
-        rateLimited: true, timedOut: false, sessionId: result.sessionId,
-        costUsd: result.costUsd, resetsAt: result.rateLimitResetsAt,
-      };
+      return { rateLimited: true, timedOut: false, ...base, resetsAt: result.rateLimitResetsAt };
     }
 
-    return { rateLimited: false, timedOut: false, sessionId: result.sessionId, costUsd: result.costUsd };
+    return { rateLimited: false, timedOut: false, ...base };
   }
 
   // --- Date/time utilities ---
