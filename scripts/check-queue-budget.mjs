@@ -41,6 +41,10 @@ const eq = (what, got, want) => {
 const at = (h) => boardQueueGapMs(new Date(2026, 8, 1, h, 30, 0));
 for (const h of [7, 8, 12, 18, 22]) eq(`${h}시는 낮 주기`, at(h), 2_000);
 for (const h of [23, 0, 3, 6]) eq(`${h}시는 밤 주기`, at(h), 30_000);
+// 알림 연결이 정상이면 낮밤 없이 안전망 60초 — 새것은 알림이 깨워 가져간다.
+for (const h of [3, 12, 22]) {
+  eq(`${h}시 · 알림 정상이면 안전망 주기`, boardQueueGapMs(new Date(2026, 8, 1, h, 30, 0), true), 60_000);
+}
 
 // ② 하루를 실제로 돌려 센다. 타이머는 2초마다 깨고, 지난 시간이 그때의 주기보다
 //    짧으면 건너뛴다 — 운영 코드와 같은 규칙이다.
@@ -65,14 +69,15 @@ if (Math.abs(claimed - polls) > polls * 0.02) {
 // ③ 폴러가 그 문을 실제로 쓰는가. **함수 몸통 안에서만 찾는다** — 파일 어딘가에
 //    이름이 있는 것과 그 자리에서 불리는 것은 다르다(2026-09-01 에 이 실수를
 //    변이 시험이 잡았다).
+// 2026-10-01 부터 한 판 도는 몸통은 `tickBoardQueue` 다(알림이 같은 몸통을 깨운다).
 const src = fs.readFileSync(SRC, 'utf-8');
-const head = src.indexOf('private startBoardQueuePoller');
+const head = src.indexOf('private async tickBoardQueue');
 const body = head < 0 ? '' : src.slice(head, src.indexOf('\n  }', head));
 if (!body) {
-  fails.push('startBoardQueuePoller() 를 못 찾았다');
+  fails.push('tickBoardQueue() 를 못 찾았다');
 } else {
-  if (!body.includes('boardQueueGapMs()')) {
-    fails.push('폴러가 boardQueueGapMs() 를 안 본다 — 밤에도 2초마다 돈다');
+  if (!/boardQueueGapMs\(new Date\(now\), this\.boardPush\?\.healthy\(now\)/.test(body)) {
+    fails.push('폴러가 boardQueueGapMs(지금, 알림 정상) 를 안 본다 — 밤에도 2초마다 돌거나 알림이 있어도 2초마다 돈다');
   }
   if (!/this\.boardQueueLast\s*=\s*now/.test(body)) {
     fails.push('폴러가 boardQueueLast 를 안 적는다 — 건너뛰기가 영영 안 걸린다');
@@ -86,5 +91,5 @@ if (fails.length) {
   const was = Math.round(86_400_000 / TICK_MS);
   console.log(`통과 — 하루 ${polls.toLocaleString()}회 (밤을 안 벌리면 `
     + `${was.toLocaleString()}회 · 천장 ${CEILING.toLocaleString()})`
-    + ` · 시각별 주기 9개 · 폴러 배선 2개`);
+    + ` · 시각별 주기 12개(알림 정상 3개 포함) · 폴러 배선 2개`);
 }

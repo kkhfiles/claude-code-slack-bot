@@ -43,6 +43,17 @@ const ALSO_DOES = {
   scheduleOffsitePush: ['runCommitHarvest', 'runOffsitePush'],
 };
 
+/**
+ * 타이머가 아닌 **상시 연결** → 그것을 여는 함수 (2026-10-01 판 알림).
+ *
+ * 이름이 `…Timer` 가 아니라 위 검사 셋이 못 본다. 그런데 짝이 깨지는 모양은 같다 —
+ * 멈추기만 하고 다시 안 열면 알림이 조용히 끊기고 안전망 주기로만 돈다(느려질 뿐 에러는
+ * 없다). 거꾸로 안 멈추면 설정을 저장할 때마다 연결이 하나씩 쌓여 같은 알림을 여러 번 받는다.
+ */
+const CONNECTIONS = {
+  boardPush: 'startBoardQueuePoller',
+};
+
 /** 소스에서 그 함수의 본문만 떼어 온다. 못 찾으면 멈춘다 — 조용히 빈 문자열을
  *  돌려주면 「아무것도 안 걸려 있다」가 아니라 「검사가 안 돌았다」가 된다. */
 function body(src, name) {
@@ -100,11 +111,26 @@ for (const [fn, jobs] of Object.entries(ALSO_DOES)) {
   }
 }
 
+// ⑤ 상시 연결도 같은 짝 — clearAllTimers() 가 멈추고, 여는 함수가 scheduleAll() 에서
+//    다시 불리고, 그 함수가 실제로 연다.
+const clearBody = body(src, 'clearAllTimers');
+for (const [conn, fn] of Object.entries(CONNECTIONS)) {
+  if (!new RegExp(`this\\.${conn}\\.stop\\(\\)`).test(clearBody)) {
+    fails.push(`${conn} — clearAllTimers() 가 안 멈춘다 (설정 저장마다 연결이 쌓인다)`);
+  }
+  if (!scheduleAll.includes(`this.${fn}(`)) {
+    fails.push(`${conn} — 여는 ${fn}() 을 scheduleAll() 이 안 부른다`);
+  }
+  if (!new RegExp(`this\\.${conn}\\.start\\(\\)`).test(body(src, fn))) {
+    fails.push(`${conn} — ${fn}() 이 연결을 안 연다 (멈추기만 하고 다시 안 엶)`);
+  }
+}
+
 if (fails.length) {
   console.error('타이머 짝이 안 맞는다\n' + fails.map((f) => `  ✗ ${f}`).join('\n'));
   process.exitCode = 1;
 } else {
   const jobs = Object.values(ALSO_DOES).flat().length;
   console.log(`통과 — 타이머 ${cleared.size}개: 지움·다시 걺·자기 재예약 셋 다`
-    + ` · 한자리에서 같이 하는 일 ${jobs}개`);
+    + ` · 한자리에서 같이 하는 일 ${jobs}개 · 상시 연결 ${Object.keys(CONNECTIONS).length}개`);
 }

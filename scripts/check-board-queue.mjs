@@ -419,6 +419,33 @@ await clear();
 fs.rmSync(DONE, { force: true });
 fs.rmSync(EVENTS, { force: true });
 
+// ---------- 알림 연결 (2026-10-01) ----------
+//
+// **진짜 워커에 진짜 소켓으로 붙는다** — 가짜 소켓 검사(`check:push`)는 끊기고 다시
+// 붙는 순서를 보고, 여기는 워커가 실제로 알림을 내는지와 주소·헤더 모양을 본다.
+// 문의보다 먼저 둔다 — 문의 칸은 받는 횟수에 상한이 있다.
+{
+  await clear();
+  const { BoardPush } = require(path.join(ROOT, 'dist', 'board-push.js'));
+  const wait = async (cond) => {
+    for (let i = 0; i < 50 && !cond(); i += 1) await new Promise((r) => setTimeout(r, 100));
+  };
+  eq('알림 주소는 같은 곳의 /api/ws', q.boardPushTarget(BASE).url,
+     BASE.replace(/^http/, 'ws') + '/api/ws');
+  eq('워커까지 닿으면 인증 탓 아님(426)', await q.boardPushAuthBroken(BASE), false);
+  let got = 0;
+  const push = new BoardPush({ target: () => q.boardPushTarget(BASE), onNew: () => { got += 1; } });
+  push.start();
+  await wait(() => got >= 1);
+  eq('워커에 붙자마자 한 번 가져간다', got, 1);
+  eq('붙으면 정상', push.healthy(), true);
+  await post('act', { text: 'ok TSK-6 알림 시험' });
+  await wait(() => got >= 2);
+  eq('판에서 누르면 알림이 온다', got, 2);
+  push.stop();
+  await clear();
+}
+
 // **`process.exit` 대신 `exitCode`** — 여기서 즉시 나가면 뒷정리를 건너뛴다.
 // ---------- 문의 ----------
 //
@@ -481,6 +508,7 @@ if (fails.length) {
     + '먼저 박기(같은 원문 · 터져도 세션은 감 · 안 넘겨도 돎) · '
     + '관찰 기록(건마다 한 줄 · 성공과 실패 둘 다 · UTC 아닌 지역시각) · '
     + '좁은 길(받으면 세션도 먼저 박기도 안 탐 · 안 받으면 세션으로 · 터져도 세션으로 · 실패해도 세션으로 · 안 넘기면 옛 길) · '
+    + '알림 연결(주소 · 인증 탓 아님 · 붙자마자 가져감 · 누르면 알림) · '
     + '문의(quick·ask·note 로 안 샘 · 못 넘기면 안 지움 · 두 번 안 보여 줌))');
 }
 stopServer();

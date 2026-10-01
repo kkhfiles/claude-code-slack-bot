@@ -17,7 +17,8 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
   offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexSession } from './work-assistant';
 import type { QuickOutcome } from './work-assistant';
-import { boardLabel, boardQueueEnabled, drain, event as recordEvent } from './board-queue';
+import { boardLabel, boardPushAuthBroken, boardPushTarget, boardQueueEnabled, drain, event as recordEvent } from './board-queue';
+import { BoardPush } from './board-push';
 import type { ContactItem } from './board-queue';
 import { config } from './config';
 import { ladderEventLines, ladderTable, ladderText, sameTier } from './model-ladder';
@@ -93,6 +94,12 @@ const BOARD_QUEUE_POLL_MS = 2_000;
 const BOARD_QUEUE_NIGHT_MS = 30_000;
 const BOARD_QUEUE_AWAKE_FROM = 7;
 const BOARD_QUEUE_AWAKE_TO = 23;
+/**
+ * 알림 연결(`board-push.ts`)이 정상일 때의 안전망 주기 (2026-10-01). 판에서 누르면
+ * 워커가 알림을 보내 바로 가져가므로, 묻는 것은 알림을 놓쳤을 때를 위한 것뿐이다.
+ * 하루 29,760회 → 1,440회. **연결이 이상하면 위 2초·30초로 저절로 돌아간다.**
+ */
+const BOARD_QUEUE_PUSH_SAFETY_MS = 60_000;
 
 /**
  * 지금 몇 초마다 봐야 하나. **타이머는 그대로 2초로 두고 이 값으로 건너뛴다** —
@@ -100,13 +107,17 @@ const BOARD_QUEUE_AWAKE_TO = 23;
  * 자리는 `clearAllTimers()` 와 짝이 안 맞으면 조용히 사라진다(`check:timers` 가
  * 세는 그 구멍이다). 건너뛰기는 짝이 하나뿐이라 그 위험이 없다.
  */
-export function boardQueueGapMs(now: Date = new Date()): number {
+export function boardQueueGapMs(now: Date = new Date(), pushHealthy = false): number {
+  // **알림 연결이 정상이면 안전망만 남긴다** — 새것은 알림이 바로 깨워 가져가고, 이
+  // 주기는 알림을 놓쳤을 때 늦어도 이만큼 뒤에 줍는 몫이다(GPT 6.1 sol 검토 · 2026-10-01).
+  if (pushHealthy) return BOARD_QUEUE_PUSH_SAFETY_MS;
   const h = now.getHours();
   const awake = h >= BOARD_QUEUE_AWAKE_FROM && h < BOARD_QUEUE_AWAKE_TO;
   return awake ? BOARD_QUEUE_POLL_MS : BOARD_QUEUE_NIGHT_MS;
 }
 
-/** 이 주기로 하루를 돌면 워커 요청이 몇 번인가. 검사가 천장을 이 값으로 본다. */
+/** 이 주기로 하루를 돌면 워커 요청이 몇 번인가. 검사가 천장을 이 값으로 본다.
+ *  **알림 연결이 끊긴 날이 기준**이다 — 그날도 한도 안에 있어야 한다. */
 export function boardQueueDailyCalls(): number {
   const awakeH = BOARD_QUEUE_AWAKE_TO - BOARD_QUEUE_AWAKE_FROM;
   return Math.round(awakeH * 3600_000 / BOARD_QUEUE_POLL_MS
@@ -502,6 +513,11 @@ export class AssistantScheduler {
   private boardQueueFailures = 0;
   /** 마지막으로 큐를 본 때. 밤에 건너뛰는 판정이 이 값 하나를 본다. */
   private boardQueueLast = 0;
+  /** 판 알림 연결 — 타이머가 아니라 상시 연결이지만 짝은 같다(`clearAllTimers` 가 멈추고
+   *  `startBoardQueuePoller` 가 다시 연다 · `check:timers` 가 센다). */
+  private boardPush: BoardPush | null = null;
+  /** 한 판이 도는 동안 알림이 오면 끝난 뒤 한 번 더 돈다 — 그 사이에 담긴 것을 안 놓친다. */
+  private boardQueueAgain = false;
 
   // File watcher debounce (account-manager.ts:59-62 pattern)
   private watchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -909,6 +925,10 @@ export class AssistantScheduler {
     if (this.boardQueueTimer) {
       clearInterval(this.boardQueueTimer);
       this.boardQueueTimer = null;
+    }
+    if (this.boardPush) {
+      this.boardPush.stop();
+      this.boardPush = null;
     }
     if (this.mailPollTimer) {
       clearInterval(this.mailPollTimer);
@@ -1576,80 +1596,109 @@ export class AssistantScheduler {
       nightMs: BOARD_QUEUE_NIGHT_MS,
       awake: `${BOARD_QUEUE_AWAKE_FROM}~${BOARD_QUEUE_AWAKE_TO}시`,
       dailyCalls: boardQueueDailyCalls(),
+      push: process.env.BOARD_PUSH === 'off' ? 'off' : 'on',
     });
-    this.boardQueueTimer = setInterval(async () => {
-      if (this.boardQueueBusy) return;
-      // 밤에는 건너뛴다 — 워커 무료 한도가 이 폴러 하나로 43%를 쓰고 있었다.
-      const now = Date.now();
-      if (now - this.boardQueueLast < boardQueueGapMs()) return;
-      this.boardQueueLast = now;
-      this.boardQueueBusy = true;
-      try {
-        const r = await drain(quickUpdate, this.askFromBoard ?? null, undefined,
-          noteUpdate, stageUpdate, this.narrowFromBoard, this.tellContact);
-        if (this.boardQueueFailures) {
-          this.logger.info(`Board queue recovered (${this.boardQueueFailures}회 실패 뒤)`);
-          this.boardQueueFailures = 0;
-        }
-        if (r.duplicates) {
-          this.logger.info(`이미 반영한 것 ${r.duplicates}건을 지웠습니다`);
-        }
-        // **버튼으로 누른 것은 조용히 반영한다** (2026-08-19 사용자 결정).
-        // 판에서 누른 사람은 판을 보고 있고 그 화면이 몇 초 뒤에 바뀐다 — 같은
-        // 사실을 슬랙에 한 번 더 적으면 알림만 늘고 새로 아는 것이 없다. 버튼이
-        // 만든 문자열은 화면이 지은 것이라 **해석이 끼어들 자리도 없다.**
-        //
-        // ⚠️ **말은 실패할 때만 한다** — 아래 `dropped`·`lost` 알림은 그대로다.
-        // 조용한 것이 「됐다」는 뜻이 되려면 안 된 것은 반드시 말해야 한다.
-        //
-        // **경고만 골라 남긴다** — ✅ 줄은 판이 보여 주지만 「3회 연기」 같은 경고는
-        // 판 어디에도 안 뜬다. 통째로 삼키면 일부러 만든 신호가 조용히 사라진다.
-        for (const { output } of r.applied) {
-          const tell = boardOutputToTell(output);
-          if (tell) await this.sendMessage(tell).catch(() => { });
-        }
-        if (r.applied.length) {
-          this.logger.info(`판에서 누른 것 ${r.applied.length}건 반영`);
-        }
-        if (r.contacts.length) {
-          this.logger.info(`문의 ${r.contacts.length}건 전달`);
-        }
-        for (const item of r.dropped) {
-          // **원인을 좁혀 말하지 않는다.** rc 2 는 「업무를 못 찾음」과 「형식이
-          // 안 맞음」을 함께 뜻하는데, 봇이 둘을 가르려면 판정을 복제해야 한다.
-          // 대신 **다음에 무엇을 할지**를 준다 — 받는 쪽에 필요한 것은 그것이다.
-          await this.sendMessage(
-            `⚠️ ${boardLabel()} 에서 누른 「${item.label || item.text}」을 반영하지 못했습니다 ` +
-            '— 그 업무를 찾지 못했거나 형식이 맞지 않습니다.\n' +
-            `누른 것은 취소됐습니다. ${boardLabel()} 을 새로고침해 다시 누르거나, ` +
-            '카드를 눌러 편집창에서 바꾸세요.',
-          ).catch(() => { });
-        }
-        for (const item of r.lost) {
-          // **원문을 그대로 돌려준다.** 한 번만 시도하는 대가라, 여기서 안 돌려주면
-          // 사람이 쓴 글이 조용히 사라진다. 붙여넣기만 하면 다시 갈 수 있게 둔다.
-          await this.sendMessage(
-            `⚠️ ${boardLabel()} 에서 보낸 말을 넘기지 못했습니다. 원문은 아래 그대로입니다 ` +
-            '— 다시 보내시려면 이 방에 붙여넣으세요.\n\n' + item.text,
-          ).catch(() => { });
-        }
-      } catch (error) {
-        // **이유를 본문에 넣는다.** Error 객체를 그대로 넘기면 로거가
-        // `JSON.stringify` 로 `{}` 를 찍어, 실패는 보이는데 왜인지가 안 남는다 —
-        // 2026-08-07 에 워커를 올리기 전 9분 동안 이유 없는 경고만 쌓였다.
-        //
-        // **매번 찍지 않는다.** 30초마다 도는 자리라 하루 못 고치면 로그가 같은
-        // 줄로 덮인다. 처음과 10분마다만 남긴다.
-        this.boardQueueFailures += 1;
-        if (this.boardQueueFailures === 1 || this.boardQueueFailures % 20 === 0) {
-          const why = error instanceof Error ? error.message : String(error);
-          this.logger.warn(
-            `Board queue drain failed (${this.boardQueueFailures}회째): ${why}`);
-        }
-      } finally {
-        this.boardQueueBusy = false;
+    this.boardQueueTimer = setInterval(() => { void this.tickBoardQueue(false); }, BOARD_QUEUE_POLL_MS);
+    // **알림이 오면 주기를 안 기다리고 바로 돈다** (2026-10-01). 끄는 문은 `BOARD_PUSH=off`
+    // 하나 — 끄면 위 타이머가 예전 주기(낮 2초 · 밤 30초)로 그대로 돈다.
+    if (process.env.BOARD_PUSH !== 'off') {
+      this.boardPush?.stop();
+      this.boardPush = new BoardPush({
+        target: () => boardPushTarget(),
+        authBroken: () => boardPushAuthBroken(),
+        onNew: () => { void this.tickBoardQueue(true); },
+      });
+      this.boardPush.start();
+    }
+  }
+
+  /**
+   * 큐를 한 번 비운다. `force` 는 알림이 깨운 것 — 주기 판정을 건너뛴다.
+   *
+   * **한 판이 도는 동안 온 알림은 버리지 않는다** — 끝난 뒤 한 번 더 돈다. 안 그러면
+   * 세션 하나(20초)가 도는 사이에 누른 버튼이 안전망 주기(60초)까지 기다린다.
+   */
+  private async tickBoardQueue(force: boolean): Promise<void> {
+    if (this.boardQueueBusy) {
+      if (force) this.boardQueueAgain = true;
+      return;
+    }
+    // 밤에는 건너뛴다 — 워커 무료 한도가 이 폴러 하나로 43%를 쓰고 있었다.
+    // 알림 연결이 정상이면 낮에도 60초 — 그때 이 주기는 안전망일 뿐이다.
+    const now = Date.now();
+    if (!force && now - this.boardQueueLast
+        < boardQueueGapMs(new Date(now), this.boardPush?.healthy(now) ?? false)) return;
+    this.boardQueueLast = now;
+    this.boardQueueBusy = true;
+    try {
+      const r = await drain(quickUpdate, this.askFromBoard ?? null, undefined,
+        noteUpdate, stageUpdate, this.narrowFromBoard, this.tellContact);
+      if (this.boardQueueFailures) {
+        this.logger.info(`Board queue recovered (${this.boardQueueFailures}회 실패 뒤)`);
+        this.boardQueueFailures = 0;
       }
-    }, BOARD_QUEUE_POLL_MS);
+      if (r.duplicates) {
+        this.logger.info(`이미 반영한 것 ${r.duplicates}건을 지웠습니다`);
+      }
+      // **버튼으로 누른 것은 조용히 반영한다** (2026-08-19 사용자 결정).
+      // 판에서 누른 사람은 판을 보고 있고 그 화면이 몇 초 뒤에 바뀐다 — 같은
+      // 사실을 슬랙에 한 번 더 적으면 알림만 늘고 새로 아는 것이 없다. 버튼이
+      // 만든 문자열은 화면이 지은 것이라 **해석이 끼어들 자리도 없다.**
+      //
+      // ⚠️ **말은 실패할 때만 한다** — 아래 `dropped`·`lost` 알림은 그대로다.
+      // 조용한 것이 「됐다」는 뜻이 되려면 안 된 것은 반드시 말해야 한다.
+      //
+      // **경고만 골라 남긴다** — ✅ 줄은 판이 보여 주지만 「3회 연기」 같은 경고는
+      // 판 어디에도 안 뜬다. 통째로 삼키면 일부러 만든 신호가 조용히 사라진다.
+      for (const { output } of r.applied) {
+        const tell = boardOutputToTell(output);
+        if (tell) await this.sendMessage(tell).catch(() => { });
+      }
+      if (r.applied.length) {
+        this.logger.info(`판에서 누른 것 ${r.applied.length}건 반영`);
+      }
+      if (r.contacts.length) {
+        this.logger.info(`문의 ${r.contacts.length}건 전달`);
+      }
+      for (const item of r.dropped) {
+        // **원인을 좁혀 말하지 않는다.** rc 2 는 「업무를 못 찾음」과 「형식이
+        // 안 맞음」을 함께 뜻하는데, 봇이 둘을 가르려면 판정을 복제해야 한다.
+        // 대신 **다음에 무엇을 할지**를 준다 — 받는 쪽에 필요한 것은 그것이다.
+        await this.sendMessage(
+          `⚠️ ${boardLabel()} 에서 누른 「${item.label || item.text}」을 반영하지 못했습니다 ` +
+          '— 그 업무를 찾지 못했거나 형식이 맞지 않습니다.\n' +
+          `누른 것은 취소됐습니다. ${boardLabel()} 을 새로고침해 다시 누르거나, ` +
+          '카드를 눌러 편집창에서 바꾸세요.',
+        ).catch(() => { });
+      }
+      for (const item of r.lost) {
+        // **원문을 그대로 돌려준다.** 한 번만 시도하는 대가라, 여기서 안 돌려주면
+        // 사람이 쓴 글이 조용히 사라진다. 붙여넣기만 하면 다시 갈 수 있게 둔다.
+        await this.sendMessage(
+          `⚠️ ${boardLabel()} 에서 보낸 말을 넘기지 못했습니다. 원문은 아래 그대로입니다 ` +
+          '— 다시 보내시려면 이 방에 붙여넣으세요.\n\n' + item.text,
+        ).catch(() => { });
+      }
+    } catch (error) {
+      // **이유를 본문에 넣는다.** Error 객체를 그대로 넘기면 로거가
+      // `JSON.stringify` 로 `{}` 를 찍어, 실패는 보이는데 왜인지가 안 남는다 —
+      // 2026-08-07 에 워커를 올리기 전 9분 동안 이유 없는 경고만 쌓였다.
+      //
+      // **매번 찍지 않는다.** 30초마다 도는 자리라 하루 못 고치면 로그가 같은
+      // 줄로 덮인다. 처음과 10분마다만 남긴다.
+      this.boardQueueFailures += 1;
+      if (this.boardQueueFailures === 1 || this.boardQueueFailures % 20 === 0) {
+        const why = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Board queue drain failed (${this.boardQueueFailures}회째): ${why}`);
+      }
+    } finally {
+      this.boardQueueBusy = false;
+    }
+    if (this.boardQueueAgain) {
+      this.boardQueueAgain = false;
+      void this.tickBoardQueue(true);
+    }
   }
 
   // --- Briefing ---

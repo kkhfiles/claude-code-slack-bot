@@ -174,6 +174,40 @@ export function boardQueueEnabled(): boolean {
   return !!boardOrigin() && !!token();
 }
 
+/**
+ * 판 알림 연결(`/api/ws`)의 주소와 헤더 — `call` 과 같은 열쇠를 쓴다(2026-10-01).
+ * `base` 를 주면 그곳(로컬 dev · 시험)으로 간다. 주소가 없으면 null.
+ */
+export function boardPushTarget(base?: string): { url: string; headers: Record<string, string> } | null {
+  const origin = base ?? boardOrigin();
+  if (!origin) return null;
+  const t = token();
+  const headers: Record<string, string> = { 'user-agent': UA };
+  if (t) {
+    headers['CF-Access-Client-Id'] = t.id;
+    headers['CF-Access-Client-Secret'] = t.secret;
+  }
+  return { url: origin.replace(/^http/, 'ws') + '/api/ws', headers };
+}
+
+/**
+ * 알림 연결이 안 열릴 때 **인증 탓인가** — 같은 주소에 업그레이드 없이 물어 본다. 워커까지
+ * 닿으면 426(업그레이드를 달라)이고, Access 가 막으면 302·401·403 이다. 기본 WebSocket 은
+ * 거절된 상태 코드를 안 알려 줘서 이렇게 가른다. 못 물으면 false(망 문제로 본다).
+ */
+export async function boardPushAuthBroken(base?: string): Promise<boolean> {
+  const t = boardPushTarget(base);
+  if (!t) return true;
+  try {
+    const res = await fetch(t.url.replace(/^ws/, 'http'), {
+      headers: t.headers, redirect: 'manual', signal: AbortSignal.timeout(10_000),
+    });
+    return [301, 302, 303, 307, 401, 403].includes(res.status);
+  } catch {
+    return false;
+  }
+}
+
 async function call(op: string, body?: unknown, base?: string): Promise<any> {
   const origin = base ?? boardOrigin();
   if (!origin) throw new Error('판 주소가 없습니다');
