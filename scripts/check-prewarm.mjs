@@ -84,15 +84,19 @@ h.runQuery('그 다음 말', OPTS);
 eq('한 번 쓰면 다음은 새로', calls.length, 2);
 eq('새로 띄운 것은 문자열 프롬프트', calls[1].prompt, '그 다음 말');
 
-// 4. **옵션이 다르면 안 쓴다** — 남의 규칙으로 뜬 세션에 말을 밀어 넣지 않는다
+// 4. **옵션이 다르면 안 쓴다** — 남의 규칙으로 뜬 세션에 말을 밀어 넣지 않는다.
+//    ⭐ **그리고 버리지도 않는다** (2026-10-01) — 전에는 버려서, 좁은 길(다른 옵션)이 한 번
+//    돌 때마다 대화용으로 띄워 둔 것이 사라졌다(8/31 이후 「못 씀」 25번 중 9번).
 h = new SdkHandler(mcp);
 calls.length = 0;
 h.prewarm(OPTS);
 h.runQuery('다른 방', { ...OPTS, workingDirectory: 'P:/github/other' });
 eq('옵션이 다르면 새로 띄운다', calls.length, 2);
-// **버리는 길은 중단 신호다** — `interrupt()` 가 아니라 `abortController`.
-// SDK 가 그 신호로 프로세스를 내린다. 처음에 `interrupt()` 를 봤다가 못 잡았다.
-eq('미리 띄운 것은 버린다', calls[0].options.abortController.signal.aborted, true);
+eq('남의 자리는 안 버린다', calls[0].options.abortController.signal.aborted, false);
+h.runQuery('원래 방', OPTS);
+eq('남겨 둔 자리를 원래 옵션이 쓴다', calls.length, 2);
+await tick();
+eq('원래 방의 말이 그 자리로 들어간다', calls[0].pushed, ['원래 방']);
 
 // 5. **세션 id 가 붙으면 지문이 달라진다** — 이걸 놓치면 다음 사람의 말이
 //    남의 대화에 붙는다. 미리 띄울 때 세션을 떼는 이유다.
@@ -188,13 +192,138 @@ const SESSION_OPTS = {
   eq('미리 띄우기에 옵션을 그대로 넘긴다', m && m[1].trim(), 'sdkOptsForWarm');
 }
 
+// 15. **자리 둘이 같이 산다** — 대화형과 좁은 길형(2026-10-01).
+const NARROW = { ...OPTS, tools: [], settingSources: [], skipMcp: true, appendSystemPrompt: '규칙' };
+{
+  h = new SdkHandler(mcp);
+  calls.length = 0;
+  h.prewarm(OPTS);
+  h.prewarm(NARROW);
+  eq('둘 다 띄운다', [calls.length, h.warmCount], [2, 2]);
+  h.runQuery('좁은 길', NARROW);
+  h.runQuery('대화', OPTS);
+  eq('각자 제 자리를 쓴다', [calls.length, h.warmCount], [2, 0]);
+  await tick();
+  eq('말이 제 자리로 간다', [calls[0].pushed, calls[1].pushed], [['대화'], ['좁은 길']]);
+}
+
+// 16. **같은 지문을 또 띄우면 하나만** — 살아 있으면 그대로 둔다.
+{
+  h = new SdkHandler(mcp);
+  calls.length = 0;
+  h.prewarm(OPTS);
+  h.prewarm(OPTS);
+  eq('같은 지문은 한 자리', [calls.length, h.warmCount], [1, 1]);
+}
+
+// 17. **자리가 차면 가장 오래된 것을 버린다** — 프로세스가 끝없이 늘지 않게.
+{
+  h = new SdkHandler(mcp);
+  calls.length = 0;
+  h.prewarm(OPTS);
+  h.prewarm(NARROW);
+  h.prewarm({ ...OPTS, workingDirectory: 'P:/github/third' });
+  eq('셋째를 띄우면 둘만 남는다', h.warmCount, SdkHandler.MAX_WARM);
+  eq('가장 오래된 것을 버린다', calls[0].options.abortController.signal.aborted, true);
+  eq('나중 것은 산다', calls[1].options.abortController.signal.aborted, false);
+}
+
+// 18. **메모리가 높으면 안 띄우고 들고 있던 것도 버린다** — 감시기의 종료 문턱을 앞당기지 않게.
+{
+  h = new SdkHandler(mcp);
+  calls.length = 0;
+  h.prewarm(OPTS);
+  let high = false;
+  h.memoryHigh = () => high;
+  high = true;
+  h.prewarm(NARROW);
+  eq('메모리가 높으면 새로 안 띄운다', calls.length, 1);
+  eq('들고 있던 것도 버린다', [h.warmCount, calls[0].options.abortController.signal.aborted], [0, true]);
+  h.dropAllWarm('시험');   // 빈 채로 불러도 안 터진다
+  high = false;
+  h.prewarm(OPTS);
+  eq('메모리가 내려가면 다시 띄운다', [calls.length, h.warmCount], [2, 1]);
+}
+
+// 19. **자리마다 유지 시간이 따로다** — 넘긴 값으로 낡음을 잰다.
+{
+  h = new SdkHandler(mcp);
+  calls.length = 0;
+  h.prewarm(OPTS, -1);           // 태어나자마자 낡음
+  h.prewarm(NARROW, 60_000);
+  h.runQuery('대화', OPTS);
+  h.runQuery('좁은 길', NARROW);
+  eq('낡은 자리는 안 쓰고 산 자리는 쓴다', calls.length, 3);
+}
+
+// 20. **메모리 문은 85% 에서 닫고 80% 이하 두 번에 연다** — 경계에서 띄웠다 버렸다를 막는다
+//     (GPT 6.1 sol 검토가 낸 순서 84→86→84→79→79).
+{
+  const { WarmMemoryGate } = require(MOD);
+  const g = new WarmMemoryGate();
+  eq('메모리 문 84→86→84→79→79', [84, 86, 84, 79, 79].map((p) => g.observe(p)),
+     [false, true, true, true, false]);
+  const g2 = new WarmMemoryGate();
+  eq('80~85 사이는 낮은 횟수를 잇지 않는다', [86, 79, 82, 79, 79].map((p) => g2.observe(p)),
+     [true, true, true, true, false]);
+}
+
+// 21. **띄우기 직전에 재고, 높으면 안 띄운다**(감시기가 있는 운영 길).
+{
+  h = new SdkHandler(mcp);
+  calls.length = 0;
+  let pct = 90;
+  h.memorySample = async () => pct;
+  h.prewarm(OPTS);
+  await tick(); await tick();
+  eq('높게 재면 안 띄운다', [calls.length, h.memoryHigh()], [0, true]);
+  pct = 70;
+  h.prewarm(OPTS);
+  await tick(); await tick();
+  eq('한 번 내려간 것으로는 아직', calls.length, 0);
+  h.prewarm(OPTS);
+  await tick(); await tick();
+  eq('두 번 내려가면 띄운다', [calls.length, h.memoryHigh()], [1, false]);
+}
+
+// 22. **띄운 뒤 규칙 파일이 바뀌면 그 프로세스를 안 쓴다** — 옛 규칙으로 답하지 않게.
+{
+  const os = await import('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'warm-ctx-'));
+  const md = path.join(dir, 'CLAUDE.md');
+  fs.writeFileSync(md, '규칙 1');
+  const C = { ...OPTS, workingDirectory: dir };
+  h = new SdkHandler(mcp);
+  calls.length = 0;
+  h.prewarm(C);
+  const later = new Date(Date.now() + 60_000);
+  fs.utimesSync(md, later, later);
+  h.runQuery('바뀐 뒤', C);
+  eq('규칙 파일이 바뀌면 새로 띄운다', calls.length, 2);
+  h.prewarm(C);
+  h.runQuery('그대로', C);
+  eq('안 바뀌면 쓴다', calls.length, 3);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// 23. **좁은 길은 끝나면 같은 옵션 객체로 미리 띄운다** — 다른 객체를 넘기면 지문이 갈린다.
+{
+  const sh = fs.readFileSync(path.join(ROOT, 'dist', 'slack-handler.js'), 'utf8');
+  eq('세션을 같은 객체로 부른다', /sdkHandler\.runQuery\(prompt, sdkOpts\)/.test(sh), true);
+  eq('끝나면 그 객체로 띄운다', /prewarmAfter[\s\S]{0,120}sdkHandler\.prewarm\(sdkOpts\)/.test(sh), true);
+  const as = fs.readFileSync(path.join(ROOT, 'dist', 'assistant-scheduler.js'), 'utf8');
+  eq('좁은 길이 켠다', /prewarmAfter: true/.test(as), true);
+}
+
 if (fails.length) {
   console.log(`실패 ${fails.length}건\n`);
   for (const f of fails) console.log('  ✗ ' + f);
   process.exitCode = 1;
 } else {
   console.log('통과 — 미리 띄우기 (하나 뜸 · 같은 옵션이면 재사용 · 프롬프트가 그리로 들어감 · '
-    + '한 번 쓰면 사라짐 · 옵션이 다르면 버림 · 세션 id 는 다른 지문 · 낡으면 안 씀 · '
+    + '한 번 쓰면 사라짐 · 옵션이 다르면 안 씀 · 세션 id 는 다른 지문 · 낡으면 안 씀 · '
     + '터져도 평소대로 · 넣고 닫힘 · 캡처 id 가 옵션에 안 박힘 · 갈린 칸을 말함 · '
-    + '세션을 이어받는 차례도 맞음 · 떼면 못 씀 · 부르는 쪽이 옵션을 안 고침)');
+    + '세션을 이어받는 차례도 맞음 · 떼면 못 씀 · 부르는 쪽이 옵션을 안 고침 · '
+    + '남의 자리를 안 버림 · 자리 둘 · 같은 지문 한 자리 · 차면 오래된 것부터 · 메모리 높으면 안 띄움 · 자리별 유지 시간 · '
+    + '메모리 문 85·80 이력 · 띄우기 직전 측정 · 규칙 파일이 바뀌면 안 씀 · 좁은 길이 같은 객체로 띄움)');
 }

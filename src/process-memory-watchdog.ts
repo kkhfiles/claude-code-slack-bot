@@ -332,6 +332,11 @@ export interface WatchdogOptions {
    * (2026-09-29 사용자 「안전하게 · 시험하다 사고 나면 안 됨」).
    */
   aiActs?: boolean;
+  /**
+   * 정기 측정마다 시스템 커밋 비율을 알린다(2026-10-01) — 미리 띄운 세션의 메모리 문이 받아
+   * 85% 를 넘으면 들고 있던 것을 버린다. 여기서 터져도 감시는 그대로 돈다.
+   */
+  onCommit?: (pct: number) => void;
 }
 
 export class ProcessMemoryWatchdog {
@@ -658,6 +663,7 @@ export class ProcessMemoryWatchdog {
 
     const status = await this.getSystemCommitStatus();
     if (!status) return;
+    try { this.opts.onCommit?.(status.usagePct); } catch { /* 알림이 감시를 막지 않는다 */ }
 
     const systemHigh = status.usagePct >= this.thresholdPct;
 
@@ -991,6 +997,11 @@ export class ProcessMemoryWatchdog {
     } catch (e) {
       this.logger.warn('감시기 판정 기록 실패', e as Error);
     }
+  }
+
+  /** 지금 시스템 커밋 비율 — 미리 띄우기 직전에 한 번 잰다(PowerShell 한 번). 못 재면 null. */
+  async sampleCommitPct(): Promise<number | null> {
+    return (await this.getSystemCommitStatus())?.usagePct ?? null;
   }
 
   private async getSystemCommitStatus(): Promise<CommitStatus | null> {

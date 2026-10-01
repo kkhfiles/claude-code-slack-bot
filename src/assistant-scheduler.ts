@@ -363,6 +363,11 @@ export interface SpawnOpts {
   settingSources?: ('user' | 'project' | 'local')[];
   maxDurationMs?: number;
   useSdk?: boolean;
+  /**
+   * 끝나면 **같은 옵션으로 하나 미리 띄워 둔다**(SDK 길만 · 2026-10-01). 좁은 길이 켠다 —
+   * 판 프롬프트는 다음까지 간격 중앙 20분이라 30분 유지면 절반 남짓이 맞는다(실측 −1.1초).
+   */
+  prewarmAfter?: boolean;
   /** 사고 깊이 — 유일한 사고 손잡이. 생략하면 SDK 기본값 `'high'`(sdk-handler 주석). */
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /** 작업 폴더 밖에 읽고 쓸 폴더. **Claude Code 는 작업 폴더 밖 편집을 허용 없이 못 한다** —
@@ -2038,6 +2043,8 @@ export class AssistantScheduler {
         // 실측 중간값 3~4초 — 상한에 닿으면 세션으로 떨어지는 편이 낫다.
         maxDurationMs: 90_000,
         useSdk: true,
+        // 다음 판 프롬프트를 위해 같은 옵션으로 하나 띄워 둔다(띄우기 약 1.5초를 앞당김).
+        prewarmAfter: true,
       });
       this.recordSessionCost('narrow', result);
       said = (result.text || '').trim();

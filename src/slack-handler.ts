@@ -669,8 +669,15 @@ export class SlackHandler {
             : undefined,
           runawayDelaySec: config.memoryWatchdog.runawayKillDelaySec,
           aiActs: config.memoryWatchdog.aiActs,
+          // 미리 띄운 세션의 메모리 문(2026-10-01) — 85% 를 넘으면 들고 있던 것을 버린다.
+          onCommit: (pct) => {
+            if (this.sdkHandler.memoryGate.observe(pct)) this.sdkHandler.dropAllWarm(`커밋 ${pct}%`);
+          },
         },
       );
+      // 띄우기 직전에 한 번 잰다 — 정기 측정(3분) 사이에 올라간 것을 놓치지 않게.
+      const wd = this.memoryWatchdog;
+      this.sdkHandler.memorySample = () => wd.sampleCommitPct();
     }
 
     // Agent SDK 판 맞춤 — 주 첫 업무일에 판을 대조해 어긋나면 DM 에 [업데이트] 버튼(2026-09-29).
@@ -2970,8 +2977,9 @@ export class SlackHandler {
     // 느린 곳이 띄우기인지 써 내려가기인지 운영에서 가를 수 없다. 원장에 그대로 옮긴다.
     const t0 = Date.now();
     const timing: { initMs?: number; firstMs?: number; resultMs?: number } = {};
+    const sdkOpts = { ...commonOpts, effort: opts.effort };
     const proc = opts.useSdk
-      ? this.sdkHandler.runQuery(prompt, { ...commonOpts, effort: opts.effort })
+      ? this.sdkHandler.runQuery(prompt, sdkOpts)
       : this.cliHandler.runQuery(prompt, { ...commonOpts, effort: opts.effort });
 
     this.logger.info('Assistant session started', { via: opts.useSdk ? 'sdk' : 'cli' });
@@ -3077,6 +3085,12 @@ export class SlackHandler {
     if (timedOut && !resultReceived) {
       return { text, costUsd, sessionId, subtype: 'error_timeout', usage, turns, toolCalls,
                rateLimited, rateLimitResetsAt, isError: true, timing };
+    }
+
+    // **다음 차례를 위해 같은 옵션으로 하나 띄워 둔다**(좁은 길이 켬 · 2026-10-01). 방금 쓴 그
+    // 객체를 그대로 넘겨 지문이 맞게 한다. 실패·한도에 걸린 차례 뒤에는 안 띄운다.
+    if (opts.useSdk && opts.prewarmAfter && !isError && !rateLimited) {
+      this.sdkHandler.prewarm(sdkOpts);
     }
 
     return { text, costUsd, sessionId, subtype, usage, turns, toolCalls,

@@ -5,7 +5,8 @@ import {
   type CanUseTool,
   type PermissionMode as SdkPermissionMode,
 } from '@anthropic-ai/claude-agent-sdk';
-import { existsSync } from 'fs';
+import { existsSync, statSync } from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
@@ -255,13 +256,45 @@ export class SdkHandler {
    * ⚠️ **배관을 안 고치고 되살리면 안전망이 깨진다** — 억지로 쓰면 앞 차례의
    * 캡처를 닫고 이번 것이 큐에 남는다(원문 유실을 막는 마지막 장치).
    */
-  private warm: {
+  /**
+   * **옵션 지문별 자리** (2026-10-01) — 전에는 자리가 하나라 옵션이 다른 호출(좁은 길)이
+   * 오면 대화용으로 띄워 둔 것을 **버렸다**(8/31 이후 「못 씀」 25번 중 9번). 이제 지문마다
+   * 따로 두고 다른 옵션의 호출은 남의 자리를 안 건드린다. 자리는 `MAX_WARM` 까지 —
+   * 대화형 하나(커밋 약 830MB · MCP 서버 포함)와 좁은 길형 하나(약 460MB).
+   */
+  private warms = new Map<string, {
     key: string; q: Query; send: (t: string) => void;
-    abortController: AbortController; bornAt: number;
-  } | null = null;
+    abortController: AbortController; bornAt: number; ttlMs: number;
+  }>();
 
-  /** 미리 띄운 것을 얼마나 들고 있나. 넘으면 버리고 새로 띄운다. */
-  static WARM_TTL_MS = 10 * 60_000;
+  /**
+   * 미리 띄운 것을 얼마나 들고 있나. 넘으면 버리고 새로 띄운다. **띄운 때부터 잰다 —
+   * 다른 호출로 늘리지 않는다.** 10분 → 30분(2026-10-01): 다음 차례까지 간격 중앙이
+   * 대화 30분 · 판 프롬프트 20분이라 10분은 대부분 놓쳤다(적중 25%). 60분은 더 얻는
+   * 몫(12~13%p)보다 메모리를 오래 쥐는 값이 커서 안 골랐다(GPT 6.1 sol 검토와 같음).
+   */
+  static WARM_TTL_MS = 30 * 60_000;
+  /** 동시에 들고 있는 미리 띄운 프로세스 수. 차면 가장 오래된 것을 버린다. */
+  static MAX_WARM = 2;
+
+  /** 메모리 문 — 감시기가 잰 커밋 비율을 넣는다(`observe`). */
+  memoryGate = new WarmMemoryGate();
+  /**
+   * **메모리가 높은가** — 높으면 미리 띄우지 않는다. 기본은 메모리 문을 본다 — 감시기가
+   * 없는 PC(시험 포함)에서는 아무도 안 채워 「안 높음」으로 그대로 돈다.
+   */
+  memoryHigh: () => boolean = () => this.memoryGate.high;
+  /**
+   * **띄우기 직전에 메모리를 한 번 잰다**(있으면). 커밋을 재는 것이 PowerShell 한 번이라
+   * 주기로 자주 재지 않고 띄울 때만 잰다 — 띄우기는 차례가 끝난 뒤라 응답을 안 늦춘다.
+   * 감시기의 정기 측정(3분)은 들고 있던 것을 버리는 쪽에 쓴다(`dropAllWarm`).
+   */
+  memorySample?: () => Promise<number | null>;
+
+  /** 미리 띄운 것과 실제 호출을 맞대는 지문 — 옵션 + 띄울 때 읽은 파일들의 시각. */
+  private keyOf(sdkOptions: any): string {
+    return warmKey({ ...sdkOptions, __ctx: contextStamp(sdkOptions?.cwd) });
+  }
 
   /**
    * `query` 를 한 겹 감싸 둔다 — **시험이 바꿔 끼우려고**.
@@ -279,58 +312,95 @@ export class SdkHandler {
    * ⚠️ **여기서 터져도 아무 일도 없어야 한다** — 이것은 빠르게 하는 장치이지
    * 반영의 일부가 아니다.
    */
-  prewarm(opts: SdkRunOptions): void {
+  prewarm(opts: SdkRunOptions, ttlMs: number = SdkHandler.WARM_TTL_MS): void {
+    // 메모리를 잴 수단이 있으면 재고 띄운다(비동기) · 없으면 곧바로(시험이 이 길이다).
+    if (this.memorySample) {
+      this.memorySample()
+        .then((pct) => { if (pct !== null) this.memoryGate.observe(pct); })
+        .catch(() => { /* 못 재면 마지막 판정을 그대로 쓴다 */ })
+        .finally(() => this.prewarmNow(opts, ttlMs));
+      return;
+    }
+    this.prewarmNow(opts, ttlMs);
+  }
+
+  private prewarmNow(opts: SdkRunOptions, ttlMs: number): void {
     try {
-      if (this.warm && Date.now() - this.warm.bornAt < SdkHandler.WARM_TTL_MS) return;
-      this.dropWarm();
+      // **메모리가 높으면 안 띄우고 들고 있던 것도 버린다** — 빠르게 하는 장치가 감시기의
+      // 종료 문턱(90%)을 앞당기면 안 된다. 미리 띄운 것은 다시 띄우면 그만인 것이다.
+      if (this.memoryHigh()) {
+        if (this.warms.size) this.dropAllWarm('메모리가 높음');
+        return;
+      }
       const built = this.buildOptions('', opts);
+      const key = this.keyOf(built.sdkOptions);
+      const have = this.warms.get(key);
+      if (have && Date.now() - have.bornAt < have.ttlMs) return;
+      if (have) this.dropWarm(key);
+      // 자리가 차면 가장 오래된 것을 버린다(Map 은 넣은 순서를 지킨다).
+      while (this.warms.size >= SdkHandler.MAX_WARM) {
+        const oldest = this.warms.keys().next().value as string;
+        this.dropWarm(oldest);
+      }
       const input = pushableInput();
       const q = SdkHandler.queryFn({ prompt: input.stream, options: built.sdkOptions });
-      this.warm = {
-        key: warmKey(built.sdkOptions), q, send: input.send,
-        abortController: built.abortController, bornAt: Date.now(),
+      const mine = {
+        key, q, send: input.send,
+        abortController: built.abortController, bornAt: Date.now(), ttlMs,
       };
+      this.warms.set(key, mine);
       // ⚠️ **안 쓰이면 스스로 죽는다.** 다음 호출이 와야 낡은 것을 버린다면,
-      // 조용한 밤에는 프로세스 하나(350MB 안팎)가 아침까지 앉아 있는다.
-      const mine = this.warm;
-      setTimeout(() => { if (this.warm === mine) this.dropWarm(); },
-        SdkHandler.WARM_TTL_MS).unref?.();
-      this.logger.info('세션을 미리 띄워 둠');
+      // 조용한 밤에는 프로세스 하나(커밋 수백 MB)가 아침까지 앉아 있는다.
+      setTimeout(() => { if (this.warms.get(key) === mine) this.dropWarm(key); },
+        ttlMs).unref?.();
+      this.logger.info('세션을 미리 띄워 둠', { slots: this.warms.size, ttlMin: Math.round(ttlMs / 60_000) });
     } catch (err) {
       this.logger.error('미리 띄우기 실패 (평소대로 돕니다)', err);
-      this.warm = null;
     }
   }
 
-  /** 들고 있던 것을 버린다 — 낡았거나 옵션이 다를 때. */
-  private dropWarm(): void {
-    const w = this.warm;
-    this.warm = null;
+  /** 들고 있던 것 하나를 버린다 — 낡았거나 자리가 찼을 때. */
+  private dropWarm(key: string): void {
+    const w = this.warms.get(key);
+    this.warms.delete(key);
     if (!w) return;
     try { w.abortController.abort(); } catch { /* 이미 죽었다 */ }
   }
 
+  /** 들고 있던 것을 다 버린다 — 메모리가 높을 때(감시기가 부른다). */
+  dropAllWarm(why: string): void {
+    if (!this.warms.size) return;
+    const n = this.warms.size;
+    for (const key of [...this.warms.keys()]) this.dropWarm(key);
+    this.logger.info('미리 띄운 것을 다 버림', { why, n });
+  }
+
+  /** 지금 들고 있는 자리 수 — 시험과 로그가 본다. */
+  get warmCount(): number { return this.warms.size; }
+
   runQuery(prompt: string, opts: SdkRunOptions): SdkProcess {
     const built = this.buildOptions(prompt, opts);
-    const key = warmKey(built.sdkOptions);
+    const key = this.keyOf(built.sdkOptions);
 
-    // **미리 띄운 것이 맞으면 그것을 쓴다.** 옵션이 다르면 버리고 평소대로 —
-    // 남의 옵션으로 뜬 세션에 이 대화를 밀어 넣으면 조용히 다른 규칙으로 답한다.
-    if (this.warm) {
-      const fresh = Date.now() - this.warm.bornAt < SdkHandler.WARM_TTL_MS;
-      if (this.warm.key === key && fresh) {
-        const w = this.warm;
-        this.warm = null;
+    // **미리 띄운 것이 맞으면 그것을 쓴다.** 지문이 같은 자리만 본다 — 남의 옵션으로 뜬
+    // 세션에 이 대화를 밀어 넣으면 조용히 다른 규칙으로 답한다.
+    const w = this.warms.get(key);
+    if (w) {
+      if (Date.now() - w.bornAt < w.ttlMs) {
+        this.warms.delete(key);
         this.logger.info('미리 띄운 세션을 씀', { agedMs: Date.now() - w.bornAt });
         w.send(prompt);
         return new SdkProcess(w.q, w.abortController);
       }
-      // ⚠️ **왜 안 맞았는지 같이 남긴다** — 08-29 에 이 줄이 「옵션이 다름」만
-      // 말해서, 원인을 짚으려고 탐침을 따로 짜야 했다.
-      this.logger.info('미리 띄운 것을 못 씀 — 새로 띄웁니다',
-        { reason: fresh ? '옵션이 다름' : '낡음',
-          diff: fresh ? warmDiff(this.warm.key, key) : '' });
-      this.dropWarm();
+      this.logger.info('미리 띄운 것을 못 씀 — 새로 띄웁니다', { reason: '낡음' });
+      this.dropWarm(key);
+    } else if (this.warms.size) {
+      // **다른 옵션의 자리는 그대로 둔다** — 버리면 그 자리의 다음 차례가 새로 뜬다.
+      // ⚠️ **왜 안 맞았는지 같이 남긴다** — 08-29 에 이 줄이 「옵션이 다름」만 말해서,
+      // 원인을 짚으려고 탐침을 따로 짜야 했다. 가장 최근 자리와 견준다.
+      const last = [...this.warms.values()].pop()!;
+      this.logger.info('미리 띄운 것과 옵션이 다름 — 그대로 두고 새로 띄웁니다',
+        { reason: '옵션이 다름', diff: warmDiff(last.key, key) });
     }
 
     const q = SdkHandler.queryFn({ prompt, options: built.sdkOptions });
@@ -518,6 +588,46 @@ export function pushableInput(): { stream: AsyncIterable<any>; send: (t: string)
 export function warmKey(sdkOptions: any): string {
   return JSON.stringify(sdkOptions, (k, v) =>
     (k === 'abortController' || typeof v === 'function' ? undefined : v));
+}
+
+/**
+ * **미리 띄운 프로세스가 띄울 때 읽은 것** — 규칙 파일(`CLAUDE.md`) · 설정 · 실행 파일의
+ * 수정 시각. 지문에 같이 넣어, 그 사이 바뀌었으면 옛 규칙으로 답하는 것을 안 쓴다
+ * (2026-10-01 · GPT 6.1 sol 검토). 내용 대신 시각만 본다 — 지문을 만들 때마다 읽는다.
+ * MCP 설정은 내용째 옵션(`mcpServers`)에 이미 들어 있다.
+ */
+export function contextStamp(cwd?: string): string {
+  const home = os.homedir();
+  const files = [
+    cwd && path.join(cwd, 'CLAUDE.md'),
+    cwd && path.join(cwd, '.claude', 'settings.json'),
+    cwd && path.join(cwd, '.claude', 'settings.local.json'),
+    path.join(home, '.claude', 'CLAUDE.md'),
+    path.join(home, '.claude', 'settings.json'),
+    resolveClaudeExecutable(),
+  ].filter(Boolean) as string[];
+  return files.map((f) => {
+    try { return String(Math.round(statSync(f).mtimeMs)); } catch { return '0'; }
+  }).join('.');
+}
+
+/** 시스템 커밋이 이만큼이면 미리 띄우지 않고 들고 있던 것도 버린다. */
+export const WARM_MEMORY_HIGH_PCT = 85;
+/** 다시 띄우는 것은 이 아래가 **두 번 잇달아** 잡힌 뒤 — 경계에서 띄웠다 버렸다를 막는다. */
+export const WARM_MEMORY_RESUME_PCT = 80;
+
+/** 메모리 문 — 85% 에서 닫고 80% 이하 두 번에 연다(이력 현상). */
+export class WarmMemoryGate {
+  high = false;
+  private lowStreak = 0;
+  observe(pct: number): boolean {
+    if (pct >= WARM_MEMORY_HIGH_PCT) { this.high = true; this.lowStreak = 0; }
+    else if (pct <= WARM_MEMORY_RESUME_PCT) {
+      this.lowStreak += 1;
+      if (this.lowStreak >= 2) this.high = false;
+    } else this.lowStreak = 0;
+    return this.high;
+  }
 }
 
 /**
