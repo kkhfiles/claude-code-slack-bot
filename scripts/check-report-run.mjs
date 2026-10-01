@@ -313,7 +313,10 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
   ok('피할 권고가 들어간다', p.includes('a-20260926-01 · 거절 · 훅 추가'));
   ok('그 주 판 목록이 들어간다', p.includes('second · 2026-10-03 · complete — 둘째') && p.includes('- [ ] 권고'));
   ok('틀의 자리는 남지 않는다', !/\{\{(REPORT_OUT|SLOT|PREV_REPORT|AVOID_LIST|WEEK_INPUT)\}\}/.test(p.replace('지난주 본문 {{SLOT}}', '')));
-  eq('prompt-context 는 종류로 묻는다', rl.of('prompt-context').map((c) => argOf(c, '--type')), ['probe']);
+  eq('prompt-context 는 종류 · 예정일 앞으로 묻는다', rl.of('prompt-context').map((c) => [argOf(c, '--type'), argOf(c, '--before')]), [['probe', '2026-10-03']]);
+  // report-log 의 week-input 실제 모양(목록 · recommended_actions)도 그린다
+  const real = S.renderWeekInput([{ id: 'cli-usage/2026-10-03', type: 'cli-usage', slot: '2026-10-03', status: 'complete', title: 'CLI', recommended_actions: '- [ ] 실제 모양' }]);
+  ok('week-input 실제 모양(recommended_actions)', real.includes('- [ ] 실제 모양'));
   eq('week-input 은 예정일 7일 전부터', rl.of('week-input').map((c) => argOf(c, '--since')), ['2026-09-26']);
   // 안 쓰는 자리는 안 묻는다
   writePrompt('second', '# second\n\n{{REPORT_OUT}} {{SLOT}}\n');
@@ -349,6 +352,9 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
   ok('다른 종류의 직전 보고서가 들어간다', p.includes('session-efficiency/2026-09-26') && p.includes('세션 효율 지난 본문'));
   ok('같은 상한으로 자른다', p.includes('자 생략') && p.length < 30_000);
   eq('종류마다 한 번씩만 묻는다', rl.of('prompt-context').map((c) => argOf(c, '--type')).sort(), ['second', 'session-efficiency']);
+  eq('직전 = 제 종류는 예정일 앞 판 · 다른 종류는 같은 예정일까지',
+    rl.of('prompt-context').map((c) => [argOf(c, '--type'), argOf(c, '--before')]).sort(),
+    [['second', '2026-10-03'], ['session-efficiency', '2026-10-04']]);
   writePrompt('second', '# second\n\n보고서를 {{REPORT_OUT}} 에 쓴다. 예정일 {{SLOT}}.\n');
 }
 {

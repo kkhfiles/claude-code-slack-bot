@@ -3170,7 +3170,10 @@ export class AssistantScheduler {
     const contexts = new Map<string, any | null>();
     const contextOf = async (t: string): Promise<any | null> => {
       if (!contexts.has(t)) {
-        const c = await this.reportLog('report_log', ['prompt-context', '--type', t]);
+        // 직전 보고서 = 이 예정일 **앞** 판 — 같은 예정일을 다시 쓰는 재시도 · 수동 재실행이 제 판을
+        // 직전으로 읽지 않게. 다른 종류는 같은 예정일 것까지 본다(같은 그룹에서 먼저 돈 판이 가장 새 재료).
+        const before = t === type ? ctx.slot : shiftDate(ctx.slot, 1);
+        const c = await this.reportLog('report_log', ['prompt-context', '--type', t, '--before', before]);
         if (!c || c.error) {
           this.logger.warn('prompt-context 실패 — 직전 보고서 · 피할 권고 자리를 못 채움', { type: t, error: c?.error });
         }
