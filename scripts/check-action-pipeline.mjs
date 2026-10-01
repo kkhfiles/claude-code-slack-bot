@@ -285,6 +285,28 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   ok('결정할 것이 있으면 요약 버튼이 먼저 · 링크는 끝', need.some((x) => x.type === 'actions')
      && need[need.length - 1].type === 'context' && JSON.stringify(need[need.length - 1]).includes('📚'));
 
+  // 이름 일부 — 예전 `-report kg` 는 kg-health · kg-regression 을 함께 찾았다. 없는 주소로 링크하면 desk 404
+  const types = ['data-sync', 'data-sync-noon', 'kg-health', 'kg-regression', 'kg-skill-update', 'skill-review'];
+  const last = (b) => JSON.stringify(b[b.length - 1]);
+  const exact = last(buildReportReplyBlocks({ need_you: [], stuck: [], site }, 'data-sync', types));
+  ok('정확히 맞으면 그 종류 하나(data-sync-noon 을 끌어오지 않음)',
+     exact.includes(`${site}/reports/data-sync/`) && !exact.includes('data-sync-noon'));
+  const partial = last(buildReportReplyBlocks({ need_you: [], stuck: [], site }, 'kg', types));
+  ok('일부면 맞는 종류 전부', ['kg-health', 'kg-regression', 'kg-skill-update'].every((t) => partial.includes(`${site}/reports/${t}/`))
+     && !partial.includes(`${site}/reports/kg/`));
+  const miss = last(buildReportReplyBlocks({ need_you: [], stuck: [], site }, 'zzz', types));
+  ok('맞는 것이 없으면 없는 주소 대신 첫 화면과 그 사실', miss.includes('맞는 보고서 종류 없음') && miss.includes(`<${site}/|`)
+     && !miss.includes('/reports/zzz/'));
+  const many = Array.from({ length: 12 }, (_, i) => `kg-t${i}`);
+  ok('너무 많이 맞으면 줄이고 나머지 수', last(buildReportReplyBlocks({ need_you: [], stuck: [], site }, 'kg', many)).includes('외 4종'));
+
+  // 블록 수 — 요약이 최대일 때(18건 · 폐기 제안 · 멈춤)도 링크 한 줄을 더해 슬랙 한 메시지 50블록 안
+  const maxNeed = Array.from({ length: 30 }, (_, i) => NOTICE(`a-20260930-${String(i + 1).padStart(2, '0')}`,
+    'digest', i > 20 ? 'reject-proposed' : 'proposed', ['approve', 'hold', 'reject']));
+  const maxStuck = Array.from({ length: 7 }, (_, i) => NOTICE(`a-20260927-${String(i + 1).padStart(2, '0')}`, 'stuck', 'executing'));
+  const biggest = buildReportReplyBlocks({ need_you: maxNeed, stuck: maxStuck, site }, 'kg', types);
+  ok(`최대 요약 + 링크도 50블록 안 (${biggest.length})`, biggest.length <= 50);
+
   // 옛 보고서 훑기가 남아 있지 않은가 — 다시 들어오면 브리핑 뒤 「보고서 확인」 버튼이 되살아난다
   const src = ['assistant-scheduler.ts', 'slack-handler.ts', 'report-server.ts']
     .map((f) => fs.readFileSync(path.join(ROOT, 'src', f), 'utf-8')).join('\n');
