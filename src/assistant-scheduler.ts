@@ -2521,12 +2521,8 @@ export class AssistantScheduler {
     }
 
     // Monday: inject weekly summary prompt
-    if (new Date().getDay() === 1) {
-      const mondayExtra = path.join(this.promptsDir, 'monday-briefing-extra.md');
-      if (fs.existsSync(mondayExtra)) {
-        prompt += '\n\n' + fs.readFileSync(mondayExtra, 'utf-8');
-      }
-    }
+    const mondayExtra = await this.mondayBriefingExtra();
+    if (mondayExtra) prompt += '\n\n' + mondayExtra;
 
     // Inject cached calendar data if available (saves MCP cost)
     // Validate cache is from today — stale cache shows yesterday's events
@@ -2577,6 +2573,30 @@ export class AssistantScheduler {
     }
 
     return result;
+  }
+
+  /**
+   * 월요일 브리핑에 덧붙이는 글(`monday-briefing-extra.md`). 월요일이 아니면 빈 글자.
+   *
+   * `{{WEEK_INPUT}}` 를 그 주 판 목록(`week-input --since <오늘-7일>`)으로 채운다 — 세션이 옛
+   * 보고서 폴더를 훑지 않게. **브리핑은 빠지면 안 되므로** 목록을 못 읽어도 거부하지 않고
+   * 못 읽었다는 한 줄을 넣는다(분석 세션의 남은 `{{` 거부와 다르다).
+   */
+  private async mondayBriefingExtra(now: Date = new Date()): Promise<string> {
+    if (now.getDay() !== 1) return '';
+    const file = path.join(this.promptsDir, 'monday-briefing-extra.md');
+    if (!fs.existsSync(file)) return '';
+    const text = fs.readFileSync(file, 'utf-8');
+    if (!text.includes('{{WEEK_INPUT}}')) return text;
+    const w = await this.reportLog('report_log', ['week-input', '--since', shiftDate(kstDate(now), -7)]);
+    const value = w && !w.error
+      ? renderWeekInput(w)
+      : `(이번 주 판 목록을 못 읽었습니다 — ${String(w?.error ?? '답 없음').slice(0, 200)})`;
+    const filled = fillPrompt(text, { WEEK_INPUT: value });
+    if (filled.left.length > 0) {
+      this.logger.warn('월요일 보고에 못 채운 자리가 남음 — 그대로 보냄', { left: filled.left });
+    }
+    return filled.text;
   }
 
   /** Format HH:MM from ISO datetime string. */

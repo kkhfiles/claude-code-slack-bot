@@ -8,7 +8,7 @@
  *
  *   - 회차 열기 · 예정일(예약 발화 시각의 한국 날짜) · 재시도는 같은 회차 · 수동은 오늘
  *   - 프롬프트 자리 치환 · 남은 `{{` 면 세션을 안 띄움
- *   - 쓰기 범위(임시 파일 폴더) · 저장 시점 · 「썼나」 판정 · 저장 시점 · 러너 환경 · 처리 백엔드
+ *   - 쓰기 범위(임시 파일 폴더) · 저장 시점 · 「썼나」 판정 · 저장 시점 · 러너 환경 · 월요일 보고 WEEK_INPUT · 처리 백엔드
  *   - 러너 미리 띄우기의 환경 변수 · `--date` · 월요일 보고의 `{{WEEK_INPUT}}`
  *   - agy 위임 경로가 걷혔나
  *
@@ -574,6 +574,42 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   eq('러너 없는 종류는 안 띄운다', h2.launches.length, 0);
 }
 
+// ── S8 월요일 보고 · weekly-digest 의 {{WEEK_INPUT}} ─────────────────
+{
+  const MONDAY = new Date('2026-10-05T03:00:00Z');   // 한국 10/5(월) 12:00 — UTC 로도 월요일
+  const TUESDAY = new Date('2026-10-06T03:00:00Z');
+  fs.writeFileSync(path.join(PROMPTS, 'monday-briefing-extra.md'), '## 지난주 판\n\n{{WEEK_INPUT}}\n', 'utf-8');
+  const rl = fakeReportLog({ week: [{ type: 'cli-usage', slot: '2026-10-03', status: 'complete', title: 'CLI', actions: '- [ ] 권고 하나' }] });
+  const { sched } = harness({ rl });
+  const extra = await sched.mondayBriefingExtra(MONDAY);
+  ok(`월요일 보고에 그 주 판이 들어간다 — 받음 ${extra}`, extra.includes('cli-usage · 2026-10-03 · complete — CLI') && extra.includes('- [ ] 권고 하나'));
+  ok('월요일 보고에 {{WEEK_INPUT}} 가 안 남는다', !extra.includes('{{WEEK_INPUT}}'));
+  eq('그 주 = 오늘(한국) 7일 전부터', rl.of('week-input').map((c) => argOf(c, '--since')), ['2026-09-28']);
+  eq('월요일이 아니면 빈 글자', await sched.mondayBriefingExtra(TUESDAY), '');
+
+  const rlErr = fakeReportLog({ week: { error: 'rc 1 · 시험' } });
+  const h = harness({ rl: rlErr });
+  const extraErr = await h.sched.mondayBriefingExtra(MONDAY);
+  ok(`못 읽어도 브리핑은 간다 — 못 읽었다는 한 줄 · 받음 ${extraErr}`, extraErr.includes('못 읽었습니다') && !extraErr.includes('{{WEEK_INPUT}}'));
+
+  // 배선 — 브리핑이 이 글을 실제로 붙이는가
+  fs.writeFileSync(path.join(PROMPTS, 'morning-briefing.md'), '# 아침 브리핑 {excludeCalendars}\n', 'utf-8');
+  const hb = harness({ results: [{ ...WORKED, text: '☀️ 브리핑' }] });
+  hb.sched.mondayBriefingExtra = async () => '## 월요일 덧붙임 표지';
+  await hb.sched.executeBriefing();
+  ok('브리핑 프롬프트에 월요일 덧붙임이 붙는다', (hb.spawns[0]?.prompt ?? '').includes('## 월요일 덧붙임 표지'));
+
+  // weekly-digest — 분석 프롬프트의 {{WEEK_INPUT}} 은 예정일 7일 전부터
+  writePrompt('third', '# weekly-digest\n\n{{REPORT_OUT}} {{SLOT}}\n\n{{WEEK_INPUT}}\n');
+  const rlD = fakeReportLog({ week: [] });
+  const hd = harness({ rl: rlD, results: [WORKED] });
+  await hd.sched.runSingleAnalysis('third', undefined, false,
+    { slot: '2026-10-03', run: { runId: 'r-d', out: path.join(STATE, 'tmp', 'r-d.md'), type: 'third', slot: '2026-10-03' } });
+  eq('다이제스트 — week-input --since 예정일-7', rlD.of('week-input').map((c) => argOf(c, '--since')), ['2026-09-26']);
+  ok('다이제스트 프롬프트에 빈 주 표시', (hd.spawns[0]?.prompt ?? '').includes('(이 기간에 저장된 판 없음)'));
+  writePrompt('third', '# third\n\n보고서를 {{REPORT_OUT}} 에 쓴다. 예정일 {{SLOT}}.\n');
+}
+
 // ── S6 처리 백엔드 — servedBy ───────────────────────────────────────
 {
   // 1차가 해냄 → claude
@@ -635,5 +671,5 @@ if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 「썼나」 판정 · 저장 시점 · 러너 환경 · 처리 백엔드 · agy 위임 경로 걷힘)');
+  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 「썼나」 판정 · 저장 시점 · 러너 환경 · 월요일 보고 WEEK_INPUT · 처리 백엔드 · agy 위임 경로 걷힘)');
 }
