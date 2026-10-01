@@ -489,6 +489,17 @@ export function noOutputOkType(cfg: { noOutputOk?: unknown; mode?: unknown } | u
   return cfg?.noOutputOk === true || cfg?.mode === 'change-detection';
 }
 
+/**
+ * 저장 결과 한 마디 — 완료 메시지의 종류 옆 · 수동 결과 꼬리. 사람이 「돌았나」 와 「저장됐나」 를
+ * 한 줄에서 갈라 읽게 한다(X1 #5 — 저장이 거부돼도 ✅ 로 끝나던 것).
+ */
+export function saveTag(run: ReportRun | null, saved: any | null, end?: RunEnd): string {
+  if (!run) return '회차 없음';
+  if (!saved) return end === 'resume' ? '저장 보류 → 재시도' : '저장 안 함 → sweep';
+  if (saved.error) return `저장 실패${saved.code ? `(${saved.code})` : ''}`;
+  return `저장 ${saved.status ?? '?'}`;
+}
+
 /** report-log 쓰기 잠금 실패인가 — 그때만 저장을 한 번 더 부른다. */
 function isLockError(r: any): boolean {
   return r?.code === 'lock' || /잠금|\block\b/i.test(String(r?.error ?? ''));
@@ -938,6 +949,9 @@ export class AssistantScheduler {
         if (result.timedOut) return `⏱️ 분석 타임아웃: ${type}${tail}`;
         if (result.rateLimited) return `⚠️ 세션 리미트 초과: ${type}${tail}`;
         if (result.noOutput) return `🫥 분석 산출물 없음(세션이 되묻고 끝남): ${type}${tail}`;
+        // **✅ 는 저장까지 된 것만** — 저장이 거부 · 실패했으면 세션이 끝났어도 그 판은 없다.
+        if (saved?.error) return `❗ 분석은 끝났지만 저장 실패: ${type} ($${result.costUsd.toFixed(4)})${tail}`;
+        if (!saved) return `⏳ 분석은 끝났고 저장은 정리 작업 몫: ${type} ($${result.costUsd.toFixed(4)})${tail}`;
         return `✅ 분석 완료: ${type} ($${result.costUsd.toFixed(4)})${tail}`;
       } catch (error) {
         const saved = await this.finishReportRun(run, 'failed', null);
@@ -965,12 +979,11 @@ export class AssistantScheduler {
     return this.runAnalysisManual(type === TRIGGER_GROUP ? undefined : type);
   }
 
-  /** 결과 메시지 꼬리 — 회차를 어떻게 저장했나. */
+  /** 수동 결과 메시지 꼬리 — 회차를 어떻게 저장했나(`saveTag` · 실패면 사유 · 저장됐으면 판 번호). */
   private savedNote(run: ReportRun | null, saved: any | null): string {
     if (!run) return ' · 회차 없음(못 엶)';
-    if (!saved) return ' · 저장 안 함(정리 작업 몫)';
-    if (saved.error) return ` · 저장 실패: ${String(saved.error).slice(0, 120)}`;
-    return ` · 저장 ${saved.status ?? '?'}${saved.id ? ` (${saved.id})` : ''}`;
+    if (saved?.error) return ` · ${saveTag(run, saved)}: ${String(saved.error).slice(0, 120)}`;
+    return ` · ${saveTag(run, saved)}${saved?.id ? ` (${saved.id})` : ''}`;
   }
 
   /** Access CalendarPoller instance (for mute actions, etc.). */
@@ -2957,6 +2970,9 @@ export class AssistantScheduler {
     const timedOutTypes: string[] = [];
     /** 세션이 두 번 다 되묻고 끝나 산출물이 없는 타입 — 종료 메시지에 그대로 적는다. */
     const noOutputTypes: string[] = [];
+    /** 종류마다 처리 백엔드 · 저장 결과 — 완료 메시지에서 이름 옆에 붙인다(`saveTag`). */
+    const servedOf = new Map<string, Backend | undefined>();
+    const saveOf = new Map<string, string>();
     // `sessionId` 가 있으면 그 세션을 이어받고(리미트에 걸린 당사자), 없으면 새로
     // 돌린다(중단 때문에 **아예 못 돈** 뒤쪽 타입). 둘을 한 큐에 담아야 중단과
     // 재개가 대칭이 된다 — 예전에는 당사자만 큐에 들어가서, 뒤쪽 타입은 재시도
@@ -3076,9 +3092,7 @@ export class AssistantScheduler {
 
           succeeded = true;
           end = 'completed';
-          // Claude 가 아닌 백엔드가 받았으면 이름 옆에 적는다 — 「완료」가 어느 경로였는지 보이게.
-          completedTypes.push(result.servedBy && result.servedBy !== 'claude'
-            ? `${type}(${result.servedBy})` : type);
+          completedTypes.push(type);
           this.appendAnalysisJournal(schedule, { kind: 'outcome', type, outcome: 'completed', runId: run?.runId });
           break;
         } catch (error) {
@@ -3105,7 +3119,9 @@ export class AssistantScheduler {
 
       // **결과대로 저장한다** — 완료는 그대로 · 이어받을 예정이면 안 함 · 마지막 시도까지 실패면
       // `--partial` · 되물음은 비었으면 report-log 가 `no-output` 으로 닫는다(`commitPlan`).
-      await this.finishReportRun(run, end, last);
+      const saved = await this.finishReportRun(run, end, last);
+      servedOf.set(type, last?.servedBy);
+      saveOf.set(type, saveTag(run, saved, end));
 
       // Rate limit breaks the entire group
       if (failedRetryTypes.length > 0) break;
@@ -3113,12 +3129,17 @@ export class AssistantScheduler {
 
     // data-sync(daily-00:00)=야간, data-sync-noon(daily-12:00)=정오. 둘 다 startsWith('daily').
     const label = !isDaily ? '주간 분석' : (schedule === 'daily-12:00' ? '정오 동기화' : '야간 동기화');
-    const parts = [`📊 ${label} 완료: ${completedTypes.join(', ') || '(없음)'}`];
+    // 이름 옆에 Claude 가 아닌 처리 백엔드와 저장 결과 — 「돌았다」 와 「저장됐다」 를 한 줄에서 가른다.
+    const tagged = (ts: string[]) => ts.map((t) => {
+      const bits = [servedOf.get(t), saveOf.get(t)].filter((b) => b && b !== 'claude');
+      return bits.length > 0 ? `${t}(${bits.join(' · ')})` : t;
+    }).join(', ');
+    const parts = [`📊 ${label} 완료: ${tagged(completedTypes) || '(없음)'}`];
     if (timedOutTypes.length > 0) {
-      parts.push(`⏱️ 타임아웃: ${timedOutTypes.join(', ')}`);
+      parts.push(`⏱️ 타임아웃: ${tagged(timedOutTypes)}`);
     }
     if (noOutputTypes.length > 0) {
-      parts.push(`🫥 산출물 없음(세션이 되묻고 끝남): ${noOutputTypes.join(', ')}`);
+      parts.push(`🫥 산출물 없음(세션이 되묻고 끝남): ${tagged(noOutputTypes)}`);
     }
     if (skippedTypes.length > 0) {
       parts.push(`⏭️ cadence 스킵: ${skippedTypes.map(s => s.type).join(', ')}`);
@@ -3180,6 +3201,8 @@ export class AssistantScheduler {
     // 적어서, 감시 검사(M12)가 재시도로 살아난 타입까지 「무기록」으로 셌다.
     const done: string[] = [];
     const failed: string[] = [];
+    /** 종류마다 저장 결과 — 재시도 완료 메시지에서 이름 옆에 붙인다. */
+    const saveOf = new Map<string, string>();
     let stoppedAt = -1;
     for (let i = 0; i < queue.length; i++) {
       const { type, sessionId } = queue[i];
@@ -3198,8 +3221,10 @@ export class AssistantScheduler {
           kind: 'outcome', type, outcome, viaRetry: true, sessionId: r.sessionId, runId: run?.runId,
         });
         // 재시도 뒤에는 더 이어받지 않는다 — 또 막혀도 마지막 시도로 보고 `--partial` 로 저장한다.
-        await this.finishReportRun(run, outcome === 'completed' ? 'completed'
-          : outcome === 'no-output' ? 'no-output' : 'failed', r);
+        const end: RunEnd = outcome === 'completed' ? 'completed' : outcome === 'no-output' ? 'no-output' : 'failed';
+        const saved = await this.finishReportRun(run, end, r);
+        saveOf.set(type, [r.servedBy && r.servedBy !== 'claude' ? r.servedBy : '', saveTag(run, saved, end)]
+          .filter(Boolean).join(' · '));
         // **또 막히면 거기서 멈춘다.** 큐에 잔여 타입까지 담게 되면서 큐 길이가
         // 1 에서 최대 그룹 크기로 늘었는데, 한도가 아직 안 풀린 상태로 전부
         // 돌리면 그만큼을 그대로 낭비한다. 한 번 막히면 그 시점의 한도는
@@ -3212,7 +3237,7 @@ export class AssistantScheduler {
           kind: 'outcome', type, outcome: 'error', viaRetry: true,
           error: ((error as Error).message || '').slice(0, 300), runId: run?.runId,
         });
-        await this.finishReportRun(run, 'failed', null);
+        saveOf.set(type, saveTag(run, await this.finishReportRun(run, 'failed', null), 'failed'));
       }
     }
     // 한도로 멈춘 뒤 손도 안 댄 칸의 회차는 저장하지 않는다(열린 채 → 정리 작업이 `abandoned` 로).
@@ -3222,8 +3247,9 @@ export class AssistantScheduler {
       ? queue.slice(stoppedAt + 1).map(f => f.type) : [];
     // **성공한 것만 완료라고 적는다.** 예전에는 무엇이 어찌 됐든 「재시도 완료」
     // 한 줄이라, 아무 일도 안 한 회차가 성공으로 읽혔다(2026-08-22).
-    const lines = [`📊 재시도 완료: ${done.join(', ') || '(없음)'}`];
-    if (failed.length > 0) lines.push(`⚠️ 재시도 실패: ${failed.join(', ')}`);
+    const tagged = (ts: string[]) => ts.map((t) => (saveOf.get(t) ? `${t}(${saveOf.get(t)})` : t)).join(', ');
+    const lines = [`📊 재시도 완료: ${tagged(done) || '(없음)'}`];
+    if (failed.length > 0) lines.push(`⚠️ 재시도 실패: ${tagged(failed)}`);
     if (notTried.length > 0) {
       lines.push(`🚧 한도가 안 풀려 미시도: ${notTried.join(', ')}`);
     }

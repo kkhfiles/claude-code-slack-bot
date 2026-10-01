@@ -850,6 +850,62 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   eq('report-log 클론이 없으면 정리 타이머를 안 건다', armed2, []);
 }
 
+// ── S15 메시지 — 저장 결과를 같이 · 저장 실패면 ✅ 로 시작하지 않음 ──────────
+{
+  writeConfig();
+  const RUN = { runId: 'r', out: 'x', type: 't', slot: '2026-10-03' };
+  eq('저장됨', S.saveTag(RUN, { status: 'complete' }), '저장 complete');
+  eq('저장 안 함 → sweep', S.saveTag(RUN, null, 'failed'), '저장 안 함 → sweep');
+  eq('이어받을 예정', S.saveTag(RUN, null, 'resume'), '저장 보류 → 재시도');
+  eq('저장 실패(코드)', S.saveTag(RUN, { error: '…', code: 'downgrade' }), '저장 실패(downgrade)');
+  eq('회차 없음', S.saveTag(null, null), '회차 없음');
+
+  // 수동 단일 — 저장이 거부되면 ✅ 가 아니고 사유를 적는다
+  const DOWN = { error: 'cli-usage/2026-10-03 은 이미 complete — machine 로 낮추지 않음 · 덮으려면 --force', code: 'downgrade' };
+  const rl = fakeReportLog({ commits: [DOWN] });
+  const h = harness({ rl, results: [writes('# probe\n본문\n')] });
+  const msg = await h.sched.runAnalysisManual('probe');
+  ok(`저장 거부면 ✅ 로 시작하지 않는다 — 받음 ${msg}`, !msg.startsWith('✅'));
+  ok('저장 실패와 사유가 보인다', msg.includes('저장 실패(downgrade)') && msg.includes('이미 complete'));
+  // 러너 종류가 빈 임시 파일로 끝나면(저장 안 함) — ✅ 아님 · 정리 작업 몫
+  const hr = harness({ rl: fakeReportLog(), results: [WORKED] });
+  const msgR = await hr.sched.runAnalysisManual('kg-regression');
+  ok(`저장 안 한 수동 실행도 ✅ 아님 — 받음 ${msgR}`, !msgR.startsWith('✅') && msgR.includes('저장 안 함 → sweep'));
+
+  // 그룹 완료 메시지 — 종류마다 저장 결과(· Claude 가 아니면 처리 백엔드)
+  const rlG = fakeReportLog({ commits: [{ run_id: 'p', id: 'probe/2026-10-03', status: 'complete' }, DOWN] });
+  const TO = { ...WORKED, subtype: 'error_timeout' };
+  const g = harness({ rl: rlG, results: [writes('# probe\n'), writes('# second\n'), TO, TO] });
+  await g.sched.runAnalysisGroup('saturday-00:00', ['probe', 'second', 'kg-regression'], { slot: '2026-10-03', trigger: 'scheduled' });
+  const done = g.sent.find((t) => t.startsWith('📊')) ?? '';
+  ok(`완료 줄에 저장 complete — 받음 ${done}`, done.includes('probe(저장 complete)'));
+  ok('완료 줄에 저장 실패', done.includes('second(저장 실패(downgrade))'));
+  ok('타임아웃 줄에 저장 안 함 → sweep(러너 종류 · 빈 임시 파일)', done.includes('⏱️ 타임아웃: kg-regression(저장 안 함 → sweep)'));
+
+  // 폴백이 받은 종류는 처리 백엔드도
+  const prevCodex = wa.codexSession;
+  wa.codexSession = async (prompt) => { const o = outIn(prompt); if (o) fs.writeFileSync(o, '# codex\n', 'utf-8'); return '썼다'; };
+  try {
+    const gc = harness({ rl: fakeReportLog(), results: [{ ...WORKED, text: '', isError: true, subtype: 'error', toolCalls: 0 }] });
+    await gc.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+    const line = gc.sent.find((t) => t.startsWith('📊')) ?? '';
+    ok(`폴백이 받으면 처리 백엔드 · 저장 — 받음 ${line}`, line.includes('probe(codex · 저장 complete)'));
+  } finally {
+    wa.codexSession = prevCodex;
+  }
+
+  // 재시도 완료 메시지도 같은 모양
+  let qOut = null;
+  const gr = harness({ rl: fakeReportLog(), results: [LIMIT(), () => { fs.writeFileSync(qOut, '# 이어받아 끝\n', 'utf-8'); return { ...WORKED }; }] });
+  let q = null;
+  gr.sched.scheduleAnalysisRetry = (schedule, origin, queue) => { q = { schedule, origin, queue }; };
+  await gr.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  qOut = q.queue[0].run.out;
+  await gr.sched.runAnalysisRetry(q.schedule, q.origin, q.queue);
+  const rline = gr.sent.find((t) => t.startsWith('📊 재시도 완료')) ?? '';
+  ok(`재시도 완료 줄에 저장 결과 — 받음 ${rline}`, rline.includes('probe(저장 complete)'));
+}
+
 // ── S6 처리 백엔드 — servedBy ───────────────────────────────────────
 {
   // 1차가 해냄 → claude

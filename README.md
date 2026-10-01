@@ -317,7 +317,7 @@ Conversations in the same thread automatically continue the session (no command 
 | `-briefing` / `-br` | Run morning briefing now |
 | `-report [type]` / `-rp` | Action proposal summary (with decision buttons) + a link to the reports site. Reports themselves live in a separate report store, one file per run |
 | `-actions [review\|run]` | Action proposals — list the ones awaiting a decision with approve / hold / reject buttons · `review` reviews queued proposals now · `run` resumes stalled ones. The rules live in a separate repo cloned at `~/.report-log/repo` (`tools/flow.py`); without it the command reports that it is not set up. The hourly timer is the `actions` section of the assistant `config.json` |
-| `-analyze [type]` / `-an` | Run analysis (single type, or the default schedule group). Both are `manual` runs dated today (KST); the single-type reply names the backend that served it (`claude` / `codex`) and how the run was saved |
+| `-analyze [type]` / `-an` | Run analysis (single type, or the default schedule group). Both are `manual` runs dated today (KST); the single-type reply names the backend that served it (`claude` / `codex`) and how the run was saved (it starts with ✅ only when the report was saved); the group summary tags each type with its save result, e.g. `cli-usage(저장 complete), kg-health(저장 안 함 → sweep)` |
 | `-assistant config` / `-as config` | Show assistant configuration |
 | `-assistant briefing HH:MM` | Change briefing time |
 | `-assistant reminder N` | Change reminder lead time (minutes) |
