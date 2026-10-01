@@ -48,7 +48,8 @@
     "check:ladder": "node scripts/check-model-ladder.mjs",
     "check:turnserve": "node scripts/check-turn-serve.mjs",
     "check:replaynarrow": "node scripts/check-replay-narrow.mjs",
-    "check:sdkupdate": "node scripts/check-sdk-update.mjs"
+    "check:sdkupdate": "node scripts/check-sdk-update.mjs",
+    "check:reportrun": "node scripts/check-report-run.mjs"
   },
   "keywords": [],
   "author": "",

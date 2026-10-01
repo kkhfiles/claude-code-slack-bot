@@ -8,7 +8,6 @@ import { CalendarPoller } from './calendar-poller';
 import { errorCollector } from './error-collector';
 import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
-import { runAgy } from './agy-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   noteUpdate, stageUpdate, summaryCandidates, summaryApply,
@@ -2448,11 +2447,9 @@ export class AssistantScheduler {
    *
    * cadence(weekly/biweekly/monthly)를 계산하는 곳은 여기뿐이라, 이 기록이 없으면
    * 소비자는 「보고서가 안 나왔다」와 「원래 오늘 안 도는 타입이다」를 구분할 수 없다.
-   * 비용 원장은 대안이 못 된다 — agy 백엔드로 도는 타입은 Claude 세션 비용이 0이라
-   * 원장에 흔적이 아예 없다(2026-08-18 실측: competitors는 단 한 번도 없음).
-   * ⚠️ 그 예시는 이제 옛일이다 — 2026-09-08 부터 agy 위임 기본값이 비어 있어
-   * competitors 도 Claude 로 돈다. **근거는 그대로다**: `ANALYSIS_AGY_TYPES` 로
-   * 언제든 다시 agy 로 보낼 수 있어 원장은 여전히 구멍 뚫린 신호원이다.
+   * 비용 원장은 대안이 못 된다 — 폴백(codex)이 받은 회차는 Claude 세션 비용이 0이라
+   * 원장에 흔적이 없다(2026-08-18 실측: 그때 agy 로 돌던 competitors 는 단 한 번도 없었다).
+   * agy 위임 경로는 5단계(2026-10)에 걷었다 — agy 는 폴백으로만 쓴다.
    *
    * plan 1줄 + 타입별 outcome 1줄 append. 그룹 도중 죽어도 「계획 N vs 기록 M」으로
    * 중단이 드러난다 — rate limit이 그룹 전체를 break하는 경로가 정확히 그 모양이라,
@@ -2793,13 +2790,6 @@ export class AssistantScheduler {
       return { rateLimited: false, timedOut: false, costUsd: 0 };
     }
 
-    // 외부 정보 수집 분석(ai-practice, competitors)은 agy로 위임 — 6/15 이후
-    // Agent SDK $100 크레딧 풀 보존. agy는 세션 resume 미지원이므로 retry 시는
-    // 기존 SDK/CLI 경로로 자연 폴백.
-    if (!resumeSessionId && this.shouldUseAgy(type)) {
-      return this.runAgyAnalysis(type, promptPath);
-    }
-
     const prompt = (nudged ? AssistantScheduler.NUDGE_PREAMBLE : '')
       + fs.readFileSync(promptPath, 'utf-8');
     const defaults = this.config!.analysis.defaults;
@@ -2933,71 +2923,6 @@ export class AssistantScheduler {
     }
 
     return { rateLimited: false, timedOut: false, sessionId: result.sessionId, costUsd: result.costUsd };
-  }
-
-  /**
-   * agy(외부 모델)로 위임할 분석 type 여부. **기본은 아무것도 안 보낸다.**
-   *
-   * 예전 기본값은 `ai-practice,competitors` 였고 사유는 「Agent SDK $100 크레딧
-   * 풀 보존」이었다. 그 크레딧 정책은 2026-06-22 에 번복돼 시행되지 않았으므로
-   * 사유가 없어졌다. 게다가 agy 가 주는 Claude 는 4.6 세대뿐이라 그 경로에는
-   * 최신 모델이 아예 없다.
-   *
-   * 실제로 품질 대가를 치렀다 — 2026-09-05 경쟁도구 보고서가 벤더 원문에 없는
-   * 제품명(「Open JSON Interfaces」)을 지어냈고, 그 산출물은 노션으로 발행된다.
-   *
-   * 되돌리려면 `ANALYSIS_AGY_TYPES=ai-practice,competitors` (콤마 구분).
-   */
-  private shouldUseAgy(type: string): boolean {
-    const raw = process.env.ANALYSIS_AGY_TYPES ?? '';
-    return raw.split(',').map(s => s.trim()).filter(Boolean).includes(type);
-  }
-
-  private async runAgyAnalysis(
-    type: string,
-    promptPath: string,
-  ): Promise<AnalysisRunResult> {
-    const dateStr = new Date().toISOString().substring(0, 10);
-    const outDir = path.join(this.workingDir, 'reports', type);
-    const outPath = path.join(outDir, `.agy-raw-${dateStr}.txt`);
-    const sessionId = `agy-${dateStr}-${type}`;
-
-    this.logger.info('Running agy analysis', { type, promptPath, outPath });
-
-    try {
-      const result = await runAgy({
-        promptPath,
-        workingDirectory: this.workingDir,
-        outPath,
-        timeoutSeconds: 600,
-        quietSecs: 30,
-        logger: this.logger,
-      });
-
-      this.logger.info('agy analysis completed', {
-        type,
-        via: 'agy',
-        sessionId,
-        exitCode: result.exitCode,
-        durationMs: result.durationMs,
-        generatedFiles: result.generatedFiles,
-        timedOut: result.timedOut,
-      });
-
-      if (result.exitCode !== 0 || result.timedOut) {
-        errorCollector.add(
-          'AssistantScheduler',
-          `agy ${type} 실패: exitCode=${result.exitCode}, timedOut=${result.timedOut}`,
-        );
-        return { rateLimited: false, timedOut: result.timedOut, sessionId, costUsd: 0 };
-      }
-
-      return { rateLimited: false, timedOut: false, sessionId, costUsd: 0 };
-    } catch (error) {
-      this.logger.error('agy analysis exception', error);
-      errorCollector.add('AssistantScheduler', `agy ${type} 예외: ${(error as Error).message}`);
-      return { rateLimited: false, timedOut: false, costUsd: 0 };
-    }
   }
 
   // --- Date/time utilities ---
