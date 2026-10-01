@@ -230,6 +230,11 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
 {
   eq('결정할 것도 멈춘 것도 없으면 메시지 없음',
      buildDigestBlocks({ need_you: [], stuck: [], site: 'https://desk.example' }), null);
+  eq('끝난 상태만 있으면 여전히 메시지 없음',
+     buildDigestBlocks({ need_you: [], stuck: [], site: 'https://desk.example', counts: { achieved: 21, rejected: 9 } }), null);
+  // 새벽 검토가 못 돌면(한도 · 실패) 권고가 검토 대기에 쌓인다 — 세지 않으면 아침 요약이 아예 안 뜬다
+  const onlyQueued = buildDigestBlocks({ need_you: [], stuck: [], site: 'https://desk.example', counts: { queued: 3, achieved: 2 } });
+  ok('검토 대기만 있어도 요약이 뜬다', onlyQueued !== null && JSON.stringify(onlyQueued).includes('검토 대기 3건'));
   const many = Array.from({ length: 30 }, (_, i) => NOTICE(`a-20260929-${String(i + 1).padStart(2, '0')}`,
     'digest', i === 0 ? 'awaiting-second-approval' : i > 25 ? 'reject-proposed' : 'proposed',
     i > 25 ? ['reject', 'reopen'] : ['approve', 'hold', 'reject']));
@@ -304,7 +309,7 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   const maxNeed = Array.from({ length: 30 }, (_, i) => NOTICE(`a-20260930-${String(i + 1).padStart(2, '0')}`,
     'digest', i > 20 ? 'reject-proposed' : 'proposed', ['approve', 'hold', 'reject']));
   const maxStuck = Array.from({ length: 7 }, (_, i) => NOTICE(`a-20260927-${String(i + 1).padStart(2, '0')}`, 'stuck', 'executing'));
-  const biggest = buildReportReplyBlocks({ need_you: maxNeed, stuck: maxStuck, site }, 'kg', types);
+  const biggest = buildReportReplyBlocks({ need_you: maxNeed, stuck: maxStuck, site, counts: { queued: 5 } }, 'kg', types);
   ok(`최대 요약 + 링크도 50블록 안 (${biggest.length})`, biggest.length <= 50);
 
   // 옛 보고서 훑기가 남아 있지 않은가 — 다시 들어오면 브리핑 뒤 「보고서 확인」 버튼이 되살아난다

@@ -76,6 +76,8 @@ export interface FlowDigest {
   need_you: FlowNotice[];
   stuck: FlowNotice[];
   site: string;
+  /** 상태별 제안 수 — `queued` 는 새벽 검토가 아직 못 본 권고. */
+  counts?: Record<string, number>;
   error?: string;
 }
 
@@ -257,7 +259,11 @@ export function buildNoticeBlocks(n: FlowNotice): unknown[] {
 export function buildDigestBlocks(d: FlowDigest): unknown[] | null {
   const need = d.need_you || [];
   const stuck = d.stuck || [];
-  if (!need.length && !stuck.length) return null;
+  // **검토 대기도 센다.** 새벽 검토가 못 돌면(사용량 한도 · 실패) 권고가 여기 쌓이는데, 결정 필요도
+  // 멈춤도 아니라 세지 않으면 아침 요약이 아예 안 뜬다 — 브리핑 「📊 보고서」 절을 걷은 뒤로는 권고가
+  // 있다는 사실이 어디에도 안 보이게 된다(report-log 4단계 검토 · 2026-10-01).
+  const queued = d.counts?.queued || 0;
+  if (!need.length && !stuck.length && !queued) return null;
   const main = need.filter((n) => n.state !== 'reject-proposed');
   const rejects = need.filter((n) => n.state === 'reject-proposed');
   const blocks: unknown[] = [{
@@ -267,9 +273,14 @@ export function buildDigestBlocks(d: FlowDigest): unknown[] | null {
       text: `*🗂 처리 제안* — 결정 필요 ${main.length}건`
         + (rejects.length ? ` · 폐기 제안 ${rejects.length}건` : '')
         + (stuck.length ? ` · 멈춤 ${stuck.length}건` : '')
+        + (queued ? ` · 검토 대기 ${queued}건` : '')
         + ` · <${d.site}/actions/|desk 에서 보기>`,
     },
   }];
+  if (queued) {
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text:
+      '검토 대기 = 새벽 검토(업무일 02:00~07:00)가 아직 못 본 권고 · 아침마다 남아 있으면 검토가 멈춘 것(사용량 한도 · 실패)' }] });
+  }
   let shown = 0;
   for (const n of main) {
     if (shown >= DIGEST_MAX_ITEMS) break;
