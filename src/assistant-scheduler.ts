@@ -363,6 +363,55 @@ export interface AnalysisRunResult {
   servedBy?: Backend;
 }
 
+// ── report-log 회차 (5단계 — 쓰는 쪽) ────────────────────────────────
+//
+// 저장 주체는 스탠리 하나다(report-log `docs/stage5-plan.md` 「쓰는 흐름」). 스탠리가 회차를
+// 열어 임시 파일 경로를 받고 → 세션 · 러너는 그 파일에 쓰기만 하고 → 스탠리가 결과에 따라
+// 저장한다. 예정일 · 파일 이름은 스케줄이 정한다(모델이 정하지 않는다).
+
+/** 회차의 시작 방식. `retry` 는 원래 회차를 못 연 채 재시도 큐에서 처음 돌 때만 쓴다. */
+export type RunTrigger = 'scheduled' | 'retry' | 'manual';
+
+/** 열린 회차 하나 — `report_log.py open` 의 답. */
+export interface ReportRun {
+  runId: string;
+  /** 임시 파일 — 세션 · 러너가 여기에 쓴다. */
+  out: string;
+  type: string;
+  slot: string;
+}
+
+/** 분석 한 종을 돌릴 때의 회차 문맥. 회차를 못 열었으면 `run` 이 없다(예정일은 남는다). */
+export interface AnalysisCtx {
+  slot: string;
+  run: ReportRun | null;
+}
+
+/** 시각의 한국 날짜(YYYY-MM-DD). 봇이 도는 PC 의 시간대와 무관하게 +9시간으로 센다. */
+export function kstDate(d: Date): string {
+  return new Date(d.getTime() + 9 * 3600_000).toISOString().slice(0, 10);
+}
+
+/** 날짜(YYYY-MM-DD)를 며칠 옮긴다. */
+export function shiftDate(ymdText: string, days: number): string {
+  const t = Date.parse(`${ymdText}T00:00:00Z`) + days * 86_400_000;
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+/** 재시도 큐 한 칸. **회차를 같이 들고 간다** — 재시도 · 이어받기 · 다른 날 재시도가 같은 회차를 쓴다. */
+interface RetryEntry {
+  type: string;
+  /** 있으면 그 세션을 이어받는다(한도에 걸린 당사자). 없으면 새로 돌린다. */
+  sessionId?: string;
+  run?: ReportRun | null;
+}
+
+/** 스케줄러가 밖에서 받는 것 — 시험이 가짜로 바꾼다. */
+export interface SchedulerDeps {
+  /** report-log 명령(`runReportLog` 와 같은 모양). 실패도 `{ error }` 로 — 던지지 않는다. */
+  reportLog?: (script: 'flow' | 'report_log', args: string[]) => Promise<any>;
+}
+
 export interface SpawnOpts {
   workingDirectory: string;
   model?: string;
@@ -538,6 +587,9 @@ export class AssistantScheduler {
   // Cost tracking
   private costEntries: CostEntry[] = [];
 
+  /** report-log 명령 — 분석 회차를 열고 저장하는 길. 시험은 `deps.reportLog` 로 바꾼다. */
+  private readonly reportLog: NonNullable<SchedulerDeps['reportLog']>;
+
   private logger = new Logger('AssistantScheduler');
   private holidays = new Holidays('KR');
 
@@ -550,7 +602,9 @@ export class AssistantScheduler {
      * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
      */
     private askFromBoard?: (text: string, lead?: string, shown?: string) => Promise<void>,
+    deps: SchedulerDeps = {},
   ) {
+    this.reportLog = deps.reportLog ?? runReportLog;
     this.configPath = path.join(configDir, 'config.json');
     this.promptsDir = path.join(configDir, 'prompts');
     this.workingDir = path.resolve(configDir, '..');
@@ -649,8 +703,11 @@ export class AssistantScheduler {
       if (!this.config.analysis.types[type].enabled) {
         return `⚠️ Analysis type '${type}' is disabled.`;
       }
+      // 수동 실행은 `manual` 회차 · 예정일은 오늘(한국 날짜) — `-analyze <종류>` 와 로컬 `POST /trigger` 가 이 길이다.
+      const slot = kstDate(new Date());
       try {
-        const result = await this.runSingleAnalysis(type);
+        const run = await this.openReportRun(type, slot, 'manual');
+        const result = await this.runSingleAnalysis(type, undefined, false, { slot, run });
         // **처리한 백엔드를 같이 적는다** — Codex 가 받은 회차를 Claude 경로 확인으로 읽지 않게.
         const by = ` · 처리 ${result.servedBy ?? '(세션 없음)'}`;
         if (result.timedOut) return `⏱️ 분석 타임아웃: ${type}${by}`;
@@ -667,7 +724,8 @@ export class AssistantScheduler {
     const defaultTypes = groups.get(defaultSchedule) || [];
     if (defaultTypes.length === 0) return '⚠️ No types in default schedule.';
 
-    await this.runAnalysisGroup(defaultSchedule, defaultTypes);
+    // 그룹 수동 실행도 `manual` 회차 · 예정일은 오늘 — 예약 회차와 섞이지 않게.
+    await this.runAnalysisGroup(defaultSchedule, defaultTypes, { slot: kstDate(new Date()), trigger: 'manual' });
     return '✅ 분석 실행 완료 — 결과는 위 메시지 참고';
   }
 
@@ -2424,9 +2482,12 @@ export class AssistantScheduler {
       nextFire: nextFire.toISOString(),
     });
 
+    // **예정일은 예약 발화 시각의 한국 날짜다** — 실제로 돈 시각이 아니다. 자정 회차가
+    // 늦게 깨거나 그룹이 자정을 넘겨도 그 회차의 날짜는 그대로다.
+    const slot = kstDate(nextFire);
     const timer = setTimeout(async () => {
       try {
-        await this.runAnalysisGroup(schedule, types);
+        await this.runAnalysisGroup(schedule, types, { slot, trigger: 'scheduled' });
       } catch (error) {
         this.logger.error('Analysis run failed', { schedule, error });
       }
@@ -2493,7 +2554,31 @@ export class AssistantScheduler {
     }
   }
 
-  private async runAnalysisGroup(schedule: string, types: string[]): Promise<void> {
+  /**
+   * report-log 회차를 연다 — 「쓰는 흐름」 1번. 못 열면 `null` 이고 사유를 남긴다.
+   *
+   * 못 열었다고 여기서 멈추지 않는다 — 러너 종류는 데이터 작업이 보고서보다 먼저라 러너는
+   * 그대로 띄우고, 세션은 프롬프트의 `{{REPORT_OUT}}` 을 못 채워 안 띄운다(남은 `{{` 거부).
+   */
+  private async openReportRun(type: string, slot: string, trigger: RunTrigger): Promise<ReportRun | null> {
+    const r = await this.reportLog('report_log', ['open', '--type', type, '--slot', slot, '--trigger', trigger]);
+    if (!r || r.error || typeof r.run_id !== 'string' || typeof r.out !== 'string') {
+      const why = String(r?.error ?? '답 없음');
+      this.logger.error('report-log 회차를 못 열었습니다', { type, slot, trigger, why });
+      errorCollector.add('AssistantScheduler', `회차 열기 실패 (${type} ${slot}): ${why.slice(0, 200)}`);
+      return null;
+    }
+    this.logger.info('report-log 회차 열림', { type, slot, trigger, runId: r.run_id });
+    return { runId: r.run_id, out: r.out, type, slot };
+  }
+
+  /**
+   * 분석 그룹 한 번. `origin` 이 예정일과 시작 방식이다 — 예약이면 그 그룹의 예약 발화
+   * 시각(`nextFire`)의 한국 날짜와 `scheduled`, 수동이면 오늘과 `manual`.
+   */
+  private async runAnalysisGroup(
+    schedule: string, types: string[], origin: { slot: string; trigger: RunTrigger },
+  ): Promise<void> {
     if (!this.config) return;
 
     const isDaily = schedule.startsWith('daily');
@@ -2507,7 +2592,8 @@ export class AssistantScheduler {
     // 돌린다(중단 때문에 **아예 못 돈** 뒤쪽 타입). 둘을 한 큐에 담아야 중단과
     // 재개가 대칭이 된다 — 예전에는 당사자만 큐에 들어가서, 뒤쪽 타입은 재시도
     // 대상에도 안 들고 저널에도 안 남아 그 주 산출물이 통째로 사라졌다.
-    const failedRetryTypes: { type: string; sessionId?: string }[] = [];
+    // 칸마다 회차를 들고 간다 — 재시도 · 이어받기 · 다른 날 재시도가 같은 회차를 쓴다.
+    const failedRetryTypes: RetryEntry[] = [];
     /** 중단 때문에 못 돈 타입 — 종료 메시지에 그대로 적는다. */
     let deferredTypes: string[] = [];
     /** 리미트 해제 시각(epoch sec) — 있으면 재시도를 그 시각 기준으로 잡는다. */
@@ -2536,6 +2622,8 @@ export class AssistantScheduler {
     this.appendAnalysisJournal(schedule, {
       kind: 'plan',
       schedule,
+      slot: origin.slot,
+      trigger: origin.trigger,
       planned: runnableTypes,
       skipped: skippedTypes,
     });
@@ -2545,10 +2633,14 @@ export class AssistantScheduler {
       const maxRetries = (typeConfig?.maxRetries as number | undefined)
         ?? defaults.maxRetries ?? 2;
 
+      // 회차는 첫 시도 전에 한 번 연다 — 같은 종류의 다음 시도(타임아웃 · 오류 재시도)는
+      // 같은 회차를 다시 쓴다. 열기가 실패했으면 다음 시도에서 다시 연다.
+      let run: ReportRun | null = null;
       let succeeded = false;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-          const result = await this.runSingleAnalysis(type);
+          run = run ?? await this.openReportRun(type, origin.slot, origin.trigger);
+          const result = await this.runSingleAnalysis(type, undefined, false, { slot: origin.slot, run });
 
           if (result.timedOut) {
             if (attempt < maxRetries) {
@@ -2558,7 +2650,7 @@ export class AssistantScheduler {
             this.logger.error(`Analysis ${type} timed out after ${attempt + 1} attempts`);
             errorCollector.add('AssistantScheduler', `분석 타임아웃 (${type}): ${maxRetries}회 재시도 후 포기`);
             timedOutTypes.push(type);
-            this.appendAnalysisJournal(schedule, { kind: 'outcome', type, outcome: 'timeout' });
+            this.appendAnalysisJournal(schedule, { kind: 'outcome', type, outcome: 'timeout', runId: run?.runId });
             break;
           }
 
@@ -2574,22 +2666,25 @@ export class AssistantScheduler {
             // 이 경우 큐가 비어 그 타입이 조용히 빠졌다.
             if (shouldRetry) {
               failedRetryTypes.push(result.sessionId
-                ? { type, sessionId: result.sessionId }
-                : { type });
+                ? { type, sessionId: result.sessionId, run }
+                : { type, run });
             }
             // **뒤쪽 타입도 같은 큐에 넣는다.** 리미트는 그룹 전체를 끊는데
             // 재시도는 당사자만 돌리던 비대칭이 2026-08-22에 보고서 4종을
             // 통째로 날렸다(kg-regression 광역 게이트 포함). 못 돈 것은
             // 「나중에 돌 것」이지 「없던 일」이 아니다.
+            // 못 돈 뒤쪽 타입의 회차도 지금 연다(예정일 · 시작 방식은 이 그룹 것) — 재시도가 그
+            // 회차를 쓰고, 재시작으로 재시도 예약이 사라져도 열린 회차가 남아 정리 작업(sweep)이
+            // 그 공백을 기록한다.
             if (shouldRetry) {
               deferredTypes = runnableTypes.slice(runnableTypes.indexOf(type) + 1);
-              for (const rest of deferredTypes) failedRetryTypes.push({ type: rest });
+              for (const rest of deferredTypes) failedRetryTypes.push({ type: rest, run: await this.openReportRun(rest, origin.slot, origin.trigger) });
             }
             if (result.resetsAt) limitResetsAt = result.resetsAt;
             this.appendAnalysisJournal(schedule, {
               kind: 'outcome', type, outcome: 'rate_limited',
               sessionId: result.sessionId, willRetry: shouldRetry,
-              deferred: deferredTypes,
+              deferred: deferredTypes, runId: run?.runId,
             });
             break; // Stop remaining types in this group (rate limit affects all)
           }
@@ -2599,7 +2694,7 @@ export class AssistantScheduler {
             // (리미트가 아니라 그룹을 끊을 이유가 없다).
             noOutputTypes.push(type);
             this.appendAnalysisJournal(schedule, {
-              kind: 'outcome', type, outcome: 'no-output', sessionId: result.sessionId,
+              kind: 'outcome', type, outcome: 'no-output', sessionId: result.sessionId, runId: run?.runId,
             });
             break;
           }
@@ -2608,14 +2703,14 @@ export class AssistantScheduler {
           // Claude 가 아닌 백엔드가 받았으면 이름 옆에 적는다 — 「완료」가 어느 경로였는지 보이게.
           completedTypes.push(result.servedBy && result.servedBy !== 'claude'
             ? `${type}(${result.servedBy})` : type);
-          this.appendAnalysisJournal(schedule, { kind: 'outcome', type, outcome: 'completed' });
+          this.appendAnalysisJournal(schedule, { kind: 'outcome', type, outcome: 'completed', runId: run?.runId });
           break;
         } catch (error) {
           const msg = (error as Error).message || '';
           if (isRateLimitText(msg)) {
             this.logger.warn(`Analysis ${type} hit rate limit, stopping group`);
             this.appendAnalysisJournal(schedule, {
-              kind: 'outcome', type, outcome: 'rate_limited', viaThrow: true,
+              kind: 'outcome', type, outcome: 'rate_limited', viaThrow: true, runId: run?.runId,
             });
             break;
           }
@@ -2626,7 +2721,7 @@ export class AssistantScheduler {
           errorCollector.add('AssistantScheduler', `분석 실행 실패 (${type}): ${msg}`);
           this.logger.error(`Analysis failed for type: ${type}`, error);
           this.appendAnalysisJournal(schedule, {
-            kind: 'outcome', type, outcome: 'error', error: msg.slice(0, 300),
+            kind: 'outcome', type, outcome: 'error', error: msg.slice(0, 300), runId: run?.runId,
           });
           break;
         }
@@ -2663,7 +2758,6 @@ export class AssistantScheduler {
       const retryTime = limitResetsAt
         ? new Date(Math.max(Date.now() + 60_000, limitResetsAt * 1000 + 5 * 60_000))
         : this.getNextHourPlus5Min();
-      const msUntil = retryTime.getTime() - Date.now();
       const retryTypes = failedRetryTypes.map(f => f.type);
 
       this.logger.info('Scheduling retry for session-limited types', {
@@ -2678,57 +2772,77 @@ export class AssistantScheduler {
         + ` → ${retryTime.toLocaleTimeString('ko-KR')} 재시도 예정`,
       ).catch(() => {});
 
-      const retryTimerKey = `retry-${schedule}`;
-      const retryTimer = setTimeout(async () => {
-        this.analysisTimers.delete(retryTimerKey);
-        // **재시도 결과도 저널에 남긴다.** 예전에는 재시도가 저널에 아무것도 안
-        // 적어서, 감시 검사(M12)가 재시도로 살아난 타입까지 「무기록」으로 셌다.
-        const done: string[] = [];
-        const failed: string[] = [];
-        let stoppedAt = -1;
-        for (let i = 0; i < failedRetryTypes.length; i++) {
-          const { type, sessionId } = failedRetryTypes[i];
-          try {
-            this.logger.info(`Retrying analysis: ${type}`, { sessionId });
-            const r = await this.runSingleAnalysis(type, sessionId);
-            const outcome = r.rateLimited ? 'rate_limited'
-              : r.timedOut ? 'timeout'
-              : r.noOutput ? 'no-output'
-              : 'completed';
-            (outcome === 'completed' ? done : failed).push(type);
-            this.appendAnalysisJournal(schedule, {
-              kind: 'outcome', type, outcome, viaRetry: true, sessionId: r.sessionId,
-            });
-            // **또 막히면 거기서 멈춘다.** 큐에 잔여 타입까지 담게 되면서 큐 길이가
-            // 1 에서 최대 그룹 크기로 늘었는데, 한도가 아직 안 풀린 상태로 전부
-            // 돌리면 그만큼을 그대로 낭비한다. 한 번 막히면 그 시점의 한도는
-            // 나머지에도 똑같이 걸린다.
-            if (r.rateLimited) { stoppedAt = i; break; }
-          } catch (error) {
-            failed.push(type);
-            this.logger.error(`Retry failed for: ${type}`, error);
-            this.appendAnalysisJournal(schedule, {
-              kind: 'outcome', type, outcome: 'error', viaRetry: true,
-              error: ((error as Error).message || '').slice(0, 300),
-            });
-          }
-        }
-        // 멈춘 뒤로 아예 손도 안 댄 것 — 저널에 남기지 않는다(무기록이 곧
-        // M12 의 「그룹 중단」 신호다). 다만 사람에게는 적는다.
-        const notTried = stoppedAt >= 0
-          ? failedRetryTypes.slice(stoppedAt + 1).map(f => f.type) : [];
-        // **성공한 것만 완료라고 적는다.** 예전에는 무엇이 어찌 됐든 「재시도 완료」
-        // 한 줄이라, 아무 일도 안 한 회차가 성공으로 읽혔다(2026-08-22).
-        const lines = [`📊 재시도 완료: ${done.join(', ') || '(없음)'}`];
-        if (failed.length > 0) lines.push(`⚠️ 재시도 실패: ${failed.join(', ')}`);
-        if (notTried.length > 0) {
-          lines.push(`🚧 한도가 안 풀려 미시도: ${notTried.join(', ')}`);
-        }
-        await this.sendMessage(lines.join('\n')).catch(() => {});
-      }, msUntil);
-
-      this.analysisTimers.set(retryTimerKey, retryTimer);
+      this.scheduleAnalysisRetry(schedule, origin, failedRetryTypes, retryTime);
     }
+  }
+
+  /** 한도로 멈춘 그룹의 재시도를 예약한다 — 큐의 칸마다 회차를 같이 들고 간다. */
+  private scheduleAnalysisRetry(
+    schedule: string, origin: { slot: string; trigger: RunTrigger }, queue: RetryEntry[], retryTime: Date,
+  ): void {
+    const retryTimerKey = `retry-${schedule}`;
+    const retryTimer = setTimeout(() => {
+      this.analysisTimers.delete(retryTimerKey);
+      this.runAnalysisRetry(schedule, origin, queue).catch((error) =>
+        this.logger.error('Analysis retry failed', { schedule, error }));
+    }, Math.max(0, retryTime.getTime() - Date.now()));
+    this.analysisTimers.set(retryTimerKey, retryTimer);
+  }
+
+  /**
+   * 재시도 큐를 돈다. **원래 회차 · 원래 예정일을 그대로 쓴다** — 재시도가 다른 날 돌아도
+   * 그 보고서는 원래 예정일의 판이다.
+   */
+  private async runAnalysisRetry(
+    schedule: string, origin: { slot: string; trigger: RunTrigger }, queue: RetryEntry[],
+  ): Promise<void> {
+    // **재시도 결과도 저널에 남긴다.** 예전에는 재시도가 저널에 아무것도 안
+    // 적어서, 감시 검사(M12)가 재시도로 살아난 타입까지 「무기록」으로 셌다.
+    const done: string[] = [];
+    const failed: string[] = [];
+    let stoppedAt = -1;
+    for (let i = 0; i < queue.length; i++) {
+      const { type, sessionId } = queue[i];
+      // 원래 회차를 못 열었던 칸만 여기서 연다 — 그때만 시작 방식이 `retry` 다.
+      let run = queue[i].run ?? null;
+      try {
+        this.logger.info(`Retrying analysis: ${type}`, { sessionId, runId: run?.runId });
+        run = run ?? await this.openReportRun(type, origin.slot, 'retry');
+        const r = await this.runSingleAnalysis(type, sessionId, false, { slot: origin.slot, run });
+        const outcome = r.rateLimited ? 'rate_limited'
+          : r.timedOut ? 'timeout'
+          : r.noOutput ? 'no-output'
+          : 'completed';
+        (outcome === 'completed' ? done : failed).push(type);
+        this.appendAnalysisJournal(schedule, {
+          kind: 'outcome', type, outcome, viaRetry: true, sessionId: r.sessionId, runId: run?.runId,
+        });
+        // **또 막히면 거기서 멈춘다.** 큐에 잔여 타입까지 담게 되면서 큐 길이가
+        // 1 에서 최대 그룹 크기로 늘었는데, 한도가 아직 안 풀린 상태로 전부
+        // 돌리면 그만큼을 그대로 낭비한다. 한 번 막히면 그 시점의 한도는
+        // 나머지에도 똑같이 걸린다.
+        if (r.rateLimited) { stoppedAt = i; break; }
+      } catch (error) {
+        failed.push(type);
+        this.logger.error(`Retry failed for: ${type}`, error);
+        this.appendAnalysisJournal(schedule, {
+          kind: 'outcome', type, outcome: 'error', viaRetry: true,
+          error: ((error as Error).message || '').slice(0, 300), runId: run?.runId,
+        });
+      }
+    }
+    // 멈춘 뒤로 아예 손도 안 댄 것 — 저널에 남기지 않는다(무기록이 곧
+    // M12 의 「그룹 중단」 신호다). 다만 사람에게는 적는다.
+    const notTried = stoppedAt >= 0
+      ? queue.slice(stoppedAt + 1).map(f => f.type) : [];
+    // **성공한 것만 완료라고 적는다.** 예전에는 무엇이 어찌 됐든 「재시도 완료」
+    // 한 줄이라, 아무 일도 안 한 회차가 성공으로 읽혔다(2026-08-22).
+    const lines = [`📊 재시도 완료: ${done.join(', ') || '(없음)'}`];
+    if (failed.length > 0) lines.push(`⚠️ 재시도 실패: ${failed.join(', ')}`);
+    if (notTried.length > 0) {
+      lines.push(`🚧 한도가 안 풀려 미시도: ${notTried.join(', ')}`);
+    }
+    await this.sendMessage(lines.join('\n')).catch(() => {});
   }
 
   /** Calculate next hour + 5 minutes (retry buffer). */
@@ -2801,10 +2915,15 @@ export class AssistantScheduler {
   private static readonly NUDGE_PREAMBLE =
     '[지시] 아래는 지금 실행할 절차다. 되묻지 말고 첫 단계부터 수행한다.\n\n';
 
+  /**
+   * 분석 한 종 한 번. `ctx` 는 회차 문맥이다 — 예정일과 열린 회차(못 열었으면 `null`).
+   * 없으면 오늘 날짜 · 회차 없음으로 돈다(시험 · 옛 호출).
+   */
   private async runSingleAnalysis(
     type: string,
     resumeSessionId?: string,
     nudged = false,
+    ctx: AnalysisCtx = { slot: kstDate(new Date()), run: null },
   ): Promise<AnalysisRunResult> {
     const promptPath = path.join(this.promptsDir, `analysis-${type}.md`);
     if (!fs.existsSync(promptPath)) {
@@ -2876,6 +2995,9 @@ export class AssistantScheduler {
 
     this.logger.info('Analysis session completed', {
       type,
+      slot: ctx.slot,
+      runId: ctx.run?.runId,
+      servedBy: result.servedBy,
       subtype: result.subtype,
       costUsd: result.costUsd.toFixed(4),
       via: useSdk ? 'sdk' : 'cli',
@@ -2902,7 +3024,7 @@ export class AssistantScheduler {
           type, subtype: result.subtype, textPreview: result.text?.substring(0, 200),
         });
         recordEvent('analysis-askback', { type, retried: true });
-        return this.runSingleAnalysis(type, undefined, true);
+        return this.runSingleAnalysis(type, undefined, true, ctx);
       }
       // 두 번째도 빈손 — 성공으로 적지 않는다. 저널의 `no-output` 이 M12 보다 하루 먼저
       // 「이 회차는 아무것도 안 했다」를 말해 준다.

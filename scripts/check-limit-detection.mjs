@@ -144,11 +144,16 @@ if (!/for \(const rest of deferredTypes\) failedRetryTypes\.push\(/.test(group))
   fails.push('잔여 타입이 재시도 큐에 안 들어간다 — 중단만 하고 재개를 안 한다');
 if (!group.includes('중단으로 미실행'))
   fails.push('종료 메시지가 미실행 타입을 안 적는다 — 계획 대비 누락이 안 보인다');
+// 재시도 본문은 `runAnalysisRetry()` 로 뽑았다(5단계 — 큐가 회차를 들고 간다). 그룹이
+// 그것을 실제로 예약하는지부터 본다 — 뽑아 두기만 하고 안 부르면 재개가 통째로 빠진다.
+if (!group.includes('this.scheduleAnalysisRetry('))
+  fails.push('runAnalysisGroup() 이 재시도를 예약하지 않는다 — 중단만 하고 재개를 안 한다');
+const retry = body(sched, 'runAnalysisRetry');
 // 큐가 1건에서 그룹 크기로 늘었으므로, 재시도 때 또 막히면 거기서 멈춰야 한다.
 // 안 멈추면 한도가 안 풀린 창에서 그룹 전체를 그대로 낭비한다.
-if (!/if \(r\.rateLimited\) \{ stoppedAt = i; break; \}/.test(group))
+if (!/if \(r\.rateLimited\) \{ stoppedAt = i; break; \}/.test(retry))
   fails.push('재시도가 또 막혀도 안 멈춘다 — 한도 미해제 창에서 큐 전체를 낭비한다');
-if (!group.includes('한도가 안 풀려 미시도'))
+if (!retry.includes('한도가 안 풀려 미시도'))
   fails.push('멈춘 뒤 손도 안 댄 타입을 사람에게 안 알린다');
 
 // ④ 산출물 백스톱 — 판정이 틀려도 일을 마친 세션은 완료로 둔다.

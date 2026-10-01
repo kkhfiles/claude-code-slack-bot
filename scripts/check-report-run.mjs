@@ -142,6 +142,109 @@ function harness({ results = [], rl = fakeReportLog(), onSpawn } = {}) {
 
 const WORKED = { text: '보고서를 썼다', costUsd: 0.01, sessionId: 's1', subtype: 'success', isError: false, toolCalls: 4 };
 
+const JOURNAL_DIR = path.join(REPO, 'reports', 'pipeline-runs');
+/** 이 스케줄의 시도 기록(저널) 줄 — 회차 번호가 실렸는지 본다. */
+function journal(schedule = 'saturday-00:00') {
+  const slug = schedule.replace(/[^A-Za-z0-9]+/g, '-');
+  const file = path.join(JOURNAL_DIR, `${S.kstDate(new Date())}-analysis-${slug}.jsonl`);
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+}
+const resetJournal = () => fs.rmSync(JOURNAL_DIR, { recursive: true, force: true });
+const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '--slot'), argOf(c, '--trigger')]);
+
+// ── S1 회차 열기 · 예정일 · 시작 방식 ─────────────────────────────────
+{
+  // 예정일 = 한국 날짜. 자정(한국)을 넘는 순간 날짜가 바뀐다.
+  eq('한국 자정 직전은 그날', S.kstDate(new Date('2026-10-02T14:59:59Z')), '2026-10-02');
+  eq('한국 자정이면 다음 날', S.kstDate(new Date('2026-10-02T15:00:00Z')), '2026-10-03');
+  eq('날짜 옮기기 — 7일 전', S.shiftDate('2026-10-03', -7), '2026-09-26');
+  eq('날짜 옮기기 — 달 넘김', S.shiftDate('2026-03-01', -1), '2026-02-28');
+}
+{
+  // 예약 그룹의 예정일은 **예약 발화 시각(nextFire)의 한국 날짜** — 실제로 돈 시각이 아니다.
+  // 어제 23:59:30(한국)으로 잡힌 회차가 오늘 돌아도 예정일은 어제다.
+  const today = S.kstDate(new Date());
+  const lateFire = new Date(Date.parse(`${today}T00:00:00+09:00`) - 30_000);
+  const { sched } = harness();
+  let calls = 0;
+  sched.getNextAnalysisTime = () => (calls++ === 0 ? lateFire : new Date(Date.now() + 86_400_000));
+  const got = [];
+  sched.runAnalysisGroup = async (schedule, types, origin) => { got.push(origin); };
+  sched.scheduleAnalysisGroup('saturday-00:00', ['probe']);
+  await new Promise((r) => setTimeout(r, 50));
+  sched.stop();
+  eq('예약 그룹은 nextFire 의 한국 날짜 · scheduled 로 돈다', got, [{ slot: S.kstDate(lateFire), trigger: 'scheduled' }]);
+  ok('(전제) 늦게 깬 회차라 오늘 날짜와 다르다', S.kstDate(lateFire) !== today);
+}
+{
+  // 그룹 — 첫 시도 전에 연다 · 타임아웃 재시도는 같은 회차를 쓴다.
+  resetJournal();
+  const order = [];
+  const rl = fakeReportLog();
+  const fn = rl.fn;
+  rl.fn = async (script, args) => { if (args[0] === 'open') order.push(`open:${argOf(args, '--type')}`); return fn(script, args); };
+  const { sched, spawns } = harness({
+    rl,
+    results: [{ ...WORKED, subtype: 'error_timeout' }, WORKED, WORKED],
+    onSpawn: () => order.push('spawn'),
+  });
+  await sched.runAnalysisGroup('saturday-00:00', ['probe', 'second'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('세션 셋(타임아웃 재시도 포함)', spawns.length, 3);
+  eq('회차는 종류마다 한 번 — 재시도가 새로 안 연다',
+    opensOf(rl), [['probe', '2026-10-03', 'scheduled'], ['second', '2026-10-03', 'scheduled']]);
+  eq('여는 것이 첫 시도보다 먼저', order, ['open:probe', 'spawn', 'spawn', 'open:second', 'spawn']);
+  const j = journal();
+  eq('계획 줄에 예정일 · 시작 방식', j.filter((r) => r.kind === 'plan').map((r) => [r.slot, r.trigger]), [['2026-10-03', 'scheduled']]);
+  eq('결과 줄에 회차 번호', j.filter((r) => r.kind === 'outcome').map((r) => [r.type, r.runId]),
+    [['probe', '2026-10-03-probe-r1'], ['second', '2026-10-03-second-r2']]);
+}
+{
+  // 한도 → 재시도 큐가 회차를 들고 간다 · 못 돈 뒤쪽 종류도 회차를 연다 · 재시도는 새로 안 연다.
+  resetJournal();
+  const rl = fakeReportLog();
+  const LIMITED = { ...WORKED, sessionId: 'sL', rateLimited: true, rateLimitResetsAt: Math.floor(Date.now() / 1000) + 600 };
+  const { sched, spawns } = harness({ rl, results: [WORKED, LIMITED, WORKED, WORKED] });
+  let captured = null;
+  sched.scheduleAnalysisRetry = (schedule, origin, queue, when) => { captured = { schedule, origin, queue, when }; };
+  await sched.runAnalysisGroup('saturday-00:00', ['probe', 'second', 'third'], { slot: '2026-10-03', trigger: 'scheduled' });
+  ok('재시도를 예약했다', !!captured);
+  eq('큐 — 당사자는 세션 · 회차 · 뒤쪽은 회차만',
+    captured && captured.queue.map((q) => [q.type, q.sessionId ?? null, q.run && q.run.runId]),
+    [['second', 'sL', '2026-10-03-second-r2'], ['third', null, '2026-10-03-third-r3']]);
+  eq('못 돈 뒤쪽 종류도 원래 예정일 · 시작 방식으로 연다', opensOf(rl).at(-1), ['third', '2026-10-03', 'scheduled']);
+  const opensBefore = rl.of('open').length;
+  // 재시도가 다른 날 돈다고 쳐도 — 같은 회차 · 같은 예정일.
+  await sched.runAnalysisRetry(captured.schedule, captured.origin, captured.queue);
+  eq('재시도는 회차를 새로 안 연다', rl.of('open').length, opensBefore);
+  eq('당사자는 이어받는다', [spawns[2].prompt, spawns[2].opts.resumeSessionId], ['continue', 'sL']);
+  eq('재시도 결과 줄도 원래 회차 번호',
+    journal().filter((r) => r.viaRetry).map((r) => [r.type, r.runId]),
+    [['second', '2026-10-03-second-r2'], ['third', '2026-10-03-third-r3']]);
+}
+{
+  // 원래 회차를 못 연 칸 — 재시도에서 처음 열 때만 `retry` · 예정일은 원래 것.
+  const rl = fakeReportLog();
+  const { sched } = harness({ rl, results: [WORKED] });
+  await sched.runAnalysisRetry('saturday-00:00', { slot: '2026-10-03', trigger: 'scheduled' }, [{ type: 'probe', run: null }]);
+  eq('회차 없는 칸은 retry 로 연다', opensOf(rl), [['probe', '2026-10-03', 'retry']]);
+}
+{
+  // 수동 — 단일 · 그룹 모두 manual · 오늘(한국 날짜).
+  const today = S.kstDate(new Date());
+  const rl = fakeReportLog();
+  const { sched } = harness({ rl, results: [WORKED] });
+  await sched.runAnalysisManual('probe');
+  eq('-analyze <종류> 는 manual · 오늘', opensOf(rl), [['probe', today, 'manual']]);
+
+  const rl2 = fakeReportLog();
+  const { sched: g } = harness({ rl: rl2, results: [WORKED, WORKED, WORKED, WORKED] });
+  await g.runAnalysisManual();
+  eq('-analyze(그룹)도 manual · 오늘', [...new Set(opensOf(rl2).map((o) => `${o[1]} ${o[2]}`))], [`${today} manual`]);
+  eq('그룹 수동은 기본 스케줄의 종류마다 연다', opensOf(rl2).map((o) => o[0]).sort(),
+    ['kg-regression', 'probe', 'second', 'third']);
+}
+
 // ── S6 처리 백엔드 — servedBy ───────────────────────────────────────
 {
   // 1차가 해냄 → claude
@@ -204,5 +307,5 @@ if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 분석 회차 쓰는 길 (처리 백엔드 · agy 위임 경로 걷힘)');
+  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 처리 백엔드 · agy 위임 경로 걷힘)');
 }
