@@ -476,6 +476,30 @@ export function analysisWritable(writablePaths: string[], tmpDir: string): strin
   return [...writablePaths.filter((p) => !old(p)), slashPath(tmpDir)];
 }
 
+/** 회차를 세션 · 러너에 알리는 환경 변수(약속: `REPORT_RUN` · `REPORT_OUT` · `REPORT_SLOT` · `REPORT_TYPE`). */
+export function reportRunEnv(run: ReportRun): Record<string, string> {
+  return { REPORT_RUN: run.runId, REPORT_OUT: run.out, REPORT_SLOT: run.slot, REPORT_TYPE: run.type };
+}
+
+/**
+ * 러너를 띄울 인자 · 폴더 · 환경. `--date <예정일>` 은 늘 붙인다 — 러너의 중복 기동 가드가 그
+ * 날짜로 판단한다(다른 날 재시도가 그날 것을 새로 띄우지 않게). 회차가 있으면 `REPORT_*` 로
+ * 알리고(러너는 기계본을 그 임시 파일에 쓰고 저장하지 않는다), 없으면 지운다 — 러너의 명령줄
+ * 진입점이 스스로 회차를 연다.
+ */
+export function runnerLaunch(
+  spec: { argv: string[]; cwdSub?: string }, workingDir: string, ctx: AnalysisCtx,
+): { args: string[]; cwd: string; env: NodeJS.ProcessEnv } {
+  const env: NodeJS.ProcessEnv = { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' };
+  for (const k of ['REPORT_RUN', 'REPORT_OUT', 'REPORT_SLOT', 'REPORT_TYPE']) delete env[k];
+  if (ctx.run) Object.assign(env, reportRunEnv(ctx.run));
+  return {
+    args: ['-X', 'utf8', ...spec.argv, '--date', ctx.slot],
+    cwd: spec.cwdSub ? path.join(workingDir, spec.cwdSub) : workingDir,
+    env,
+  };
+}
+
 /** 경로를 `/` 로 — 세션이 Bash 로 넘길 때 역슬래시가 이스케이프로 먹히지 않게(윈도에서도 파이썬 · Write 는 `/` 를 받는다). */
 export function slashPath(p: string): string {
   return p.replace(/\\/g, '/');
@@ -2146,16 +2170,20 @@ export class AssistantScheduler {
    * 지우지 않아도 안전하고, 재시도 회차에서 다시 불러도 무해하다. Best-effort —
    * 던지지 않는다(기동 실패도 세션은 돌아야 한다).
    */
-  private launchPipelineRunner(type: string, spec: { argv: string[]; cwdSub?: string }): Promise<void> {
+  private launchPipelineRunner(
+    type: string, spec: { argv: string[]; cwdSub?: string }, ctx: AnalysisCtx,
+  ): Promise<void> {
+    // 회차(`REPORT_*`)와 예정일(`--date`)을 넘긴다 — `runnerLaunch` 주석.
+    const launch = runnerLaunch(spec, this.workingDir, ctx);
     return new Promise((resolve) => {
       const proc = spawn(
         'python',
-        ['-X', 'utf8', ...spec.argv],
+        launch.args,
         {
-          cwd: spec.cwdSub ? path.join(this.workingDir, spec.cwdSub) : this.workingDir,
+          cwd: launch.cwd,
           stdio: ['ignore', 'pipe', 'pipe'],
           shell: process.platform === 'win32',
-          env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
+          env: launch.env,
           windowsHide: true,
         },
       );
@@ -2183,7 +2211,8 @@ export class AssistantScheduler {
         const out = (stdout.trim() || stderr.trim());
         this.logger.info('Pipeline runner pre-launched', {
           type,
-          argv: spec.argv.join(' '),
+          argv: launch.args.slice(2).join(' '),
+          runId: ctx.run?.runId ?? null,
           code: code ?? -1,
           // 「detach 실행 pid=」면 이번에 띄운 것이고 「띄우지 않는다」면 이미 떠 있던 것이다.
           out: out.slice(0, 300),
@@ -3164,7 +3193,7 @@ export class AssistantScheduler {
     // (러너 가드가 「이미 진행 중」이면 안 띄우므로, 첫 회차가 못 띄웠을 때만 뜬다).
     const prelaunch = AssistantScheduler.RUNNER_PRELAUNCH_BY_TYPE[type];
     if (prelaunch) {
-      await this.launchPipelineRunner(type, prelaunch);
+      await this.launchPipelineRunner(type, prelaunch, ctx);
     }
 
     // **프롬프트 자리를 채운다** — 이어받는 회차는 `'continue'` 한 낱말이라 채울 것이 없다.
@@ -3204,7 +3233,9 @@ export class AssistantScheduler {
           + AssistantScheduler.SCHEDULED_SESSION_DIRECTIVE,
         additionalDirectories: tmpOpen,
         fallbackScope: { cwd: this.workingDir, writable: [...codexWritableDirs(), ...tmpOpen] },
-        env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1' },
+        // 회차를 세션에도 알린다(audit.py 처럼 세션이 부르는 스크립트가 `REPORT_OUT` 을 읽는다).
+        // Codex 폴백은 환경 변수를 못 받으므로 프롬프트 본문의 `{{REPORT_OUT}}` 이 정본이다.
+        env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1', ...(ctx.run ? reportRunEnv(ctx.run) : {}) },
         resumeSessionId,
         skipMcp: true,
         maxDurationMs: maxDurationMinutes * 60_000,

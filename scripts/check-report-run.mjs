@@ -8,7 +8,7 @@
  *
  *   - 회차 열기 · 예정일(예약 발화 시각의 한국 날짜) · 재시도는 같은 회차 · 수동은 오늘
  *   - 프롬프트 자리 치환 · 남은 `{{` 면 세션을 안 띄움
- *   - 쓰기 범위(임시 파일 폴더) · 저장 시점 · 「썼나」 판정 · 저장 시점 · 처리 백엔드
+ *   - 쓰기 범위(임시 파일 폴더) · 저장 시점 · 「썼나」 판정 · 저장 시점 · 러너 환경 · 처리 백엔드
  *   - 러너 미리 띄우기의 환경 변수 · `--date` · 월요일 보고의 `{{WEEK_INPUT}}`
  *   - agy 위임 경로가 걷혔나
  *
@@ -541,6 +541,39 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   eq('수동도 저장한다', rl.of('commit').length, 1);
 }
 
+// ── S7 러너 미리 띄우기 — 환경 변수 · --date ────────────────────────
+{
+  const run = { runId: 'r-ds', out: path.join(STATE, 'tmp', 'r-ds.md'), type: 'data-sync', slot: '2026-10-03' };
+  const spec = { argv: ['-m', 'batch.kg_regression_weekly', '--detach'], cwdSub: 'mycelium' };
+  const L = S.runnerLaunch(spec, REPO, { slot: '2026-10-03', run });
+  eq('인자 — 원래 argv 뒤에 --date <예정일>', L.args, ['-X', 'utf8', '-m', 'batch.kg_regression_weekly', '--detach', '--date', '2026-10-03']);
+  eq('폴더 — cwdSub', L.cwd, path.join(REPO, 'mycelium'));
+  eq('환경 — 회차 넷', [L.env.REPORT_RUN, L.env.REPORT_OUT, L.env.REPORT_SLOT, L.env.REPORT_TYPE],
+    ['r-ds', run.out, '2026-10-03', 'data-sync']);
+  eq('환경 — 파이썬 설정은 그대로', [L.env.PYTHONDONTWRITEBYTECODE, L.env.PYTHONIOENCODING], ['1', 'utf-8']);
+  // 회차가 없으면 REPORT_* 를 지운다 — 바깥 환경에 남은 값이 새지 않게(러너가 스스로 연다)
+  process.env.REPORT_OUT = path.join(TMP, '바깥에-남은-값.md');
+  try {
+    const L2 = S.runnerLaunch(spec, REPO, { slot: '2026-10-03', run: null });
+    eq('회차 없음 → REPORT_* 없음 · --date 는 있음', [L2.env.REPORT_OUT, L2.env.REPORT_RUN, L2.args.at(-1)], [undefined, undefined, '2026-10-03']);
+  } finally {
+    delete process.env.REPORT_OUT;
+  }
+
+  // 분석 한 번 — 러너를 회차 문맥으로 띄우고, 세션에도 회차를 알린다
+  const h = harness({ results: [writes('# 판정본\n')] });
+  const runK = { runId: 'r-kgr2', out: path.join(STATE, 'tmp', 'r-kgr2.md'), type: 'kg-regression', slot: '2026-10-03' };
+  await h.sched.runSingleAnalysis('kg-regression', undefined, false, { slot: '2026-10-03', run: runK });
+  eq('러너 종류는 회차 문맥으로 띄운다', h.launches.map(([t, sp, ctx]) => [t, sp.argv.at(-1), ctx.slot, ctx.run && ctx.run.runId]),
+    [['kg-regression', '--detach', '2026-10-03', 'r-kgr2']]);
+  const env = h.spawns[0].opts.env;
+  eq('세션 환경에도 회차', [env.REPORT_RUN, env.REPORT_OUT, env.REPORT_SLOT, env.REPORT_TYPE],
+    ['r-kgr2', runK.out, '2026-10-03', 'kg-regression']);
+  const h2 = harness({ results: [writes('# s\n')] });
+  await h2.sched.runSingleAnalysis('second', undefined, false, { slot: '2026-10-03', run: { ...runK, type: 'second' } });
+  eq('러너 없는 종류는 안 띄운다', h2.launches.length, 0);
+}
+
 // ── S6 처리 백엔드 — servedBy ───────────────────────────────────────
 {
   // 1차가 해냄 → claude
@@ -602,5 +635,5 @@ if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 「썼나」 판정 · 저장 시점 · 처리 백엔드 · agy 위임 경로 걷힘)');
+  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 「썼나」 판정 · 저장 시점 · 러너 환경 · 처리 백엔드 · agy 위임 경로 걷힘)');
 }
