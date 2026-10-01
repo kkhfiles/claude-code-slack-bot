@@ -142,6 +142,20 @@ function harness({ results = [], rl = fakeReportLog(), onSpawn } = {}) {
 
 const WORKED = { text: '보고서를 썼다', costUsd: 0.01, sessionId: 's1', subtype: 'success', isError: false, toolCalls: 4 };
 
+/** 프롬프트에 박힌 회차 임시 파일 경로(`{{REPORT_OUT}}` 자리) — 가짜 세션이 거기에 쓴다. */
+const outIn = (prompt) => {
+  const tmp = path.join(STATE, 'tmp').replace(/\\/g, '/');
+  const m = new RegExp(`${tmp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/[^\\s]+?\\.md`).exec(prompt || '');
+  return m ? m[0] : null;
+};
+/** 가짜 세션 — 받은 프롬프트의 임시 파일에 `body` 를 쓰고 `result` 를 돌려준다. */
+const writes = (body, result = WORKED) => (prompt) => {
+  const out = outIn(prompt);
+  if (!out) throw new Error('프롬프트에 임시 파일 경로가 없다');
+  fs.writeFileSync(out, body, 'utf-8');
+  return { ...result };
+};
+
 const JOURNAL_DIR = path.join(REPO, 'reports', 'pipeline-runs');
 /** 이 스케줄의 시도 기록(저널) 줄 — 회차 번호가 실렸는지 본다. */
 function journal(schedule = 'saturday-00:00') {
@@ -362,6 +376,42 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
   }
 }
 
+// ── S5 「썼나」 판정 — 회차 임시 파일 ─────────────────────────────────
+{
+  const dir = path.join(STATE, 'tmp');
+  const put = (name, body, ageMs = 0) => {
+    const p = path.join(dir, name);
+    fs.writeFileSync(p, body, 'utf-8');
+    if (ageMs) { const t = new Date(Date.now() - ageMs); fs.utimesSync(p, t, t); }
+    return p;
+  };
+  const since = Date.now();
+  ok('없는 파일은 안 냄', !S.reportProduced(path.join(dir, '없음.md'), since));
+  ok('세션 시작 뒤 쓴 본문은 냄', S.reportProduced(put('p-a.md', '# 보고서\n본문\n'), since));
+  ok('세션 시작 전 파일(앞 세션 · 앞 시도)은 안 냄', !S.reportProduced(put('p-b.md', '# 옛것\n본문\n', 3_600_000), since));
+  ok('빈 파일은 안 냄', !S.reportProduced(put('p-c.md', '  \n'), since));
+  ok('머리말만 있으면 안 냄', !S.reportProduced(put('p-d.md', '---\ntype: x\n---\n\n'), since));
+  ok('대기 표식이 남은 기계본은 안 냄', !S.reportProduced(put('p-e.md', `# 기계본\n${S.PENDING_MARK}\n`), since));
+  ok('자리표시자가 남은 본문은 안 냄', !S.reportProduced(put('p-f.md', '# kg-health\n_(filled in by analysis-kg-health prompt)_\n'), since));
+}
+{
+  // 러너 종류 — 러너가 세션 도중 기계본을 썼는데(시각은 새것) 세션이 한도로 끊김 → 「안 냄」 · 이어받기.
+  const LIM = { ...WORKED, sessionId: 'sK', rateLimited: true, rateLimitResetsAt: Math.floor(Date.now() / 1000) + 600 };
+  const run = { runId: 'r-kgr', out: path.join(STATE, 'tmp', 'r-kgr.md'), type: 'kg-regression', slot: '2026-10-03' };
+  const h = harness({ results: [writes(`# 기계본\n${S.PENDING_MARK}\n수치\n`, LIM)] });
+  const r = await h.sched.runSingleAnalysis('kg-regression', undefined, false, { slot: '2026-10-03', run });
+  eq('러너 종류 — 대기 표식이 남으면 한도 그대로(이어받음)', [r.rateLimited, r.produced], [true, false]);
+  const h2 = harness({ results: [writes('# 판정본\n수치 · 판정\n', LIM)] });
+  const r2 = await h2.sched.runSingleAnalysis('kg-regression', undefined, false, { slot: '2026-10-03', run });
+  eq('대기 표식을 지운 판정본이면 백스톱이 완료로', [r2.rateLimited, r2.produced], [false, true]);
+  // 회차가 없으면(못 엶) 낸 것이 없다
+  const h3 = harness({ results: [WORKED] });
+  writePrompt('second', '# second\n\n고정 문구 — 자리 없음\n');
+  const r3 = await h3.sched.runSingleAnalysis('second', undefined, false, { slot: '2026-10-03', run: null });
+  eq('회차가 없으면 produced=false', r3.produced, false);
+  writePrompt('second', '# second\n\n보고서를 {{REPORT_OUT}} 에 쓴다. 예정일 {{SLOT}}.\n');
+}
+
 // ── S6 처리 백엔드 — servedBy ───────────────────────────────────────
 {
   // 1차가 해냄 → claude
@@ -372,10 +422,9 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
   // 1차가 도구 0회로 실패 → codex 가 받음 → codex
   const realCodex = wa.codexSession;
   // codex 가 보고서를 남겼다고 친다 — 안 남기면 도구 0회 재시도(되물음)가 Claude 로 다시 돈다.
-  wa.codexSession = async () => {
-    const dir = path.join(REPO, 'reports', 'scheduled-reports', 'probe');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'codex.md'), '# codex 보고서\n', 'utf-8');
+  wa.codexSession = async (prompt) => {
+    const out = outIn(prompt);
+    if (out) fs.writeFileSync(out, '# codex 보고서\n', 'utf-8');
     return 'codex 가 썼다';
   };
   try {
@@ -424,5 +473,5 @@ if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 처리 백엔드 · agy 위임 경로 걷힘)');
+  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 「썼나」 판정 · 처리 백엔드 · agy 위임 경로 걷힘)');
 }

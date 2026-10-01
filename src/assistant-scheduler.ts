@@ -144,7 +144,7 @@ export function boardQueueDailyCalls(): number {
 const MAIL_POLL_MS = 600_000;
 const MAIL_POLL_FROM_HOUR = 8;
 const MAIL_POLL_TO_HOUR = 20;
-/** 보고서 파일 시각을 세션 시작과 견줄 때의 여유 — `reportWrittenSince` 참조. */
+/** 보고서 파일 시각을 세션 시작과 견줄 때의 여유 — `reportProduced` 참조. */
 const MTIME_SLACK_MS = 50;
 /**
  * 시각 알림을 보는 간격. **이 값이 곧 늦게 울릴 수 있는 최대 시간이다** —
@@ -330,11 +330,6 @@ export interface AssistantConfig {
       sessionBudgetUsd?: number;
       maxDurationMinutes?: number;
       maxRetries?: number;
-      /** 이 타입의 보고서가 떨어지는 디렉터리 이름. 생략하면 타입 이름과 같다.
-       *  둘이 갈리는 타입이 있어서 둔다(`product-docs-sync` → `product-docs`).
-       *  같은 값을 파이썬 쪽 감시 검사도 읽는다 — 규칙을 두 곳에서 추측하면
-       *  한쪽이 조용히 틀린다(M12가 그렇게 3종을 상시 오탐했다). */
-      reportDir?: string;
       [key: string]: unknown;
     }>;
   };
@@ -361,6 +356,8 @@ export interface AnalysisRunResult {
   resetsAt?: number;
   /** 이 회차를 처리한 백엔드(`SessionResult.servedBy`). 세션을 안 띄웠으면 없다. */
   servedBy?: Backend;
+  /** 이번 세션이 보고서를 냈나(`reportProduced`) — 저장 때 `--partial` 을 가른다. */
+  produced?: boolean;
 }
 
 // ── report-log 회차 (5단계 — 쓰는 쪽) ────────────────────────────────
@@ -396,6 +393,37 @@ export function kstDate(d: Date): string {
 export function shiftDate(ymdText: string, days: number): string {
   const t = Date.parse(`${ymdText}T00:00:00Z`) + days * 86_400_000;
   return new Date(t).toISOString().slice(0, 10);
+}
+
+/** 러너가 쓴 기계본 표식 — 판정 세션이 지운다. report-log `PENDING_MARK` 와 같은 글자. */
+export const PENDING_MARK = '<!-- judgment: pending -->';
+/** 판정 세션이 채워야 하는 자리표시자가 남았다는 표식 — report-log `INCOMPLETE_MARKERS` 와 같다. */
+const INCOMPLETE_MARKERS = ['_(filled in by'];
+const FRONT_MATTER_RE = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
+
+/**
+ * **이번 세션이 보고서를 냈나** — 「썼나」 판정. 셋 다 맞아야 한다.
+ *
+ *   - 임시 파일 수정 시각 ≥ 세션 시작 — 존재만 보면 앞 시도 · 앞 세션이 남긴 것을 이번 성과로 센다
+ *   - 머리말을 뺀 본문이 있음
+ *   - 대기 표식 · 자리표시자가 없음 — 러너가 쓴 기계본(대기 표식)이나 audit 의 빈 해설
+ *     (자리표시자)은 세션이 판정을 얹기 **전** 모양이다. report-log 가 `complete` 로 저장할
+ *     본문만 「냈다」로 친다(그쪽 `status_of` 와 같은 규칙 — 두 곳의 판정이 갈리지 않게).
+ *
+ * 감시가 감시 대상을 죽이면 안 되므로 어떤 예외도 밖으로 내보내지 않는다(못 읽으면 「안 냄」).
+ */
+export function reportProduced(out: string, sinceMs: number): boolean {
+  try {
+    // 여유 50ms — 파일 시각이 시계보다 이르게 찍힌다(실측 2026-09-29: 시계를 읽고 바로 쓴 파일
+    // 2,000번 중 481번이 최대 1.52ms 앞섬). 없으면 세션 직후 쓴 보고서를 「전 것」으로 읽는다.
+    if (fs.statSync(out).mtimeMs < sinceMs - MTIME_SLACK_MS) return false;
+    const body = fs.readFileSync(out, 'utf-8').replace(FRONT_MATTER_RE, '');
+    if (!body.trim()) return false;
+    if (body.includes(PENDING_MARK)) return false;
+    return !INCOMPLETE_MARKERS.some((k) => body.includes(k));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -2929,42 +2957,6 @@ export class AssistantScheduler {
     return next;
   }
 
-  /** 이 타입의 보고서가 떨어지는 디렉터리 이름 (config 우선, 없으면 타입 이름). */
-  private reportDirFor(type: string): string {
-    const configured = this.config?.analysis.types[type]?.reportDir;
-    return typeof configured === 'string' && configured ? configured : type;
-  }
-
-  /**
-   * `sinceMs` 이후에 쓰인 이 타입의 보고서를 찾아 경로를 돌려준다(없으면 null).
-   *
-   * **존재만으로는 근거가 못 된다** — 사람이 같은 창에 수동으로 돌려 둔 파일이
-   * 그대로 걸린다. 그래서 세션 시작 시각을 기준선으로 받아 그 뒤에 쓰인 것만 센다.
-   * 감시가 감시 대상을 죽이면 안 되므로 어떤 예외도 밖으로 내보내지 않는다.
-   */
-  private reportWrittenSince(type: string, sinceMs: number): string | null {
-    const dir = this.reportDirFor(type);
-    for (const base of [
-      path.join(this.workingDir, 'reports', 'scheduled-reports', dir),
-      path.join(this.workingDir, 'reports', 'archived', dir),
-    ]) {
-      try {
-        if (!fs.existsSync(base)) continue;
-        for (const name of fs.readdirSync(base)) {
-          if (!name.toLowerCase().endsWith('.md')) continue;
-          const full = path.join(base, name);
-          // 여유 50ms — 파일 시각이 시계보다 이르게 찍힌다(실측 2026-09-29: 시계를 읽고 바로 쓴 파일
-          // 2,000번 중 481번이 최대 1.52ms 앞섬). 없으면 세션 직후 쓴 보고서를 「전 것」으로 읽는다.
-          if (fs.statSync(full).mtimeMs >= sinceMs - MTIME_SLACK_MS) return full;
-        }
-      } catch {
-        // 읽기 실패는 「산출물 없음」으로 두고 넘어간다 — 백스톱이 판정을
-        // 뒤집는 쪽이라, 못 읽었을 때는 원래 판정을 살리는 것이 안전하다.
-      }
-    }
-    return null;
-  }
-
   /**
    * 예약 세션에 붙는 시스템 프롬프트 한 줄 — **사람이 없다는 것을 모델에게 말한다.**
    *
@@ -3115,8 +3107,11 @@ export class AssistantScheduler {
     );
 
     this.recordSessionCost(`analysis-${type}`, result);
-    /** 돌려줄 때마다 붙는 것 — 세션 번호 · 비용 · 처리한 백엔드. */
-    const base = { sessionId: result.sessionId, costUsd: result.costUsd, servedBy: result.servedBy };
+    // 「썼나」 — 회차 임시 파일이 이 세션 시작 뒤에 판정까지 된 본문으로 쓰였나(`reportProduced`).
+    // 회차가 없으면(못 엶) 낸 것이 없다.
+    const produced = ctx.run ? reportProduced(ctx.run.out, startedAtMs) : false;
+    /** 돌려줄 때마다 붙는 것 — 세션 번호 · 비용 · 처리한 백엔드 · 냈나. */
+    const base = { sessionId: result.sessionId, costUsd: result.costUsd, servedBy: result.servedBy, produced };
 
     this.logger.info('Analysis session completed', {
       type,
@@ -3142,8 +3137,7 @@ export class AssistantScheduler {
     // 0 으로 읽으면 두 번 돈다 — `spawnOrFallback` 과 같은 규칙). 보고서 검사는 codex
     // 폴백(`toolCalls: 0` 으로 돌아온다)이 이미 보고서를 남긴 경우를 거른다.
     // 이어받는 회차는 안 한다 — 그 프롬프트는 `'continue'` 한 낱말이다.
-    if (!resumeSessionId && result.toolCalls === 0 && !result.isError
-        && !this.reportWrittenSince(type, startedAtMs)) {
+    if (!resumeSessionId && result.toolCalls === 0 && !result.isError && !produced) {
       if (!nudged) {
         this.logger.warn('분석 세션이 도구 0회로 끝났다(되물음) — 머리말 붙여 1회 재시도', {
           type, subtype: result.subtype, textPreview: result.text?.substring(0, 200),
@@ -3175,12 +3169,12 @@ export class AssistantScheduler {
     // **산출물 백스톱** — 판정이 무엇을 잘못 보든, 이번 세션이 보고서를 남겼으면
     // 그 세션은 일을 마친 것이다. 「성공으로 기록됨 ≠ 일을 마쳤음」의 반대 방향.
     // 시작 시각 이후에 쓰인 파일만 인정한다 — 그냥 존재만 보면 사람이 같은 창에
-    // 수동으로 돌려 둔 것을 이 세션의 성과로 착각한다.
+    // 수동으로 돌려 둔 것을 이 세션의 성과로 착각한다. 러너 종류는 대기 표식이 남아 있으면
+    // (기계본만 있고 판정 전) 낸 것이 아니다 — 그대로 한도로 두어 이어받게 한다.
     if (flaggedLimit) {
-      const produced = this.reportWrittenSince(type, startedAtMs);
       if (produced) {
         this.logger.warn('리미트로 찍혔지만 이번 세션이 보고서를 남겼다 — 완료로 처리', {
-          type, produced, subtype: result.subtype, rateLimitEvent: result.rateLimited === true,
+          type, out: ctx.run?.out, subtype: result.subtype, rateLimitEvent: result.rateLimited === true,
         });
         return { rateLimited: false, timedOut: false, ...base };
       }

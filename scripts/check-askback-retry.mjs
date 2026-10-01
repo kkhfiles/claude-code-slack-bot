@@ -135,17 +135,31 @@ function harness(results) {
 
 // ── ③-c 도구 0회여도 보고서를 남겼으면(codex 폴백 모양) → 재시도 안 함 ─
 {
-  const dir = path.join(root, 'reports', 'scheduled-reports', 'probe');
-  fs.mkdirSync(dir, { recursive: true });
+  // 5단계 — 보고서는 report-log 회차 임시 파일에 쓴다. 「썼나」 는 그 파일을 본다.
+  const out = path.join(rlState, 'tmp', 'r-askback.md');
+  const run = { runId: 'r-askback', out, type: 'probe', slot: '2026-09-12' };
   const { sched, calls } = harness([() => {
     // 세션이 도는 동안 보고서가 쓰였다고 치자.
-    fs.writeFileSync(path.join(dir, '2026-09-12.md'), '# probe\n', 'utf-8');
+    fs.writeFileSync(out, '# probe\n', 'utf-8');
     return ASKED;
   }]);
-  const r = await sched.runSingleAnalysis('probe');
+  const r = await sched.runSingleAnalysis('probe', undefined, false, { slot: '2026-09-12', run });
   eq('보고서가 있으면 도구 0회여도 한 번만', calls.length, 1);
   ok('완료로 돌아온다', !r.noOutput);
-  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(out, { force: true });
+}
+
+// ── ③-d 앞 세션이 남긴 파일은 이번 성과가 아니다 → 재시도 한다 ─
+{
+  const out = path.join(rlState, 'tmp', 'r-askback-old.md');
+  fs.writeFileSync(out, '# 앞 시도가 남긴 것\n', 'utf-8');
+  const past = new Date(Date.now() - 3_600_000);
+  fs.utimesSync(out, past, past);
+  const run = { runId: 'r-askback-old', out, type: 'probe', slot: '2026-09-12' };
+  const { sched, calls } = harness([ASKED, WORKED]);
+  await sched.runSingleAnalysis('probe', undefined, false, { slot: '2026-09-12', run });
+  eq('세션 시작 전에 쓰인 파일은 안 센다 — 재시도', calls.length, 2);
+  fs.rmSync(out, { force: true });
 }
 
 delete process.env.WORK_EVENTS_FILE;
@@ -157,6 +171,6 @@ if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 되물음 재시도 (도구 0회는 머리말로 1회 재시도 · 두 번 빈손은 noOutput · '
+  console.log('통과 — 되물음 재시도 (도구 0회는 머리말로 1회 재시도 · 두 번 빈손은 noOutput · 앞 세션 파일은 안 셈 · '
     + '모름·이어받기·보고서 있음은 안 함 · 예약 실행 지시가 시스템 프롬프트에 붙음)');
 }

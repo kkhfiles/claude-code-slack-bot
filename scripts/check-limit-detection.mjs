@@ -156,14 +156,21 @@ if (!/if \(r\.rateLimited\) \{ stoppedAt = i; break; \}/.test(retry))
 if (!retry.includes('한도가 안 풀려 미시도'))
   fails.push('멈춘 뒤 손도 안 댄 타입을 사람에게 안 알린다');
 
-// ④ 산출물 백스톱 — 판정이 틀려도 일을 마친 세션은 완료로 둔다.
-if (!body(sched, 'runSingleAnalysis').includes('reportWrittenSince('))
+// ④ 산출물 백스톱 — 판정이 틀려도 일을 마친 세션은 완료로 둔다. 5단계부터 「썼나」 는
+//    report-log 회차 임시 파일을 본다(`reportProduced` — 옛 `reportWrittenSince` 를 대신함).
+if (!body(sched, 'runSingleAnalysis').includes('reportProduced('))
   fails.push('산출물 백스톱이 빠졌다 — 보고서를 낸 세션이 리미트로 찍힐 수 있다');
 // 없으면 **보고**한다. 여기서 던지면 앞서 모은 위반이 화면에 못 뜬 채로 죽는다.
-if (!sched.includes('private reportWrittenSince('))
-  fails.push('reportWrittenSince() 가 없다 — 산출물 백스톱 자체가 빠졌다');
-else if (!body(sched, 'reportWrittenSince').includes('mtimeMs'))
-  fails.push('백스톱이 파일 존재만 본다 — 사람이 수동으로 돌려 둔 것을 성과로 센다');
+const prodHead = sched.indexOf('export function reportProduced(');
+if (prodHead < 0) {
+  fails.push('reportProduced() 가 없다 — 산출물 백스톱 자체가 빠졌다');
+} else {
+  const prod = sched.slice(prodHead, sched.indexOf('\n}\n', prodHead));
+  if (!prod.includes('mtimeMs'))
+    fails.push('백스톱이 파일 존재만 본다 — 앞 세션 · 사람이 남긴 것을 이번 성과로 센다');
+  if (!prod.includes('PENDING_MARK'))
+    fails.push('백스톱이 대기 표식을 안 본다 — 러너가 쓴 기계본을 세션 성과로 센다');
+}
 
 if (fails.length) {
   console.log(`실패 ${fails.length}건\n`);
