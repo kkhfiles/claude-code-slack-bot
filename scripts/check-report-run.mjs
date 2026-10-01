@@ -790,6 +790,66 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   ok('로컬 서버 트리거가 runAnalysisTrigger 를 부른다', cb.includes('scheduler.runAnalysisTrigger(type)'));
 }
 
+// ── S13 열린 채 남은 회차 정리 — 한 시간마다 sweep --older-than 6 ─────────
+{
+  // 한 차례 — 인자 · 결과 기록 · 실패해도 안 던짐
+  const swept = { swept: [
+    { run_id: 'a', id: 'cli-usage/2026-10-03', action: 'committed', status: 'partial', commit: 'c1' },
+    { run_id: 'b', id: 'probe/2026-10-03', action: 'abandoned' },
+    { run_id: 'c', id: 'kg-health/2026-10-03', action: 'error', error: 'git 실패 시험' },
+  ], recent: 1, pushed: true };
+  const rl = fakeReportLog();
+  const fn = rl.fn;
+  rl.fn = async (script, args) => (args[0] === 'sweep' ? (rl.calls.push([script, ...args]), swept) : fn(script, args));
+  const { sched } = harness({ rl });
+  errorCollector.getAndClear();
+  const got = await sched.sweepReportRuns();
+  eq('sweep 은 --older-than 6 으로 부른다', rl.of('sweep').map((c) => c.slice(1)), [['sweep', '--older-than', '6']]);
+  eq('결과를 돌려준다', got && got.swept.length, 3);
+  ok('항목 실패는 시스템 이슈로', errorCollector.getAndClear().some((e) => e.message.includes('kg-health/2026-10-03')));
+
+  const rlErr = fakeReportLog();
+  rlErr.fn = async () => ({ error: '잠금을 120초 안에 못 얻음', code: 'lock' });
+  const h2 = harness({ rl: rlErr });
+  let threw = null;
+  try { await h2.sched.sweepReportRuns(); } catch (e) { threw = e; }
+  ok('명령 실패에도 안 던진다', threw === null);
+  ok('명령 실패는 시스템 이슈로', errorCollector.getAndClear().some((e) => e.message.includes('회차 정리(sweep) 실패')));
+  const h3 = harness({ rl: { ...rlErr, fn: async () => { throw new Error('터짐 시험'); } } });
+  let threw3 = null;
+  try { await h3.sched.sweepReportRuns(); } catch (e) { threw3 = e; }
+  ok('report-log 호출이 던져도 안 던진다', threw3 === null && errorCollector.getAndClear().some((e) => e.message.includes('터짐 시험')));
+
+  // 타이머 — report-log 가 있으면 한 시간 간격으로 걸고, 터지면 sweep 한 차례
+  const fakeClone = path.join(process.env.REPORT_LOG_REPO, 'tools');
+  fs.mkdirSync(fakeClone, { recursive: true });
+  fs.writeFileSync(path.join(fakeClone, 'flow.py'), '', 'utf-8');
+  const realSetInterval = globalThis.setInterval;
+  const armed = [];
+  globalThis.setInterval = (cb, ms) => { armed.push({ cb, ms }); return { unref() {} }; };
+  try {
+    const h4 = harness({ rl: fakeReportLog() });
+    let calls = 0;
+    h4.sched.sweepReportRuns = async () => { calls += 1; return null; };
+    h4.sched.startRunSweeper();
+    eq('정리 타이머는 한 시간 간격', armed.map((a) => a.ms), [3_600_000]);
+    armed[0]?.cb();
+    eq('타이머가 터지면 sweep 한 차례', calls, 1);
+  } finally {
+    globalThis.setInterval = realSetInterval;
+    fs.rmSync(fakeClone, { recursive: true, force: true });
+  }
+  // report-log 가 없으면 안 건다
+  const armed2 = [];
+  globalThis.setInterval = (cb, ms) => { armed2.push(ms); return { unref() {} }; };
+  try {
+    harness({ rl: fakeReportLog() }).sched.startRunSweeper();
+  } finally {
+    globalThis.setInterval = realSetInterval;
+  }
+  eq('report-log 클론이 없으면 정리 타이머를 안 건다', armed2, []);
+}
+
 // ── S6 처리 백엔드 — servedBy ───────────────────────────────────────
 {
   // 1차가 해냄 → claude

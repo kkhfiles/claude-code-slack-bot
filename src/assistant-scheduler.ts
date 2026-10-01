@@ -30,6 +30,17 @@ import { ActionPipeline, parseWindow, reportLogAvailable, reportLogState, runRep
 const ACTIONS_TICK_MS = 3_600_000;
 
 /**
+ * 열린 채 남은 분석 회차를 report-log 정리 작업(`sweep`)에 넘기는 간격과 기준.
+ *
+ * **6시간인 까닭** — 세션 한 번(최대 60~90분)에 러너 기다림(~2시간)을 더한 것보다 길어, 돌고 있는
+ * 회차를 닫지 않는다. 한도로 멈춘 회차가 그 사이 `partial` 로 저장돼도 손해가 없다 — 이어받은 세션이
+ * 임시 파일을 다시 쓰면 report-log 가 그 회차를 정상 저장한다(빈 임시 파일일 때만 「이미 저장」 으로
+ * 돌려준다 · partial → complete 는 허용). 처리 제안 타이머와 따로 둔다 — 처리 제안을 꺼도 정리는 돌아야 한다.
+ */
+const RUN_SWEEP_MS = 3_600_000;
+const RUN_SWEEP_OLDER_THAN_HOURS = 6;
+
+/**
  * 업무 넛지 시각. 09:00 데일리 미팅 직전이라는 것이 이 값의 전부다 —
  * 설정으로 뺄 이유가 생기면 그때 뺀다.
  */
@@ -767,6 +778,9 @@ export class AssistantScheduler {
   private remindTimer: ReturnType<typeof setInterval> | null = null;
   private remindBusy = false;
   private actionsTimer: ReturnType<typeof setInterval> | null = null;
+  private runSweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** 한 차례가 끝나기 전에 다음 차례가 겹치지 않게 — 저장 · push 가 한 시간을 넘길 일은 드물지만 막아 둔다. */
+  private runSweepBusy = false;
   private readonly actionPipeline: ActionPipeline;
   /** 이 프로세스에서 이미 보낸 알림. **자국을 못 찍었을 때의 퓨즈다** — 파일
    *  자국이 정본이고 이것은 그 자국이 실패했을 때 2분마다 같은 DM 이 무한히
@@ -1194,6 +1208,8 @@ export class AssistantScheduler {
 
     if (this.getEnabledAnalysisTypes().length > 0) {
       this.scheduleAnalysis();
+      // 분석 회차를 여는 쪽이 정리도 건다 — clearAllTimers() 가 지우므로 다시 거는 자리가 여기다.
+      this.startRunSweeper();
     }
   }
 
@@ -1242,6 +1258,10 @@ export class AssistantScheduler {
       clearInterval(this.actionsTimer);
       this.actionsTimer = null;
     }
+    if (this.runSweepTimer) {
+      clearInterval(this.runSweepTimer);
+      this.runSweepTimer = null;
+    }
     if (this.focusTimer) {
       clearTimeout(this.focusTimer);
       this.focusTimer = null;
@@ -1275,6 +1295,55 @@ export class AssistantScheduler {
         review: !!a?.nightlyReview, window, workingDay: !this.isNonWorkingDay().skip,
       });
     }, ACTIONS_TICK_MS);
+  }
+
+  /**
+   * 열린 채 남은 분석 회차 정리 — 한 시간마다 `report_log.py sweep --older-than 6`(「쓰는 흐름」 6번).
+   * 세션이 저장 전에 죽었거나 · 재시작 · 설정 저장으로 재시도 예약이 사라졌거나 · 세션이 러너보다
+   * 먼저 끝난 회차를 report-log 가 저장(`partial` · `machine`)하거나 `abandoned` 로 닫는다.
+   */
+  private startRunSweeper(): void {
+    if (!reportLogAvailable()) {
+      this.logger.info('분석 회차 정리 타이머 꺼짐 (report-log 자동 기록 클론 없음)');
+      return;
+    }
+    this.runSweepTimer = setInterval(() => { void this.sweepReportRuns(); }, RUN_SWEEP_MS);
+  }
+
+  /** 정리 한 차례. **던지지 않는다** — 실패는 로그와 브리핑 「시스템 이슈」로만 남긴다. */
+  async sweepReportRuns(): Promise<any | null> {
+    if (this.runSweepBusy) return null;
+    this.runSweepBusy = true;
+    try {
+      const r = await this.reportLog('report_log', ['sweep', '--older-than', String(RUN_SWEEP_OLDER_THAN_HOURS)]);
+      if (!r || r.error) {
+        const why = String(r?.error ?? '답 없음');
+        this.logger.error('분석 회차 정리(sweep) 실패', { why });
+        errorCollector.add('AssistantScheduler', `회차 정리(sweep) 실패: ${why.slice(0, 200)}`);
+        return r ?? null;
+      }
+      const swept: any[] = Array.isArray(r.swept) ? r.swept : [];
+      const of = (action: string) => swept.filter((x) => x?.action === action);
+      const committed = of('committed').map((x) => `${x.id}(${x.status})`);
+      const abandoned = of('abandoned').map((x) => x.id);
+      const refused = of('refused').map((x) => x.id);
+      const failed = of('error').map((x) => `${x.id}: ${String(x.error ?? '').slice(0, 120)}`);
+      if (swept.length > 0) {
+        this.logger.info('분석 회차 정리(sweep)', {
+          committed, abandoned, refused, failed, recent: r.recent, pushed: r.pushed,
+        });
+      }
+      if (failed.length > 0) {
+        errorCollector.add('AssistantScheduler', `회차 정리(sweep) 일부 실패: ${failed.join(' · ').slice(0, 300)}`);
+      }
+      return r;
+    } catch (err) {
+      this.logger.error('분석 회차 정리(sweep) 예외', err);
+      errorCollector.add('AssistantScheduler', `회차 정리(sweep) 예외: ${(err as Error).message}`);
+      return null;
+    } finally {
+      this.runSweepBusy = false;
+    }
   }
 
   /** `-report` 답 — 처리 제안 요약 + desk 보고서 링크. report-log 가 없거나 못 읽으면 null. */

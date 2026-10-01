@@ -186,6 +186,7 @@ npm test        # 빌드 + check:* 전부
     - 쓰기 범위: `~/.report-log/tmp` 를 Claude 추가 폴더 · Codex 쓰기 허용 폴더로 엶 · 시스템 문구의 쓰기 허용은 설정 `writablePaths` 에서 `reports/` 를 빼고 그 폴더를 더함
     - 「썼나」 판정(`reportProduced`): 임시 파일 수정 시각 ≥ 세션 시작 · 본문 있음 · 대기 표식(`<!-- judgment: pending -->`) · 자리표시자 없음 — 도구 0회 재시도(되물음)와 한도 백스톱이 씀 · 산출물 없음이 정상인 종류(설정 `noOutputOk: true` 또는 `mode: 'change-detection'`)는 폴백(codex)이 빈손으로 끝내도 되물음으로 안 침
     - 저장(`commitPlan`): 완료 → 저장 · 한도로 이어받을 예정 → 저장 안 함 · 마지막 시도까지 실패 → `--partial` · 임시 파일이 비었으면 `--partial` 없이 저장(report-log 가 `no-output` — 변경 없는 회차 · 되물음) · 러너 종류인데 임시 파일이 비었으면 저장 안 함(러너가 아직 씀) · `--backend` 에 처리 백엔드 · 잠금 실패는 한 번 더, 그래도 실패면 정리 작업(`sweep`) 몫
+    - 정리 작업: 한 시간마다 `report_log.py sweep --older-than 6`(`startRunSweeper` · 처리 제안 타이머와 별개 · report-log 클론이 있을 때만) — 6시간 동안 안 움직인 열린 회차를 report-log 가 `partial`·`machine` 으로 저장하거나 `abandoned` 로 닫음 · 실패는 「시스템 이슈」 · 안 던짐
     - 러너 미리 띄우기: 환경 변수 `REPORT_RUN` · `REPORT_OUT`(`/` 경로) · `REPORT_SLOT` · `REPORT_TYPE` + `--date <예정일>` · 세션 환경에도 같은 넷
     - 월요일 브리핑: `monday-briefing-extra.md` 의 `{{WEEK_INPUT}}` 을 `week-input --since <오늘-7일>` 로 채움 · 못 채우면 덧붙임 없이 브리핑 본문만 보내고 「시스템 이슈」 로 남김
     - 처리 백엔드: `SessionResult.servedBy`(`spawnOrFallback` 이 붙임) · agy 위임 경로(`ANALYSIS_AGY_TYPES`)는 없앰 — agy 는 도구 없는 회차의 폴백 사다리에서만 씀

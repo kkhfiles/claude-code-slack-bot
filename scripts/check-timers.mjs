@@ -30,6 +30,7 @@ const REGISTRAR = {
   mailPollTimer: 'startMailPoller',
   remindTimer: 'startRemindPoller',
   actionsTimer: 'startActionsTicker',
+  runSweepTimer: 'startRunSweeper',
 };
 
 /**
