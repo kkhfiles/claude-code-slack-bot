@@ -82,7 +82,7 @@ Automate daily briefings, calendar reminders, and weekly analysis reports. Requi
 
 - **Morning briefing** — Scheduled on working days, skips weekends and Korean holidays
 - **Calendar reminders** — Polls Google Calendar via MCP during working hours, dedup per event
-- **Weekly analysis** — Runs configurable analysis types (competitors, dependencies, etc.) and saves reports
+- **Weekly analysis** — Runs configurable analysis types (competitors, dependencies, etc.); each run is opened in, and saved to, a separate report store (see [Analysis runs and the report store](#analysis-runs-and-the-report-store))
 - Configure via environment variables: `ASSISTANT_DM_CHANNEL` and `ASSISTANT_CONFIG_DIR`
 
 ### Additional Features
@@ -317,7 +317,7 @@ Conversations in the same thread automatically continue the session (no command 
 | `-briefing` / `-br` | Run morning briefing now |
 | `-report [type]` / `-rp` | Action proposal summary (with decision buttons) + a link to the reports site. Reports themselves live in a separate report store, one file per run |
 | `-actions [review\|run]` | Action proposals — list the ones awaiting a decision with approve / hold / reject buttons · `review` reviews queued proposals now · `run` resumes stalled ones. The rules live in a separate repo cloned at `~/.report-log/repo` (`tools/flow.py`); without it the command reports that it is not set up. The hourly timer is the `actions` section of the assistant `config.json` |
-| `-analyze [type]` / `-an` | Run analysis (single type or all) |
+| `-analyze [type]` / `-an` | Run analysis (single type, or the default schedule group). Both are `manual` runs dated today (KST); the single-type reply names the backend that served it (`claude` / `codex`) and how the run was saved |
 | `-assistant config` / `-as config` | Show assistant configuration |
 | `-assistant briefing HH:MM` | Change briefing time |
 | `-assistant reminder N` | Change reminder lead time (minutes) |
@@ -418,7 +418,7 @@ assistant/
     "budgetUsd": 5.00,
     "defaults": {
       "allowedTools": ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "Write"],
-      "writablePaths": ["reports/"],
+      "writablePaths": [],
       "maxDurationMinutes": 60,
       "maxRetries": 2
     },
@@ -436,9 +436,24 @@ assistant/
 - `weekly` (default) — runs every firing of the analysis schedule
 - `biweekly` — runs every 14 days from `cadenceFrom` (ISO date anchor)
 - `monthly` + `monthlyWeek: "first" | "last"` — runs only on the first/last Saturday of the month
-- `mode: "change-detection"` — report file is optional (no file generated is treated as success)
+- `mode: "change-detection"` — report file is optional (no file generated is treated as success; the run is closed as `no-output`)
 
 Off-cycle types are automatically skipped at scheduled firing time.
+
+`writablePaths` lists folders (relative to the working directory) a session may write besides the report itself. The report temp folder is always added, and a bare `reports/` entry is ignored — reports no longer go there.
+
+#### Analysis runs and the report store
+
+Reports are stored in a separate report store (the `report-log` repo, cloned at `~/.report-log/repo` with its state in `~/.report-log/`; override with `REPORT_LOG_REPO` / `REPORT_LOG_STATE`). The bot is the only writer:
+
+1. **Open a run** — before a type's first attempt: `report_log.py open --type <type> --slot <date> --trigger <scheduled|manual|retry>`. The date (slot) is the KST date of the group's *scheduled* fire time, so a late wake-up or a group that runs past midnight keeps its date. Manual runs (`-analyze`, `-analyze <type>`, `POST /trigger?type=<type>` on the loopback server) use today.
+2. **Fill the prompt** — `{{REPORT_OUT}}` (the run's temp file), `{{SLOT}}`, `{{PREV_REPORT}}` / `{{AVOID_LIST}}` (`prompt-context --type`), `{{WEEK_INPUT}}` (`week-input --since <slot − 7 days>`). Values go straight into the prompt text because the Codex fallback cannot read environment variables. If any `{{` from the template is left unfilled, the session is not started and the attempt is recorded as an error.
+3. **Run** — the session (and, for runner types, the pre-launched runner, which gets `REPORT_RUN` / `REPORT_OUT` / `REPORT_SLOT` / `REPORT_TYPE` and `--date <slot>`) writes only to the temp file. The temp folder is passed as a Claude additional directory and a Codex writable directory.
+4. **Save** — by outcome: completed → `commit`; stopped by a usage limit with a retry scheduled → not saved (the retry, even on another day, reuses the same run); last attempt failed or timed out → `commit --partial`; the session only asked back → `commit` (an empty file is closed as `no-output`). A runner type whose temp file is still empty is left open for the store's `sweep`. `--backend` records who served it (`claude` / `codex`). A lock failure is retried once, then left for `sweep`.
+
+"Did the session produce the report?" (used by the ask-back retry and the usage-limit backstop) means: the temp file was modified after the session started, has a body, and carries neither the runner's `<!-- judgment: pending -->` mark nor an unfilled placeholder.
+
+On Mondays `{{WEEK_INPUT}}` in `monday-briefing-extra.md` is filled the same way (`--since` today − 7 days); if the list cannot be read, the briefing still goes out with a one-line note.
 
 Changes to `config.json` are auto-detected (file watcher, 10s interval) — no restart needed.
 

@@ -165,9 +165,9 @@ npm test        # 빌드 + check:* 전부
   - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
 - `-report [type]`/`-rp [type]`: 처리 제안 요약(🗂 · 결정 버튼) + desk 의 보고서 링크(`buildReportReplyBlocks`). 보고서 본문은 report-log 저장소에 회차별로 쌓이고 desk 사이트가 그린다 — 링크 주소는 `flow.py digest` 의 `site` 를 쓴다(이 저장소에 주소를 적지 않는다). report-log 4단계(읽는 쪽 전환)로 `reports/scheduled-reports/` 훑기 · 파일 업로드 · 매니페스트(`_status.json`) · 보관 버튼 · 브리핑 뒤 「📄 보고서 확인」 버튼을 뺐다. 이미 올라간 메시지의 옛 버튼은 처리기만 남겨 새 답이나 폐지 안내를 낸다.
-  - 로컬 HTTP 서버 (`src/report-server.ts`): 업무 칸반(`/board`)과 수동 분석 실행(`POST /trigger`)만 남음 · 127.0.0.1 바인딩, per-process 토큰(`?t=<hex>`) 인증. 옛 `/` 는 칸반으로 돌리고 `/report/…` 는 410. `index.ts`에서 `config.reports.localServer.enabled && config.assistant.configDir` 조건으로 부팅. `EADDRINUSE` 시 +5까지 재시도 후 비활성화.
+  - 로컬 HTTP 서버 (`src/report-server.ts`): 업무 칸반(`/board`)과 수동 분석 실행(`POST /trigger?type=<종류>` · `-analyze <종류>` 와 같은 `manual` 회차 · 호출은 202 만 받고 결과 한 줄은 DM 으로)만 남음 · 127.0.0.1 바인딩, per-process 토큰(`?t=<hex>`) 인증. 옛 `/` 는 칸반으로 돌리고 `/report/…` 는 410. `index.ts`에서 `config.reports.localServer.enabled && config.assistant.configDir` 조건으로 부팅. `EADDRINUSE` 시 +5까지 재시도 후 비활성화.
   - 환경변수: `REPORTS_SERVER_ENABLED` (0이면 비활성), `REPORTS_SERVER_PORT` (기본 8765)
-- `-analyze [type]`/`-an [type]`/`분석 [타입]`: 분석 수동 실행 — 타입 지정 시 단일 실행, 미지정 시 전체 실행
+- `-analyze [type]`/`-an [type]`/`분석 [타입]`: 분석 수동 실행 — 타입 지정 시 단일 실행, 미지정 시 기본 스케줄 그룹 실행 · 둘 다 `manual` 회차(예정일 = 오늘 한국 날짜) · 단일 실행 결과 메시지에 처리한 백엔드(`claude` · `codex`)와 저장 상태
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
   - `-as config`: 현재 설정 표시 (config.json 내용)
   - `-as briefing HH:MM`: 브리핑 시간 변경 → fs.watchFile이 감지하여 자동 재스케줄
@@ -176,9 +176,19 @@ npm test        # 빌드 + check:* 전부
 - 비용 제어: `--max-budget-usd` 플래그로 세션별 비용 한도, `.assistant-costs.json`에 비용 기록, 브리핑에 일간/주간/월간 통계 표시
   - `config.json`에서 `briefing.maxBudgetUsd`, `reminders.maxBudgetUsd`, `analysis.budgetUsd` 조정 가능
   - 분석: `analysis.defaults` (sessionBudgetUsd, allowedTools, writablePaths, maxDurationMinutes, maxRetries) + `analysis.types` (타입별 override) 구조
-  - 분석 cadence: 타입별 `cadence` 필드 — `weekly`(기본) / `biweekly`(`cadenceFrom`부터 14일마다) / `monthly`(`monthlyWeek: 'first' | 'last'`) — 스케줄 실행 시 `shouldRunToday()` 로 off-cycle 타입 자동 스킵. `mode: 'change-detection'`은 보고서 미생성을 정상 결과로 처리
+  - 분석 cadence: 타입별 `cadence` 필드 — `weekly`(기본) / `biweekly`(`cadenceFrom`부터 14일마다) / `monthly`(`monthlyWeek: 'first' | 'last'`) — 스케줄 실행 시 `shouldRunToday()` 로 off-cycle 타입 자동 스킵. `mode: 'change-detection'`은 보고서 미생성을 정상 결과로 처리(회차는 report-log 가 `no-output` 으로 닫음)
   - 분석 세션 타임아웃: `maxDurationMinutes` (기본 60분) 초과 시 CLI 프로세스 강제 종료, `maxRetries` (기본 2) 회 재시도 후 포기 → 다음 타입으로 진행
   - 분석 세션: 비용 한도 도달 시 `--resume`로 이어서 진행 (총 `budgetUsd` 내에서)
+  - 분석 회차와 보고서 저장 — report-log 5단계(쓰는 쪽). **저장 주체는 스탠리 하나** · 설계 정본은 report-log `docs/stage5-plan.md` 「쓰는 흐름」 · 검사 `npm run check:reportrun`
+    - 회차 열기: 종류마다 첫 시도 전에 `report_log.py open --type --slot --trigger` · 예정일 = 예약 발화 시각(`nextFire`)의 한국 날짜(늦게 깨거나 자정을 넘겨도 그대로) · 수동은 오늘
+    - 같은 회차: 타임아웃 · 오류 재시도, 한도 재시도(다른 날 포함) — 재시도 큐가 회차를 들고 감 · 한도로 못 돈 뒤쪽 종류도 그때 회차를 엶 · 원래 회차가 없던 칸만 `retry` 로 엶
+    - 프롬프트 자리: `{{REPORT_OUT}}`(임시 파일 · `/` 경로) · `{{SLOT}}` · `{{PREV_REPORT}}` · `{{AVOID_LIST}}`(`prompt-context --type`) · `{{WEEK_INPUT}}`(`week-input --since <예정일-7일>`) — 본문에 직접 넣음(Codex 폴백은 환경 변수를 못 받음) · 틀에 남은 `{{` 가 있으면 세션을 안 띄우고 오류
+    - 쓰기 범위: `~/.report-log/tmp` 를 Claude 추가 폴더 · Codex 쓰기 허용 폴더로 엶 · 시스템 문구의 쓰기 허용은 설정 `writablePaths` 에서 `reports/` 를 빼고 그 폴더를 더함
+    - 「썼나」 판정(`reportProduced`): 임시 파일 수정 시각 ≥ 세션 시작 · 본문 있음 · 대기 표식(`<!-- judgment: pending -->`) · 자리표시자 없음 — 도구 0회 재시도(되물음)와 한도 백스톱이 씀
+    - 저장(`commitPlan`): 완료 → 저장 · 한도로 이어받을 예정 → 저장 안 함 · 마지막 시도까지 실패 → `--partial` · 되물음 → 저장(비었으면 report-log 가 `no-output`) · 러너 종류인데 임시 파일이 비었으면 저장 안 함(러너가 아직 씀) · `--backend` 에 처리 백엔드 · 잠금 실패는 한 번 더, 그래도 실패면 정리 작업(`sweep`) 몫
+    - 러너 미리 띄우기: 환경 변수 `REPORT_RUN` · `REPORT_OUT` · `REPORT_SLOT` · `REPORT_TYPE` + `--date <예정일>` · 세션 환경에도 같은 넷
+    - 월요일 브리핑: `monday-briefing-extra.md` 의 `{{WEEK_INPUT}}` 을 `week-input --since <오늘-7일>` 로 채움 · 못 읽어도 브리핑은 나감
+    - 처리 백엔드: `SessionResult.servedBy`(`spawnOrFallback` 이 붙임) · agy 위임 경로(`ANALYSIS_AGY_TYPES`)는 없앰 — agy 는 도구 없는 회차의 폴백 사다리에서만 씀
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성
   2. `handleMessage()`의 명령어 분기에 추가 (stop은 help보다 먼저 체크)
