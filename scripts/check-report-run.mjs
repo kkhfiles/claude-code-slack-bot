@@ -764,6 +764,32 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   writePrompt('third', '# third\n\n보고서를 {{REPORT_OUT}} 에 쓴다. 예정일 {{SLOT}}.\n');
 }
 
+// ── S12 로컬 트리거 `?type=@group` — 기본 스케줄 그룹 수동 실행 ──────────
+{
+  writeConfig();
+  const today = S.kstDate(new Date());
+  const rl = fakeReportLog();
+  const { sched, spawns } = harness({ rl, results: [WORKED, WORKED, WORKED, WORKED] });
+  const msg = await sched.runAnalysisTrigger(S.TRIGGER_GROUP);
+  eq('@group 은 기본 스케줄 그룹 — 종류마다 manual · 오늘',
+    opensOf(rl).map((o) => o.join(' ')).sort(),
+    ['kg-regression', 'probe', 'second', 'third'].map((t) => `${t} ${today} manual`));
+  eq('@group — 세션 넷', spawns.length, 4);
+  ok(`@group — 그룹 결과 메시지 · 받음 ${msg}`, msg.includes('분석 실행 완료'));
+  eq('@group 표기', S.TRIGGER_GROUP, '@group');
+
+  const rl2 = fakeReportLog();
+  const h2 = harness({ rl: rl2, results: [writes('# probe\n')] });
+  const one = await h2.sched.runAnalysisTrigger('probe');
+  eq('그 밖은 그 종류 하나 · manual', opensOf(rl2), [['probe', today, 'manual']]);
+  ok(`종류 하나 — 단일 결과 메시지 · 받음 ${one}`, one.includes('probe') && one.includes('처리 claude'));
+
+  // 배선 — 로컬 서버 콜백이 이 입구를 부르는가(서버를 띄우면 칸반 주소 파일을 쓰므로 소스로 본다)
+  const handler = stripComments(fs.readFileSync(path.join(SRC, 'slack-handler.ts'), 'utf-8'));
+  const cb = handler.slice(handler.indexOf('setTriggerCallback('), handler.indexOf('setTriggerCallback(') + 400);
+  ok('로컬 서버 트리거가 runAnalysisTrigger 를 부른다', cb.includes('scheduler.runAnalysisTrigger(type)'));
+}
+
 // ── S6 처리 백엔드 — servedBy ───────────────────────────────────────
 {
   // 1차가 해냄 → claude

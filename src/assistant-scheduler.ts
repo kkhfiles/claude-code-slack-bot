@@ -368,6 +368,9 @@ export interface AnalysisRunResult {
 // 열어 임시 파일 경로를 받고 → 세션 · 러너는 그 파일에 쓰기만 하고 → 스탠리가 결과에 따라
 // 저장한다. 예정일 · 파일 이름은 스케줄이 정한다(모델이 정하지 않는다).
 
+/** 로컬 서버 `POST /trigger?type=@group` — 종류 하나가 아니라 기본 스케줄 그룹을 수동으로. */
+export const TRIGGER_GROUP = '@group';
+
 /** 회차의 시작 방식. `retry` 는 원래 회차를 못 연 채 재시도 큐에서 처음 돌 때만 쓴다. */
 export type RunTrigger = 'scheduled' | 'retry' | 'manual';
 
@@ -937,6 +940,15 @@ export class AssistantScheduler {
     // 그룹 수동 실행도 `manual` 회차 · 예정일은 오늘 — 예약 회차와 섞이지 않게.
     await this.runAnalysisGroup(defaultSchedule, defaultTypes, { slot: kstDate(new Date()), trigger: 'manual' });
     return '✅ 분석 실행 완료 — 결과는 위 메시지 참고';
+  }
+
+  /**
+   * 로컬 서버 `POST /trigger?type=<종류>` 의 입구. `@group` 이면 기본 스케줄 그룹을 수동으로 돌린다
+   * (`-analyze` 와 같은 길 · `manual` 회차) — 그룹 경로(회차 재사용 · 시도 기록)를 이 세션 밖에서
+   * 확인할 때 쓴다. 그 밖은 그 종류 하나.
+   */
+  async runAnalysisTrigger(type: string): Promise<string> {
+    return this.runAnalysisManual(type === TRIGGER_GROUP ? undefined : type);
   }
 
   /** 결과 메시지 꼬리 — 회차를 어떻게 저장했나. */

@@ -165,7 +165,7 @@ npm test        # 빌드 + check:* 전부
   - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
 - `-report [type]`/`-rp [type]`: 처리 제안 요약(🗂 · 결정 버튼) + desk 의 보고서 링크(`buildReportReplyBlocks`). 보고서 본문은 report-log 저장소에 회차별로 쌓이고 desk 사이트가 그린다 — 링크 주소는 `flow.py digest` 의 `site` 를 쓴다(이 저장소에 주소를 적지 않는다). report-log 4단계(읽는 쪽 전환)로 `reports/scheduled-reports/` 훑기 · 파일 업로드 · 매니페스트(`_status.json`) · 보관 버튼 · 브리핑 뒤 「📄 보고서 확인」 버튼을 뺐다. 이미 올라간 메시지의 옛 버튼은 처리기만 남겨 새 답이나 폐지 안내를 낸다.
-  - 로컬 HTTP 서버 (`src/report-server.ts`): 업무 칸반(`/board`)과 수동 분석 실행(`POST /trigger?type=<종류>` · `-analyze <종류>` 와 같은 `manual` 회차 · 호출은 202 만 받고 결과 한 줄은 DM 으로)만 남음 · 127.0.0.1 바인딩, per-process 토큰(`?t=<hex>`) 인증. 옛 `/` 는 칸반으로 돌리고 `/report/…` 는 410. `index.ts`에서 `config.reports.localServer.enabled && config.assistant.configDir` 조건으로 부팅. `EADDRINUSE` 시 +5까지 재시도 후 비활성화.
+  - 로컬 HTTP 서버 (`src/report-server.ts`): 업무 칸반(`/board`)과 수동 분석 실행(`POST /trigger?type=<종류>` · `-analyze <종류>` 와 같은 `manual` 회차 · `type=@group` 이면 `-analyze` 와 같은 기본 스케줄 그룹 · 호출은 202 만 받고 결과 한 줄은 DM 으로)만 남음 · 127.0.0.1 바인딩, per-process 토큰(`?t=<hex>`) 인증. 옛 `/` 는 칸반으로 돌리고 `/report/…` 는 410. `index.ts`에서 `config.reports.localServer.enabled && config.assistant.configDir` 조건으로 부팅. `EADDRINUSE` 시 +5까지 재시도 후 비활성화.
   - 환경변수: `REPORTS_SERVER_ENABLED` (0이면 비활성), `REPORTS_SERVER_PORT` (기본 8765)
 - `-analyze [type]`/`-an [type]`/`분석 [타입]`: 분석 수동 실행 — 타입 지정 시 단일 실행, 미지정 시 기본 스케줄 그룹 실행 · 둘 다 `manual` 회차(예정일 = 오늘 한국 날짜) · 단일 실행 결과 메시지에 처리한 백엔드(`claude` · `codex`)와 저장 상태
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리

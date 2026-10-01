@@ -22,7 +22,8 @@ export class ReportServer {
     this.token = crypto.randomBytes(16).toString('hex');
   }
 
-  /** Wire a fire-and-forget analysis trigger. Bound to POST /trigger?type=... on the loopback port. */
+  /** Wire a fire-and-forget analysis trigger. Bound to POST /trigger?type=... on the loopback port
+   *  (`type=@group` runs the default schedule group — the callback decides). */
   setTriggerCallback(cb: (type: string) => Promise<unknown>): void {
     this.triggerCallback = cb;
   }

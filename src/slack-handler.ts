@@ -360,8 +360,9 @@ export class SlackHandler {
       // 여기서 안 내면 그 회차가 Codex 로 처리됐는지 아무 데도 안 보인다.
       if (this.reportServer) {
         const scheduler = this.assistantScheduler;
+        // `?type=@group` 이면 기본 스케줄 그룹(`-analyze` 와 같음) — `runAnalysisTrigger` 주석.
         this.reportServer.setTriggerCallback(async (type: string) => {
-          const text = await scheduler.runAnalysisManual(type);
+          const text = await scheduler.runAnalysisTrigger(type);
           await this.app.client.chat.postMessage({
             channel: config.assistant.dmChannel,
             text: `🔧 수동 실행(로컬 트리거) — ${text}`,
