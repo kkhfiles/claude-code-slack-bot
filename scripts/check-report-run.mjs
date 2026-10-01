@@ -317,6 +317,18 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
   // report-log 의 week-input 실제 모양(목록 · recommended_actions)도 그린다
   const real = S.renderWeekInput([{ id: 'cli-usage/2026-10-03', type: 'cli-usage', slot: '2026-10-03', status: 'complete', title: 'CLI', recommended_actions: '- [ ] 실제 모양' }]);
   ok('week-input 실제 모양(recommended_actions)', real.includes('- [ ] 실제 모양'));
+
+  // S14 — 판 머리는 `##` · 끼워 넣은 「권장 액션」 절의 제목은 두 단계 내린다(머리와 같은 단계로 안 읽히게)
+  const nested = S.renderWeekInput([{ type: 'kg-health', slot: '2026-10-03', status: 'complete', title: 'KG',
+    recommended_actions: '### 즉시\n- [ ] 하나\n#### 이번 주\n- [ ] 둘\n##### 깊음\n```\n### 울타리 안\n```' }]);
+  const lines = nested.split('\n');
+  ok(`판 머리는 ## — 받음 ${lines[0]}`, lines[0] === '## kg-health · 2026-10-03 · complete — KG');
+  ok('### 즉시 → ##### 즉시', lines.includes('##### 즉시') && !lines.includes('### 즉시'));
+  ok('#### → ######', lines.includes('###### 이번 주'));
+  ok('6단계 넘게는 안 내린다', lines.includes('###### 깊음'));
+  ok('코드 울타리 안은 그대로', lines.includes('### 울타리 안'));
+  ok('판 머리보다 얕은 제목이 안에 없다', !lines.slice(1).some((l) => /^#{1,2}\s/.test(l)));
+  eq('제목 내리기 — 기본 두 단계', S.demoteHeadings('# a\n본문 #태그\n## b'), '### a\n본문 #태그\n#### b');
   eq('week-input 은 예정일 7일 전부터', rl.of('week-input').map((c) => argOf(c, '--since')), ['2026-09-26']);
   // 안 쓰는 자리는 안 묻는다
   writePrompt('second', '# second\n\n{{REPORT_OUT}} {{SLOT}}\n');

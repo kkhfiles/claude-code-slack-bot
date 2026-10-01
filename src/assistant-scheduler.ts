@@ -572,7 +572,21 @@ export function renderAvoidList(avoid: any): string {
 }
 
 /**
- * `week-input` → 그 주 판 목록. 판마다 머리 한 줄(종류 · 예정일 · 상태 · 제목)과 「권장 액션」 절 원문.
+ * 마크다운 제목을 `by` 단계 내린다(최대 6단계) — 끼워 넣은 글의 제목이 바깥 목록의 머리와 같은
+ * 단계로 읽히지 않게. 코드 울타리(```) 안은 건드리지 않는다.
+ */
+export function demoteHeadings(text: string, by = 2): string {
+  let fenced = false;
+  return text.split('\n').map((line) => {
+    if (/^\s*(```|~~~)/.test(line)) { fenced = !fenced; return line; }
+    if (fenced) return line;
+    return line.replace(/^(#{1,6})(?=\s)/, (h) => '#'.repeat(Math.min(6, h.length + by)));
+  }).join('\n');
+}
+
+/**
+ * `week-input` → 그 주 판 목록. 판마다 `## ` 머리 한 줄(종류 · 예정일 · 상태 · 제목)과 「권장 액션」 절
+ * 원문 — 원문 안의 제목(`### 즉시` 등)은 두 단계 내려(`#####`) 판 머리 아래로 들어가게 한다.
  * 모양을 못 알아보면 JSON 그대로 싣는다 — 버리면 다이제스트가 빈 주로 읽는다.
  */
 export function renderWeekInput(w: any): string {
@@ -581,9 +595,9 @@ export function renderWeekInput(w: any): string {
   if (!list) return '```json\n' + JSON.stringify(w, null, 1) + '\n```';
   if (list.length === 0) return '(이 기간에 저장된 판 없음)';
   return list.map((v: any) => {
-    const head = `### ${v?.type ?? '?'} · ${v?.slot ?? '?'} · ${v?.status ?? '?'}${v?.title ? ` — ${v.title}` : ''}`;
+    const head = `## ${v?.type ?? '?'} · ${v?.slot ?? '?'} · ${v?.status ?? '?'}${v?.title ? ` — ${v.title}` : ''}`;
     const section = [v?.actions, v?.section, v?.recommended_actions].find((x) => typeof x === 'string') as string | undefined;
-    return `${head}\n\n${section?.trim() || '(「권장 액션」 절 없음)'}`;
+    return `${head}\n\n${section?.trim() ? demoteHeadings(section.trim()) : '(「권장 액션」 절 없음)'}`;
   }).join('\n\n');
 }
 
