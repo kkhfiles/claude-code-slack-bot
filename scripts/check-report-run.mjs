@@ -53,6 +53,7 @@ const schedSrc = stripComments(fs.readFileSync(path.join(SRC, 'assistant-schedul
 
 const S = require('../dist/assistant-scheduler.js');
 const { AssistantScheduler } = S;
+const { errorCollector } = require('../dist/error-collector.js');
 const wa = require('../dist/work-assistant.js');
 const ladder = require('../dist/model-ladder.js');
 // 폴백 둘을 시험 내내 빈손으로 — 시험이 엇나가 1차가 터져도 진짜 codex · 사다리를 띄우지 않게.
@@ -322,6 +323,35 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
   eq('틀에 없는 자리는 report-log 에 안 묻는다', rl2.calls.length, 0);
 }
 {
+  // 다른 종류의 직전 보고서 — {{PREV_REPORT:<종류>}} (skill-review 가 session-efficiency 것을 본다)
+  eq('이름 붙은 자리도 자리 모양', S.fillPrompt('{{PREV_REPORT:session-efficiency}}', { 'PREV_REPORT:session-efficiency': 'v' }), { text: 'v', left: [] });
+  eq('이름 붙은 자리에 값이 없으면 남김', S.fillPrompt('{{PREV_REPORT:x-y}}', {}).left, ['{{PREV_REPORT:x-y}}']);
+  writePrompt('second', '# second\n\n{{REPORT_OUT}} {{SLOT}}\n\n## 내 직전\n{{PREV_REPORT}}\n\n## 다른 종류 직전\n{{PREV_REPORT:session-efficiency}}\n\n## 내 것 또\n{{PREV_REPORT:second}}\n');
+  const bodies = { second: '둘째 지난 본문', 'session-efficiency': '세션 효율 지난 본문 ' + 'y'.repeat(13_000) };
+  const rl = fakeReportLog();
+  const fn = rl.fn;
+  rl.fn = async (script, args) => {
+    if (args[0] === 'prompt-context') {
+      rl.calls.push([script, ...args]);
+      const t = argOf(args, '--type');
+      return { prev: { id: `${t}/2026-09-26`, slot: '2026-09-26', status: 'complete', body: bodies[t] }, avoid: [] };
+    }
+    return fn(script, args);
+  };
+  const { sched, spawns } = harness({ rl, results: [WORKED] });
+  let errN = null;
+  try {
+    await sched.runSingleAnalysis('second', undefined, false,
+      { slot: '2026-10-03', run: { runId: 'r-n', out: path.join(STATE, 'tmp', 'r-n.md'), type: 'second', slot: '2026-10-03' } });
+  } catch (e) { errN = e; }
+  eq('이름 붙은 자리를 채워 세션을 띄운다(거부 없음)', errN && errN.message, null);
+  const p = spawns[0]?.prompt ?? '';
+  ok('다른 종류의 직전 보고서가 들어간다', p.includes('session-efficiency/2026-09-26') && p.includes('세션 효율 지난 본문'));
+  ok('같은 상한으로 자른다', p.includes('자 생략') && p.length < 30_000);
+  eq('종류마다 한 번씩만 묻는다', rl.of('prompt-context').map((c) => argOf(c, '--type')).sort(), ['second', 'session-efficiency']);
+  writePrompt('second', '# second\n\n보고서를 {{REPORT_OUT}} 에 쓴다. 예정일 {{SLOT}}.\n');
+}
+{
   // 남은 `{{` → 세션을 안 띄움 · 오류
   writePrompt('third', '# third\n\n{{REPORT_OUT}} {{SLOT}} {{FOO}}\n');
   const { sched, spawns } = harness({ results: [WORKED] });
@@ -432,7 +462,9 @@ const commitsOf = (rl) => rl.of('commit').map((c) => [argOf(c, '--run'), argOf(c
   eq('이어받을 예정 → 저장 안 함', P('resume', n), null);
   eq('손도 안 댐 → 저장 안 함', P('not-tried', n), null);
   eq('마지막 시도까지 실패 → partial', P('failed', { ...n, produced: false }), { partial: true });
-  eq('되물음 → 저장(비었으면 report-log 가 no-output)', P('no-output', { ...n, empty: true, produced: false }), { partial: true });
+  eq('되물음 · 빈 파일 → --partial 없이 저장(report-log 가 no-output)', P('no-output', { ...n, empty: true, produced: false }), { partial: false });
+  eq('완료인데 빈 파일(변경 없음) → --partial 없이(no-output)', P('completed', { ...n, empty: true, produced: false }), { partial: false });
+  eq('실패 · 빈 파일 → --partial 없이(no-output)', P('failed', { ...n, empty: true, produced: false }), { partial: false });
   eq('러너 종류 · 빈 임시 파일 → 저장 안 함(러너가 아직 씀)', P('failed', { runner: true, empty: true, produced: false }), null);
   eq('러너 종류 · 기계본 있음 → partial(report-log 가 machine 으로)', P('completed', { runner: true, empty: false, produced: false }), { partial: true });
   ok('빈 파일 판정 — 없는 파일', S.outIsEmpty(path.join(STATE, 'tmp', '없음.md')));
@@ -469,20 +501,26 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
     [['2026-10-03-probe-r1', 'claude', false], ['2026-10-03-second-r2', 'claude', false]]);
 }
 {
-  // 재시도가 또 막히면 그 칸은 --partial · 손도 안 댄 칸은 남김
+  // 재시도가 또 막히면 그 칸은 --partial · 손도 안 댄 칸은 남김.
+  // 이어받은 세션이 반쪽을 남겼다고 친다(자리표시자 — 「냈다」 가 아니므로 백스톱이 완료로 안 바꾼다).
   const rl = fakeReportLog();
-  const { sched } = harness({ rl, results: [LIMIT(), LIMIT('sL2')] });
+  let qOut = null;
+  const { sched } = harness({ rl, results: [LIMIT(), () => {
+    fs.writeFileSync(qOut, '# probe 반쪽\n_(filled in by 이어받은 세션)_\n', 'utf-8');
+    return LIMIT('sL2');
+  }] });
   let q = null;
   sched.scheduleAnalysisRetry = (schedule, origin, queue) => { q = { schedule, origin, queue }; };
   await sched.runAnalysisGroup('saturday-00:00', ['probe', 'second'], { slot: '2026-10-03', trigger: 'scheduled' });
+  qOut = q.queue[0].run.out;
   await sched.runAnalysisRetry(q.schedule, q.origin, q.queue);
   eq('재시도도 막힘 → 당사자만 --partial · 미시도 칸은 저장 안 함', commitsOf(rl), [['2026-10-03-probe-r1', 'claude', true]]);
 }
 {
-  // 데일리(재시도 안 잡음) 한도 → 마지막 시도 → --partial
+  // 데일리(재시도 안 잡음) 한도 → 마지막 시도 → 저장(반쪽이 있으면 --partial)
   writeConfig({ probe: { enabled: true, schedule: 'daily-12:00', model: 'sonnet', effort: 'low' } });
   const rl = fakeReportLog();
-  const { sched } = harness({ rl, results: [LIMIT()] });
+  const { sched } = harness({ rl, results: [writes('# 반쪽\n_(filled in by 끊긴 세션)_\n', LIMIT())] });
   let scheduled = false;
   sched.scheduleAnalysisRetry = () => { scheduled = true; };
   await sched.runAnalysisGroup('daily-12:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
@@ -503,7 +541,36 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   const ASK = { ...WORKED, toolCalls: 0, text: 'what would you like me to do?' };
   const { sched } = harness({ rl, results: [ASK, ASK] });
   await sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
-  eq('되물음 → 저장한다(--partial · 비었으므로 no-output 판정은 report-log)', commitsOf(rl), [['2026-10-03-probe-r1', 'claude', true]]);
+  eq('되물음 → 저장한다(빈 파일이라 --partial 없이 · report-log 가 no-output)', commitsOf(rl), [['2026-10-03-probe-r1', 'claude', false]]);
+}
+{
+  // 변경이 없으면 안 쓰는 것이 정상인 종류(mode: change-detection) — 빈 결과는 실패가 아니다.
+  writeConfig({ probe: { enabled: true, model: 'sonnet', effort: 'low', mode: 'change-detection' } });
+  // Claude 가 도구를 돌리고 아무것도 안 씀 → 완료 · --partial 없이(no-output)
+  const rl = fakeReportLog();
+  const h = harness({ rl, results: [WORKED] });
+  await h.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('조용한 회차 → 세션 한 번 · --partial 없이 저장', [h.spawns.length, commitsOf(rl)], [1, [['2026-10-03-probe-r1', 'claude', false]]]);
+  // 폴백(codex · 도구 0회로 돌아옴)이 빈손 → 되물음으로 안 침(다시 안 돌림) · --backend codex
+  const prevCodex = wa.codexSession;
+  wa.codexSession = async () => '바뀐 것 없음';
+  try {
+    const rl2 = fakeReportLog();
+    const FAIL0 = { ...WORKED, text: '', isError: true, subtype: 'error', toolCalls: 0 };
+    const h2 = harness({ rl: rl2, results: [FAIL0] });
+    await h2.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+    eq('폴백 빈손은 되물음 아님 · codex 로 저장', [h2.spawns.length, commitsOf(rl2)], [1, [['2026-10-03-probe-r1', 'codex', false]]]);
+    eq('조용한 회차는 완료로 적는다', journal().filter((r) => r.kind === 'outcome').at(-1)?.outcome, 'completed');
+  } finally {
+    wa.codexSession = prevCodex;
+  }
+  // 같은 종류라도 Claude 가 도구 0회로 끝나면 여전히 되물음 — 확인도 안 한 것이다
+  const rl3 = fakeReportLog();
+  const ASK = { ...WORKED, toolCalls: 0, text: 'what would you like me to do?' };
+  const h3 = harness({ rl: rl3, results: [ASK, WORKED] });
+  await h3.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('Claude 도구 0회는 그대로 다시 돌린다', h3.spawns.length, 2);
+  writeConfig();
 }
 {
   // 잠금 실패 → 한 번 더 · 그래도 실패면 그대로 둔다(정리 작업 몫)
@@ -548,8 +615,9 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   const L = S.runnerLaunch(spec, REPO, { slot: '2026-10-03', run });
   eq('인자 — 원래 argv 뒤에 --date <예정일>', L.args, ['-X', 'utf8', '-m', 'batch.kg_regression_weekly', '--detach', '--date', '2026-10-03']);
   eq('폴더 — cwdSub', L.cwd, path.join(REPO, 'mycelium'));
-  eq('환경 — 회차 넷', [L.env.REPORT_RUN, L.env.REPORT_OUT, L.env.REPORT_SLOT, L.env.REPORT_TYPE],
-    ['r-ds', run.out, '2026-10-03', 'data-sync']);
+  eq('환경 — 회차 넷(경로는 / 로)', [L.env.REPORT_RUN, L.env.REPORT_OUT, L.env.REPORT_SLOT, L.env.REPORT_TYPE],
+    ['r-ds', S.slashPath(run.out), '2026-10-03', 'data-sync']);
+  ok('환경의 REPORT_OUT 에 역슬래시 없음', !L.env.REPORT_OUT.includes('\\'));
   eq('환경 — 파이썬 설정은 그대로', [L.env.PYTHONDONTWRITEBYTECODE, L.env.PYTHONIOENCODING], ['1', 'utf-8']);
   // 회차가 없으면 REPORT_* 를 지운다 — 바깥 환경에 남은 값이 새지 않게(러너가 스스로 연다)
   process.env.REPORT_OUT = path.join(TMP, '바깥에-남은-값.md');
@@ -568,7 +636,7 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
     [['kg-regression', '--detach', '2026-10-03', 'r-kgr2']]);
   const env = h.spawns[0].opts.env;
   eq('세션 환경에도 회차', [env.REPORT_RUN, env.REPORT_OUT, env.REPORT_SLOT, env.REPORT_TYPE],
-    ['r-kgr2', runK.out, '2026-10-03', 'kg-regression']);
+    ['r-kgr2', S.slashPath(runK.out), '2026-10-03', 'kg-regression']);
   const h2 = harness({ results: [writes('# s\n')] });
   await h2.sched.runSingleAnalysis('second', undefined, false, { slot: '2026-10-03', run: { ...runK, type: 'second' } });
   eq('러너 없는 종류는 안 띄운다', h2.launches.length, 0);
@@ -587,10 +655,21 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   eq('그 주 = 오늘(한국) 7일 전부터', rl.of('week-input').map((c) => argOf(c, '--since')), ['2026-09-28']);
   eq('월요일이 아니면 빈 글자', await sched.mondayBriefingExtra(TUESDAY), '');
 
+  // 못 채우면 덧붙임 없이(빈 글자) · 오류를 남긴다 — 브리핑 본문은 그대로 나간다
+  errorCollector.getAndClear();
   const rlErr = fakeReportLog({ week: { error: 'rc 1 · 시험' } });
   const h = harness({ rl: rlErr });
-  const extraErr = await h.sched.mondayBriefingExtra(MONDAY);
-  ok(`못 읽어도 브리핑은 간다 — 못 읽었다는 한 줄 · 받음 ${extraErr}`, extraErr.includes('못 읽었습니다') && !extraErr.includes('{{WEEK_INPUT}}'));
+  eq('목록을 못 읽으면 덧붙임 없음', await h.sched.mondayBriefingExtra(MONDAY), '');
+  ok('그 사실을 시스템 이슈로 남긴다', errorCollector.getAndClear().some((e) => e.message.includes('월요일 보고를 못 채워')));
+  fs.writeFileSync(path.join(PROMPTS, 'monday-briefing-extra.md'), '{{WEEK_INPUT}}\n{{MYSTERY}}\n', 'utf-8');
+  eq('다른 자리가 남아도 덧붙임 없음', await sched.mondayBriefingExtra(MONDAY), '');
+  ok('남은 자리도 시스템 이슈로', errorCollector.getAndClear().some((e) => e.message.includes('{{MYSTERY}}')));
+  fs.writeFileSync(path.join(PROMPTS, 'monday-briefing-extra.md'), '## 지난주 판\n\n{{WEEK_INPUT}}\n', 'utf-8');
+  const hb0 = harness({ rl: fakeReportLog({ week: { error: 'rc 1' } }), results: [{ ...WORKED, text: '☀️ 브리핑' }] });
+  fs.writeFileSync(path.join(PROMPTS, 'morning-briefing.md'), '# 아침 브리핑 {excludeCalendars}\n', 'utf-8');
+  hb0.sched.mondayBriefingExtra = async () => '';
+  const br = await hb0.sched.executeBriefing();
+  ok('덧붙임이 없어도 브리핑은 돈다', hb0.spawns.length === 1 && br.text.includes('☀️'));
 
   // 배선 — 브리핑이 이 글을 실제로 붙이는가
   fs.writeFileSync(path.join(PROMPTS, 'morning-briefing.md'), '# 아침 브리핑 {excludeCalendars}\n', 'utf-8');

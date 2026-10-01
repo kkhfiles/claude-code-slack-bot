@@ -182,12 +182,12 @@ npm test        # 빌드 + check:* 전부
   - 분석 회차와 보고서 저장 — report-log 5단계(쓰는 쪽). **저장 주체는 스탠리 하나** · 설계 정본은 report-log `docs/stage5-plan.md` 「쓰는 흐름」 · 검사 `npm run check:reportrun`
     - 회차 열기: 종류마다 첫 시도 전에 `report_log.py open --type --slot --trigger` · 예정일 = 예약 발화 시각(`nextFire`)의 한국 날짜(늦게 깨거나 자정을 넘겨도 그대로) · 수동은 오늘
     - 같은 회차: 타임아웃 · 오류 재시도, 한도 재시도(다른 날 포함) — 재시도 큐가 회차를 들고 감 · 한도로 못 돈 뒤쪽 종류도 그때 회차를 엶 · 원래 회차가 없던 칸만 `retry` 로 엶
-    - 프롬프트 자리: `{{REPORT_OUT}}`(임시 파일 · `/` 경로) · `{{SLOT}}` · `{{PREV_REPORT}}` · `{{AVOID_LIST}}`(`prompt-context --type`) · `{{WEEK_INPUT}}`(`week-input --since <예정일-7일>`) — 본문에 직접 넣음(Codex 폴백은 환경 변수를 못 받음) · 틀에 남은 `{{` 가 있으면 세션을 안 띄우고 오류
+    - 프롬프트 자리: `{{REPORT_OUT}}`(임시 파일 · `/` 경로) · `{{SLOT}}` · `{{PREV_REPORT}}` · `{{AVOID_LIST}}`(`prompt-context --type`) · `{{PREV_REPORT:<종류>}}`(다른 종류의 직전 보고서 · 같은 상한) · `{{WEEK_INPUT}}`(`week-input --since <예정일-7일>`) — 본문에 직접 넣음(Codex 폴백은 환경 변수를 못 받음) · 틀에 있는 자리만 report-log 에 물음 · 한 번에 바꿈(넣은 값 안의 `{{SLOT}}` 같은 글은 다시 안 바꾸고 거부에도 안 셈) · 틀에 남은 `{{` 가 있으면 세션을 안 띄우고 오류
     - 쓰기 범위: `~/.report-log/tmp` 를 Claude 추가 폴더 · Codex 쓰기 허용 폴더로 엶 · 시스템 문구의 쓰기 허용은 설정 `writablePaths` 에서 `reports/` 를 빼고 그 폴더를 더함
-    - 「썼나」 판정(`reportProduced`): 임시 파일 수정 시각 ≥ 세션 시작 · 본문 있음 · 대기 표식(`<!-- judgment: pending -->`) · 자리표시자 없음 — 도구 0회 재시도(되물음)와 한도 백스톱이 씀
-    - 저장(`commitPlan`): 완료 → 저장 · 한도로 이어받을 예정 → 저장 안 함 · 마지막 시도까지 실패 → `--partial` · 되물음 → 저장(비었으면 report-log 가 `no-output`) · 러너 종류인데 임시 파일이 비었으면 저장 안 함(러너가 아직 씀) · `--backend` 에 처리 백엔드 · 잠금 실패는 한 번 더, 그래도 실패면 정리 작업(`sweep`) 몫
-    - 러너 미리 띄우기: 환경 변수 `REPORT_RUN` · `REPORT_OUT` · `REPORT_SLOT` · `REPORT_TYPE` + `--date <예정일>` · 세션 환경에도 같은 넷
-    - 월요일 브리핑: `monday-briefing-extra.md` 의 `{{WEEK_INPUT}}` 을 `week-input --since <오늘-7일>` 로 채움 · 못 읽어도 브리핑은 나감
+    - 「썼나」 판정(`reportProduced`): 임시 파일 수정 시각 ≥ 세션 시작 · 본문 있음 · 대기 표식(`<!-- judgment: pending -->`) · 자리표시자 없음 — 도구 0회 재시도(되물음)와 한도 백스톱이 씀 · `mode: 'change-detection'` 종류는 폴백(codex)이 빈손으로 끝내도 되물음으로 안 침
+    - 저장(`commitPlan`): 완료 → 저장 · 한도로 이어받을 예정 → 저장 안 함 · 마지막 시도까지 실패 → `--partial` · 임시 파일이 비었으면 `--partial` 없이 저장(report-log 가 `no-output` — 변경 없는 회차 · 되물음) · 러너 종류인데 임시 파일이 비었으면 저장 안 함(러너가 아직 씀) · `--backend` 에 처리 백엔드 · 잠금 실패는 한 번 더, 그래도 실패면 정리 작업(`sweep`) 몫
+    - 러너 미리 띄우기: 환경 변수 `REPORT_RUN` · `REPORT_OUT`(`/` 경로) · `REPORT_SLOT` · `REPORT_TYPE` + `--date <예정일>` · 세션 환경에도 같은 넷
+    - 월요일 브리핑: `monday-briefing-extra.md` 의 `{{WEEK_INPUT}}` 을 `week-input --since <오늘-7일>` 로 채움 · 못 채우면 덧붙임 없이 브리핑 본문만 보내고 「시스템 이슈」 로 남김
     - 처리 백엔드: `SessionResult.servedBy`(`spawnOrFallback` 이 붙임) · agy 위임 경로(`ANALYSIS_AGY_TYPES`)는 없앰 — agy 는 도구 없는 회차의 폴백 사다리에서만 씀
 - 새 명령어 추가 시:
   1. `is*Command()` 또는 `parse*Command()` 메서드 작성

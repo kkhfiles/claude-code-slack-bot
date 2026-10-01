@@ -450,15 +450,18 @@ export type RunEnd =
  *     이어받은 세션이 마저 쓴 것을 저장할 회차가 없다)
  *   - 러너 종류인데 임시 파일이 비었음 → 저장 안 함. 러너가 아직 기계본을 쓰는 중일 수 있고,
  *     지금 저장하면 `no-output` 으로 닫혀 뒤에 온 기계본이 버려진다(sweep 이 `machine` 으로 받는다)
+ *   - 임시 파일이 비었음 → `--partial` 없이 저장 — report-log 가 `no-output` 으로 닫는다. 변경이
+ *     없으면 안 쓰는 것이 정상인 종류(`mode: 'change-detection'`)의 조용한 회차가 이 길이다
  *   - 완료이고 이번 세션이 냈음 → 그대로 저장(상태는 report-log 가 본문으로 가름)
- *   - 그 밖(실패 · 되물음 · 완료인데 이번 세션이 안 냄) → `--partial`. 앞 시도가 남긴 반쪽이 있으면
- *     `partial` 로, 비었으면 report-log 가 `no-output` 으로, 대기 표식이면 `machine` 으로 닫는다
+ *   - 그 밖(실패 · 되물음 · 완료인데 이번 세션이 안 냄 — 내용은 있음) → `--partial`. 앞 시도가 남긴
+ *     반쪽은 `partial` 로, 대기 표식이면 report-log 가 `machine` 으로 닫는다
  */
 export function commitPlan(
   end: RunEnd, s: { runner: boolean; empty: boolean; produced: boolean },
 ): { partial: boolean } | null {
   if (end === 'resume' || end === 'not-tried') return null;
   if (s.runner && s.empty) return null;
+  if (s.empty) return { partial: false };
   return { partial: !(end === 'completed' && s.produced) };
 }
 
@@ -479,7 +482,8 @@ export function analysisWritable(writablePaths: string[], tmpDir: string): strin
 
 /** 회차를 세션 · 러너에 알리는 환경 변수(약속: `REPORT_RUN` · `REPORT_OUT` · `REPORT_SLOT` · `REPORT_TYPE`). */
 export function reportRunEnv(run: ReportRun): Record<string, string> {
-  return { REPORT_RUN: run.runId, REPORT_OUT: run.out, REPORT_SLOT: run.slot, REPORT_TYPE: run.type };
+  // 경로는 `/` 로 — 프롬프트의 `{{REPORT_OUT}}` 과 같은 글자(셸 명령에 그대로 넣어도 역슬래시가 안 먹힌다).
+  return { REPORT_RUN: run.runId, REPORT_OUT: slashPath(run.out), REPORT_SLOT: run.slot, REPORT_TYPE: run.type };
 }
 
 /**
@@ -511,8 +515,13 @@ export function slashPath(p: string): string {
 // 값은 **프롬프트 본문에 직접** 넣는다 — Codex 폴백은 환경 변수를 못 받는다. 직전 보고서 ·
 // 피할 권고를 세션이 읽게 두지 않고 여기서 넣는 까닭은 Bash 가 없는 종류(6종)도 받게 하려는 것이다.
 
-/** 이름 모양의 자리 — `{{REPORT_OUT}}` · `{{SLOT}}` · `{{PREV_REPORT}}` · `{{AVOID_LIST}}` · `{{WEEK_INPUT}}`. */
-const PLACEHOLDER_RE = /\{\{([A-Z_]+)\}\}/g;
+/**
+ * 이름 모양의 자리 — `{{REPORT_OUT}}` · `{{SLOT}}` · `{{PREV_REPORT}}` · `{{AVOID_LIST}}` · `{{WEEK_INPUT}}`,
+ * 그리고 다른 종류의 직전 보고서 `{{PREV_REPORT:<종류>}}`(예: skill-review 가 session-efficiency 것을 본다).
+ */
+const PLACEHOLDER_RE = /\{\{([A-Z_]+(?::[a-z0-9]+(?:-[a-z0-9]+)*)?)\}\}/g;
+/** 틀에 있는 `{{PREV_REPORT:<종류>}}` 의 종류들. */
+const NAMED_PREV_RE = /\{\{PREV_REPORT:([a-z0-9]+(?:-[a-z0-9]+)*)\}\}/g;
 /** 직전 보고서 본문을 프롬프트에 넣는 상한(글자) — report-log `prompt-context --max-chars` 기본값과 같다. */
 const PREV_REPORT_MAX = 12_000;
 
@@ -2580,22 +2589,26 @@ export class AssistantScheduler {
    * 월요일 브리핑에 덧붙이는 글(`monday-briefing-extra.md`). 월요일이 아니면 빈 글자.
    *
    * `{{WEEK_INPUT}}` 를 그 주 판 목록(`week-input --since <오늘-7일>`)으로 채운다 — 세션이 옛
-   * 보고서 폴더를 훑지 않게. **브리핑은 빠지면 안 되므로** 목록을 못 읽어도 거부하지 않고
-   * 못 읽었다는 한 줄을 넣는다(분석 세션의 남은 `{{` 거부와 다르다).
+   * 보고서 폴더를 훑지 않게. **못 채우면(목록을 못 읽음 · 다른 자리가 남음) 덧붙임 없이** 빈
+   * 글자를 돌려주고 오류를 남긴다 — 브리핑 본문은 그대로 나가고, 빈 자리를 받은 세션이 옛
+   * 폴더를 훑거나 지어내지 않게 한다(브리핑 「시스템 이슈」로 보인다).
    */
   private async mondayBriefingExtra(now: Date = new Date()): Promise<string> {
     if (now.getDay() !== 1) return '';
     const file = path.join(this.promptsDir, 'monday-briefing-extra.md');
     if (!fs.existsSync(file)) return '';
     const text = fs.readFileSync(file, 'utf-8');
-    if (!text.includes('{{WEEK_INPUT}}')) return text;
-    const w = await this.reportLog('report_log', ['week-input', '--since', shiftDate(kstDate(now), -7)]);
-    const value = w && !w.error
-      ? renderWeekInput(w)
-      : `(이번 주 판 목록을 못 읽었습니다 — ${String(w?.error ?? '답 없음').slice(0, 200)})`;
-    const filled = fillPrompt(text, { WEEK_INPUT: value });
+    const values: Record<string, string> = {};
+    if (text.includes('{{WEEK_INPUT}}')) {
+      const w = await this.reportLog('report_log', ['week-input', '--since', shiftDate(kstDate(now), -7)]);
+      if (w && !w.error) values.WEEK_INPUT = renderWeekInput(w);
+    }
+    const filled = fillPrompt(text, values);
     if (filled.left.length > 0) {
-      this.logger.warn('월요일 보고에 못 채운 자리가 남음 — 그대로 보냄', { left: filled.left });
+      const why = `월요일 보고를 못 채워 덧붙임 없이 보냄: ${filled.left.join(', ')}`;
+      this.logger.error(why);
+      errorCollector.add('AssistantScheduler', why);
+      return '';
     }
     return filled.text;
   }
@@ -3153,14 +3166,28 @@ export class AssistantScheduler {
   private async promptValues(type: string, template: string, ctx: AnalysisCtx): Promise<Record<string, string>> {
     const values: Record<string, string> = { SLOT: ctx.slot };
     if (ctx.run) values.REPORT_OUT = slashPath(ctx.run.out);
+    // 종류마다 한 번만 묻는다 — `{{PREV_REPORT}}` 와 `{{PREV_REPORT:<같은 종류>}}` 가 함께 있어도.
+    const contexts = new Map<string, any | null>();
+    const contextOf = async (t: string): Promise<any | null> => {
+      if (!contexts.has(t)) {
+        const c = await this.reportLog('report_log', ['prompt-context', '--type', t]);
+        if (!c || c.error) {
+          this.logger.warn('prompt-context 실패 — 직전 보고서 · 피할 권고 자리를 못 채움', { type: t, error: c?.error });
+        }
+        contexts.set(t, c && !c.error ? c : null);
+      }
+      return contexts.get(t);
+    };
     if (template.includes('{{PREV_REPORT}}') || template.includes('{{AVOID_LIST}}')) {
-      const c = await this.reportLog('report_log', ['prompt-context', '--type', type]);
-      if (c && !c.error) {
+      const c = await contextOf(type);
+      if (c) {
         values.PREV_REPORT = renderPrevReport(c.prev);
         values.AVOID_LIST = renderAvoidList(c.avoid);
-      } else {
-        this.logger.warn('prompt-context 실패 — 직전 보고서 · 피할 권고 자리를 못 채움', { type, error: c?.error });
       }
+    }
+    for (const named of new Set([...template.matchAll(NAMED_PREV_RE)].map((m) => m[1]))) {
+      const c = await contextOf(named);
+      if (c) values[`PREV_REPORT:${named}`] = renderPrevReport(c.prev);
     }
     if (template.includes('{{WEEK_INPUT}}')) {
       const w = await this.reportLog('report_log', ['week-input', '--since', shiftDate(ctx.slot, -7)]);
@@ -3301,7 +3328,12 @@ export class AssistantScheduler {
     // 0 으로 읽으면 두 번 돈다 — `spawnOrFallback` 과 같은 규칙). 보고서 검사는 codex
     // 폴백(`toolCalls: 0` 으로 돌아온다)이 이미 보고서를 남긴 경우를 거른다.
     // 이어받는 회차는 안 한다 — 그 프롬프트는 `'continue'` 한 낱말이다.
-    if (!resumeSessionId && result.toolCalls === 0 && !result.isError && !produced) {
+    // 변경이 없으면 안 쓰는 것이 정상인 종류(`mode: 'change-detection'`)는 폴백(codex · 도구 횟수를
+    // 0 으로 돌려준다)이 빈손으로 끝내도 되물음으로 치지 않는다 — 정말 바뀐 것이 없었을 수 있고,
+    // Claude 로 다시 돌리면 1차가 막혀 폴백했던 그 회차를 또 부른다. 저장은 `no-output` 이다.
+    const quietOk = typeConfig?.mode === 'change-detection' && result.servedBy !== undefined
+      && result.servedBy !== 'claude';
+    if (!resumeSessionId && result.toolCalls === 0 && !result.isError && !produced && !quietOk) {
       if (!nudged) {
         this.logger.warn('분석 세션이 도구 0회로 끝났다(되물음) — 머리말 붙여 1회 재시도', {
           type, subtype: result.subtype, textPreview: result.text?.substring(0, 200),
