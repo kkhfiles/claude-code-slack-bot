@@ -172,6 +172,25 @@ try { fs.unlinkSync(evFile); } catch { /* 없으면 그만 */ }
   }
 }
 
+// ── 폴백이 받은 회차도 원장에 남는다 (2026-10-02) ─────────────
+// 구독이라 값이 0 이어서 원장이 통째로 걸렀다 — 원장만 보면 폴백이 한 번도 안 돈 것처럼 보였다.
+// ⚠️ **진짜 원장에 안 쓴다** — 저장을 막고 메모리의 목록만 본다(기본 checkout 에서 돌면 진짜 파일이다).
+{
+  const sched = new AssistantScheduler(async () => {}, async () => OKR, config.assistant.configDir);
+  sched.saveCosts = () => {};
+  const n0 = sched.costEntries.length;
+  sched.recordSessionCost('briefing', { text: '됨', costUsd: 0, sessionId: '', subtype: 'success',
+    isError: false, servedBy: 'codex', timing: { resultMs: 1234 } });
+  sched.recordSessionCost('briefing', { text: '', costUsd: 0, sessionId: '', subtype: 'error', isError: true });
+  const got = sched.costEntries.slice(n0).map((e) => [e.type, e.costUsd, e.via, e.ok, e.resultMs]);
+  eq('폴백 회차는 값 0 · 백엔드 · 성패 · 걸린 시간으로 남고, 값 0 인 1차 실패는 그대로 안 남는다',
+     got, [['briefing', 0, 'codex', true, 1234]]);
+  // 폴백이 돌다 실패한 브리핑을 「오늘 돌았다」로 읽으면 재시작 뒤 따라잡기가 안 돈다.
+  ok('따라잡기는 실패한 폴백 회차를 「돌았다」로 안 친다',
+     /e\.type === 'briefing' && e\.ok !== false/.test(
+       fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8')));
+}
+
 // ── 소스: 예약 세션이 폴백을 안 거치고 새는 곳이 없나 ─────────
 const src = fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8');
 const direct = [...src.matchAll(/await this\.spawnSession\(/g)].length;

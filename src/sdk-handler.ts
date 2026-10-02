@@ -11,6 +11,7 @@ import * as path from 'path';
 import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
 import { errorCollector } from './error-collector';
+import { event as recordEvent } from './board-queue';
 import type {
   CliEvent,
   CliInitEvent,
@@ -384,23 +385,34 @@ export class SdkHandler {
 
     // **미리 띄운 것이 맞으면 그것을 쓴다.** 지문이 같은 자리만 본다 — 남의 옵션으로 뜬
     // 세션에 이 대화를 밀어 넣으면 조용히 다른 규칙으로 답한다.
+    // **맞았나 · 왜 안 맞았나를 관찰 기록에 남긴다** (2026-10-02) — 로그 한 줄로는 하루에 몇 번
+    // 맞았는지를 못 센다. 미리 띄우기가 있는 두 길(좁은 길 · 대화 세션)만 적는다 — 분석 세션까지
+    // 「없음」으로 적으면 맞힌 비율이 저절로 낮아 보인다. 값은 안 싣고 칸 이름만(`warmDiff`).
+    const mode = opts.env?.ASSISTANT_MODE === 'narrow' ? 'narrow'
+      : opts.env?.WORK_ASSISTANT_CAPTURE_FILE ? 'chat' : '';
     const w = this.warms.get(key);
     if (w) {
       if (Date.now() - w.bornAt < w.ttlMs) {
         this.warms.delete(key);
         this.logger.info('미리 띄운 세션을 씀', { agedMs: Date.now() - w.bornAt });
+        if (mode) recordEvent('prewarm', { hit: true, mode, aged_s: Math.round((Date.now() - w.bornAt) / 1000) });
         w.send(prompt);
         return new SdkProcess(w.q, w.abortController);
       }
       this.logger.info('미리 띄운 것을 못 씀 — 새로 띄웁니다', { reason: '낡음' });
+      if (mode) recordEvent('prewarm', { hit: false, mode, why: 'stale' });
       this.dropWarm(key);
     } else if (this.warms.size) {
       // **다른 옵션의 자리는 그대로 둔다** — 버리면 그 자리의 다음 차례가 새로 뜬다.
       // ⚠️ **왜 안 맞았는지 같이 남긴다** — 08-29 에 이 줄이 「옵션이 다름」만 말해서,
       // 원인을 짚으려고 탐침을 따로 짜야 했다. 가장 최근 자리와 견준다.
       const last = [...this.warms.values()].pop()!;
+      const diff = warmDiff(last.key, key);
       this.logger.info('미리 띄운 것과 옵션이 다름 — 그대로 두고 새로 띄웁니다',
-        { reason: '옵션이 다름', diff: warmDiff(last.key, key) });
+        { reason: '옵션이 다름', diff });
+      if (mode) recordEvent('prewarm', { hit: false, mode, why: 'diff', diff });
+    } else if (mode) {
+      recordEvent('prewarm', { hit: false, mode, why: 'none' });
     }
 
     const q = SdkHandler.queryFn({ prompt, options: built.sdkOptions });

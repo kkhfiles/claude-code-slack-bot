@@ -53,6 +53,20 @@ export interface BoardPushDeps {
   authBackoffMs?: number;
   /** 무작위 편차 — 시험은 0 을 준다. */
   jitter?: () => number;
+  /**
+   * 끊겼다 — 까닭과 붙어 있던 시간(2026-10-02). **경고 없이 끊기는 것을 세려고 둔다** — 9시간에
+   * 다섯 번 조용히 다시 붙었는데 로그에 까닭이 없어 무엇 때문인지 못 짚었다. 터져도 다시 붙는 것은 막지 않는다.
+   */
+  onDrop?: (info: PushDrop) => void;
+}
+
+/** 끊김 한 번. `cause` — 소켓이 닫힘 · 핑에 답 없음 · 만들다 실패. `code` 는 닫힘 코드(1006 등). */
+export interface PushDrop {
+  cause: 'close' | 'pong' | 'create';
+  code?: number;
+  /** 붙어 있던 초 — 붙기 전에 끊기면 없음. */
+  up_s?: number;
+  auth?: boolean;
 }
 
 const defaultSocket: SocketFactory = (url, headers) => {
@@ -72,6 +86,8 @@ export class BoardPush {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
   private authWarned = false;
+  /** 지금 연결이 붙은 시각 — 끊길 때 붙어 있던 시간을 잰다. 안 붙었으면 0. */
+  private openedAt = 0;
   /** 몇 번 붙었나 · 알림 몇 번 받았나 — 로그와 시험이 본다. */
   opens = 0;
   notices = 0;
@@ -121,14 +137,16 @@ export class BoardPush {
       ws = (this.deps.socket ?? defaultSocket)(t.url, t.headers);
     } catch (err) {
       this.logger.warn('판 알림 연결을 못 만들었습니다', { reason: String((err as Error)?.message ?? err) });
-      void this.fail(gen);
+      void this.fail(gen, { cause: 'create' });
       return;
     }
     this.ws = ws;
+    this.openedAt = 0;
     ws.onopen = () => {
       if (gen !== this.gen) return;
       this.attempt = 0;
       this.lastPong = Date.now();
+      this.openedAt = Date.now();
       this.opens += 1;
       if (this.authWarned) this.logger.info('판 알림 — 인증이 다시 통과했습니다');
       this.authWarned = false;
@@ -142,18 +160,27 @@ export class BoardPush {
       if (d === 'pong') { this.lastPong = Date.now(); return; }
       if (d.includes('"new"')) { this.notices += 1; this.deps.onNew(); }
     };
-    ws.onclose = () => { if (gen === this.gen) void this.fail(gen); };
+    ws.onclose = (ev?: unknown) => {
+      if (gen !== this.gen) return;
+      const code = Number((ev as { code?: unknown } | undefined)?.code);
+      void this.fail(gen, { cause: 'close', code: Number.isFinite(code) ? code : undefined });
+    };
     ws.onerror = () => { /* close 가 뒤따른다 — 다시 붙는 것은 거기서 */ };
   }
 
   /** 끊겼다 — 원인을 가르고 다시 붙을 때를 잡는다. 같은 연결의 두 번째 신호는 버린다. */
-  private async fail(gen: number): Promise<void> {
+  private async fail(gen: number, why: Pick<PushDrop, 'cause' | 'code'> = { cause: 'close' }): Promise<void> {
     if (gen !== this.gen || this.stopped) return;
     this.ws = null;
     this.gen += 1;
+    const upS = this.openedAt ? Math.round((Date.now() - this.openedAt) / 1000) : undefined;
+    this.openedAt = 0;
     let auth = false;
     try { auth = (await this.deps.authBroken?.()) ?? false; } catch { auth = false; }
     if (this.stopped) return;
+    // **까닭을 남긴다** — 다시 붙는 것은 조용해도 된다. 까닭까지 조용하면 끊김이 몇 번인지도 안 남는다.
+    this.logger.info('판 알림 끊김', { cause: why.cause, code: why.code, upS, auth });
+    try { this.deps.onDrop?.({ ...why, up_s: upS, auth: auth || undefined }); } catch { /* 기록이 다시 붙기를 막지 않는다 */ }
     if (auth) {
       // **같은 경고를 되풀이하지 않는다** — 고칠 때까지 5분마다 조용히 다시 본다.
       if (!this.authWarned) {
@@ -189,7 +216,7 @@ export class BoardPush {
       if (this.lastPong < sentAt) {
         this.logger.warn('판 알림 — 핑에 답이 없습니다 · 끊고 다시 붙습니다');
         try { ws.close(); } catch { /* 이미 */ }
-        void this.fail(gen);
+        void this.fail(gen, { cause: 'pong' });
       }
     }, this.graceMs);
     check.unref?.();

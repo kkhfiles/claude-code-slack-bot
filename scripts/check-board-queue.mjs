@@ -139,8 +139,11 @@ const pendingContacts = () => post('pull', {}).then((j) => j.contacts ?? []);
  * 묶음 경로가 실제와 다른 답을 받아 검사가 거짓말을 한다.
  */
 const applied = [];
-const apply = async (text) => {
+/** 반영마다 넘어온 누름 번호 — 파이썬이 「누름 → 화면」을 잇는 열쇠다(2026-10-02). */
+const pressArgs = [];
+const apply = async (text, press) => {
   applied.push(text);
+  pressArgs.push(press);
   const parts = text.split(' · ').map((x) => x.trim()).filter(Boolean);
   if (parts.some((x) => x.startsWith('fail'))) {
     return { kind: 'failed', message: '노션이 안 열립니다' };
@@ -176,6 +179,7 @@ async function clear() {
   if (ids.length) await post('ack', { ids });
   fs.rmSync(DONE, { force: true });
   applied.length = 0;
+  pressArgs.length = 0;
   asked.length = 0;
   noted.length = 0;
 }
@@ -227,6 +231,7 @@ eq('세 건이 한 번에 반영된다', [r.applied.length, r.retry.length], [3,
 eq('**quick 을 한 번만 부른다**', applied.length, 1);
 eq('조각을 이어 붙인다', applied[0], 'ok TSK-8 완료 · ok TSK-10 완료 · ok TSK-11 완료');
 eq('답은 한 번만 낸다', r.applied.filter((x) => x.output).length, 1);
+eq('**묶어 보내도 누름 번호 셋을 다 넘긴다**', pressArgs[0], r.applied.map((x) => x.item.id).join(','));
 
 // 6-b. **묶음이 문법에 안 맞으면 건별로 다시 시도한다.** 묶으면 전부 아니면
 //    전무라, 그것만으로 끝내면 성한 것까지 버려진다.
@@ -271,11 +276,19 @@ eq('다음 판에도 안 돌아온다', [r.lost.length, asked.length], [0, 1]);
 // 9-b. **관찰 기록** — 「판 「프롬프트」가 슬랙을 대신하는가」의 판정 근거다
 //      (`work-assistant/docs/status.md` 「관찰 항목」). 위 8·9 가 성공 하나와
 //      실패 하나를 지났으니 여기서 두 줄이 있어야 한다.
-const evLines = fs.existsSync(EVENTS)
+const evAll = fs.existsSync(EVENTS)
   ? fs.readFileSync(EVENTS, 'utf-8').split('\n').filter(Boolean).map((x) => JSON.parse(x))
   : [];
+const evLines = evAll.filter((x) => x.kind === 'ask');
 eq('사람 말 한 건마다 한 줄이 쌓인다', evLines.length, 2);
-eq('갈래는 ask 하나', [...new Set(evLines.map((x) => x.kind))], ['ask']);
+eq('갈래는 ask 와 누름 둘뿐', [...new Set(evAll.map((x) => x.kind))].sort(), ['ask', 'press']);
+// **누른 것 하나마다 끝날 때 한 줄** (2026-10-02) — 다시 시도하려고 남긴 것(5 · 7)은 끝날 때 적고,
+// 이미 반영한 것(3)은 안 적는다. 매일 개선 제안이 「판이 느린가」를 이 줄로 잰다.
+const presses = evAll.filter((x) => x.kind === 'press');
+eq('누름마다 갈래가 남는다(반영 · 버림 · 세션 · 놓침)',
+   [...new Set(presses.map((x) => x.path))].sort(), ['drop', 'lost', 'quick', 'session']);
+eq('누른 시각부터 잰다(음수 없음)', presses.every((x) => x.done_ms >= 0 && x.wait_ms >= 0), true);
+eq('누름 줄에 글을 안 싣는다', JSON.stringify(presses).includes('완료'), false);
 // **못 넘긴 것도 센다** — 성공만 세면 비율이 늘 100%가 되어 「한 번만 시도하는
 // 대가가 실제로 나오는가」를 영영 못 본다.
 eq('성공과 실패를 둘 다 남긴다', evLines.map((x) => x.ok), [true, false]);
@@ -371,7 +384,7 @@ staged.length = 0;
 const narrowed = [];
 const narrow = async (text) => {
   narrowed.push(text);
-  if (text.includes('안 짚음')) return { kind: 'not-quick', detail: '업무를 안 짚었다' };
+  if (text.includes('안 짚음')) return { kind: 'not-quick', detail: '업무를 안 짚었다', code: 'no-task' };
   if (text.includes('터짐')) throw new Error('좁은 길이 터졌습니다');
   if (text.includes('망함')) return { kind: 'failed', message: '볼트가 안 열립니다' };
   return { kind: 'ok', output: 'TSK-9 — 진행 로그 / 소프트 마감=2026-09-11' };
@@ -414,6 +427,20 @@ await post('act', { text: HEAD + '좁은 길 안 넘김', kind: 'ask' });
 r = await q.drain(apply, ask, BASE, note, stage);
 eq('좁은 길을 안 넘기면 오늘까지와 같은 길',
    [narrowed.length, asked.length, staged.length], [0, 1, 1]);
+
+// **좁은 길이 못 받은 까닭을 짧은 이름으로 남긴다** (2026-10-02) — 「안 받음」만으로는 업무를 안
+// 짚은 말(정상)과 모델이 빈손인 것(고장)을 못 가른다. 걸린 시간도 같이.
+{
+  const nev = fs.readFileSync(EVENTS, 'utf-8').split('\n').filter(Boolean)
+    .map((x) => JSON.parse(x)).filter((x) => x.kind === 'narrow');
+  eq('좁은 길 줄 — 받음 · 안 짚음 · 터짐 · 망함',
+     nev.map((x) => [x.ok, x.code ?? x.why]), [[true, undefined], [false, 'no-task'], [false, 'threw'], [false, 'failed']]
+       .map(([o, c]) => [o, c === undefined ? undefined : c]));
+  eq('좁은 길 줄에 걸린 시간', nev.every((x) => typeof x.ms === 'number'), true);
+  const np = fs.readFileSync(EVENTS, 'utf-8').split('\n').filter(Boolean)
+    .map((x) => JSON.parse(x)).filter((x) => x.kind === 'press' && x.path === 'narrow');
+  eq('좁은 길로 끝난 누름도 한 줄', np.length, 1);
+}
 
 await clear();
 fs.rmSync(DONE, { force: true });

@@ -30,6 +30,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MOD = path.join(ROOT, 'dist', 'sdk-handler.js');
 // dist 가 없거나 낡았으면 맨 위 `./lib/fresh-dist.mjs` 가 이미 멈춘다.
 
+// 관찰 기록은 임시 파일로 — 실제 파일에 쌓으면 「몇 번 맞았나」가 검사 횟수만큼 부푼다.
+// **require 보다 먼저** 정한다(모듈이 읽을 때 경로를 굳힌다).
+const EVENTS = path.join(fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'warm-ev-')), 'ev.jsonl');
+process.env.WORK_EVENTS_FILE = EVENTS;
 const { SdkHandler, warmKey, warmDiff, pushableInput } = require(MOD);
 
 const fails = [];
@@ -322,6 +326,29 @@ const NARROW = { ...OPTS, tools: [], settingSources: [], skipMcp: true, appendSy
   eq('끝나면 그 객체로 띄운다', /prewarmAfter[\s\S]{0,120}sdkHandler\.prewarm\(sdkOpts\)/.test(sh), true);
   const as = fs.readFileSync(path.join(ROOT, 'dist', 'assistant-scheduler.js'), 'utf8');
   eq('좁은 길이 켠다', /prewarmAfter: true/.test(as), true);
+}
+
+// 24. **맞았나 · 왜 안 맞았나가 관찰 기록에 남는다** (2026-10-02) — 하루 활동 요약이 센다.
+//     미리 띄우기가 있는 두 길(좁은 길 · 대화)만 적는다 — 분석 세션까지 「없음」으로 적으면 맞힌
+//     비율이 저절로 낮아 보인다. 값은 안 싣고 칸 이름만.
+{
+  fs.rmSync(EVENTS, { force: true });
+  const NAR = { ...OPTS, env: { ASSISTANT_MODE: 'narrow' } };
+  const hh = new SdkHandler(mcp);
+  hh.prewarm(NAR);
+  hh.runQuery('맞음', NAR);
+  hh.prewarm(NAR);
+  hh.runQuery('다름', { ...NAR, effort: 'high' });
+  const h3 = new SdkHandler(mcp);
+  h3.runQuery('대화 — 자리 없음', { ...OPTS, env: { WORK_ASSISTANT_CAPTURE_FILE: 'x.json' } });
+  h3.runQuery('분석 — 안 적음', { ...OPTS, env: { ASSISTANT_MODE: 'analysis' } });
+  const ev = fs.existsSync(EVENTS)
+    ? fs.readFileSync(EVENTS, 'utf-8').split('\n').filter(Boolean).map((x) => JSON.parse(x)) : [];
+  eq('맞음 · 다름 · 없음 셋만 남는다(분석은 안 적음)',
+     ev.map((e) => [e.kind, e.hit, e.why ?? '', e.mode]),
+     [['prewarm', true, '', 'narrow'], ['prewarm', false, 'diff', 'narrow'], ['prewarm', false, 'none', 'chat']]);
+  eq('다른 까닭은 칸 이름으로', ev[1]?.diff, 'effort');
+  eq('프롬프트 글은 안 싣는다', JSON.stringify(ev).includes('맞음') || JSON.stringify(ev).includes('다름'), false);
 }
 
 if (fails.length) {

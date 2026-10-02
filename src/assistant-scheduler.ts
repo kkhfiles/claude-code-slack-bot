@@ -746,7 +746,10 @@ interface CostEntry {
   outputTokens?: number;
   cacheCreateTokens?: number;
   cacheReadTokens?: number;
-  via?: 'cli' | 'sdk';
+  /** 어느 길로 돌았나 — 폴백(`codex` · `agy`)이 받은 회차는 값이 0 이다(구독). */
+  via?: string;
+  /** 폴백 회차가 답을 냈나 — 값이 0 이라 값으로는 성패를 못 가른다. */
+  ok?: boolean;
   /** **폭주는 값이 아니라 횟수로 보인다.** 회당 $45 회차가 같은 명령을 900번
    *  되불러서였는데, 원장에 값만 있어 그것을 세는 길이 금지된 자료뿐이었다. */
   turns?: number;
@@ -1118,6 +1121,11 @@ export class AssistantScheduler {
   }
 
   private recordSessionCost(type: string, result: SessionResult): void {
+    // 폴백이 받은 회차는 값이 0 이라 아래에서 걸러진다 — 따로 남긴다.
+    if (result.servedBy && result.servedBy !== 'claude') {
+      this.recordFallbackRun(type, result.servedBy, result.timing?.resultMs, !result.isError);
+      return;
+    }
     this.recordCost(type, result.costUsd, result.sessionId, {
       usage: result.usage,
       via: result.usage ? 'sdk' : 'cli',
@@ -1126,6 +1134,21 @@ export class AssistantScheduler {
       timing: result.timing,
       textChars: result.text ? result.text.length : undefined,
     });
+  }
+
+  /**
+   * **폴백(codex · agy)이 돈 회차를 원장에 남긴다** (2026-10-02). 구독이라 값이 0 이어서
+   * `recordCost` 가 통째로 걸렀고, 그래서 원장만 보면 폴백이 한 번도 안 돈 것처럼 보였다.
+   * 값 0 · 백엔드 · 걸린 시간 · 됐는지만 적는다(토큰 수는 그쪽이 안 준다).
+   */
+  recordFallbackRun(type: string, via: string, ms: number | undefined, ok: boolean): void {
+    const entry: CostEntry = {
+      timestamp: new Date().toISOString(), type, costUsd: 0, sessionId: '', via, ok,
+    };
+    if (ms !== undefined) entry.resultMs = ms;
+    this.costEntries.push(entry);
+    this.saveCosts();
+    this.logger.info('Recorded fallback run', { type, via, ok, resultMs: ms });
   }
 
   private recordCost(
@@ -1989,6 +2012,8 @@ export class AssistantScheduler {
         target: () => boardPushTarget(),
         authBroken: () => boardPushAuthBroken(),
         onNew: () => { void this.tickBoardQueue(true); },
+        // 끊김마다 한 줄 — 하루 활동 요약이 세고, 「경고 없이 끊김」 관찰(10/09)의 재료가 된다.
+        onDrop: (d) => recordEvent('push-drop', { ...d }),
       });
       this.boardPush.start();
     }
@@ -2158,7 +2183,8 @@ export class AssistantScheduler {
     const todayKST = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
     const lastBriefing = [...this.costEntries]
       .reverse()
-      .find(e => e.type === 'briefing');
+      // 폴백이 돌다 실패한 회차(`ok: false`)는 「돌았다」로 안 친다 — 재시작 뒤에 다시 돌아야 한다.
+      .find(e => e.type === 'briefing' && e.ok !== false);
 
     if (lastBriefing) {
       const lastDateKST = new Date(new Date(lastBriefing.timestamp).getTime() + 9 * 3600_000)
@@ -2434,20 +2460,20 @@ export class AssistantScheduler {
    *
    * 못 받으면 `not-quick` 으로 물러난다. 부르는 쪽이 평소 경로(세션)로 떨어뜨린다.
    */
-  private narrowFromBoard = async (text: string): Promise<QuickOutcome> => {
-    if (process.env.BOARD_NARROW === 'off') return { kind: 'not-quick' };
+  private narrowFromBoard = async (text: string, press?: string): Promise<QuickOutcome> => {
+    if (process.env.BOARD_NARROW === 'off') return { kind: 'not-quick', code: 'off' };
     const root = workAssistantRoot();
-    if (!root) return { kind: 'not-quick' };
+    if (!root) return { kind: 'not-quick', code: 'no-root' };
     // 업무를 안 짚은 말(실측 10%)은 대상을 스스로 찾아야 해서 세션 몫이다.
     const task = narrowTask(text);
-    if (!task) return { kind: 'not-quick', detail: '업무를 안 짚었다' };
+    if (!task) return { kind: 'not-quick', detail: '업무를 안 짚었다', code: 'no-task' };
     const rules = path.join(root, NARROW_RULES);
     if (!fs.existsSync(rules)) {
       this.logger.error(`좁은 길 규칙이 없습니다 — ${rules}`);
-      return { kind: 'not-quick', detail: '규칙 파일 없음' };
+      return { kind: 'not-quick', detail: '규칙 파일 없음', code: 'no-rules' };
     }
     const card = await narrowCard(task);
-    if (!card) return { kind: 'not-quick', detail: `${task} 재료를 못 만듦` };
+    if (!card) return { kind: 'not-quick', detail: `${task} 재료를 못 만듦`, code: 'no-card' };
     // 두 엔진이 **같은 규칙**을 받아야 한다 — 한쪽만 고치면 폴백이 다른 일을 한다.
     const rulesText = fs.readFileSync(rules, 'utf-8');
 
@@ -2518,16 +2544,19 @@ export class AssistantScheduler {
     // 반영은 아래 `narrowApply` 한 번뿐이다. 세션 경로에 같은 사다리를 놓으려면
     // 되돌리기 문이 따로 필요하다(도구를 여러 번 돌려 중간에 죽을 수 있다).
     if (!said) {
+      const fb0 = Date.now();
       said = await narrowCodex(rulesText, user);
       // **센다.** 얼마나 도는지를 로그로만 알 수 있으면 아무도 안 센다 —
       // 이 레포에서 무시되는지·도는지를 세는 것은 `tasks.py events` 다.
-      recordEvent('narrow-fallback', { why, ok: !!said });
+      recordEvent('narrow-fallback', { why, ok: !!said, ms: Date.now() - fb0 });
+      // **원장에도 남긴다** — 구독이라 값은 0 이지만 빈칸이면 폴백이 몇 번 돌았는지가 원장에서 안 보인다.
+      this.recordFallbackRun('narrow', 'codex', Date.now() - fb0, !!said);
       if (said) this.logger.warn(`좁은 길 1차가 못 해서(${why}) codex 로 처리했습니다`);
       else this.logger.warn(`좁은 길 1차·폴백 둘 다 빈손(${why}) — 세션으로 갑니다`);
     }
 
-    if (!said) return { kind: 'not-quick', detail: '좁은 길이 아무 말도 안 했다' };
-    return narrowApply(said, task);
+    if (!said) return { kind: 'not-quick', detail: '좁은 길이 아무 말도 안 했다', code: 'empty' };
+    return narrowApply(said, task, press);
   };
 
   /**
@@ -2596,6 +2625,7 @@ export class AssistantScheduler {
     let said = '';
     let via = '';
     let servedBy: Backend = 'codex';
+    const fb0 = Date.now();
     if (toolFree) {
       // **도구 없는 회차는 사다리로**(읽기 전용 codex → agy) — 글만 주고받는 일이다. codex 세션으로
       // 넘기면 작업 폴더 쓰기 권한까지 붙어 1차보다 권한이 넓어진다(2026-09-23 점검).
@@ -2630,7 +2660,9 @@ export class AssistantScheduler {
     recordEvent('session-fallback', { label, why, ok: !!said, via });
     if (said) {
       this.logger.warn(`${label} 1차가 못 해서(${why}) ${via} 로 처리했습니다`);
-      return { text: said, costUsd: 0, sessionId: '', subtype: 'success', isError: false, toolCalls: 0, servedBy };
+      // 걸린 시간을 싣는다 — 원장(`recordFallbackRun`)이 폴백 회차의 길이를 이것으로 남긴다.
+      return { text: said, costUsd: 0, sessionId: '', subtype: 'success', isError: false, toolCalls: 0, servedBy,
+               timing: { resultMs: Date.now() - fb0 } };
     }
     this.logger.warn(`${label} 1차·폴백 둘 다 못 했습니다(${why})`);
     return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };

@@ -217,10 +217,20 @@ export function quoteForShell(arg: string): string {
   return `"${arg}"`;
 }
 
-function runTasks(
+/**
+ * 판에서 누른 것을 반영할 때 넘기는 표시(2026-10-02) — 값은 **환경변수로** 간다(인자로 주면
+ * cmd.exe 를 지난다). `src` 는 체크인 답과 판 버튼을 가르고, `press` 는 누름 번호(쉼표로 이음)라
+ * 그 쓰기가 띄운 판 올리기가 「누름 → 화면」 시간을 남긴다(`upload_board.py` 의 `press_note`).
+ */
+export function boardEnv(press?: string): Record<string, string> {
+  return press ? { WORK_ASSISTANT_SRC: 'board', WORK_ASSISTANT_PRESS: press } : {};
+}
+
+export function runTasks(
   args: string[],
   timeoutMs = 60_000,
   script = 'bin/tasks.py',
+  extraEnv: Record<string, string> = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const root = workAssistantRoot();
   const useShell = process.platform === 'win32';
@@ -231,7 +241,7 @@ function runTasks(
       cwd: root,
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: useShell,
-      env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
+      env: { ...process.env, ...extraEnv, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
       windowsHide: true,
     });
     let stdout = '';
@@ -681,7 +691,9 @@ export type QuickOutcome =
    * 않는다는 규율은 그대로) **로그에 남길 것**이다 — 판에서 누른 것이 버려졌을 때
    * 이유가 어디에도 안 남아 다음에 또 못 짚는다(2026-08-18).
    */
-  | { kind: 'not-quick'; detail?: string }
+  | { kind: 'not-quick'; detail?: string;
+      /** 좁은 길이 못 받은 까닭의 짧은 이름 — 관찰 기록에 그대로 실린다(`detail` 은 글이라 안 싣는다). */
+      code?: string }
   /** 문법은 맞는데 쓰기가 깨졌다 — 조용히 넘기면 갱신이 사라진 줄 모른다. */
   | { kind: 'failed'; message: string };
 
@@ -695,8 +707,8 @@ export type QuickOutcome =
  * 원문은 파일로 넘긴다. 따옴표·줄바꿈·한글이 섞인 문자열을 인자로 주면
  * win32 `shell:true` spawn 에서 깨지거나 주입 위험이 생긴다(캡처와 같은 이유).
  */
-export async function quickUpdate(text: string): Promise<QuickOutcome> {
-  return byFile('quick', text);
+export async function quickUpdate(text: string, press?: string): Promise<QuickOutcome> {
+  return byFile('quick', text, press);
 }
 
 /**
@@ -707,8 +719,8 @@ export async function quickUpdate(text: string): Promise<QuickOutcome> {
  * 지시로 읽고, 줄바꿈과 `·` 는 그 문법의 조각 구분자다. 여기서는 여전히
  * **종료 코드만** 본다 — 뜻은 저쪽 한 곳에만 있다.
  */
-export async function noteUpdate(text: string): Promise<QuickOutcome> {
-  return byFile('note', text);
+export async function noteUpdate(text: string, press?: string): Promise<QuickOutcome> {
+  return byFile('note', text, press);
 }
 
 /**
@@ -734,13 +746,15 @@ export async function stageUpdate(text: string): Promise<QuickOutcome> {
  * 파일로 넘기는 이유 — 따옴표·줄바꿈·한글이 섞인 문자열을 인자로 주면
  * win32 `shell:true` spawn 에서 깨지거나 주입 위험이 생긴다(캡처와 같은 이유).
  */
-async function byFile(cmd: 'quick' | 'note' | 'stage', text: string): Promise<QuickOutcome> {
+async function byFile(cmd: 'quick' | 'note' | 'stage', text: string,
+                      press?: string): Promise<QuickOutcome> {
   const root = workAssistantRoot();
   if (!root) return { kind: 'not-quick' };
   const file = path.join(os.tmpdir(), `wa-${cmd}-${randomId()}.txt`);
   try {
     fs.writeFileSync(file, text, { encoding: 'utf-8' });
-    const { code, stdout, stderr } = await runTasks([cmd, '--file', file], 90_000);
+    const { code, stdout, stderr } = await runTasks([cmd, '--file', file], 90_000,
+      undefined, boardEnv(press));
     if (code === 0) return { kind: 'ok', output: stdout.trim() };
     if (code === 2) {
       return { kind: 'not-quick', detail: (stderr || stdout).trim().split('\n').slice(-2).join(' / ') };
@@ -790,17 +804,19 @@ export async function narrowCard(
  *
  * rc 2 는 「좁은 길이 못 냈다」 — 봇이 평소 경로(세션)로 넘긴다.
  */
-export async function narrowApply(json: string, task: string): Promise<QuickOutcome> {
+export async function narrowApply(json: string, task: string,
+                                  press?: string): Promise<QuickOutcome> {
   const root = workAssistantRoot();
   if (!root) return { kind: 'not-quick' };
   const file = path.join(os.tmpdir(), `wa-narrow-${randomId()}.json`);
   try {
     fs.writeFileSync(file, json, { encoding: 'utf-8' });
     const { code, stdout, stderr } = await runTasks(
-      ['narrow', '--apply', file, '--task', task], 90_000);
+      ['narrow', '--apply', file, '--task', task], 90_000, undefined, boardEnv(press));
     if (code === 0) return { kind: 'ok', output: stdout.trim() };
     if (code === 2) {
-      return { kind: 'not-quick', detail: (stderr || stdout).trim().split('\n').slice(-2).join(' / ') };
+      return { kind: 'not-quick', code: 'reject',
+               detail: (stderr || stdout).trim().split('\n').slice(-2).join(' / ') };
     }
     return { kind: 'failed', message: (stderr || stdout).trim().slice(0, 300) };
   } catch (err) {

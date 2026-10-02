@@ -236,6 +236,32 @@ function rig(over = {}) {
   push.stop();
 }
 
+// ⑫-b 끊김마다 까닭과 붙어 있던 시간을 알린다 (2026-10-02) — 9시간에 다섯 번 조용히 다시 붙었는데
+//      까닭이 어디에도 없어 못 짚었다. 붙기 전에 끊긴 것은 붙어 있던 시간이 없다.
+{
+  const drops = [];
+  const { push, sockets } = rig({ onDrop: (d) => drops.push(d) });
+  push.start();
+  sockets[0].open();
+  await sleep(50);
+  sockets[0].drop();                         // 닫힘 1006
+  await sleep(75);
+  sockets[1].drop();                         // 붙기 전에 끊김
+  await sleep(160);
+  sockets[2].open();
+  await sleep(200);                          // 핑 답 없음 → 끊고 다시
+  push.stop();
+  eq('끊김마다 한 번 · 까닭 셋', drops.map((d) => [d.cause, d.code ?? null]),
+     [['close', 1006], ['close', 1006], ['pong', null]]);
+  eq('붙어 있던 시간 — 붙은 것만', drops.map((d) => typeof d.up_s), ['number', 'undefined', 'number']);
+  const boom = rig({ onDrop: () => { throw new Error('기록 실패'); } });
+  boom.push.start();
+  boom.sockets[0].drop();
+  await sleep(75);
+  eq('기록이 터져도 다시 붙는다', boom.sockets.length, 2);
+  boom.push.stop();
+}
+
 // ⑫ 스케줄러 배선 — **소스를 대조한다.** 몸통(`tickBoardQueue`)은 진짜 판 주소로 나가서
 //    여기서 돌릴 수 없다. 대신 깨지면 조용히 느려지기만 하는 네 군데를 글자로 묶는다.
 {
@@ -251,6 +277,7 @@ function rig(over = {}) {
   eq('알림이 깨운 것은 주기 판정을 안 탄다', /if \(!force && now - this\.boardQueueLast/.test(tick), true);
   eq('도는 중에 온 알림은 적어 둔다', /if \(this\.boardQueueBusy\) \{\s*if \(force\) this\.boardQueueAgain = true;/.test(tick), true);
   eq('끝난 뒤 한 번 더 돈다', /if \(this\.boardQueueAgain\) \{\s*this\.boardQueueAgain = false;\s*void this\.tickBoardQueue\(true\);/.test(tick), true);
+  eq('끊김을 관찰 기록에 남긴다', /onDrop: \(d\) => recordEvent\('push-drop'/.test(start), true);
 }
 
 if (fails.length) {

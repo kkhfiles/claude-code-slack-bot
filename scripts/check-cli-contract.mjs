@@ -137,6 +137,23 @@ for (const { file, toks } of calls) {
   }
 }
 
+// ---------- ③ 환경변수로 넘기는 이름 (2026-10-02) ----------
+// 판에서 누른 것을 반영할 때 봇이 환경변수 둘을 넘긴다(`boardEnv`). 파이썬이 그 이름을 안 읽으면
+// **아무 오류 없이** 판 버튼이 체크인 답으로 세지고 「누름 → 화면」이 비어 있다. 이름을 소스에서 뽑아 맞춘다.
+{
+  const waSrc = fs.readFileSync(path.join(srcDir, 'work-assistant.ts'), 'utf-8');
+  const body = waSrc.slice(waSrc.indexOf('export function boardEnv'), waSrc.indexOf('export function runTasks'));
+  const names = [...body.matchAll(/\b(WORK_ASSISTANT_[A-Z_]+):/g)].map((m) => m[1]);
+  const readers = { WORK_ASSISTANT_SRC: 'tasks.py', WORK_ASSISTANT_PRESS: 'upload_board.py' };
+  if (names.length !== 2) fails.push(`boardEnv 에서 뽑은 이름이 ${names.length}개 — 뽑는 규칙이 헛돕니다`);
+  for (const n of names) {
+    const file = path.join(waRoot, 'bin', readers[n] ?? 'tasks.py');
+    if (!fs.existsSync(file) || !fs.readFileSync(file, 'utf-8').includes(`"${n}"`)) {
+      fails.push(`봇이 넘기는 ${n} 를 ${path.basename(file)} 가 안 읽습니다 — 한쪽만 고쳤습니다`);
+    }
+  }
+}
+
 for (const n of notes) console.log('⚠️  ' + n);
 if (fails.length) {
   console.log(`실패 ${fails.length}건\n`);

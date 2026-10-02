@@ -102,13 +102,30 @@ export interface ContactItem {
  */
 export type Deliver = (item: ContactItem) => Promise<boolean>;
 
-/** `quick` 을 부르는 쪽. 봇은 실제 구현을, 검사는 가짜를 넘긴다. */
-export type Apply = (text: string) =>
+/**
+ * `quick` 을 부르는 쪽. 봇은 실제 구현을, 검사는 가짜를 넘긴다.
+ *
+ * `press` 는 이 반영을 부른 누름 번호(쉼표로 이음)다 — 받는 쪽이 파이썬에 넘겨 「누름 → 화면」을
+ * 잇는다(2026-10-02). 판에서 온 것에만 붙으므로 **있으면 판 버튼**이라는 표시도 겸한다.
+ */
+export type Apply = (text: string, press?: string) =>
   Promise<{ kind: 'ok'; output: string }
     // `detail` 은 왜 문법이 아닌지 — 로그에만 쓴다(사람에게 가는 DM 은 원인을
     // 안 좁힌다). 검사가 가짜를 넘길 수 있게 여기 모양을 따로 적어 둔다.
-    | { kind: 'not-quick'; detail?: string }
+    // `code` 는 그 까닭의 짧은 이름 — 관찰 기록에 실린다(좁은 길이 못 받은 까닭).
+    | { kind: 'not-quick'; detail?: string; code?: string }
     | { kind: 'failed'; message: string }>;
+
+/**
+ * 누른 시각(ms). 워커가 매기는 번호가 `c-<밀리초 36진>-<무작위>` 라 초 단위 `ts` 보다 정확하다.
+ * 모양이 다르면 `ts`(초)로 물러난다.
+ */
+export function pressedAt(item: Pick<QueueItem, 'id' | 'ts'>): number | null {
+  const m = /^c-([0-9a-z]+)-/.exec(item.id || '');
+  const ms = m ? parseInt(m[1], 36) : NaN;
+  if (Number.isFinite(ms) && ms > 1e12) return ms;
+  return item.ts ? item.ts * 1000 : null;
+}
 
 /**
  * 사람 말을 비서에게 넘기는 쪽. **답도 되묻기도 비서가 자기 자리에서 한다** —
@@ -270,6 +287,7 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
   // 이 폴러 하나가 이미 무료 한도의 43%를 쓴다.
   const pulled = (await call('pull', {}, base)) as
     { items: QueueItem[]; contacts?: ContactItem[] };
+  const pulledAt = Date.now();
   const items = pulled.items ?? [];
   const mail = pulled.contacts ?? [];
   if (!items.length && !mail.length) return out;
@@ -316,6 +334,22 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
   /** 여러 줄 글. **모으지 않는다** — 아래 `note` 갈래의 주석 참조. */
   const notes: QueueItem[] = [];
 
+  /**
+   * **누른 것 하나가 어디로 가서 얼마 만에 끝났나** (2026-10-02) — 관찰 기록 한 줄. 매일 개선
+   * 제안이 「판이 느린가」를 이 줄로 잰다. 글은 안 싣는다(갈래 · 걸린 시간 · 번호뿐).
+   *   `wait_ms` 누름 → 봇이 가져감 · `done_ms` 누름 → 반영이 끝남(세션이면 세션이 끝날 때까지)
+   * 화면에 실린 때는 파이썬 올리기가 같은 번호로 따로 남긴다(`press-up`).
+   * 다시 시도하려고 큐에 남긴 것은 안 적는다 — 끝날 때 한 번만 적어야 건수가 안 부푼다.
+   */
+  const pressed = (item: QueueItem, route: string, ok: boolean) => {
+    const at = pressedAt(item);
+    event('press', {
+      id: item.id, k: item.kind || 'quick', path: route, ok,
+      wait_ms: at === null ? undefined : pulledAt - at,
+      done_ms: at === null ? undefined : Date.now() - at,
+    });
+  };
+
   /** 반영됐다고 적고 지운다. **적는 것이 먼저다** — 순서가 바뀌면 그 사이에 죽었을 때 두 번 쓴다. */
   const settle = (item: QueueItem, output: string) => {
     done.push(item.id);
@@ -324,6 +358,7 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
     ack.push(item.id);
     logger.info(`반영 — ${item.id} ${item.text}`);
     out.applied.push({ item, output });
+    pressed(item, item.kind === 'note' ? 'note' : 'quick', true);
   };
 
   const drop = (item: QueueItem, why?: string) => {
@@ -335,6 +370,7 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
     // 로그까지 비워 두면 다음에 또 「왜 안 됐나」에서 막힌다.
     logger.warn(`버림 — ${item.id} ${item.text} · ${why || '이유 없음'}`);
     out.dropped.push(item);
+    pressed(item, 'drop', false);
   };
 
   for (const item of items) {
@@ -365,19 +401,24 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
       // **못 받으면 조용히 아래로 떨어진다** — 업무를 안 짚었거나(10%) JSON 을
       // 못 냈을 때다. 그때는 오늘까지와 완전히 같은 길이라 잃는 것이 없다.
       if (narrow) {
+        const t0 = Date.now();
         try {
-          const r = await narrow(item.text);
+          const r = await narrow(item.text, item.id);
           if (r.kind === 'ok') {
             logger.info(`좁은 길로 처리 — ${item.id} ${r.output.slice(0, 120)}`);
-            event('narrow', { ok: true });
+            event('narrow', { ok: true, ms: Date.now() - t0 });
             out.applied.push({ item, output: r.output });
+            pressed(item, 'narrow', true);
             continue;
           }
           // `failed` 도 세션으로 떨어뜨린다 — 사람 말을 잃는 것보다 두 번 도는 편이 싸다.
-          event('narrow', { ok: false, why: r.kind });
+          // **못 받은 까닭을 짧은 이름으로 싣는다**(`code`) — 「안 받음」만으로는 업무를 안 짚은
+          // 말(정상)과 모델이 빈손인 것(고장)을 못 가른다(2026-10-02).
+          event('narrow', { ok: false, why: r.kind,
+                            code: r.kind === 'not-quick' ? r.code : undefined, ms: Date.now() - t0 });
           logger.info(`좁은 길이 안 받음 (세션으로) — ${item.id} ${r.kind}`);
         } catch (err) {
-          event('narrow', { ok: false, why: 'threw' });
+          event('narrow', { ok: false, why: 'threw', ms: Date.now() - t0 });
           logger.error('좁은 길이 터졌습니다 (세션으로 갑니다)', err);
         }
       }
@@ -402,12 +443,14 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
         logger.info(`비서에게 넘김 — ${item.id} ${item.text.slice(0, 80)}`);
         event('ask', { ok: true });
         out.applied.push({ item, output: '' });
+        pressed(item, 'session', true);
       } catch (err) {
         logger.error('판에서 온 말을 비서에게 못 넘겼습니다', err);
         // **못 넘긴 것도 센다** — 성공만 세면 비율이 늘 100%가 되어 「한 번만
         // 시도하는 대가가 실제로 나오는가」를 영영 못 본다.
         event('ask', { ok: false });
         out.lost.push(item);
+        pressed(item, 'lost', false);
       }
       continue;
     }
@@ -448,7 +491,7 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
   async function applyQuicks(): Promise<void> {
     if (!quicks.length) return;
     if (quicks.length === 1) { await applyEach(quicks, apply); return; }
-    const r = await apply(quicks.map((i) => i.text).join(' · '));
+    const r = await apply(quicks.map((i) => i.text).join(' · '), quicks.map((i) => i.id).join(','));
     if (r.kind === 'ok') {
       // **답은 한 번만 낸다** — 건마다 같은 글을 DM 으로 보내면 소음이다.
       quicks.forEach((item, i) => settle(item, i === 0 ? r.output : ''));
@@ -464,7 +507,7 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
 
   async function applyEach(list: QueueItem[], fn: Apply): Promise<void> {
     for (const item of list) {
-      const r = await fn(item.text);
+      const r = await fn(item.text, item.id);
       if (r.kind === 'ok') settle(item, r.output);
       else if (r.kind === 'not-quick') drop(item, r.detail);
       else {
