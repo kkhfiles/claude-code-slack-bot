@@ -35,6 +35,9 @@ const eq = (label, got, want) => {
 const ok = (label, cond) => { if (!cond) fails.push(label); };
 
 const evFile = path.join(os.tmpdir(), `wa-sev-${Date.now()}.jsonl`);
+// 비용 원장도 임시 파일로 — **import 보다 먼저**(모듈이 읽을 때 경로를 굳힌다).
+const costFile = path.join(os.tmpdir(), `wa-cost-${Date.now()}.json`);
+process.env.ASSISTANT_COSTS_FILE = costFile;
 process.env.WORK_EVENTS_FILE = evFile;
 // 폴백이 실제로 불리는지만 보고 싶다 — 없는 실행체를 주면 빈손으로 돌아온다.
 process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
@@ -189,6 +192,28 @@ try { fs.unlinkSync(evFile); } catch { /* 없으면 그만 */ }
   ok('따라잡기는 실패한 폴백 회차를 「돌았다」로 안 친다',
      /e\.type === 'briefing' && e\.ok !== false/.test(
        fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8')));
+}
+
+// ── ⛔ 원장을 읽지 않은 스케줄러는 원장에 쓰지 않는다 (2026-10-02 사고) ──
+// 시험이 `start()` 없이 만든 스케줄러가 폴백 회차를 남기다 운영 원장 382건을 1건으로 덮었다.
+{
+  const seed = [1, 2, 3].map((n) => ({ timestamp: new Date().toISOString(), type: `t${n}`, costUsd: 0.1, sessionId: `s${n}` }));
+  fs.writeFileSync(costFile, JSON.stringify({ entries: seed }));
+  const cold = new AssistantScheduler(async () => {}, async () => OKR, config.assistant.configDir);
+  cold.recordFallbackRun('narrow', 'codex', 10, false);
+  cold.recordCost('briefing', 0.5, 's9');
+  eq('읽기 전에는 원장을 안 덮는다', JSON.parse(fs.readFileSync(costFile, 'utf-8')).entries.length, 3);
+  const warm = new AssistantScheduler(async () => {}, async () => OKR, config.assistant.configDir);
+  warm.loadCosts();
+  warm.recordFallbackRun('narrow', 'codex', 10, false);
+  eq('읽은 뒤에는 이어 쓴다', JSON.parse(fs.readFileSync(costFile, 'utf-8')).entries.map((e) => e.type),
+     ['t1', 't2', 't3', 'narrow']);
+  fs.writeFileSync(costFile, '깨진 원장');
+  const broken = new AssistantScheduler(async () => {}, async () => OKR, config.assistant.configDir);
+  broken.loadCosts();
+  broken.recordFallbackRun('narrow', 'codex', 10, false);
+  eq('읽다 실패한 원장도 안 덮는다', fs.readFileSync(costFile, 'utf-8'), '깨진 원장');
+  fs.rmSync(costFile, { force: true });
 }
 
 // ── 소스: 예약 세션이 폴백을 안 거치고 새는 곳이 없나 ─────────

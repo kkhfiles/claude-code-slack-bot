@@ -776,7 +776,8 @@ interface CostEntry {
   textChars?: number;
 }
 
-const COST_FILE = path.join(__dirname, '..', '.assistant-costs.json');
+/** 비용 원장. 시험은 `ASSISTANT_COSTS_FILE` 로 바꿔 끼운다 — 실제 원장을 건드리면 안 된다(2026-10-02 사고). */
+const COST_FILE = process.env.ASSISTANT_COSTS_FILE || path.join(__dirname, '..', '.assistant-costs.json');
 const COST_RETENTION_DAYS = 30;
 
 export class AssistantScheduler {
@@ -833,6 +834,8 @@ export class AssistantScheduler {
 
   // Cost tracking
   private costEntries: CostEntry[] = [];
+  /** 원장을 읽었나 — 안 읽었으면 저장하지 않는다(`saveCosts` 주석). */
+  private costsLoaded = false;
 
   /** report-log 명령 — 분석 회차를 열고 저장하는 길. 시험은 `deps.reportLog` 로 바꾼다. */
   private readonly reportLog: NonNullable<SchedulerDeps['reportLog']>;
@@ -1118,13 +1121,23 @@ export class AssistantScheduler {
           (e: CostEntry) => new Date(e.timestamp).getTime() > cutoff,
         );
       }
+      this.costsLoaded = true;
     } catch (error) {
       errorCollector.add('AssistantScheduler', `비용 데이터 로드 실패: ${(error as Error).message}`);
       this.logger.error('Failed to load cost data', error);
     }
   }
 
+  /**
+   * ⛔ **원장을 읽지 않은 스케줄러는 원장에 쓰지 않는다** (2026-10-02 사고). 원장은 통째로 다시 쓰는
+   * 파일이라, 읽기 전의 빈 목록으로 쓰면 남은 기록이 다 지워진다. 시험이 `start()` 없이 만든 스케줄러가
+   * 폴백 회차를 원장에 남기다 운영 원장(382건)을 1건으로 덮었다. 읽다 실패한 원장도 덮지 않는다(사람이 본다).
+   */
   private saveCosts(): void {
+    if (!this.costsLoaded) {
+      this.logger.warn('비용 원장을 읽기 전이라 저장하지 않습니다(덮어쓰기 막음)');
+      return;
+    }
     try {
       fs.writeFileSync(COST_FILE, JSON.stringify({ entries: this.costEntries }, null, 2), 'utf-8');
     } catch (error) {
