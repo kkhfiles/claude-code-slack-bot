@@ -23,24 +23,24 @@ const PART = '\u{1F7E1}';
 
 // 정원 1 — 예전 자료(capacity·users 없음)와 새 자료가 같은 글
 const old = { accounts: [
-  { account: 'pro-a@ex.com', current: { display_name: '가', until: '오늘 오후까지' }, next: null },
-  { account: 'pro-b@ex.com', current: null, next: { display_name: '나', label: '내일 오전' } },
+  { account: 'pro-a@example.com', current: { display_name: '가', until: '오늘 오후까지' }, next: null },
+  { account: 'pro-b@example.com', current: null, next: { display_name: '나', label: '내일 오전' } },
 ] };
 const oldText = proFieldText(old);
 check('정원 1 · 쓰는 중', oldText.includes(`${BUSY} *pro-a*  가 · 오늘 오후까지`), oldText);
 check('정원 1 · 비어 있음과 다음 예약', oldText.includes(`${FREE} *pro-b*  비어 있음 · 다음 내일 오전 나`), oldText);
 check('정원 1 · 제목에 동시 인원 없음 · 자리 표시 없음', !oldText.includes('동시') && !oldText.includes('자리'), oldText);
 const same = proFieldText({ accounts: [
-  { account: 'pro-a@ex.com', capacity: 1, users: [{ display_name: '가', until: '오늘 오후까지' }], current: { display_name: '가', until: '오늘 오후까지' }, next: null },
-  { account: 'pro-b@ex.com', capacity: 1, users: [], current: null, next: { display_name: '나', label: '내일 오전' } },
+  { account: 'pro-a@example.com', capacity: 1, users: [{ display_name: '가', until: '오늘 오후까지' }], current: { display_name: '가', until: '오늘 오후까지' }, next: null },
+  { account: 'pro-b@example.com', capacity: 1, users: [], current: null, next: { display_name: '나', label: '내일 오전' } },
 ] });
 check('정원 1 · 새 자료도 예전 자료와 같은 글', same === oldText, [same, oldText]);
 
 // 정원 2 — 한 사람이면 노란 원과 남은 자리 · 두 사람이면 빨간 원과 둘 다
 const shared = proFieldText({ accounts: [
-  { account: 'pro-a@ex.com', capacity: 2, users: [{ display_name: '가', until: '오늘 오후까지' }], next: null },
-  { account: 'pro-b@ex.com', capacity: 2, users: [{ display_name: '나', until: '오늘 오후까지' }, { display_name: '다', until: '내일 오전까지' }], next: null },
-  { account: 'pro-c@ex.com', capacity: 2, users: [], next: null },
+  { account: 'pro-a@example.com', capacity: 2, users: [{ display_name: '가', until: '오늘 오후까지' }], next: null },
+  { account: 'pro-b@example.com', capacity: 2, users: [{ display_name: '나', until: '오늘 오후까지' }, { display_name: '다', until: '내일 오전까지' }], next: null },
+  { account: 'pro-c@example.com', capacity: 2, users: [], next: null },
 ] });
 check('정원 2 · 제목에 동시 인원', shared.includes('*GPT Pro 계정* (계정마다 동시 2명)'), shared);
 check('정원 2 · 한 사람이면 노란 원 · 1자리 남음', shared.includes(`${PART} *pro-a*  가 · 오늘 오후까지  (1자리 남음)`), shared);
@@ -49,7 +49,7 @@ check('정원 2 · 아무도 없으면 초록 원', shared.includes(`${FREE} *pr
 
 // 끝날 때의 알림(2026-09-30 실장) — 계정 전환: 정오 끝 11:55 · 자정 끝 17:55(밤에는 안 보냄) · 긴 예약 미리 알림: 08:00·15:00
 const next = { display_name: '나', label: '오늘 오후' };
-const A = 'pro-a@ex.com';
+const A = 'pro-a@example.com';
 const lines = (t) => t.split('\n');
 const noonNext = bookingEndingText({ account: A, end_word: '정오', next, next_is_adjacent: true });
 check('전환 · 정오 · 바로 뒤 사람', lines(noonNext)[0] === '*pro-a* 계정 예약이 5분 뒤 정오에 끝납니다.'
