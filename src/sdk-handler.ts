@@ -595,11 +595,16 @@ export function warmKey(sdkOptions: any): string {
  * 수정 시각. 지문에 같이 넣어, 그 사이 바뀌었으면 옛 규칙으로 답하는 것을 안 쓴다
  * (2026-10-01 · GPT 6.1 sol 검토). 내용 대신 시각만 본다 — 지문을 만들 때마다 읽는다.
  * MCP 설정은 내용째 옵션(`mcpServers`)에 이미 들어 있다.
+ *
+ * **`AGENTS.md` 도 본다**(2026-10-02) — 다른 사람과 쓰는 저장소는 규칙 본문을 `AGENTS.md` 에 두고
+ * `CLAUDE.md` 는 그것을 불러오는 한 줄(`@AGENTS.md`)만 둔다. 그러면 규칙을 고쳐도 `CLAUDE.md` 의
+ * 시각은 그대로라, 이것을 안 보면 미리 띄운 프로세스가 옛 규칙으로 답한다.
  */
 export function contextStamp(cwd?: string): string {
   const home = os.homedir();
   const files = [
     cwd && path.join(cwd, 'CLAUDE.md'),
+    cwd && path.join(cwd, 'AGENTS.md'),
     cwd && path.join(cwd, '.claude', 'settings.json'),
     cwd && path.join(cwd, '.claude', 'settings.local.json'),
     path.join(home, '.claude', 'CLAUDE.md'),

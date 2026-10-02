@@ -1,0 +1,85 @@
+# 명령별 동작과 설정
+
+**명령을 고치거나 새로 만들 때 먼저 읽는 참고** — 명령마다 하는 일 · 설정 · 저장 파일 · 규칙은 `AGENTS.md` 「Command Pattern」(2026-10-02 `AGENTS.md` 에서 옮김)
+
+- `-stop`: `CliProcess.interrupt()`로 CLI 프로세스 중단 (세션 상태 보존)
+- `-plan <prompt>`: `permissionMode: 'plan'`으로 읽기 전용 실행 → Execute 버튼으로 세션 resume
+- `-default`/`-safe`/`-trust`: 권한 모드 전환 (default → safe → trust 순으로 자유도 증가)
+- 모델 선택 (`config.defaultModel`, env `DEFAULT_MODEL` — 기본 `sonnet`):
+  - `-m`/`-model [이름]`/`모델 [이름]` — 채널 모델 조회/설정 (`sonnet`, `opus`, `haiku`, full ID, `default`)
+  - `-opus`/`-o`, `-sonnet`/`-s`, `-haiku`/`-h` — 채널 모델을 별칭으로 즉시 전환
+  - `!o <prompt>`/`!s <prompt>`/`!h <prompt>` — 메시지 prefix로 일회성 모델 적용 (try/finally로 채널 모델 복원)
+  - alias 매핑: `SlackHandler.resolveModelAlias()` (full ID는 그대로 통과)
+- `-r`/`-resume`: 전체 프로젝트 세션 피커 (버튼 선택 → cwd 자동 전환 + 세션 재개)
+- `-sessions all`: 전체 프로젝트 세션 목록 (세션 피커와 동일)
+- `-version`: 봇 버전 + git hash + 업데이트 확인 (`src/version.ts`)
+- `-apikey`: API 키 등록/수정 모달 (rate limit 시 자동 전환용, `~/.claude/.bot-api-keys.json` 영속화)
+- `-account`: 다중 계정 상태 조회 및 수동 전환 (`AccountManager`, `~/.claude/.bot-accounts.json` 영속화)
+  - `-account` — 통합 상태 뷰 (Set/Use/Unset 버튼)
+  - `-account 1` / `-account 2` / `-account 3` — 수동 전환
+  - 토큰 저장: `~/.claude/.bot-accounts.json` (accessToken, refreshToken, expiresAt, email, oauthAccount)
+  - 전환: `CLAUDE_CODE_OAUTH_TOKEN` env var 주입 + `~/.claude/.credentials.json` + `~/.claude.json` 자동 동기화 (터미널 CLI도 전환 반영)
+  - 토큰 만료 90분 전 자동 갱신 (OAuth refresh), 갱신 실패 시 `null` 반환 (만료 토큰 사용 방지)
+  - **토큰 자동 동기화**: `fs.watchFile`로 `.credentials.json` 10초 간격 감시 → email 매칭으로 `.bot-accounts.json` 자동 갱신
+  - 봇→터미널: refresh 시 `syncToCredentialsIfActive()` — email 매칭으로 터미널 활성 계정이면 `.credentials.json` 갱신
+  - 터미널→봇: 파일 워처 + CLI 스폰 전 동기화
+  - **토큰 공유**: `captureForSlot()`은 캡처만 수행 (독립 refresh 삭제 — 토큰 체인 파괴 원인이었음)
+  - **토큰 건강 체크**: 1시간마다 + 시작 시 전 계정 체크, 체크 전 `syncFromCredentialsFile()` 실행, 갱신 실패 시 Slack 알림 (계정당 1회)
+  - **터미널 보호**: 터미널 활성 계정은 선제적 갱신 건너뜀 (OAuth rotation이 터미널 인메모리 refresh token 무효화 방지), 토큰 실제 만료 시에만 갱신
+  - rate limit 시 전환 체인: account-1 → account-2 → account-3 → API 키 버튼
+- `-schedule`: 세션 자동 시작 설정 관리 (`ScheduleManager`, `.schedule-config.json` 영속화)
+  - 블록 UI: 계정별 `[+ email]` 추가 버튼(모달) + 시간별 `[✕]` 삭제 버튼 + `[🗑 Clear all]`
+  - 각 스케줄 엔트리는 특정 계정에 연결 (`ScheduleEntry: { time, account }`)
+  - 같은 계정 내에서만 5시간 윈도우 충돌 검사 (다른 계정끼리는 겹쳐도 OK)
+  - 모달 제출 후 원래 메시지를 `chat.update`로 즉시 갱신
+  - 예약 시간 +0~10분 랜덤 지터로 자동화 감지 방지
+  - **자동 팔로우업**: 첫 발송 후 5시간 뒤 두 번째 메시지 자동 발송 (다음 세션 윈도우 커버)
+  - **비업무일 스킵**: 주말 + 한국 공휴일(음력 포함) 자동 스킵 (`date-holidays` 패키지, 오프라인)
+  - 팔로우업 타이머 디스크 영속화 (`pendingFollowUps`) — pm2 재시작 후에도 복원, 만료분은 즉시 발사
+  - 랜덤 인사 메시지 (`say "hi"`, `3+7` 등) + haiku 모델로 새 세션 시작
+  - **일일 로테이션**: 2계정 교차 스케줄 시 짝수/홀수 dayOfYear로 계정 스왑 → 2주 합산 균형 (토글 버튼으로 ON/OFF)
+- `-briefing`/`-br`/`브리핑`: 모닝 브리핑 즉시 실행 (`AssistantScheduler.runBriefing()`)
+  - 캐시된 캘린더 데이터 사용 (MCP 미호출), 캐시 날짜가 오늘이 아니면 `refreshCache()` 호출 후 사용, 실패 시 MCP fallback
+  - `ErrorCollector`에 수집된 봇 에러를 `⚠️ 시스템 이슈` 섹션으로 일괄 보고
+  - **재시작 시 catch-up**: `catchUpBriefingIfNeeded()` — `.assistant-costs.json`에서 마지막 브리핑 날짜 확인, 오늘 미실행이면 15초 후 즉시 실행
+  - **월요일 주간 요약**: `monday-briefing-extra.md` 프롬프트 자동 주입 (주간 비용 통계 + 보고서 요약)
+- **캘린더 리마인더**: `CalendarPoller` — 직접 Google Calendar REST API HTTP 폴링
+  - 전체 캘린더 조회 후 `excludeCalendars`로만 제외 (화이트리스트 없음)
+  - 5분 간격 폴링, diff 감지 시에만 AI 판단 (Haiku 모델, 경량 모드 ~$0.003/회)
+  - AI 판단 경량 모드: `cwd=tmpdir` + `--system-prompt` + `--tools ""` + `--no-session-persistence`
+  - AI 판단 rate limit 시 다음 정시까지 자동 일시 중지 (`aiJudgmentPaused`)
+  - 알림 큐 (`.calendar-notifications.json`) + 1분 간격 발송
+  - 토큰 공유: `~/.config/google-calendar-mcp/tokens.json` (MCP 서버와 동일)
+  - 어시스턴트 세션은 `skipMcp: true`로 MCP 서버 연결 건너뜀
+  - 알림 뮤트: 🔇 버튼으로 반복 일정 알림 끄기 (`.calendar-muted-events.json`, base eventId로 시리즈 매칭)
+  - 예약 문서 리마인더: 이벤트 description에 `[scheduled-doc] reports/scheduled/{파일명}` → type `"scheduled-doc"`, dispatch 시 `## 요약` 섹션 읽어서 Slack 메시지에 포함
+  - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
+  - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
+- `-report [type]`/`-rp [type]`: 처리 제안 요약(🗂 · 결정 버튼) + desk 의 보고서 링크(`buildReportReplyBlocks`)
+  - **보고서 본문과 옛 버튼** — 보고서 본문은 report-log 저장소에 회차별로 쌓이고 desk 사이트가 그립니다 — 링크 주소는 `flow.py digest` 의 `site` 를 쓴다(이 저장소에 주소를 적지 않는다). report-log 4단계(읽는 쪽 전환)로 `reports/scheduled-reports/` 훑기 · 파일 업로드 · 매니페스트(`_status.json`) · 보관 버튼 · 브리핑 뒤 「📄 보고서 확인」 버튼을 뺐습니다. 이미 올라간 메시지의 옛 버튼은 처리기만 남겨 새 답이나 폐지 안내를 냅니다.
+  - 로컬 HTTP 서버 (`src/report-server.ts`): 업무 칸반(`/board`)과 수동 분석 실행(`POST /trigger?type=<종류>` · `-analyze <종류>` 와 같은 `manual` 회차 · `type=@group` 이면 `-analyze` 와 같은 기본 스케줄 그룹 · 호출은 202 만 받고 결과 한 줄은 DM 으로)만 남음 · 127.0.0.1 바인딩, per-process 토큰(`?t=<hex>`) 인증. 옛 `/` 는 칸반으로 돌리고 `/report/…` 는 410. `index.ts`에서 `config.reports.localServer.enabled && config.assistant.configDir` 조건으로 부팅. `EADDRINUSE` 시 +5까지 재시도 후 비활성화.
+  - 환경변수: `REPORTS_SERVER_ENABLED` (0이면 비활성), `REPORTS_SERVER_PORT` (기본 8765)
+- `-analyze [type]`/`-an [type]`/`분석 [타입]`: 분석 수동 실행 — 타입 지정 시 단일 실행, 미지정 시 기본 스케줄 그룹 실행 · 둘 다 `manual` 회차(예정일 = 오늘 한국 날짜) · 단일 실행 결과 메시지에 처리한 백엔드(`claude` · `codex`)와 저장 상태
+- `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
+  - `-as config`: 현재 설정 표시 (config.json 내용)
+  - `-as briefing HH:MM`: 브리핑 시간 변경 → fs.watchFile이 감지하여 자동 재스케줄
+  - `-as reminder N`: 리마인더 사전 알림 시간(분) 변경
+  - 환경변수 미설정 시 graceful 비활성 (`assistantScheduler = null`)
+- 비용 제어: `--max-budget-usd` 플래그로 세션별 비용 한도, `.assistant-costs.json`에 비용 기록, 브리핑에 일간/주간/월간 통계 표시
+  - `config.json`에서 `briefing.maxBudgetUsd`, `reminders.maxBudgetUsd`, `analysis.budgetUsd` 조정 가능
+  - 분석: `analysis.defaults` (sessionBudgetUsd, allowedTools, writablePaths, maxDurationMinutes, maxRetries) + `analysis.types` (타입별 override) 구조
+  - 분석 cadence: 타입별 `cadence` 필드 — `weekly`(기본) / `biweekly`(`cadenceFrom`부터 14일마다) / `monthly`(`monthlyWeek: 'first' | 'last'`) — 스케줄 실행 시 `shouldRunToday()` 로 off-cycle 타입 자동 스킵. `mode: 'change-detection'`은 보고서 미생성을 정상 결과로 처리(회차는 report-log 가 `no-output` 으로 닫음)
+  - 분석 세션 타임아웃: `maxDurationMinutes` (기본 60분) 초과 시 CLI 프로세스 강제 종료, `maxRetries` (기본 2) 회 재시도 후 포기 → 다음 타입으로 진행
+  - 분석 세션: 비용 한도 도달 시 `--resume`로 이어서 진행 (총 `budgetUsd` 내에서)
+  - 분석 회차와 보고서 저장 — report-log 5단계(쓰는 쪽). **저장 주체는 스탠리 하나** · 설계 정본은 report-log `docs/stage5-plan.md` 「쓰는 흐름」 · 검사 `npm run check:reportrun`
+    - 회차 열기: 종류마다 첫 시도 전에 `report_log.py open --type --slot --trigger` · 예정일 = 예약 발화 시각(`nextFire`)의 한국 날짜(늦게 깨거나 자정을 넘겨도 그대로) · 수동은 오늘
+    - 같은 회차: 타임아웃 · 오류 재시도, 한도 재시도(다른 날 포함) — 재시도 큐가 회차를 들고 감 · 한도로 못 돈 뒤쪽 종류도 그때 회차를 엶 · 원래 회차가 없던 칸만 `retry` 로 엶
+    - 프롬프트 자리: `{{REPORT_OUT}}`(임시 파일 · `/` 경로) · `{{SLOT}}` · `{{PREV_REPORT}}` · `{{AVOID_LIST}}`(`prompt-context --type`) · `{{PREV_REPORT:<종류>}}`(다른 종류의 직전 보고서 · 같은 상한) · `{{WEEK_INPUT}}`(`week-input --since <예정일-7일>`) — 본문에 직접 넣음(Codex 폴백은 환경 변수를 못 받음) · 틀에 있는 자리만 report-log 에 물음 · 한 번에 바꿈(넣은 값 안의 `{{SLOT}}` 같은 글은 다시 안 바꾸고 거부에도 안 셈) · 틀에 남은 `{{` 가 있으면 세션을 안 띄우고 오류
+    - 쓰기 범위: `~/.report-log/tmp` 를 Claude 추가 폴더 · Codex 쓰기 허용 폴더로 엶 · 시스템 문구의 쓰기 허용은 설정 `writablePaths` 에서 `reports/` 를 빼고 그 폴더를 더함
+    - 「썼나」 판정(`reportProduced`): 임시 파일 수정 시각 ≥ 세션 시작 · 본문 있음 · 대기 표식(`<!-- judgment: pending -->`) · 자리표시자 없음 — 도구 0회 재시도(되물음)와 한도 백스톱이 씀 · 산출물 없음이 정상인 종류(설정 `noOutputOk: true` 또는 `mode: 'change-detection'`)는 폴백(codex)이 빈손으로 끝내도 되물음으로 안 침
+    - 저장(`commitPlan`): 완료 → 저장 · 한도로 이어받을 예정 → 저장 안 함 · 마지막 시도까지 실패 → `--partial` · 임시 파일이 비었으면 `--partial` 없이 저장(report-log 가 `no-output` — 변경 없는 회차 · 되물음) · 러너 종류인데 임시 파일이 비었으면 저장 안 함(러너가 아직 씀) · `--backend` 에 처리 백엔드 · 잠금 실패는 한 번 더, 그래도 실패면 정리 작업(`sweep`) 몫
+    - 결과 메시지: 그룹 · 재시도 완료 줄은 종류 옆에 저장 결과(`saveTag` — `저장 complete` · `저장 안 함 → sweep` · `저장 보류 → 재시도` · `저장 실패(<코드>)`)와 Claude 가 아닌 처리 백엔드 · 수동 단일은 저장까지 된 것만 ✅(저장 실패 ❗ · 정리 작업 몫 ⏳)
+    - 정리 작업: 한 시간마다 `report_log.py sweep --older-than 6`(`startRunSweeper` · 처리 제안 타이머와 별개 · report-log 클론이 있을 때만) — 6시간 동안 안 움직인 열린 회차를 report-log 가 `partial`·`machine` 으로 저장하거나 `abandoned` 로 닫음 · 실패는 「시스템 이슈」 · 안 던짐
+    - 러너 미리 띄우기: 환경 변수 `REPORT_RUN` · `REPORT_OUT`(`/` 경로) · `REPORT_SLOT` · `REPORT_TYPE` + `--date <예정일>` · 세션 환경에도 같은 넷
+    - 월요일 브리핑: `monday-briefing-extra.md` 의 `{{WEEK_INPUT}}` 을 `week-input --since <오늘-7일>` 로 채움 · 못 채우면 덧붙임 없이 브리핑 본문만 보내고 「시스템 이슈」 로 남김
+    - 처리 백엔드: `SessionResult.servedBy`(`spawnOrFallback` 이 붙임) · agy 위임 경로(`ANALYSIS_AGY_TYPES`)는 없앰 — agy 는 도구 없는 회차의 폴백 사다리에서만 씀

@@ -303,6 +303,15 @@ const NARROW = { ...OPTS, tools: [], settingSources: [], skipMcp: true, appendSy
   h.prewarm(C);
   h.runQuery('그대로', C);
   eq('안 바뀌면 쓴다', calls.length, 3);
+  // 규칙 본문이 AGENTS.md 에 있고 CLAUDE.md 는 `@AGENTS.md` 한 줄인 저장소(2026-10-02) —
+  // 본문을 고쳐도 CLAUDE.md 시각은 그대로라, AGENTS.md 를 안 보면 옛 규칙으로 답한다.
+  const agents = path.join(dir, 'AGENTS.md');
+  fs.writeFileSync(agents, '규칙 본문');
+  h.prewarm(C);
+  const later2 = new Date(Date.now() + 120_000);
+  fs.utimesSync(agents, later2, later2);
+  h.runQuery('본문만 바뀐 뒤', C);
+  eq('AGENTS.md 가 바뀌어도 새로 띄운다', calls.length, 5);
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
