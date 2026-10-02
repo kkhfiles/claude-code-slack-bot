@@ -474,6 +474,15 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   ok('실장이 창에서 이름을 넣어도 보내기 직전 빗장이 막는다 (소인 제안)',
     lunchPosted.length === lunchBefore && c.posted.some((m) => String(m.text).includes('빗장')), c.posted);
 
+  // ── 소인 대화 호스트가 이 창구를 받는다 (2026-10-02 · 「사람 비서처럼 다른 채널에서 활동」) ──
+  // 전에는 소인 호스트에 `onAsk` 가 없어 주간 판단 밖(실장이 시험 방에서 「노는거에 올려」)에서 실은 글이 오류도 로그도
+  // 없이 버려졌다. 연결은 설정 배선이라 단위 시험이 못 본다 — 소스에서 두 끝(정하는 곳 · 받는 곳)을 대조한다.
+  const handlerSrc = fs.readFileSync(new URL('../src/slack-handler.ts', import.meta.url), 'utf-8');
+  const lunchBlock = handlerSrc.slice(handlerSrc.indexOf("name: 'lunch'"), handlerSrc.indexOf('this.chatHosts.push(lunchHost)'));
+  ok('소인 대화 호스트에 확인 카드 창구가 연결된다 (정하는 곳과 받는 곳 둘 다)',
+    /lunchAsk = letterNotice\.enabled && lunchClient \? letterNotice\.offer/.test(handlerSrc)
+    && /onAsk:\s*lunchAsk/.test(lunchBlock), lunchBlock.slice(0, 200));
+
   console.log(`\n${fail ? `실패 ${fail}건` : '모두 통과.'}`);
   fs.rmSync(dir, { recursive: true, force: true });
   process.exitCode = fail ? 1 : 0;

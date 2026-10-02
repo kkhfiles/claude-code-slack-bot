@@ -430,6 +430,10 @@ export class SlackHandler {
     // 있는 커피콩 앱 하나다 — 소인의 제안도 거기 뜨고, 「보내기」를 누르면 **소인 이름으로** 그 방에 오른다(`poster`).
     // 방 이름은 봇 설정의 `rooms` 에서 읽는다. 소인 대화 호스트는 아래에서 만들어지므로 늦게 묶는다.
     let lunchHost: ChatHost | null = null;
+    // 소인이 실장 턴에서 「다른 방에 올릴 글」을 실으면 같은 카드 창구로 받는다(2026-10-02 실장 「사람 비서처럼 다른 채널에서
+    // 활동」). 카드 창구가 커피콩 앱에 있어 아래 커피콩 블록에서 정해지고, 더 아래 소인 대화 호스트가 받는다 — 전에는 소인
+    // 호스트에 이 길이 없어 주간 판단 밖에서 실은 글이 말없이 버려졌다.
+    let lunchAsk: LetterNotice['offer'] | undefined;
     const roomLabel = (bot: string, id: string): string => {
       try {
         const cfg = JSON.parse(fs.readFileSync(
@@ -453,10 +457,10 @@ export class SlackHandler {
         { general: config.letter.generalChannel, chat: config.letter.chatChannel, test: testRoom },
         { agenda: path.join(letterData, 'agenda.md') },
       );
-      // 소인이 방에 걸 글(주간 판단의 `lunch-pulse`) — 점심원정대·친목 방·시험 방 · 소인 이름으로.
+      // 소인이 방에 걸 글(`lunch-pulse` — 주간 판단 · 실장이 시킨 것) — 점심원정대·친목 방·시험 방 · 소인 이름으로.
       const lunchKinds: Record<string, NoticeKind> = lunchClient ? {
         'lunch-pulse': {
-          title: '소인의 주간 제안', ask: '소인이 먼저 말을 꺼내려 합니다.', header: '',
+          title: '소인이 방에 올릴 글', ask: '소인이 방에 글을 올리려 합니다.', header: '',
           hint: '소인 이름으로 나갑니다. 여기서 고칠 수 있습니다.',
           rooms: rooms(config.lunchBot.chatChannel).map((id) => ({ id, label: roomLabel('lunch', id) })),
           // 소인이 쓴 글이라 이름·멘션 빗장은 건다(카드 만들 때와 실장이 고친 뒤 둘 다) — 숫자는 모임 제안의 내용이라 둔다.
@@ -470,6 +474,7 @@ export class SlackHandler {
         logPath: path.join(letterData, 'notice.jsonl'),
         pendingPath: path.join(letterData, 'notice-pending.json'),
       });
+      lunchAsk = letterNotice.enabled && lunchClient ? letterNotice.offer : undefined;
       // 커피콩의 주간 시계 — 주 첫 업무일 13:00 실장 DM 에 「이번 주 이렇게 할까요」. 말은 대화 봇(아래
       // ChatHost)이 만들고, 방에 걸 글은 위 확인 카드(`letterNotice.offer`)로만 간다. 호스트는 아래에서
       // 만들어지므로 늦게 묶는다.
@@ -624,6 +629,8 @@ export class SlackHandler {
           managerUserId: config.letter.managerUserId,
           botTalk,
           buttIn: config.chat.buttIn.enabled ? config.chat.buttIn : null,
+          // 실장 턴에서 실은 「방에 올릴 글」 → 실장 DM 확인 카드(커피콩 앱 창구 · 「보내기」를 눌러야 소인 이름으로 나감).
+          onAsk: lunchAsk,
           // **둘 중 하나라도 켜져 있으면 붙인다.** 점심 버튼 존재만 보고 정하면,
           // 버튼을 끈 날 좌석 기능이 오류도 로그도 없이 등록되지 않는다.
           attach: (buttons || premium)
