@@ -362,6 +362,13 @@ export class SlackHandler {
         const scheduler = this.assistantScheduler;
         // `?type=@group` 이면 기본 스케줄 그룹(`-analyze` 와 같음) — `runAnalysisTrigger` 주석.
         this.reportServer.setTriggerCallback(async (type: string) => {
+          // `@improve` — 매일 개선 제안을 한 번 만든다(켜는 문과 무관 · 시안 확인용). **DM 을 안 보낸다** —
+          // 만든 제안은 다음 브리핑이 올리고, 꺼져 있으면 안 올린다. 결과는 로그 한 줄.
+          if (type === '@improve') {
+            const done = await scheduler.runImproveNow();
+            this.logger.info(`개선 제안(로컬 트리거) — ${done}`);
+            return done;
+          }
           const text = await scheduler.runAnalysisTrigger(type);
           await this.app.client.chat.postMessage({
             channel: config.assistant.dmChannel,
@@ -1017,6 +1024,12 @@ export class SlackHandler {
         const actionBlocks = await this.assistantScheduler.actionDigestBlocks().catch(() => null);
         if (actionBlocks) {
           await say({ text: '🗂 처리 제안', blocks: actionBlocks, thread_ts: thread_ts || ts });
+        }
+        // 매일 개선 제안 — 켜는 문(`DAILY_IMPROVE`)이 꺼져 있거나 이미 올렸으면 없음
+        const improveBlocks = await this.assistantScheduler.improveForBriefing().catch(() => null);
+        if (improveBlocks) {
+          await say({ text: '💡 개선 제안', blocks: improveBlocks, thread_ts: thread_ts || ts });
+          await this.assistantScheduler.markImprovePosted().catch(() => {});
         }
       } catch (error) {
         this.logger.error('Manual briefing failed', error);
@@ -3803,6 +3816,33 @@ export class SlackHandler {
         });
       } catch (error) {
         this.logger.error('Action proposal decision failed', error);
+        await respond({ response_type: 'ephemeral', text: '❌ 처리 실패' }).catch(() => {});
+      }
+    });
+
+    // --- 매일 개선 제안 버튼 (2026-10-02) ---
+    // 처리 제안과 같은 모양 · 다른 갈래 — 「업무로 등록」은 실행으로 안 이어진다(처음 2주는 등록만).
+    // 값은 제안 번호뿐이고 결정은 action_id 에 있다. 번호 · 결정 이름은 스케줄러가 다시 본다.
+    this.action(/^improve_(register|hold|drop)$/, async ({ ack, body, respond }) => {
+      await ack();
+      try {
+        if (!this.assistantScheduler) return;
+        const act = (body as any).actions[0];
+        const decision = String(act.action_id || '').replace(/^improve_/, '');
+        const id = String(act.value || '');
+        const r = await this.assistantScheduler.decideImprove(id, decision);
+        if (!r.ok) {
+          await respond({ response_type: 'ephemeral', text: r.note });
+          return;
+        }
+        const msg = (body as any).message;
+        await respond({
+          replace_original: true,
+          text: msg?.text || '💡 개선 제안',
+          blocks: markDecided(msg?.blocks || [], id, r.note),
+        });
+      } catch (error) {
+        this.logger.error('Improvement proposal decision failed', error);
         await respond({ response_type: 'ephemeral', text: '❌ 처리 실패' }).catch(() => {});
       }
     });

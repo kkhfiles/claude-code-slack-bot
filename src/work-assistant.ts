@@ -487,6 +487,76 @@ export async function summaryApply(
   }
 }
 
+// ---------------------------------------------------------------- 매일 개선 제안
+//
+// **업무일 06:30 에 만들고 08:00 브리핑 뒤에 올린다** (2026-10-02 사용자 · 하루 최대 셋).
+// 재료 모으기 · 결과 검사 · 장부 · 승인 시 업무 등록은 전부 `bin/improve.py` 가 한다 — 여기는 나른다.
+
+export interface ImproveEvidence { label: string; value: string; compare?: string; key?: string }
+export interface ImproveItem {
+  id: string; date: string; title: string; area: string; evidence: ImproveEvidence[];
+  why: string; next: string; est: number; state: string;
+}
+export interface ImproveDay { date: string; posted: string | null; note: string; items: ImproveItem[] }
+
+/** `improve.py` 한 번 — 마지막 줄의 JSON 을 돌려준다. 못 읽으면 null(부르는 쪽이 물러난다). */
+async function improveRun(args: string[], timeoutMs = 120_000): Promise<any | null> {
+  try {
+    const { code, stdout, stderr } = await runTasks(args, timeoutMs, 'bin/improve.py');
+    const last = (stdout || '').trim().split('\n').pop() || '';
+    try { return JSON.parse(last); } catch { /* 아래 */ }
+    if (code !== 0) logger.warn(`improve.py ${args[0]} 실패 (rc=${code})`, (stderr || stdout).slice(-300));
+    return null;
+  } catch (err) {
+    logger.warn(`improve.py ${args[0]} 가 터졌습니다`, err);
+    return null;
+  }
+}
+
+/** 재료(지난 7일 하루 활동 요약 + 지난 제안 장부)를 JSON 글로. 못 만들면 빈 글. */
+export async function improveGather(): Promise<string> {
+  const file = path.join(os.tmpdir(), `wa-imp-${randomId()}.json`);
+  try {
+    const { code, stderr } = await runTasks(['gather', '--out', file], 180_000, 'bin/improve.py');
+    if (code !== 0 || !fs.existsSync(file)) {
+      logger.warn(`개선 제안 재료를 못 모았습니다 (rc=${code})`, (stderr || '').slice(-300));
+      return '';
+    }
+    return fs.readFileSync(file, 'utf-8');
+  } catch (err) {
+    logger.warn('개선 제안 재료 모으기가 터졌습니다', err);
+    return '';
+  } finally {
+    try { fs.unlinkSync(file); } catch { /* 이미 없다 */ }
+  }
+}
+
+/** 세션이 낸 글을 넘겨 검사 · 장부에 올린다. 결과 그대로(`ok` · `items` · `skipped` · `why`). */
+export async function improveAccept(reply: string): Promise<any | null> {
+  const file = path.join(os.tmpdir(), `wa-imp-out-${randomId()}.txt`);
+  try {
+    fs.writeFileSync(file, reply, { encoding: 'utf-8' });
+    return await improveRun(['accept', '--file', file]);
+  } finally {
+    try { fs.unlinkSync(file); } catch { /* 이미 없다 */ }
+  }
+}
+
+export async function improveShow(): Promise<ImproveDay | null> {
+  return improveRun(['show']);
+}
+
+export async function improvePosted(): Promise<void> {
+  await improveRun(['posted']);
+}
+
+/** 버튼 결정 — 등록이면 `tasks.py add` 까지 돈다(판을 다시 그리므로 넉넉히 기다린다). */
+export async function improveDecide(id: string, decision: string):
+    Promise<{ ok: boolean; note: string; task?: string }> {
+  const r = await improveRun(['decide', '--id', id, '--decision', decision], 240_000);
+  return r ?? { ok: false, note: '⚠️ 결정을 기록하지 못했습니다' };
+}
+
 /** `bin/mail.py` 가 내는 스레드 하나. 뜻은 파이썬만 알고 여기서는 나르기만 한다. */
 export interface MailThread {
   subject: string;

@@ -137,6 +137,28 @@ for (const { file, toks } of calls) {
   }
 }
 
+// ---------- ③-b 매일 개선 제안 (`bin/improve.py`) ----------
+// tasks.py 와 같은 계약이 둘째 스크립트에도 있다 — 서브커맨드 · 플래그를 한쪽만 고치면 06:30 에야 터진다.
+let impSeen = 0;
+{
+  const impPy = path.join(waRoot, 'bin', 'improve.py');
+  if (!fs.existsSync(impPy)) {
+    fails.push(`improve.py 가 없습니다: ${impPy}`);
+  } else {
+    const impAllowed = parseCli([impPy]);
+    const impCalls = findCalls(impAllowed, ['work-assistant.ts']);
+    if (impAllowed.size < 5 || !impCalls.length) {
+      fails.push(`improve.py 대조가 헛돕니다 — 서브커맨드 ${impAllowed.size}개 · 호출 ${impCalls.length}개`);
+    }
+    for (const { toks } of impCalls) {
+      impSeen += 1;
+      const ok = impAllowed.get(toks[0]);
+      const miss = toks.slice(1).filter((x) => x.startsWith('--') && !ok.has(x));
+      if (miss.length) fails.push(`work-assistant.ts: \`${toks.join(' ')}\` — improve.py «${toks[0]}» 에 없는 플래그 ${miss.join(' ')}`);
+    }
+  }
+}
+
 // ---------- ③ 환경변수로 넘기는 이름 (2026-10-02) ----------
 // 판에서 누른 것을 반영할 때 봇이 환경변수 둘을 넘긴다(`boardEnv`). 파이썬이 그 이름을 안 읽으면
 // **아무 오류 없이** 판 버튼이 체크인 답으로 세지고 「누름 → 화면」이 비어 있다. 이름을 소스에서 뽑아 맞춘다.
@@ -161,5 +183,5 @@ if (fails.length) {
   process.exitCode = 1;
 } else {
   console.log(`통과 — 봇이 부르는 조합 ${seen.size}개가 tasks.py 서브커맨드`
-    + ` ${allowed.size}개 안에 다 있음 · report-log 호출 ${rlSeen}개도 맞음`);
+    + ` ${allowed.size}개 안에 다 있음 · report-log 호출 ${rlSeen}개 · improve.py 호출 ${impSeen}개도 맞음`);
 }

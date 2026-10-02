@@ -36,6 +36,7 @@
     "check:slackui": "node scripts/check-slack-queue.mjs",
     "check:prewarm": "node scripts/check-prewarm.mjs",
     "check:push": "node scripts/check-board-push.mjs",
+    "check:improve": "node scripts/check-improve.mjs",
     "check:capfail": "node scripts/check-capture-fail.mjs",
     "check:double": "node scripts/check-double-answer.mjs",
     "check:manager": "node scripts/check-manager-turn.mjs",

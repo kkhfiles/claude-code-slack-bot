@@ -14,8 +14,11 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
-  offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexSession, codexWritableDirs } from './work-assistant';
+  offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexSession, codexWritableDirs,
+  improveGather, improveAccept, improveShow, improvePosted, improveDecide } from './work-assistant';
 import type { QuickOutcome } from './work-assistant';
+import { buildImproveBlocks, improveEnabled, improvePreviewText,
+  IMPROVE_DECISIONS, IMPROVE_ID_RE } from './improve-message';
 import { boardLabel, boardPushAuthBroken, boardPushTarget, boardQueueEnabled, drain, event as recordEvent } from './board-queue';
 import { BoardPush } from './board-push';
 import type { ContactItem } from './board-queue';
@@ -248,6 +251,15 @@ const SUMMARY_EFFORT = 'low' as const;
  * 30~60초지만 밀린 회차는 상한에 닿으므로 아래 `maxDurationMs` 에 여유를 둔다.
  */
 const SUMMARY_MAX = 10;
+
+/**
+ * 매일 개선 제안 — 업무일 06:30 에 만들고 08:00 브리핑 뒤에 올린다(2026-10-02 사용자).
+ * 구독 세션 하루 한 번 · sonnet · 사고 낮음 · 도구 없음(재료는 본문 · 답은 JSON 글).
+ * 켜는 문 `DAILY_IMPROVE=on`(기본 꺼짐 · `improve-message.ts`).
+ */
+const IMPROVE_TIME = '06:30';
+const IMPROVE_MODEL = 'sonnet';
+const IMPROVE_EFFORT = 'low' as const;
 
 /**
  * 요약 세션이 돌려준 글 → `{업무 번호: 요약}`.
@@ -786,6 +798,7 @@ export class AssistantScheduler {
   private focusTimer: ReturnType<typeof setTimeout> | null = null;
   private focusBusy = false;
   private summaryTimer: ReturnType<typeof setTimeout> | null = null;
+  private improveTimer: ReturnType<typeof setTimeout> | null = null;
   private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
   private mailPollTimer: ReturnType<typeof setInterval> | null = null;
   private mailPollBusy = false;
@@ -1237,6 +1250,8 @@ export class AssistantScheduler {
       this.scheduleOffsitePush();
       this.startMailPoller();
       this.startRemindPoller();
+      // 켜는 문이 꺼져 있으면 안 건다 — 06:30 에 아무것도 안 만든다(시안 확인 전).
+      if (improveEnabled()) this.scheduleImprove();
     }
     if (this.config.actions?.enabled) {
       this.startActionsTicker();
@@ -1305,6 +1320,10 @@ export class AssistantScheduler {
     if (this.summaryTimer) {
       clearTimeout(this.summaryTimer);
       this.summaryTimer = null;
+    }
+    if (this.improveTimer) {
+      clearTimeout(this.improveTimer);
+      this.improveTimer = null;
     }
     if (this.offsitePushTimer) {
       clearTimeout(this.offsitePushTimer);
@@ -1635,6 +1654,121 @@ export class AssistantScheduler {
       : '쓸 것 없음';
     this.logger.info(`Summaries: ${detail} · $${result.costUsd?.toFixed(4) ?? '?'}`
       + (missing.length ? ` · 안 온 것 ${missing.join(',')}` : ''));
+  }
+
+  // --- 매일 개선 제안 ---
+
+  private scheduleImprove(): void {
+    const nextFire = this.getNextWorkingDay(IMPROVE_TIME);
+    this.logger.info('Scheduled improvement proposals', { time: IMPROVE_TIME, nextFire: nextFire.toISOString() });
+    this.improveTimer = setTimeout(async () => {
+      try {
+        const nonWorking = this.isNonWorkingDay();
+        if (nonWorking.skip) {
+          this.logger.info(`개선 제안 건너뜀 (${nonWorking.reason})`);
+        } else if (await isQuietPeriod()) {
+          // 「조용히」는 미는 것을 멈추는 장치다 — 아무도 안 볼 제안에 구독 한도를 쓰지 않는다.
+          this.logger.info('개선 제안 건너뜀 (조용히 기간)');
+        } else {
+          this.logger.info(`개선 제안 — ${await this.runImprove()}`);
+        }
+      } catch (error) {
+        this.logger.warn('개선 제안 실패', { why: error instanceof Error ? error.message : String(error) });
+      } finally {
+        this.scheduleImprove();
+      }
+    }, nextFire.getTime() - Date.now());
+  }
+
+  /**
+   * 한 번 만든다 — 재료(파이썬) → 세션 한 번(도구 없음) → 검사 · 장부(파이썬). 결과 한 줄을 돌려준다.
+   * **절대 던지지 않는다.** 올리는 것은 여기서 안 한다 — 08:00 브리핑이 올린다.
+   */
+  private async runImprove(): Promise<string> {
+    const root = workAssistantRoot();
+    if (!root) return 'work-assistant 를 못 찾음';
+    const promptPath = path.join(root, 'prompts', 'improve.md');
+    if (!fs.existsSync(promptPath)) return `규칙 파일 없음 — ${promptPath}`;
+    const pack = await improveGather();
+    if (!pack) return '재료를 못 모음';
+    const result = await this.spawnOrFallback('개선 제안', pack, {
+      workingDirectory: root,
+      model: IMPROVE_MODEL,
+      effort: IMPROVE_EFFORT,
+      permissionMode: 'default',
+      // **도구가 하나도 없다** — 재료는 본문에 있고 장부에 올리는 것은 파이썬이 한다(카드 요약과 같은 모양).
+      tools: [],
+      allowedTools: [],
+      settingSources: [],
+      appendSystemPrompt: fs.readFileSync(promptPath, 'utf-8'),
+      env: { ASSISTANT_MODE: 'improve', CLAUDE_SCHEDULED: '1' },
+      skipMcp: true,
+      noSessionPersistence: true,
+      maxDurationMs: 5 * 60_000,
+      useSdk: true,
+    });
+    this.recordSessionCost('improve', result);
+    const said = (result.text || '').trim();
+    if (!said) return `세션이 빈손 (${result.subtype})`;
+    const got = await improveAccept(said);
+    if (!got) return '결과를 장부에 못 올림';
+    if (!got.ok) return `받지 않음 — ${got.why}`;
+    const skipped = (got.skipped || []) as { why: string }[];
+    return `${(got.items || []).length}건 · 거름 ${skipped.length}건`
+      + (skipped.length ? ` (${skipped.map((s) => s.why).join(' / ')})` : '')
+      + ` · $${result.costUsd?.toFixed(4) ?? '?'}`;
+  }
+
+  /** 로컬 트리거 `@improve` — 켜는 문과 무관하게 한 번 만든다. 올리지는 않는다(시안 확인용). */
+  async runImproveNow(): Promise<string> {
+    return this.runImprove();
+  }
+
+  /** 오늘 제안 블록 — 아직 안 올렸고 결정 전 제안이 있을 때만. 미리 보기용 글도 같이. */
+  async improveDigest(): Promise<{ blocks: unknown[] | null; text: string; posted: boolean }> {
+    const day = await improveShow();
+    const blocks = buildImproveBlocks(day);
+    return { blocks, text: improvePreviewText(blocks), posted: !!day?.posted };
+  }
+
+  /** 브리핑에 붙일 블록 — 켜는 문이 꺼져 있거나 이미 올렸거나 제안이 없으면 null. */
+  async improveForBriefing(): Promise<unknown[] | null> {
+    if (!improveEnabled()) return null;
+    const d = await this.improveDigest();
+    return d.blocks && !d.posted ? d.blocks : null;
+  }
+
+  /** 올렸다고 적는다 — **보낸 뒤에** 부른다(먼저 적으면 보내다 실패한 날 영영 안 올라간다). */
+  async markImprovePosted(): Promise<void> {
+    await improvePosted();
+  }
+
+  /** 브리핑 셋이 처리 제안 다음에 붙인다. 켜는 문이 꺼져 있거나 이미 올렸으면 아무것도 안 한다. */
+  private async postImproveDigest(): Promise<void> {
+    try {
+      const blocks = await this.improveForBriefing();
+      if (!blocks) return;
+      await this.sendMessage('💡 개선 제안', blocks);
+      await this.markImprovePosted();
+    } catch (err) {
+      this.logger.warn('개선 제안 올리기 실패', err);
+    }
+  }
+
+  /** 아침 브리핑 뒤에 붙는 것 둘 — 처리 제안 · 개선 제안. 세 곳(예약 · 놓친 것 · 수동)이 같이 부른다. */
+  async postMorningProposals(): Promise<void> {
+    await this.postActionDigest();
+    await this.postImproveDigest();
+  }
+
+  /** 버튼 결정 — 등록이면 업무가 하나 생긴다. 번호 · 결정 이름은 여기서도 다시 본다(버튼 값은 믿지 않는다). */
+  async decideImprove(id: string, decision: string): Promise<{ ok: boolean; note: string }> {
+    if (!IMPROVE_ID_RE.test(id) || !(IMPROVE_DECISIONS as readonly string[]).includes(decision)) {
+      return { ok: false, note: '⚠️ 버튼 값이 올바르지 않습니다' };
+    }
+    const r = await improveDecide(id, decision);
+    const at = new Date().toTimeString().slice(0, 5);
+    return { ok: r.ok, note: r.ok ? `*${r.note}* · ${at}` : r.note };
   }
 
   private scheduleOffsitePush(): void {
@@ -2156,7 +2290,7 @@ export class AssistantScheduler {
             this.logger.warn('NAS confirm queue check failed', err);
           }
 
-          await this.postActionDigest();
+          await this.postMorningProposals();
         }
       } catch (error) {
         const msg = (error as Error).message || '';
@@ -2204,7 +2338,7 @@ export class AssistantScheduler {
       await this.sendMessage(result.text +
         this.formatErrorReport() + this.formatCostLine());
 
-      await this.postActionDigest();
+      await this.postMorningProposals();
     } catch (error) {
       const msg = (error as Error).message || '';
       if (isRateLimitText(msg)) {

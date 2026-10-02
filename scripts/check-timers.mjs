@@ -26,6 +26,7 @@ const REGISTRAR = {
   daouKeepAliveTimer: 'scheduleDaouKeepAlive',
   focusTimer: 'scheduleFocus',
   summaryTimer: 'scheduleSummary',
+  improveTimer: 'scheduleImprove',
   offsitePushTimer: 'scheduleOffsitePush',
   mailPollTimer: 'startMailPoller',
   remindTimer: 'startRemindPoller',
