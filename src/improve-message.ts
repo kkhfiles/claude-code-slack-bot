@@ -19,7 +19,8 @@ export function improveEnabled(): boolean {
 }
 
 function plain(text: string): string {
-  return String(text || '').replace(/[<>|*_~`]/g, ' ').trim();
+  // `~` 는 남긴다 — 「9/28~29」 같은 범위를 쓰는 글자다(취소선은 짝이 맞아야 걸린다).
+  return String(text || '').replace(/[<>|*_`]/g, ' ').trim();
 }
 
 function evidenceLine(it: ImproveItem): string {

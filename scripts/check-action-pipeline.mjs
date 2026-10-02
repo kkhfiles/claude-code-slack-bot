@@ -269,8 +269,12 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
     const next = rest.slice(10).search(/\n {2}(private|public|async|\/\*\*)/);
     return next < 0 ? rest : rest.slice(0, next + 10);
   };
-  ok('예약 브리핑에 처리 제안 요약', body(sched, 'scheduleBriefing').includes('postActionDigest('));
-  ok('놓친 브리핑에 처리 제안 요약', body(sched, 'catchUpBriefingIfNeeded').includes('postActionDigest('));
+  // 2026-10-02 부터 둘은 `postMorningProposals`(처리 제안 + 매일 개선 제안)를 부른다 — 그 안이 처리 제안을 부르는지까지 본다.
+  const morning = sched.slice(sched.indexOf('async postMorningProposals('), sched.indexOf('async decideImprove('));
+  const viaMorning = (name) => body(sched, name).includes('postActionDigest(')
+    || (body(sched, name).includes('postMorningProposals(') && morning.includes('this.postActionDigest()'));
+  ok('예약 브리핑에 처리 제안 요약', viaMorning('scheduleBriefing'));
+  ok('놓친 브리핑에 처리 제안 요약', viaMorning('catchUpBriefingIfNeeded'));
   const manual = handler.slice(handler.indexOf('this.isBriefingCommand(text)'), handler.indexOf('this.isReportCommand(text)'));
   ok('수동 -briefing 에 처리 제안 요약', manual.includes('actionDigestBlocks('));
 }

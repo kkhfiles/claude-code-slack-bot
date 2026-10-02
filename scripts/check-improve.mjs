@@ -32,7 +32,7 @@ const eq = (label, got, want) => {
 const item = (n, state = 'proposed') => ({
   id: `P-20261005-${n}`, date: '2026-10-05', title: `제안 ${n} <꺾쇠>`, area: '성능',
   evidence: [{ label: '누름 → 화면 중앙값', value: '3500ms', compare: '7일 2900ms', key: 'board.press' }],
-  why: '누른 뒤 3.5초 · 늘어남', next: '구간 나눠 재기', est: 1.5, state,
+  why: '누른 뒤 3.5초 · 늘어남', next: '9/28~29 구간 나눠 재기', est: 1.5, state,
 });
 
 // ① 메시지
@@ -47,6 +47,7 @@ const item = (n, state = 'proposed') => ({
   const text = m.improvePreviewText(blocks);
   eq('근거 줄에 사람이 읽는 이름 · 값 · 비교', text.includes('근거 — 누름 → 화면 중앙값 *3500ms* (7일 2900ms)'), true);
   eq('칸 경로(key)는 안 보인다', text.includes('board.press'), false);
+  eq('범위 물결은 남긴다', text.includes('첫 걸음 — 9/28~29 구간 나눠 재기'), true);
   eq('제목의 꺾쇠를 걷는다(슬랙 링크 문법)', text.includes('<꺾쇠>'), false);
   eq('맨 아래에 한계 한 줄', text.trim().split('\n').pop().startsWith('첫날 · 처음 2주는 등록까지만'), true);
   const after = markDecided(blocks, 'P-20261005-1', '*업무로 등록 — TSK-120*');
