@@ -991,10 +991,11 @@ export function codexWritableDirs(): string[] {
  *   - **답의 모양을 강제하지 않는다.** 산출물이 사람이 읽을 글이라 스키마가 없다.
  *
  * **규칙을 codex 가 스스로 읽는다** — `~/.codex/config.toml` 의
- * `project_doc_fallback_filenames = ["CLAUDE.md"]` 와 `~/.codex/skills` 투영이
+ * `project_doc_fallback_filenames = ["CLAUDE.md"]` 와 `~/.agents/skills` 투영이
  * 이미 있어, 작업 디렉터리만 주면 같은 규칙·같은 스킬로 돈다.
- * ⚠️ **그 파일이 `project_doc_max_bytes` 를 넘으면 조용히 잘린다** — 지금
- * 110,583자 대 131,072자(84%)다. 넘기 시작하면 이 폴백이 반쪽 규칙으로 돈다.
+ * ⚠️ **그 파일이 `project_doc_max_bytes` 를 넘으면 조용히 잘린다** — 한도는
+ * 바이트로 센다(2026-10-02 84,954바이트 대 131,072바이트 · 65%). 넘기 시작하면
+ * 이 폴백이 반쪽 규칙으로 돈다.
  *
  * 못 하면 **빈 글자**를 돌려준다 — 부르는 쪽이 오늘까지와 같이 물러난다.
  * `SESSION_FALLBACK=off` 로 끈다.
