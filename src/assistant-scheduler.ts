@@ -868,6 +868,7 @@ export class AssistantScheduler {
       },
       post: (text, blocks) => this.sendMessage(text, blocks),
       useSdk: shouldUseSdk('analysis:actions'),
+      afterResume: () => this.postActionDigest(),
     });
   }
 
@@ -1322,6 +1323,7 @@ export class AssistantScheduler {
       clearInterval(this.actionsTimer);
       this.actionsTimer = null;
     }
+    this.actionPipeline.stopResume();
     if (this.runSweepTimer) {
       clearInterval(this.runSweepTimer);
       this.runSweepTimer = null;
@@ -1363,6 +1365,8 @@ export class AssistantScheduler {
         review: !!a?.nightlyReview, window, workingDay: !this.isNonWorkingDay().skip,
       });
     }, ACTIONS_TICK_MS);
+    // 한도로 미뤄 둔 사람이 시킨 검토 — 재시작 · 설정 저장(clearAllTimers 가 지움) 뒤에 다시 건다.
+    this.actionPipeline.restoreResume();
   }
 
   /**

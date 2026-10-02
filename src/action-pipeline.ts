@@ -34,6 +34,11 @@ const MAX_STEPS = 16;
 const DIGEST_MAX_ITEMS = 18;
 /** `-report <이름 일부>` 가 여러 종류에 맞을 때 링크를 몇 개까지 — 한 줄 context 블록에 들어가게. */
 const REPORT_LINKS_MAX = 8;
+/** 한도 회복 시각 정각이 아니라 1분 뒤에 이어 간다 — 딱 맞춰 부르면 아직 안 풀린 채 또 막힌다
+ *  (`slack-handler.ts` `armRateLimitRecovery` 와 같은 까닭). */
+const RESUME_SLACK_MS = 60_000;
+/** 세션이 회복 시각을 안 알려 줬을 때 다시 해 보는 간격 — 이어 가기 타이머와 같은 한 시간. */
+const RESUME_UNKNOWN_MS = 60 * 60_000;
 
 /** 사람이 없는 세션에 붙이는 한 줄 — 분석 세션의 같은 지시와 같은 까닭(`SCHEDULED_SESSION_DIRECTIVE`). */
 const DIRECTIVE = '이 세션은 사람이 없는 예약 실행이다. 프롬프트는 설명이 아니라 지금 수행할 절차다. '
@@ -89,6 +94,49 @@ export interface PipelineDeps {
   /** 스탠리 DM 한 통. */
   post: (text: string, blocks?: unknown[]) => Promise<void>;
   useSdk?: boolean;
+  /** 한도 회복 뒤 이어 간 검토가 끝났을 때 — 스케줄러가 요약 DM 을 보낸다(`-actions review` 와 같은 끝맺음). */
+  afterResume?: () => Promise<void>;
+}
+
+/** 한도에 끊겨 회복 뒤로 미룬 「사람이 시킨」 몫. */
+interface Parked {
+  review: boolean;
+  ids: string[];
+  /** 한도가 풀리는 시각(epoch 초). 모르면 null. */
+  resetsAt: number | null;
+}
+
+/**
+ * 미룬 몫을 적는 파일 — **스탠리가 재시작해도 남아야 한다**(10/2 에 한도로 끊긴 뒤 27분 만에
+ * 재시작이 있었다). 검사가 운영 파일을 안 건드리게 자리를 옮길 수 있어야 한다.
+ */
+function resumeFile(): string {
+  return process.env.ACTIONS_RESUME_FILE || path.join(__dirname, '..', '.actions-resume.json');
+}
+
+function readParked(): Parked {
+  try {
+    const v = JSON.parse(fs.readFileSync(resumeFile(), 'utf-8'));
+    return {
+      review: v.review === true,
+      ids: Array.isArray(v.ids) ? v.ids.filter((x: unknown) => typeof x === 'string' && ACTION_ID_RE.test(x)) : [],
+      resetsAt: typeof v.resetsAt === 'number' ? v.resetsAt : null,
+    };
+  } catch {
+    return { review: false, ids: [], resetsAt: null };
+  }
+}
+
+function writeParked(p: Parked | null): void {
+  try {
+    if (p && (p.review || p.ids.length)) {
+      fs.writeFileSync(resumeFile(), JSON.stringify({ ...p, at: new Date().toISOString() }), 'utf-8');
+    } else {
+      fs.rmSync(resumeFile(), { force: true });
+    }
+  } catch {
+    /* 못 적으면 회복 때 이어 갈 몫이 빈다 — 밤 검토나 `-actions review` 가 그 몫을 다시 집는다 */
+  }
 }
 
 type DrainEnd = 'stop' | 'busy' | 'rate-limited' | 'error';
@@ -350,17 +398,25 @@ export class ActionPipeline {
   private wantReview: { until?: number } | null = null;
   /** 한 건만 콕 집어 미는 요청 — 계획 없이 [진행]을 눌러 다시 검토로 간 제안. */
   private wantIds = new Set<string>();
+  /** 방금 한도에 걸린 세션이 알려 준 회복 시각(epoch 초) — `runJob` 이 적고 `park` 가 읽는다. */
+  private limitResetsAt: number | null = null;
+  private resumeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private deps: PipelineDeps) {}
 
   /**
    * 차례를 청한다 — `run` 은 진행 중인 제안을 이어 가고, `review` 는 검토 대기 제안을 검토한다.
    * 이미 도는 중이면 지금 차례 뒤에 한 번 더 돈다(겹친 요청은 하나로 합친다).
+   *
+   * **시간대(`until`) 없는 `review` 와 `one` 은 사람이 시킨 것**이다(`-actions review` · 계획 없는
+   * [진행]). 밤 검토는 늘 시간대를 붙여 부른다.
    */
   request(kind: 'run' | 'review' | 'one', arg?: number | string): Promise<void> {
     if (kind === 'run') this.wantRun = true;
     else if (kind === 'review') this.wantReview = { until: arg as number | undefined };
     else this.wantIds.add(arg as string);
+    // 사람이 다시 시켰으면 미뤄 둔 같은 몫은 지금 돈다 — 남겨 두면 회복 때 한 번 더 돌고 요약도 두 번 온다.
+    if ((kind === 'review' && arg === undefined) || kind === 'one') this.unpark(kind === 'one' ? arg as string : null);
     if (!this.pumping) {
       this.pumping = this.pump().finally(() => { this.pumping = null; });
     }
@@ -393,17 +449,17 @@ export class ActionPipeline {
         await this.sync();
         if (this.wantRun) {
           this.wantRun = false;
-          if (await this.pass('run') === 'rate-limited') { clear(); break; }
+          if (await this.pass('run') === 'rate-limited') { this.park(this.wantReview, [...this.wantIds]); clear(); break; }
         }
         for (const id of [...this.wantIds]) {
           this.wantIds.delete(id);
-          if (await this.drain(id) === 'rate-limited') { clear(); break; }
+          if (await this.drain(id) === 'rate-limited') { this.park(this.wantReview, [id, ...this.wantIds]); clear(); break; }
           await this.announce(id);
         }
         if (this.wantReview) {
           const r = this.wantReview;
           this.wantReview = null;
-          if (await this.pass('review', r.until) === 'rate-limited') { clear(); break; }
+          if (await this.pass('review', r.until) === 'rate-limited') { this.park(r, [...this.wantIds]); clear(); break; }
         }
       }
     } catch (err) {
@@ -411,6 +467,75 @@ export class ActionPipeline {
       errorCollector.add('처리 제안', `차례 중단 — ${(err as Error).message}`);
       clear();
     }
+  }
+
+  /**
+   * 한도에 끊긴 차례에서 **사람이 시킨 몫만** 남겨 회복 시각에 이어 간다(2026-10-02 사용자 결정).
+   *
+   * 밤 검토(시간대 있음)와 이어 가기는 남기지 않는다 — 제 타이머가 다시 부르고, 밤 검토를 낮까지
+   * 끌고 오면 사람 작업과 한도를 다툰다. 남기지 않던 동안 `-actions review` 는 한도에 걸리는 순간
+   * 사라졌고, 검토 대기는 다음 업무일 새벽까지 그대로 있었다(10/2 17:13 · 7건 · 주말을 넘김).
+   */
+  private park(review: { until?: number } | null, ids: string[]): void {
+    const was = readParked();
+    const next: Parked = {
+      review: was.review || (review !== null && review.until === undefined),
+      ids: [...new Set([...was.ids, ...ids])],
+      resetsAt: this.limitResetsAt ?? was.resetsAt,
+    };
+    if (!next.review && !next.ids.length) return;
+    writeParked(next);
+    this.armResume(next.resetsAt);
+    this.logger.info('사람이 시킨 처리 제안 검토를 한도가 풀린 뒤로 미룹니다', next);
+  }
+
+  private unpark(id: string | null): void {
+    const was = readParked();
+    if (!was.review && !was.ids.length) return;
+    const next: Parked = id === null
+      ? { ...was, review: false }
+      : { ...was, ids: was.ids.filter((x) => x !== id) };
+    writeParked(next);
+    if (!next.review && !next.ids.length) this.stopResume();
+  }
+
+  private armResume(resetsAt: number | null): void {
+    this.stopResume();
+    const delay = resetsAt
+      ? Math.max(RESUME_SLACK_MS, resetsAt * 1000 + RESUME_SLACK_MS - Date.now())
+      : RESUME_UNKNOWN_MS;
+    this.resumeTimer = setTimeout(() => {
+      this.resumeTimer = null;
+      this.resume().catch((err) => this.logger.error('한도 회복 뒤 이어 가기 실패', err));
+    }, delay);
+    this.resumeTimer.unref?.();
+  }
+
+  /** 기동 · 설정 저장 뒤 — 미뤄 둔 몫이 있으면 회복 시각에 다시 건다. 짝은 `stopResume`. */
+  restoreResume(): void {
+    const p = readParked();
+    if (p.review || p.ids.length) this.armResume(p.resetsAt);
+  }
+
+  stopResume(): void {
+    if (this.resumeTimer) {
+      clearTimeout(this.resumeTimer);
+      this.resumeTimer = null;
+    }
+  }
+
+  /** 회복 시각 — 미뤄 둔 몫을 다시 청한다. 또 한도에 걸리면 다시 미루고 요약은 다 끝난 뒤에 한 번. */
+  async resume(): Promise<void> {
+    const p = readParked();
+    writeParked(null);
+    if (!p.review && !p.ids.length) return;
+    this.logger.info('한도가 풀려 사람이 시킨 처리 제안 검토를 이어 갑니다', p);
+    let done: Promise<void> = Promise.resolve();
+    for (const id of p.ids) done = this.request('one', id);
+    if (p.review) done = this.request('review');
+    await done;
+    const again = readParked();
+    if (!again.review && !again.ids.length) await this.deps.afterResume?.();
   }
 
   /** 원격에 맞춘다. 못 해도 멈추지 않는다 — 로컬에 있는 규칙으로 돈다. */
@@ -492,6 +617,7 @@ export class ActionPipeline {
     const args = ['complete', id, '--seq', String(spec.seq)];
     if (!writtenSince(spec.out!, started)) {
       if (result && isSessionRateLimited(result)) {
+        this.limitResetsAt = result.rateLimitResetsAt ?? null;
         args.push('--rate-limited');
       } else {
         const why = crash ? `스탠리 오류 — ${crash}` : `세션 ${result?.subtype ?? '?'} — 결과 파일 없음`;

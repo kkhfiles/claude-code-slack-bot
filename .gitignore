@@ -66,6 +66,8 @@ coverage/
 .inflight-sessions.json
 # 한도에 막혀 밀린 요청 — 사용자가 보낸 원문이 들어간다
 .rate-limit-until.json
+# 한도로 미룬 처리 제안 검토 (런타임 상태)
+.actions-resume*.json
 
 # 모델 실험 산출물 — 결과는 work-assistant/docs/design.md 에 정리해 둔다
 # ⚠️ `.bench-prev.json` 은 `.bench/` **밖**이라 따로 적어야 한다 — 벤치가

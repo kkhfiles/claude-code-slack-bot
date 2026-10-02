@@ -15,6 +15,7 @@
  *   ⑤ 버튼 값은 믿지 않는다 — 형식이 틀리면 report-log 를 부르지도 않는다
  *   ⑥ 아침 요약이 슬랙 한 메시지 한도 안에 든다 · 세 브리핑 모두에 붙는다
  *   ⑦ 밤 검토는 업무일 시간대 안에서만 · 이어 가기는 늘
+ *   ⑧ 사람이 시킨 검토가 한도에 끊기면 회복 뒤 이어 간다 · 재시작에도 남는다 · 밤 검토는 안 남긴다
  */
 import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
@@ -29,6 +30,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // 뒤에서 정하면 앞선 require 가 그 모듈을 먼저 끌어와 진짜 기록 파일에 쓴다.
 const EVENTS_FILE = path.join(os.tmpdir(), `actions-check-ev-${Date.now()}.jsonl`);
 process.env.WORK_EVENTS_FILE = EVENTS_FILE;
+// 한도로 미룬 검토 기록 — 운영 파일(`.actions-resume.json`)을 안 건드린다
+const RESUME_FILE = path.join(os.tmpdir(), `actions-check-resume-${Date.now()}.json`);
+process.env.ACTIONS_RESUME_FILE = RESUME_FILE;
 process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
 const {
   ActionPipeline, buildDigestBlocks, buildReportReplyBlocks, markDecided, parseWindow,
@@ -66,7 +70,7 @@ const NOTICE = (id, kind, state, buttons = []) => ({
  * 부른 명령은 `calls` 에 남는다.
  */
 function world({ nexts = {}, completes = [], pending = {}, digest = null, decide = null,
-                 session = null } = {}) {
+                 session = null, afterResume = undefined } = {}) {
   const calls = [];
   const posts = [];
   const sessions = [];
@@ -87,6 +91,7 @@ function world({ nexts = {}, completes = [], pending = {}, digest = null, decide
       return session ? session(opts) : { text: '끝', costUsd: 0, sessionId: 's', subtype: 'success', toolCalls: 3 };
     },
     post: async (text, blocks) => { posts.push({ text, blocks }); },
+    afterResume,
   };
   return { calls, posts, sessions, pipe: new ActionPipeline(deps) };
 }
@@ -363,6 +368,107 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   eq('밤 검토를 안 켰으면 → 이어 가기만', await kinds({ ...on, review: false }, at(2, 30)), ['run']);
 }
 
+// ── ⑧ 한도로 끊긴 사람이 시킨 검토 — 회복 뒤 이어 감 · 재시작에도 남음 · 밤 검토는 안 남김 ──
+// 남기지 않던 동안 10/2 17:13 의 `-actions review` 가 한도에 걸리는 순간 사라져, 검토 대기 7건이
+// 다음 업무일 새벽까지 그대로 있었다.
+{
+  const parked = () => (fs.existsSync(RESUME_FILE) ? JSON.parse(fs.readFileSync(RESUME_FILE, 'utf-8')) : null);
+  const put = (p) => fs.writeFileSync(RESUME_FILE, JSON.stringify(p));
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const limited = (at) => () => ({
+    text: '', costUsd: 0, sessionId: 's', subtype: 'success', rateLimited: true, rateLimitResetsAt: at, toolCalls: 8,
+  });
+  const cut = (id) => ({
+    pending: { review: [id, 'a-20261002-27'], run: [id] },
+    nexts: { [id]: [spec(id, 'review', 1)] },
+    completes: [{ result: 'rate-limited', state: 'queued' }],
+  });
+
+  {
+    const w = world({ ...cut('a-20261002-21'), session: limited(resetsAt) });
+    await w.pipe.request('review');
+    eq('-actions review 가 한도에 끊기면 검토 몫과 회복 시각을 남긴다',
+       parked() && [parked().review, parked().ids, parked().resetsAt], [true, [], resetsAt]);
+    ok('한도 뒤 다음 제안은 안 건드린다', !w.calls.some((c) => c[2] === 'a-20261002-27'));
+    ok('회복 타이머를 건다', w.pipe.resumeTimer !== null);
+    w.pipe.stopResume();
+    ok('stopResume 이 타이머를 푼다', w.pipe.resumeTimer === null);
+    const restarted = world();
+    restarted.pipe.restoreResume();
+    ok('재시작한 실행기도 파일에서 회복 타이머를 다시 건다', restarted.pipe.resumeTimer !== null);
+    restarted.pipe.stopResume();
+  }
+  {
+    let after = 0;
+    const s = spec('a-20261002-21', 'review', 2);
+    const w = world({
+      pending: { review: ['a-20261002-21'] },
+      nexts: { 'a-20261002-21': [s, { job: 'wait', who: 'human', state: 'proposed' }] },
+      session: writes(s.out),
+      afterResume: async () => { after += 1; },
+    });
+    await w.pipe.resume();
+    ok('회복 뒤 검토 대기를 다시 검토한다',
+       w.calls.some((c) => c[1] === 'pending' && c[3] === 'review') && w.sessions.length === 1);
+    eq('다 끝나면 요약 DM 한 번', after, 1);
+    eq('이어 간 몫은 지운다', parked(), null);
+  }
+  {
+    let after = 0;
+    put({ review: true, ids: [], resetsAt });
+    const w = world({ ...cut('a-20261002-22'), session: limited(resetsAt + 600), afterResume: async () => { after += 1; } });
+    await w.pipe.resume();
+    eq('회복 뒤에도 또 한도면 다시 남기고 새 회복 시각을 쓴다',
+       parked() && [parked().review, parked().resetsAt], [true, resetsAt + 600]);
+    eq('다시 남겼으면 요약은 아직 안 보낸다', after, 0);
+    w.pipe.stopResume();
+    fs.rmSync(RESUME_FILE, { force: true });
+  }
+  {
+    const w = world({ ...cut('a-20261002-23'), session: limited(resetsAt) });
+    await w.pipe.request('review', Date.now() + 3600_000);
+    eq('밤 검토(시간대 있음)는 한도에 끊겨도 남기지 않는다', parked(), null);
+    ok('밤 검토는 회복 타이머도 안 건다', w.pipe.resumeTimer === null);
+  }
+  {
+    const w = world({ ...cut('a-20261002-04'), session: limited(resetsAt) });
+    const p = w.pipe.request('run');
+    void w.pipe.request('review');
+    await p;
+    eq('이어 가기가 한도에 끊기면 뒤에 기다리던 -actions review 도 남긴다', parked() && parked().review, true);
+    w.pipe.stopResume();
+    fs.rmSync(RESUME_FILE, { force: true });
+  }
+  {
+    const w = world({ ...cut('a-20261002-08'), session: limited(undefined) });
+    await w.pipe.request('one', 'a-20261002-08');
+    eq('계획 없는 [진행]으로 집은 한 건은 번호를 남긴다 · 회복 시각을 모르면 null',
+       parked() && [parked().review, parked().ids, parked().resetsAt], [false, ['a-20261002-08'], null]);
+    w.pipe.stopResume();
+  }
+  {
+    put({ review: true, ids: ['a-20261002-08'], resetsAt });
+    const w = world();
+    w.pipe.restoreResume();
+    await w.pipe.request('review');
+    eq('사람이 다시 시킨 검토는 남긴 검토 몫을 지운다', parked() && [parked().review, parked().ids], [false, ['a-20261002-08']]);
+    ok('남은 번호가 있으면 회복 타이머는 그대로', w.pipe.resumeTimer !== null);
+    await w.pipe.request('one', 'a-20261002-08');
+    eq('다 지우면 파일도 없앤다', parked(), null);
+    ok('다 지우면 회복 타이머도 푼다', w.pipe.resumeTimer === null);
+  }
+  {
+    // 짝 — 설정 저장마다 clearAllTimers 가 지우고 scheduleAll → startActionsTicker 가 다시 건다
+    const sched = fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8');
+    const from = (name) => sched.indexOf(`private ${name}(`);
+    const clearBody = sched.slice(from('clearAllTimers'), sched.indexOf('\n  }\n', from('clearAllTimers')));
+    const startBody = sched.slice(from('startActionsTicker'), sched.indexOf('\n  }\n', from('startActionsTicker')));
+    ok('clearAllTimers 가 회복 타이머를 푼다', clearBody.includes('this.actionPipeline.stopResume()'));
+    ok('startActionsTicker 가 회복 타이머를 되살린다', startBody.includes('this.actionPipeline.restoreResume()'));
+    ok('회복 뒤 끝맺음은 -actions review 와 같은 요약 DM', sched.includes('afterResume: () => this.postActionDigest()'));
+  }
+}
+
 // ── ② Codex 폴백의 쓰기 범위 · SDK 추가 폴더 ─────────────────────────────
 {
   const args = codexSessionArgs({ workingDirectory: 'W', writableDirs: ['J'] }, 'OUT');
@@ -403,11 +509,12 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
 
 fs.rmSync(tmp, { recursive: true, force: true });
 try { fs.unlinkSync(EVENTS_FILE); } catch { /* 안 썼으면 없다 */ }
+fs.rmSync(RESUME_FILE, { force: true });
 
 if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
   console.log('통과 — 처리 제안 실행기 (결과는 파일로만 · 폴백은 받은 범위만 · 한도에서 멈춤 · '
-    + '도는 고리 끊김 · 버튼 값 검사 · 요약 50블록 안 · 세 브리핑 · 밤 검토 시간대)');
+    + '도는 고리 끊김 · 버튼 값 검사 · 요약 50블록 안 · 세 브리핑 · 밤 검토 시간대 · 한도 회복 뒤 이어 감)');
 }
