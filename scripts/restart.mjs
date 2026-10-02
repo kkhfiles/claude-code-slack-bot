@@ -35,6 +35,7 @@
  *      버렸다. 그런 캡처는 차례가 이미 끝난 것이라 재시작과 무관하다 — 알리기만 한다.
  *   ② 방금 큐가 움직였나 — 마지막 `[BoardQueue]` 줄이 최근이면 **기다린다**.
  *      곧 끝나므로 멈출 것 없이 몇 초 쉬었다 다시 본다.
+ *   ③ 지금 떠 있는 봇이 연 분석 회차가 아직 안 닫혔나 — 있으면 **멈춘다**(아래 `openAnalysisRuns`).
  */
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -148,6 +149,39 @@ function activeActionJob() {
   return null;
 }
 
+/**
+ * 아직 안 닫힌 분석 회차 — report-log 회차 기록(`runs/*.json`)의 `open` · `editing` 을 둘로 가른다.
+ *
+ * - `live` — 지금 떠 있는 봇이 연 것(연 시각 ≥ 봇 시작 시각). 재시작하면 그 세션이 죽고 회차는
+ *   판정 없이 남아 정리 작업(`sweep`)이 6시간 뒤에야 기계 초안으로 저장한다 · 그룹이면 뒤 차례
+ *   종류는 아예 안 돈다. 2026-10-02 에 두 번 — 00:53 자정 그룹 뒤 차례 · 12:26 정오 판정.
+ *   한도 뒤 재시도를 기다리는 회차도 여기 든다 — 재시작하면 재시도 예약이 사라지므로 막는 것이 맞다.
+ * - `orphan` — 봇이 뜨기 전에 열린 것. 주인 세션이 이미 없어 재시작과 무관하다 — 알리기만 한다.
+ *
+ * 봇 시작 시각은 pm2 의 `pm_uptime` · 시험은 `BOT_STARTED_AT` 으로 넣는다. **못 읽으면 빈 목록** —
+ * 검사 때문에 재시작이 막히면 안 된다. **검사가 진짜 상태를 안 읽게 경로를 넣을 수 있다.**
+ */
+function openAnalysisRuns(startedAtMs) {
+  const dir = path.join(process.env.REPORT_LOG_STATE || path.join(os.homedir(), '.report-log'), 'runs');
+  const live = [];
+  const orphan = [];
+  let names = [];
+  try {
+    names = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
+  } catch {
+    return { live, orphan };
+  }
+  for (const name of names) {
+    let r;
+    try { r = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf-8')); } catch { continue; }
+    if (!r || (r.status !== 'open' && r.status !== 'editing')) continue;
+    const at = Date.parse(r.opened_at || '');
+    if (Number.isFinite(at) && Number.isFinite(startedAtMs) && at >= startedAtMs) live.push(r);
+    else orphan.push(r);
+  }
+  return { live, orphan };
+}
+
 /** 로그 꼬리에서 마지막 큐 활동 시각. 없으면 null. 파일이 19MB 라 끝만 읽는다. */
 function lastQueueActivity(logPath) {
   if (!logPath) return null;
@@ -213,6 +247,28 @@ if (actionJob && !force) {
     + `${String(actionJob.started_at || '').slice(11, 16)} 시작 · ${String(actionJob.deadline).slice(11, 16)} 까지) — 재시작하지 않았습니다`);
   console.log('   끝난 뒤에 다시 하세요 · 그래도 지금 해야 하면 —  npm run restart -- --force');
   process.exit(1);
+}
+
+const botStartedAt = process.env.BOT_STARTED_AT
+  ? Date.parse(process.env.BOT_STARTED_AT) : Number(proc.pm2_env?.pm_uptime);
+const runs = openAnalysisRuns(botStartedAt);
+const runLine = (r) => `   ${r.type}  ${r.slot}  ${String(r.opened_at || '').slice(11, 16)} 시작  ${r.status}  ${r.run_id}`;
+if (runs.orphan.length) {
+  console.log(`· 봇이 뜨기 전에 열린 분석 회차 ${runs.orphan.length}건 — 주인 세션이 이미 없어 재시작을 막지 않습니다`
+    + ' (정리 작업이 6시간 뒤 받습니다)');
+  for (const r of runs.orphan) console.log(runLine(r));
+}
+if (runs.live.length && !force) {
+  console.log(`⛔ 분석 회차 ${runs.live.length}건이 도는 중입니다 — 재시작하지 않았습니다`);
+  for (const r of runs.live) console.log(runLine(r));
+  console.log('\n   끝난 뒤에 다시 하세요 —');
+  console.log('     python -X utf8 ~/.report-log/repo/tools/report_log.py runs --since <오늘>');
+  console.log('   그래도 지금 해야 하면 —  npm run restart -- --force');
+  console.log('   (그 회차는 판정 없이 열린 채 남고 정리 작업이 6시간 뒤 기계 초안으로 저장 · 그룹이면 뒤 차례는 안 돎)');
+  process.exit(1);
+}
+if (runs.live.length && force) {
+  console.log(`⚠️ 분석 회차 ${runs.live.length}건이 도는 중인데 --force 라 그냥 합니다 — 판정 없이 남습니다`);
 }
 
 const sdkUpdate = activeSdkUpdate();

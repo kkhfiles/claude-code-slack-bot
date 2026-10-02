@@ -12,6 +12,7 @@
  *   ② 큐가 방금 움직였으면 기다리는가
  *   ③ 아무것도 안 걸리면 통과시키는가 (막기만 하는 문도 고장이다)
  *   ④ 처리 제안 세션(report-log 작업 잡기 표시)이 도는 중이면 멈추는가 · 시간 지난 표시는 막지 않는가
+ *   ⑥ 지금 떠 있는 봇이 연 분석 회차(open · editing)가 있으면 멈추는가 · 봇이 뜨기 전에 열린 회차는 막지 않는가
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -149,6 +150,38 @@ if (self.code !== 0) fails.push('판 맞춤 자신이 부른 재시작을 막는
 const oldSdk = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, SDK_UPDATE_RESULT: staleSdk });
 if (oldSdk.code !== 0) fails.push('세 시간 전에 멈춘 판 맞춤 기록으로 재시작을 막는다');
 
+// ⑥ 지금 떠 있는 봇이 연 분석 회차가 안 닫혔으면 멈춘다 — 2026-10-02 에 다른 세션의 재시작이
+//    자정 그룹 뒤 차례와 정오 판정 세션을 끊었다. 봇이 뜨기 전에 열린 회차는 주인이 없어 막지 않는다.
+const runState = (name, runs) => {
+  const dir = path.join(tmp, name);
+  fs.mkdirSync(path.join(dir, 'runs'), { recursive: true });
+  for (const r of runs) fs.writeFileSync(path.join(dir, 'runs', `${r.run_id}.json`), JSON.stringify(r));
+  return dir;
+};
+const ago = (ms) => new Date(Date.now() - ms).toISOString();
+const runRec = (id, type, status, openedAgoMs) => ({
+  run_id: id, type, slot: '2026-10-02', trigger: 'scheduled', opened_at: ago(openedAgoMs), out: 'x.md', status,
+});
+const botStarted = { BOT_STARTED_AT: ago(60 * 60_000) };
+const liveRun = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, ...botStarted,
+  REPORT_LOG_STATE: runState('runs-live', [runRec('r-live', 'kg-regression', 'open', 5 * 60_000)]) });
+if (liveRun.code === 0) fails.push('지금 봇이 연 분석 회차가 도는 중인데 그냥 재시작한다 — 2026-10-02 에 두 번 끊긴 그 자리');
+else if (!liveRun.out.includes('kg-regression')) fails.push('분석 회차로 막기는 했는데 어느 회차인지 안 보여준다');
+const editingRun = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, ...botStarted,
+  REPORT_LOG_STATE: runState('runs-editing', [runRec('r-edit', 'data-sync-noon', 'editing', 5 * 60_000)]) });
+if (editingRun.code === 0) fails.push('세션이 고치는 중(editing)인 회차가 있는데 그냥 재시작한다');
+// ⑥-b 봇이 뜨기 전에 열린 회차 · 닫힌 회차는 막지 않는다 — 막으면 정리 작업이 받을 때까지 6시간 못 한다
+const orphanRun = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, ...botStarted,
+  REPORT_LOG_STATE: runState('runs-orphan', [runRec('r-old', 'data-sync-noon', 'open', 2 * 60 * 60_000),
+    runRec('r-done', 'cli-usage', 'committed', 5 * 60_000)]) });
+if (orphanRun.code !== 0) fails.push('봇이 뜨기 전에 열린(주인 없는) 회차나 닫힌 회차로 재시작을 막는다');
+else if (!orphanRun.out.includes('봇이 뜨기 전에')) fails.push('주인 없는 열린 회차를 막지 않되 알리지도 않는다');
+// ⑥-c `--force` 는 뚫리고, 무엇을 끊는지 남긴다
+const forcedRun = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, ...botStarted,
+  REPORT_LOG_STATE: runState('runs-force', [runRec('r-f', 'archive-sync', 'open', 5 * 60_000)]) }, ['--force']);
+if (forcedRun.code !== 0) fails.push('도는 분석 회차가 있을 때 --force 로도 못 지나간다');
+else if (!forcedRun.out.includes('--force 라 그냥')) fails.push('--force 로 도는 분석 회차를 끊는데 그 사실을 안 남긴다');
+
 // ② 큐가 방금 움직였으면 기다린다 (여기서는 기다리기 시작하는 것까지만 본다)
 const busy = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: busyLog });
 if (!busy.out.includes('기다립니다')) {
@@ -162,5 +195,5 @@ if (fails.length) {
   for (const f of fails) console.log(`  ✗ ${f}`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 깨끗하면 지나가고 · 도는 사람 말이 있으면 멈추고 · 도는 처리 제안 세션도 멈추고 · 도는 SDK 판 맞춤도 멈추고(자신은 통과) · 끝난 오래된 캡처는 알리기만 · 큐가 돌면 기다리고 · --force 는 뚫린다');
+  console.log('통과 — 깨끗하면 지나가고 · 도는 사람 말이 있으면 멈추고 · 도는 처리 제안 세션도 멈추고 · 도는 SDK 판 맞춤도 멈추고(자신은 통과) · 지금 봇이 연 분석 회차도 멈추고(주인 없는 회차는 알리기만) · 끝난 오래된 캡처는 알리기만 · 큐가 돌면 기다리고 · --force 는 뚫린다');
 }
