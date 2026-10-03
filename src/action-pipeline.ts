@@ -372,7 +372,7 @@ export function buildDigestBlocks(d: FlowDigest): unknown[] | null {
  * `-report [종류]` 답 — 처리 제안 요약 + desk 의 보고서 링크 (report-log 4단계 · 읽는 쪽 전환).
  *
  * 사람이 보는 단위는 보고서가 아니라 검토를 거친 처리 제안이라 요약을 먼저 둔다. 보고서 본문은
- * desk 가 회차별로 보여 준다(하루 한 번 01:00 쯤 옮겨짐). 결정할 것이 없어도 링크는 늘 준다.
+ * desk 가 회차별로 보여 준다(회차가 끝나면 바로 저장됨). 결정할 것이 없어도 링크는 늘 준다.
  *
  * `types` 는 report-log 에 있는 보고서 종류 — 주면 `종류` 를 이름 일부로도 찾는다(예전 `-report kg` 가
  * kg-health · kg-regression 을 함께 찾던 동작). 없으면 준 이름 그대로 링크한다.
@@ -392,7 +392,7 @@ export function buildReportReplyBlocks(d: FlowDigest, type?: string, types?: str
         + (hits.length > REPORT_LINKS_MAX ? ` 외 ${hits.length - REPORT_LINKS_MAX}종` : '')
       : `「${plain(type)}」에 맞는 보고서 종류 없음 · ${home}`;
   }
-  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `📚 ${where} · 새 보고서는 매일 01:00 쯤 올라옵니다` }] });
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `📚 ${where} · 새 보고서는 회차가 끝나면 바로 올라옵니다` }] });
   return blocks;
 }
 
