@@ -134,5 +134,72 @@ function turnStarts(host) {
     size > 0 && size < many, { 기억: size, 넣은수: many });
 }
 
+// --- 답을 짓는 동안 온 남의 말을 봇 답이 지우지 않는다 (2026-10-06) --------------------
+// 실측: 실장 말에 낄지 정하는 턴이 도는 40초 사이에 다른 사람이 한 말이 **어디서도 안 집혔다.**
+//   살아 있는 길은 턴이 도는 방이라 안 담고(`withinLimits` 의 `active`), 턴 도중 훑기도 같은 까닭으로 안 담고,
+//   턴이 끝나 봇이 답을 올리자 다음 훑기가 **그 답을 경계로 그 앞 글을 지웠다.**
+// 그 모양 그대로 — 진짜 `pump` 를 돌리고, 턴 안에서 다른 사람 말이 오고, 답이 방에 오른 뒤 훑는다.
+// ts 는 호스트가 뜬 뒤 시각이어야 한다(예전 글 ts 「100.1」로 재면 새 길을 안 지난다).
+const now = () => (Date.now() / 1000).toFixed(6);
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function scene({ boundary = 'self', called = false, before = null } = {}) {
+  const { host } = make();
+  history = [];
+  if (before) {                               // 턴과 상관없이 전에 지나간 말(관심 낱말 없음 — 안 담김)
+    const t0 = now();
+    history.push({ ts: t0, user: 'U3', text: before });
+    await host['onChannelMessage'](client, 'U3', ROOM, t0, undefined, before, false);
+    await pause(20);
+  }
+  const t1 = now();
+  const first = called ? `<@${ME}> 점심 어디로 갈까` : '점심 어디로 갈까';
+  history.push({ ts: t1, user: 'U1', text: first });
+  await host['onChannelMessage'](client, 'U1', ROOM, t1, undefined, first, called);
+  await pause(20);
+  host['runTurn'] = async () => {
+    await pause(20);
+    const t2 = now();
+    const other = '예약도 대신 해 주나요';
+    history.push({ ts: t2, user: 'U2', text: other });
+    await host['onChannelMessage'](client, 'U2', ROOM, t2, undefined, other, false);
+    await pause(20);
+    return { reply: '말씀 받들겠사옵니다', speak: true };
+  };
+  host['say'] = async () => {
+    await pause(20);
+    if (boundary === 'self') history.push({ ts: now(), user: ME, bot_id: 'B_ME', text: '말씀 받들겠사옵니다' });
+    if (boundary === 'sibling') history.push({ ts: now(), user: 'U_SIB', bot_id: 'B_SIB', text: '형제 봇 답' });
+    if (boundary === 'join') history.push({ ts: now(), user: ME, subtype: 'channel_join', text: '들어옴' });
+  };
+  await host['pump'](client, ROOM, called);
+  host['pending'].delete(ROOM);               // 아래 훑기가 새로 담은 것만 센다
+  await host['sweepChannel'](client, ROOM);
+  return host['pending'].get(ROOM)?.texts ?? [];
+}
+
+{
+  const got = await scene();
+  check('답을 짓는 동안 온 남의 말은 봇 답이 올라간 뒤 훑기가 다시 집는다',
+    got.length === 1 && got[0].includes('예약도 대신'), got);
+}
+{
+  const got = await scene({ called: true });
+  check('부른 턴이 도는 동안 온 남의 말도 집는다', got.length === 1 && got[0].includes('예약도 대신'), got);
+}
+{
+  const got = await scene({ before: '오늘 날씨 좋네요' });
+  check('턴 밖에서 지나간 말은 되살리지 않는다(턴이 돈 동안 온 말만)',
+    got.length === 1 && !got.some((t) => t.includes('날씨')), got);
+}
+{
+  const got = await scene({ boundary: 'sibling' });
+  check('형제 봇이 답한 뒤에는 예전처럼 끊는다(형제가 받은 말을 다시 집어 겹쳐 답하지 않게)', got.length === 0, got);
+}
+{
+  const got = await scene({ boundary: 'join' });
+  check('입장 알림 같은 자기 글(subtype)은 경계일 뿐 — 그 앞 말을 되살리지 않는다', got.length === 0, got);
+}
+
 console.log(`\n${pass}개 통과${fails.length ? ` · ${fails.length}개 실패: ${fails.join(', ')}` : ''}`);
 process.exit(fails.length ? 1 : 0);

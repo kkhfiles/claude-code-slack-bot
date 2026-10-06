@@ -31,6 +31,13 @@ let globalRunning = 0;
 const CONCURRENCY_CAP = 3;
 
 const MAX_MERGED_LINES = 20;
+/** 방마다 기억해 둘 「턴이 돈 구간」 수(`turnSpans`). 훑기가 30초마다 도니 최근 몇 개면 된다. */
+const TURN_SPANS_KEPT = 5;
+/** 다른 방 최근 말(`roomsRecent`) — 며칠 안 · 방마다 몇 줄 · 한 줄 몇 자 · 방 하나 읽기를 기다리는 한계. */
+const ROOMS_RECENT_DAYS = 3;
+const ROOMS_RECENT_LINES = 20;
+const ROOMS_RECENT_LINE_CHARS = 200;
+const ROOMS_RECENT_TIMEOUT_MS = 4000;
 /** 한 방에서 「이미 집어 갔다」를 기억해 둘 글 수. 넘으면 오래된 것부터 버린다. */
 const TAKEN_MEMORY = 500;
 /**
@@ -311,6 +318,14 @@ export class ChatHost {
    * 「봤고 안 끼기로 했다」를 남길 자리가 없던 것이 원인이라, 여기에 남긴다.
    */
   private sweptUpTo = new Map<string, number>();
+  /**
+   * 방마다 **턴이 돈 구간**(초 · 최근 몇 개). 훑기의 경계 「봇이 입을 연 자리」는 그 앞 글을 지우는데,
+   * 턴이 도는 동안 온 남의 말은 살아 있는 길도(`withinLimits` 의 `active`) 그 사이 훑기도 안 담는다 —
+   * 그 턴의 답이 오르면 **어디서도 안 집힌 채 경계 앞으로 빠졌다**(2026-10-06 실측 · `check:double`).
+   * 그래서 자기 답이 경계일 때는 이 구간 안에 왔고 아직 안 담긴(`taken`) 말만 남긴다. 뜬 뒤에만 쌓이므로
+   * 재시작 뒤에는 비어 있어 예전처럼 끊는다.
+   */
+  private turnSpans = new Map<string, Array<[number, number]>>();
   /** 방마다 봇끼리 이어 온 횟수. **사람이 한 마디 하면 처음으로 돌아간다.** */
   private botTurns = new Map<string, number>();
   /**
@@ -1009,8 +1024,14 @@ export class ChatHost {
 
     let after: Record<string, unknown>[] = [];
     for (const m of msgs) {
-      // 봇이 입을 연 자리에서 끊는다 — 그 앞은 이미 지나간 이야기다.
-      if (m.bot_id || m.user === this.selfUserId) { after = []; continue; }
+      // 봇이 입을 연 자리에서 끊는다 — 그 앞은 이미 지나간 이야기다. **다만 자기 답이 경계면** 그 답을 짓는
+      // 동안 와서 아무 턴에도 안 담긴 말은 남긴다(`turnSpans`). 형제 봇 답·입장 알림(subtype)은 예전처럼 끊는다 —
+      // 형제가 이미 받은 말을 다시 집으면 겹쳐 답하고(형제 글은 `after` 에 안 들어가 모델이 못 본다), 입장 알림 앞은
+      // 들어오기 전 이야기다.
+      if (m.bot_id || m.user === this.selfUserId) {
+        after = m.user === this.selfUserId && !m.subtype ? this.missedDuringTurn(channel, after) : [];
+        continue;
+      }
       if (m.subtype || !((m.text as string) ?? '').trim()) continue;
       after.push(m);
     }
@@ -1189,9 +1210,11 @@ export class ChatHost {
           await this.react(client, 'add', waiting.channel, ts, mark);
         }
         let result: TurnResult;
+        const began = Date.now() / 1000;
         try {
           result = await this.runTurn(key, await this.displayName(client, key), merged, !forced,
-                                      this.isManagerTurn(waiting.users));
+                                      this.isManagerTurn(waiting.users),
+                                      await this.roomsRecent(client, key, waiting.users));
         } catch (error) {
           this.logger.warn('Turn crashed', error);
           result = { reply: '', error: String(error) };
@@ -1235,6 +1258,8 @@ export class ChatHost {
           await this.say(client, waiting.channel, result.reply, waiting.threadTs);
           this.noteSpoke(key);
         }
+        // 답을 올린 뒤까지가 「턴이 돈 구간」이다 — 그 사이에 온 말을 훑기가 경계 앞에서 지우지 않게(`turnSpans`).
+        this.noteTurnSpan(key, began, Date.now() / 1000);
         // 먼저 말 거는 턴은 한 번만 돈다. 남은 말은 다음 조건이 찰 때 본다.
         if (!forced) break;
       }
@@ -1259,6 +1284,102 @@ export class ChatHost {
       if (!forced && !waiting?.hasSibling) continue;
       void this.pump(client, key, forced);
     }
+  }
+
+  private noteTurnSpan(key: string, from: number, to: number): void {
+    const spans = (this.turnSpans.get(key) ?? []).concat([[from, to]] as Array<[number, number]>);
+    this.turnSpans.set(key, spans.slice(-TURN_SPANS_KEPT));
+  }
+
+  /** 자기 답이 경계일 때 남길 말 — 턴이 돈 구간 안에 왔고 아직 어떤 턴에도 안 담긴 것(`turnSpans`). */
+  private missedDuringTurn(channel: string, msgs: Record<string, unknown>[]): Record<string, unknown>[] {
+    const spans = this.turnSpans.get(channel) ?? [];
+    if (!spans.length) return [];
+    const seen = this.taken.get(channel);
+    return msgs.filter((m) => {
+      const ts = Number(m.ts);
+      return !seen?.has(m.ts as string) && spans.some(([a, b]) => ts >= a && ts <= b);
+    });
+  }
+
+  /**
+   * **다른 방에서 최근 오간 말** — 실장이 1:1 이나 시험 방(봇 설정 `rooms[방].rules`)에서 부를 때만 읽어 턴에 넘긴다
+   * (2026-10-06 실장 「다른 방에서 이야기한 내용도 기억하고 시키면 그 방에서 다시 이야기도」). 봇 설정 `rooms_recent` 를
+   * 켠 봇만. 파일에 쌓지 않고 그때 슬랙에서 읽는다 — 재시작에도 안 잊고 새 저장소가 안 생긴다.
+   *
+   * - **읽는 방은 이 봇이 맡은 채널뿐**(`opts.channels`) · DM 은 안 읽는다.
+   * - **시험 방은 공개 방이라** 설정에서 `public: true` 로 표시한 방만 싣는다 — 비공개 방 글이 누구나 보는 방의 답·대화로
+   *   옮겨지지 않게. 실장 1:1 에는 맡은 방 전부.
+   * - 실을지·어느 방을 실을지(실장 말에 그 방이 나왔나)와 개인 글 빗장은 `turn.py` 가 한 번 더 본다(두 겹).
+   * - 로그에는 줄 수만 · 못 읽은 방은 빼고 턴은 그대로 간다.
+   */
+  private async roomsRecent(client: App['client'], key: string,
+                            users?: Set<string>): Promise<Record<string, unknown>> {
+    if (!this.isManagerTurn(users)) return {};
+    const cfg = this.readNear('bots', this.opts.name, 'config.json') as
+      { rooms_recent?: unknown; rooms?: Record<string, { rules?: unknown; public?: unknown } | undefined> } | null;
+    if (!cfg?.rooms_recent) return {};
+    const rooms = cfg.rooms ?? {};
+    const inDm = this.isDmKey(key);
+    if (!inDm && !rooms[key]?.rules) return {};
+    const sources = (this.opts.channels ?? []).filter((c) => c !== key && (inDm || rooms[c]?.public === true));
+    if (!sources.length) return {};
+    const oldest = ((Date.now() - ROOMS_RECENT_DAYS * 86400 * 1000) / 1000).toFixed(6);
+    const timeout = () => new Promise<null>((r) => { setTimeout(() => r(null), ROOMS_RECENT_TIMEOUT_MS).unref?.(); });
+    const read = async (room: string) => {
+      try {
+        const res = await Promise.race([client.conversations.history({ channel: room, oldest, limit: 60 }), timeout()]);
+        return (res?.messages ?? []) as Record<string, unknown>[];
+      } catch {
+        return null;
+      }
+    };
+    const got = await Promise.all(sources.map(read));
+    const out: Array<{ room: string; lines: Array<Record<string, unknown>> }> = [];
+    let count = 0;
+    for (let i = 0; i < sources.length; i++) {
+      const msgs = got[i];
+      if (!msgs) continue;
+      const picked = msgs
+        .filter((m) => (!m.subtype || m.subtype === 'thread_broadcast') && ((m.text as string) ?? '').trim())
+        .slice(0, ROOMS_RECENT_LINES)
+        .reverse();
+      const lines: Array<Record<string, unknown>> = [];
+      for (const m of picked) {
+        const self = m.user === this.selfUserId;
+        const who = self ? '' : (await this.displayName(client, (m.user as string) ?? '')) || '(이름 모름)';
+        lines.push({
+          at: this.clock(Number(m.ts)), who, self,
+          text: (await this.plainText(client, (m.text as string) ?? '')).slice(0, ROOMS_RECENT_LINE_CHARS),
+          replies: Number(m.reply_count ?? 0),
+        });
+      }
+      if (lines.length) { out.push({ room: sources[i], lines }); count += lines.length; }
+    }
+    if (!out.length) return {};
+    this.logger.info(`다른 방 ${out.length}곳 ${count}줄을 턴에 넘깁니다 (${key.startsWith('U') ? '1:1' : '시험 방'})`);
+    return { rooms_recent: out };
+  }
+
+  /** 「10-06 16:33」 — 이 PC 시각대. */
+  private clock(ts: number): string {
+    const d = new Date(ts * 1000);
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  /** 슬랙 표기를 사람 글로 — 멘션은 이름으로(아이디가 프롬프트로 안 가게), 방·링크는 이름만, 알림 꼬리표는 지운다. */
+  private async plainText(client: App['client'], text: string): Promise<string> {
+    const ids = [...new Set([...text.matchAll(/<@([UW][A-Z0-9]+)>/g)].map((x) => x[1]))];
+    const names = new Map<string, string>();
+    for (const id of ids) names.set(id, (await this.displayName(client, id)) || '누군가');
+    return text
+      .replace(/<@([UW][A-Z0-9]+)>/g, (_s, id: string) => `@${names.get(id) ?? '누군가'}`)
+      .replace(/<#[A-Z0-9]+\|([^>]*)>/g, '#$1')
+      .replace(/<(https?:[^|>]+)\|([^>]*)>/g, '$2')
+      .replace(/<!(?:[^>|]*)(?:\|([^>]*))?>/g, (_s, label?: string) => label ?? '')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   /** 슬랙이 이름을 안다 — 파이썬 쪽이 명단을 들고 있을 이유가 없다. */
