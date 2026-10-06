@@ -1,5 +1,8 @@
 /**
- * 「이번 주 한 조각」 후보에서 하나를 고르는 버튼.
+ * 「이번 주 한 조각」 후보에서 하나를 고르는 버튼과 버리는 버튼.
+ *
+ * **버리면 다시는 후보로 안 올라온다** — 그 자리를 통의 다음 편으로 채우고 목록을 고치는 것까지
+ * 파이썬(`drop`)이 한다. 여기서는 부르기만 하고, 실패했을 때만 그 글 답글로 알린다.
  *
  * **여기서 글을 만들지 않는다.** 통을 읽고 고르고 내보내는 일은 전부 파이썬
  * (`chatbot/weekly_boost.py`)이 한다. 이쪽이 하는 일은 버튼을 받아 그 스크립트를
@@ -13,6 +16,7 @@ import { spawn } from 'child_process';
 import type { App } from '@slack/bolt';
 
 const PICK = 'boost_pick';
+const DROP = 'boost_drop';
 
 export interface LetterBoostOptions {
   managerUserId: string;
@@ -51,10 +55,33 @@ export class LetterBoost {
       }
       this.opts.logger?.info(`이번 주 한 조각 · 고름 ${id} · ${out.ok ? 'ok' : 'fail'}`);
     });
+    app.action({ action_id: DROP }, async ({ ack, body, client }) => {
+      await ack();
+      const payload = body as any;
+      if (payload.user?.id !== this.opts.managerUserId) return;
+      const id = payload.actions?.[0]?.value as string;
+      if (!id) return;
+
+      // **화면은 파이썬이 고친다** — 다음 편을 고르는 판단과 목록 모양이 거기 있다. 여기서 또
+      // 고치면 두 곳이 서로 덮는다. 성공이면 목록이 이미 바뀌어 있으므로 아무 말도 안 한다.
+      const out = await this.run(['drop', '--id', id]);
+      if (!out.ok) {
+        try {
+          await client.chat.postMessage({
+            channel: payload.channel?.id,
+            thread_ts: payload.message?.ts,
+            text: `버리지 못했습니다 — ${out.text.slice(-200)}`,
+          });
+        } catch (error) {
+          this.opts.logger?.warn('버리기 실패를 못 알렸습니다', error);
+        }
+      }
+      this.opts.logger?.info(`이번 주 한 조각 · 버림 ${id} · ${out.ok ? 'ok' : 'fail'}`);
+    });
     // **켜졌다는 것을 시작 로그에 남긴다.** 다른 모듈은 다 남기는데 이것만 조용하면,
     // 버튼이 안 먹을 때 「안 붙은 것」과 「눌러도 아무 일이 없는 것」을 못 가른다.
     this.opts.logger?.info(
-      `[Letter:한조각] 후보 버튼 준비됨 — 고를 수 있는 사람 1명 · ${this.opts.script}`);
+      `[Letter:한조각] 후보 버튼(고르기·버리기) 준비됨 — 누를 수 있는 사람 1명 · ${this.opts.script}`);
   }
 
   private run(args: string[]): Promise<{ ok: boolean; text: string }> {
