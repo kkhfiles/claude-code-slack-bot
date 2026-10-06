@@ -158,8 +158,10 @@ function activeActionJob() {
  *   한도 뒤 재시도를 기다리는 회차도 여기 든다 — 재시작하면 재시도 예약이 사라지므로 막는 것이 맞다.
  * - `orphan` — 봇이 뜨기 전에 열린 것. 주인 세션이 이미 없어 재시작과 무관하다 — 알리기만 한다.
  *
- * 봇 시작 시각은 pm2 의 `pm_uptime` · 시험은 `BOT_STARTED_AT` 으로 넣는다. **못 읽으면 빈 목록** —
- * 검사 때문에 재시작이 막히면 안 된다. **검사가 진짜 상태를 안 읽게 경로를 넣을 수 있다.**
+ * 봇 시작 시각은 pm2 의 `pm_uptime` · 시험은 `BOT_STARTED_AT` 으로 넣는다. **회차 기록 폴더를 못
+ * 읽으면 빈 목록 · 봇 시작 시각을 모르면 전부 `orphan`(알리기만)** — 검사 때문에 재시작이 막히면 안 된다.
+ * 봇이 뜬 뒤 명령줄로 손수 연 회차도 `live` 로 센다 — 가를 표지가 없어 막는 쪽을 골랐다(`--force`).
+ * **검사가 진짜 상태를 안 읽게 경로를 넣을 수 있다.**
  */
 function openAnalysisRuns(startedAtMs) {
   const dir = path.join(process.env.REPORT_LOG_STATE || path.join(os.homedir(), '.report-log'), 'runs');
