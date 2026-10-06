@@ -3097,6 +3097,10 @@ export class AssistantScheduler {
    * 중단이 드러난다 — rate limit이 그룹 전체를 break하는 경로가 정확히 그 모양이라,
    * 그때 뒤쪽 타입은 completed도 skipped도 아닌 무기록으로 사라진다.
    *
+   * **결과 줄에도 계획 줄과 같은 `slot` · `trigger` 를 싣는다** — 파일 이름은 쓰는 날의 날짜라 날을 넘긴
+   * 재시도의 결과 줄은 다음 날 파일에 들어간다. 예정일이 없으면 읽는 쪽(M12)이 파일 날짜로 대신 읽어
+   * 원래 회차를 「기록 없음」으로 본다(2026-10-07 검토 K8).
+   *
    * best-effort — 절대 throw하지 않는다(감시 장치가 감시 대상을 죽이면 안 된다).
    */
   private appendAnalysisJournal(schedule: string, record: Record<string, unknown>): void {
@@ -3259,7 +3263,9 @@ export class AssistantScheduler {
             this.logger.error(`Analysis ${type} timed out after ${attempt + 1} attempts`);
             errorCollector.add('AssistantScheduler', `분석 타임아웃 (${type}): ${maxRetries}회 재시도 후 포기`);
             timedOutTypes.push(type);
-            this.appendAnalysisJournal(schedule, { kind: 'outcome', type, outcome: 'timeout', runId: run?.runId });
+            this.appendAnalysisJournal(schedule, {
+              kind: 'outcome', slot: origin.slot, trigger: origin.trigger, type, outcome: 'timeout', runId: run?.runId,
+            });
             break;
           }
 
@@ -3292,7 +3298,7 @@ export class AssistantScheduler {
             }
             if (result.resetsAt) limitResetsAt = result.resetsAt;
             this.appendAnalysisJournal(schedule, {
-              kind: 'outcome', type, outcome: 'rate_limited',
+              kind: 'outcome', slot: origin.slot, trigger: origin.trigger, type, outcome: 'rate_limited',
               sessionId: result.sessionId, willRetry: shouldRetry,
               deferred: deferredTypes, runId: run?.runId,
             });
@@ -3305,7 +3311,7 @@ export class AssistantScheduler {
             noOutputTypes.push(type);
             end = 'no-output';
             this.appendAnalysisJournal(schedule, {
-              kind: 'outcome', type, outcome: 'no-output', sessionId: result.sessionId, runId: run?.runId,
+              kind: 'outcome', slot: origin.slot, trigger: origin.trigger, type, outcome: 'no-output', sessionId: result.sessionId, runId: run?.runId,
             });
             break;
           }
@@ -3313,14 +3319,16 @@ export class AssistantScheduler {
           succeeded = true;
           end = 'completed';
           completedTypes.push(type);
-          this.appendAnalysisJournal(schedule, { kind: 'outcome', type, outcome: 'completed', runId: run?.runId });
+          this.appendAnalysisJournal(schedule, {
+            kind: 'outcome', slot: origin.slot, trigger: origin.trigger, type, outcome: 'completed', runId: run?.runId,
+          });
           break;
         } catch (error) {
           const msg = (error as Error).message || '';
           if (isRateLimitText(msg)) {
             this.logger.warn(`Analysis ${type} hit rate limit, stopping group`);
             this.appendAnalysisJournal(schedule, {
-              kind: 'outcome', type, outcome: 'rate_limited', viaThrow: true, runId: run?.runId,
+              kind: 'outcome', slot: origin.slot, trigger: origin.trigger, type, outcome: 'rate_limited', viaThrow: true, runId: run?.runId,
             });
             break;
           }
@@ -3331,7 +3339,7 @@ export class AssistantScheduler {
           errorCollector.add('AssistantScheduler', `분석 실행 실패 (${type}): ${msg}`);
           this.logger.error(`Analysis failed for type: ${type}`, error);
           this.appendAnalysisJournal(schedule, {
-            kind: 'outcome', type, outcome: 'error', error: msg.slice(0, 300), runId: run?.runId,
+            kind: 'outcome', slot: origin.slot, trigger: origin.trigger, type, outcome: 'error', error: msg.slice(0, 300), runId: run?.runId,
           });
           break;
         }
@@ -3444,7 +3452,7 @@ export class AssistantScheduler {
           : 'completed';
         (outcome === 'completed' ? done : failed).push(type);
         this.appendAnalysisJournal(schedule, {
-          kind: 'outcome', type, outcome, viaRetry: true, sessionId: r.sessionId, runId: run?.runId,
+          kind: 'outcome', slot: origin.slot, trigger: origin.trigger, type, outcome, viaRetry: true, sessionId: r.sessionId, runId: run?.runId,
         });
         // 재시도 뒤에는 더 이어받지 않는다 — 또 막혀도 마지막 시도로 보고 `--partial` 로 저장한다.
         const end: RunEnd = outcome === 'completed' ? 'completed' : outcome === 'no-output' ? 'no-output' : 'failed';
@@ -3460,7 +3468,7 @@ export class AssistantScheduler {
         failed.push(type);
         this.logger.error(`Retry failed for: ${type}`, error);
         this.appendAnalysisJournal(schedule, {
-          kind: 'outcome', type, outcome: 'error', viaRetry: true,
+          kind: 'outcome', slot: origin.slot, trigger: origin.trigger, type, outcome: 'error', viaRetry: true,
           error: ((error as Error).message || '').slice(0, 300), runId: run?.runId,
         });
         saveOf.set(type, saveTag(run, await this.finishReportRun(run, 'failed', null), 'failed'));

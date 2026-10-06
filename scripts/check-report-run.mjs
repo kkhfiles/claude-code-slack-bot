@@ -975,6 +975,55 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   ok(`수동 실행 메시지에 「처리 claude」 — 받음 ${msg5}`, msg5.includes('처리 claude'));
 }
 
+// ── S16 결과 줄에도 예정일 · 시작 방식 — 계획 줄과 같은 이름(slot · trigger) ───────────
+// 시도 기록 파일 이름은 쓰는 날의 날짜라, 날을 넘긴 재시도의 결과 줄은 다음 날 파일에 들어간다. 결과 줄에
+// 예정일이 없어 완주 검사(M12)가 파일 날짜로 대신 읽었고, 원래 예정일 회차를 「기록 없음」으로 거짓 보고했다
+// (2026-10-07 검토 K8). 결과 줄을 만드는 곳 모두 — 그룹 · 재시도 · 던짐 · 회차 못 엶 · 데일리 한도.
+{
+  writeConfig();
+  resetJournal();
+  const origin = { slot: '2026-10-03', trigger: 'scheduled' };
+  const TO = { ...WORKED, subtype: 'error_timeout' };
+  const ASK = { ...WORKED, toolCalls: 0, text: 'what would you like me to do?' };
+  // 완료 · 타임아웃 · 되물음(no-output)
+  const g1 = harness({ results: [writes('# probe\n본문\n'), TO, TO, ASK, ASK] });
+  await g1.sched.runAnalysisGroup('saturday-00:00', ['probe', 'second', 'third'], origin);
+  // 한도(재시도 예약) → 재시도에서 완료 · 오류
+  const g2 = harness({ results: [LIMIT()] });
+  let q = null;
+  g2.sched.scheduleAnalysisRetry = (schedule, o, queue) => { q = { schedule, o, queue }; };
+  await g2.sched.runAnalysisGroup('saturday-00:00', ['probe', 'second'], origin);
+  g2.sched.runSingleAnalysis = async (type) => {
+    if (type === 'second') throw new Error('재시도 터짐 시험');
+    return { rateLimited: false, timedOut: false, costUsd: 0 };
+  };
+  await g2.sched.runAnalysisRetry(q.schedule, q.o, q.queue);
+  // 한도가 던져진 모양
+  const g3 = harness();
+  g3.sched.runSingleAnalysis = async () => { throw new Error('Claude usage limit reached'); };
+  await g3.sched.runAnalysisGroup('saturday-00:00', ['probe'], origin);
+  // 회차를 못 엶 → 오류
+  const g4 = harness({ rl: fakeReportLog({ openError: '잠금 없음 시험' }) });
+  await g4.sched.runAnalysisGroup('saturday-00:00', ['third'], origin);
+  // 데일리 · 재시도 없는 한도 — 손으로 연 회차(manual)
+  writeConfig({ probe: { enabled: true, schedule: 'daily-12:00', model: 'sonnet', effort: 'low' } });
+  const daily = { slot: '2026-10-04', trigger: 'manual' };
+  const g5 = harness({ results: [LIMIT()] });
+  await g5.sched.runAnalysisGroup('daily-12:00', ['probe'], daily);
+  writeConfig();
+
+  const weekly = journal().filter((r) => r.kind === 'outcome');
+  const dailyLines = journal('daily-12:00').filter((r) => r.kind === 'outcome');
+  const shape = (r) => `${r.outcome}${r.viaRetry ? '(재시도)' : ''}${r.viaThrow ? '(던짐)' : ''}`;
+  const made = new Set([...weekly, ...dailyLines].map(shape));
+  const want = ['completed', 'timeout', 'no-output', 'rate_limited', 'error', 'completed(재시도)', 'error(재시도)', 'rate_limited(던짐)'];
+  ok(`(전제) 결과 줄 모양을 고루 만들었다 — 만든 것 ${[...made].join(' · ')}`, want.every((k) => made.has(k)));
+  eq('결과 줄마다 계획 줄과 같은 예정일 · 시작 방식',
+    weekly.filter((r) => r.slot !== origin.slot || r.trigger !== origin.trigger).map((r) => `${r.type}:${shape(r)}`), []);
+  eq('데일리 한도 결과 줄도 그 회차의 예정일 · 시작 방식(manual)',
+    dailyLines.map((r) => [r.outcome, r.slot, r.trigger]), [['rate_limited', '2026-10-04', 'manual']]);
+}
+
 // ── S9 agy 위임 경로 — 걷혔나 ─────────────────────────────────────
 {
   ok('src/agy-handler.ts 가 남아 있다 — 부르는 곳이 없는 폐기 모듈', !fs.existsSync(path.join(SRC, 'agy-handler.ts')));
