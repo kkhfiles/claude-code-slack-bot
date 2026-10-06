@@ -1435,13 +1435,17 @@ export class AssistantScheduler {
     return this.actionPipeline.digestBlocks();
   }
 
-  /** 브리핑 셋(예약 · 놓친 것 · 수동 `-briefing`)이 같이 붙이는 요약. 실패해도 브리핑은 그대로. */
+  /**
+   * 브리핑 셋(예약 · 놓친 것 · 수동 `-briefing`)이 같이 붙이는 요약. 실패해도 브리핑은 그대로.
+   * **실패는 「시스템 이슈」로 남긴다** — 요약이 안 온 날이 「결정할 것 없음」과 똑같아 보이지 않게.
+   */
   private async postActionDigest(): Promise<void> {
     try {
       const blocks = await this.actionDigestBlocks();
       if (blocks) await this.sendMessage('🗂 처리 제안', blocks);
     } catch (err) {
       this.logger.warn('처리 제안 요약 실패', err);
+      errorCollector.add('처리 제안', `아침 요약을 못 보냄 — ${(err as Error).message}`);
     }
   }
 
@@ -2311,8 +2315,6 @@ export class AssistantScheduler {
           } catch (err) {
             this.logger.warn('NAS confirm queue check failed', err);
           }
-
-          await this.postMorningProposals();
         }
       } catch (error) {
         const msg = (error as Error).message || '';
@@ -2324,6 +2326,11 @@ export class AssistantScheduler {
           await this.sendMessage('❌ Morning briefing failed. Check logs for details.').catch(() => {});
         }
       }
+
+      // **처리 제안 요약은 브리핑 결과와 무관하게 붙인다** — 요약은 세션이 아니라 report-log 를 읽어
+      // 만든다. 성공 갈래 안에 있던 동안 브리핑 세션이 한도 · 실패로 끝난 날은 🗂 도 안 나갔다
+      // (2026-10-07 검토 K7 · `check:actions` ⑥).
+      await this.postMorningProposals();
 
       // Reschedule for next working day
       this.scheduleBriefing();
@@ -2359,8 +2366,6 @@ export class AssistantScheduler {
       this.recordSessionCost('briefing', result);
       await this.sendMessage(result.text +
         this.formatErrorReport() + this.formatCostLine());
-
-      await this.postMorningProposals();
     } catch (error) {
       const msg = (error as Error).message || '';
       if (isRateLimitText(msg)) {
@@ -2369,6 +2374,8 @@ export class AssistantScheduler {
         this.logger.error('Catch-up briefing failed', error);
       }
     }
+    // 예약 브리핑과 같은 까닭으로 브리핑 결과와 무관하게 붙인다.
+    await this.postMorningProposals();
   }
 
   /**

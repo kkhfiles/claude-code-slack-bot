@@ -13,7 +13,8 @@
  *   ③ 사용량 한도가 나오면 그 차례를 멈춘다(다음 제안으로 안 넘어간다)
  *   ④ 도는 고리가 영영 안 끝나지 않는다
  *   ⑤ 버튼 값은 믿지 않는다 — 형식이 틀리면 report-log 를 부르지도 않는다 · 거절 답은 원래 메시지를 덮지 않는다
- *   ⑥ 아침 요약이 슬랙 한 메시지 한도 안에 든다 · 세 브리핑 모두에 붙는다
+ *   ⑥ 아침 요약이 슬랙 한 메시지 한도 안에 든다 · 세 브리핑 모두에 붙는다 · 브리핑이 한도 · 실패여도
+ *      붙는다 · 요약을 못 만들면 「시스템 이슈」
  *   ⑦ 밤 검토는 업무일 시간대 안에서만 · 이어 가기는 늘
  *   ⑧ 사람이 시킨 검토가 한도에 끊기면 회복 뒤 이어 간다 · 재시작에도 남는다 · 밤 검토는 안 남긴다
  */
@@ -34,9 +35,14 @@ process.env.WORK_EVENTS_FILE = EVENTS_FILE;
 const RESUME_FILE = path.join(os.tmpdir(), `actions-check-resume-${Date.now()}.json`);
 process.env.ACTIONS_RESUME_FILE = RESUME_FILE;
 process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
+// report-log 자동 기록 클론 · 비용 원장 — 스케줄러를 만드는 절이 진짜 것을 부르지 않게(없는 자리)
+process.env.REPORT_LOG_STATE = path.join(os.tmpdir(), `actions-check-rl-${Date.now()}`);
+process.env.REPORT_LOG_REPO = path.join(process.env.REPORT_LOG_STATE, '없는-클론');
+process.env.ASSISTANT_COSTS_FILE = path.join(os.tmpdir(), `actions-check-costs-${Date.now()}.json`);
 const {
   ActionPipeline, buildDigestBlocks, buildReportReplyBlocks, decisionReply, markDecided, noticeReply, parseWindow,
 } = require(path.join(ROOT, 'dist', 'action-pipeline.js'));
+const { errorCollector } = require(path.join(ROOT, 'dist', 'error-collector.js'));
 const { codexSessionArgs } = require(path.join(ROOT, 'dist', 'work-assistant.js'));
 const { SdkHandler } = require(path.join(ROOT, 'dist', 'sdk-handler.js'));
 
@@ -292,23 +298,78 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
      after.filter((x) => x.type === 'actions').map((x) => x.block_id), ['actb_a-20260929-01']);
 }
 {
-  // 세 브리핑(예약 · 놓친 것 · 수동) 모두에 붙는가 — NAS 확인 요청이 놓친 브리핑에서 빠진 선례
-  const sched = fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8');
+  // 세 브리핑(예약 · 놓친 것 · 수동) 모두에 붙는가 — NAS 확인 요청이 놓친 브리핑에서 빠진 선례.
+  // 예약 · 놓친 것은 **돌려서** 본다 — 브리핑 결과와 무관하게 한 번 붙어야 한다. 예전에는 함수 본문에
+  // 글자가 있는지만 봐서, 브리핑 세션이 한도 · 실패로 끝난 날 요약까지 빠지는 것을 못 잡았다(2026-10-07 검토 K7).
   const handler = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
-  const body = (src, name) => {
-    const head = src.search(new RegExp(`private (async )?${name}\\(`));
-    const rest = src.slice(head);
-    const next = rest.slice(10).search(/\n {2}(private|public|async|\/\*\*)/);
-    return next < 0 ? rest : rest.slice(0, next + 10);
-  };
-  // 2026-10-02 부터 둘은 `postMorningProposals`(처리 제안 + 매일 개선 제안)를 부른다 — 그 안이 처리 제안을 부르는지까지 본다.
-  const morning = sched.slice(sched.indexOf('async postMorningProposals('), sched.indexOf('async decideImprove('));
-  const viaMorning = (name) => body(sched, name).includes('postActionDigest(')
-    || (body(sched, name).includes('postMorningProposals(') && morning.includes('this.postActionDigest()'));
-  ok('예약 브리핑에 처리 제안 요약', viaMorning('scheduleBriefing'));
-  ok('놓친 브리핑에 처리 제안 요약', viaMorning('catchUpBriefingIfNeeded'));
   const manual = handler.slice(handler.indexOf('this.isBriefingCommand(text)'), handler.indexOf('this.isReportCommand(text)'));
   ok('수동 -briefing 에 처리 제안 요약', manual.includes('actionDigestBlocks('));
+
+  const { AssistantScheduler } = require(path.join(ROOT, 'dist', 'assistant-scheduler.js'));
+  const nas = require(path.join(ROOT, 'dist', 'nas-confirm.js'));
+  const CFG = path.join(tmp, 'brief-cfg');
+  fs.mkdirSync(path.join(CFG, 'prompts'), { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({
+    briefing: { time: '00:00', enabled: true, excludeCalendars: [] },
+    reminders: { enabled: false, beforeMinutes: 15, pollingIntervalMinutes: 5, workingHoursStart: '08:00', workingHoursEnd: '20:00' },
+    analysis: { schedule: 'saturday-00:00', defaults: {}, types: {} },
+  }));
+  const savedNas = nas.listNasQueue;
+  nas.listNasQueue = async () => { throw new Error('시험 — NAS 큐는 안 본다'); };
+  const OK = { text: '☀️ 브리핑', costUsd: 0, sessionId: 's', subtype: 'success', isError: false, toolCalls: 3 };
+  /** 브리핑 세션만 갈아 끼운 스케줄러 — 세션 · report-log · 비용 원장 · 개선 제안은 안 부른다. */
+  const brief = (how) => {
+    const sent = [];
+    const s = new AssistantScheduler(async (text) => { sent.push(text); },
+      async () => { throw new Error('시험이 세션을 불렀다'); }, CFG);
+    s.loadConfig();
+    s.recordSessionCost = () => {};
+    s.isNonWorkingDay = () => ({ skip: false });
+    s.executeBriefing = async () => { if (how instanceof Error) throw how; return { ...how }; };
+    s.actionDigestBlocks = async () => [{ type: 'section', text: { type: 'mrkdwn', text: '요약' } }];
+    s.improveForBriefing = async () => null;
+    return { s, sent };
+  };
+  const digests = (sent) => sent.filter((t) => t === '🗂 처리 제안').length;
+  try {
+    for (const [label, how] of [
+      ['정상', OK],
+      ['한도(결과)', { ...OK, text: '', rateLimited: true }],
+      ['한도(던짐)', new Error('Claude usage limit reached')],
+      ['실패(던짐)', new Error('브리핑 터짐 시험')],
+    ]) {
+      const { s, sent } = brief(how);
+      let armed = 0;
+      s.getNextWorkingDay = () => new Date(Date.now() + (armed++ === 0 ? 5 : 86_400_000));
+      s.scheduleBriefing();
+      for (let i = 0; i < 200 && armed < 2; i++) await new Promise((r) => setTimeout(r, 10));
+      s.stop();
+      eq(`예약 브리핑 ${label} — 🗂 요약 한 번`, digests(sent), 1);
+      const c = brief(how);
+      await c.s.catchUpBriefingIfNeeded();
+      eq(`놓친 브리핑 ${label} — 🗂 요약 한 번`, digests(c.sent), 1);
+    }
+
+    // 요약을 못 만들면 「시스템 이슈」로 — 「결정할 것 없음」(메시지 없음)과 갈려야 한다
+    errorCollector.getAndClear();
+    const bad = world({ digest: { error: 'rc 1 · 요약 시험' } });
+    eq('report-log 를 못 읽으면 요약 없음', await bad.pipe.digestBlocks(), null);
+    ok('요약을 못 읽은 것은 시스템 이슈로', errorCollector.getAndClear().some((e) => e.message.includes('rc 1 · 요약 시험')));
+    const quiet = world({ digest: { need_you: [], stuck: [], site: 'https://desk.example' } });
+    eq('결정할 것이 없으면 요약 없음', await quiet.pipe.digestBlocks(), null);
+    eq('결정할 것 없음은 시스템 이슈가 아니다', errorCollector.getAndClear().length, 0);
+    const { s: thrower } = brief(OK);
+    thrower.actionDigestBlocks = async () => { throw new Error('요약 터짐 시험'); };
+    await thrower.postActionDigest();
+    ok('요약이 던지면 시스템 이슈로', errorCollector.getAndClear().some((e) => e.message.includes('요약 터짐 시험')));
+    const unsent = new AssistantScheduler(async () => { throw new Error('슬랙 보내기 실패 시험'); },
+      async () => { throw new Error('시험이 세션을 불렀다'); }, CFG);
+    unsent.actionDigestBlocks = async () => [{ type: 'section', text: { type: 'mrkdwn', text: '요약' } }];
+    await unsent.postActionDigest();
+    ok('요약을 못 보내면 시스템 이슈로', errorCollector.getAndClear().some((e) => e.message.includes('슬랙 보내기 실패 시험')));
+  } finally {
+    nas.listNasQueue = savedNas;
+  }
 }
 
 // ── ⑥b 읽는 쪽 전환(report-log 4단계) — `-report` 는 요약 + desk 링크 · 옛 보고서 훑기는 없음 ──

@@ -711,11 +711,15 @@ export class ActionPipeline {
     if (n) await this.tell([{ ...n, kind: 'reviewed' }]);
   }
 
-  /** 아침 요약 블록 — 없으면 null. 못 읽으면 null 로 물러나 브리핑을 막지 않는다. */
+  /**
+   * 아침 요약 블록 — 없으면 null. 못 읽으면 null 로 물러나 브리핑을 막지 않되 「시스템 이슈」로
+   * 남긴다 — 둘 다 null 이라 남기지 않으면 못 읽은 날이 「결정할 것 없음」으로 읽힌다.
+   */
   async digestBlocks(): Promise<unknown[] | null> {
     const d = await this.deps.run('flow', ['digest']);
     if (!d || d.error) {
       this.logger.warn(`처리 제안 요약을 못 읽음 — ${d?.error}`);
+      errorCollector.add('처리 제안', `요약을 못 읽음 — ${String(d?.error ?? '답 없음').slice(0, 200)}`);
       return null;
     }
     return buildDigestBlocks(d as FlowDigest);
