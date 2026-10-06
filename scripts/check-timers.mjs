@@ -235,6 +235,38 @@ try {
 
   await round(() => sched.stop());
   if (live.size !== 0) fails.push(`⑥ 봇을 끄는 사이 끝난 그룹이 타이머를 다시 건다 (남은 타이머 ${live.size}개)`);
+
+  // ⑦ 한도 재시도 — 설정을 다시 읽어도 살아남는다 · 봇을 끄면 풀린다 · 같은 스케줄 둘을 둘 다 쥔다.
+  //    재시도가 `analysisTimers` 에 있던 동안 설정을 다시 읽으면 지워지고 아무도 다시 안 걸어, 열린
+  //    회차를 6시간 뒤 정리 작업이 반쪽으로 닫았다(2026-10-07 검토 K2).
+  const retried = [];
+  sched.runAnalysisRetry = async (schedule, origin, queue) => { retried.push(queue.map((q) => q.type).join(',')); };
+  const origin = { slot: '2026-10-03', trigger: 'scheduled' };
+  const retryIn = (type, ms) => sched.scheduleAnalysisRetry(GROUP, origin, [{ type, run: null }], new Date(Date.now() + ms));
+  nextIn = DAY;
+  writeConfig(true);
+  sched.loadConfig();
+  sched.scheduleAll();
+  retryIn('a', 40);
+  reload();
+  await wait(120);
+  if (retried.join(' ') !== 'a') fails.push(`⑦ 설정을 다시 읽은 뒤 한도 재시도가 안 돈다 (돈 것: ${JSON.stringify(retried)})`);
+
+  retryIn('b', 40);
+  sched.stop();
+  await wait(120);
+  if (retried.includes('b')) fails.push('⑦ 봇을 껐는데 한도 재시도가 돈다');
+  if (live.size !== 0) fails.push(`⑦ 봇을 끈 뒤 남은 타이머 ${live.size}개 — 재시도도 풀려야 한다`);
+
+  sched.scheduleAll();
+  retryIn('c', 30);
+  retryIn('d', DAY);   // 같은 스케줄 둘째 — 앞엣것이 장부에서 빠지거나, 먼저 돈 것이 이것을 지우면 안 된다
+  await wait(120);
+  if (!retried.includes('c')) fails.push('⑦ 같은 스케줄 재시도가 둘일 때 앞엣것이 안 돈다');
+  sched.stop();
+  if (live.size !== 0) {
+    fails.push(`⑦ 같은 스케줄 재시도가 둘이면 봇을 꺼도 하나가 남는다 (${live.size}개) — 먼저 돈 재시도가 뒤엣것의 칸을 지웠거나 덮어써 놓쳤다`);
+  }
 } finally {
   sched.stop();
   for (const h of live) realClearTimeout(h);
@@ -250,5 +282,6 @@ if (fails.length) {
   const jobs = Object.values(ALSO_DOES).flat().length;
   console.log(`통과 — 타이머 ${cleared.size}개: 지움·다시 걺·자기 재예약 셋 다`
     + ` · 한자리에서 같이 하는 일 ${jobs}개 · 상시 연결 ${Object.keys(CONNECTIONS).length}개`
-    + ' · 분석 그룹 타이머(도는 사이 설정 다시 읽기 · 그룹 끔 · 봇 끔)');
+    + ' · 분석 그룹 타이머(도는 사이 설정 다시 읽기 · 그룹 끔 · 봇 끔)'
+    + ' · 한도 재시도(설정 다시 읽기에 살아남음 · 봇 끄면 풀림 · 같은 스케줄 둘)');
 }

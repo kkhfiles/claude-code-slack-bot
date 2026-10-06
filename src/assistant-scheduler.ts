@@ -789,6 +789,9 @@ export class AssistantScheduler {
   // Timers
   private briefingTimer: ReturnType<typeof setTimeout> | null = null;
   private analysisTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  /** 한도 재시도 — `clearAllTimers` 밖에 둔다. 설정을 다시 읽어도 살아남아야 하고(다시 걸어 줄
+   *  곳이 없다) 같은 스케줄의 재시도가 둘이어도 둘 다 쥔다. 봇을 끌 때(`stop`)만 푼다. */
+  private analysisRetryTimers = new Set<ReturnType<typeof setTimeout>>();
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private workNudgeTimer: ReturnType<typeof setTimeout> | null = null;
   private offsitePushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -917,6 +920,8 @@ export class AssistantScheduler {
 
   stop(): void {
     this.clearAllTimers();
+    for (const timer of this.analysisRetryTimers) clearTimeout(timer);
+    this.analysisRetryTimers.clear();
     this.stopConfigWatcher();
     if (this.midnightTimer) {
       clearTimeout(this.midnightTimer);
@@ -1371,7 +1376,7 @@ export class AssistantScheduler {
 
   /**
    * 열린 채 남은 분석 회차 정리 — 한 시간마다 `report_log.py sweep --older-than 6`(「쓰는 흐름」 6번).
-   * 세션이 저장 전에 죽었거나 · 재시작 · 설정 저장으로 재시도 예약이 사라졌거나 · 세션이 러너보다
+   * 세션이 저장 전에 죽었거나 · 재시작으로 재시도 예약이 사라졌거나 · 세션이 러너보다
    * 먼저 끝난 회차를 report-log 가 저장(`partial` · `machine`)하거나 `abandoned` 로 닫는다.
    */
   private startRunSweeper(): void {
@@ -3385,17 +3390,23 @@ export class AssistantScheduler {
     }
   }
 
-  /** 한도로 멈춘 그룹의 재시도를 예약한다 — 큐의 칸마다 회차를 같이 들고 간다. */
+  /**
+   * 한도로 멈춘 그룹의 재시도를 예약한다 — 큐의 칸마다 회차를 같이 들고 간다.
+   *
+   * **설정을 다시 읽어도 안 지운다**(`analysisRetryTimers` · 2026-10-07 검토 K2). 예전에는 그룹
+   * 타이머 맵에 `retry-<스케줄>` 칸으로 두어 설정 저장마다 지워졌고 `scheduleAll` 은 정규 그룹만
+   * 다시 걸어, 열린 회차를 6시간 뒤 정리 작업이 반쪽으로 닫았다. 칸 이름도 스케줄 하나에 하나라
+   * 같은 스케줄 재시도가 둘이면 앞엣것이 장부에서 빠졌다.
+   */
   private scheduleAnalysisRetry(
     schedule: string, origin: { slot: string; trigger: RunTrigger }, queue: RetryEntry[], retryTime: Date,
   ): void {
-    const retryTimerKey = `retry-${schedule}`;
     const retryTimer = setTimeout(() => {
-      this.analysisTimers.delete(retryTimerKey);
+      this.analysisRetryTimers.delete(retryTimer);
       this.runAnalysisRetry(schedule, origin, queue).catch((error) =>
         this.logger.error('Analysis retry failed', { schedule, error }));
     }, Math.max(0, retryTime.getTime() - Date.now()));
-    this.analysisTimers.set(retryTimerKey, retryTimer);
+    this.analysisRetryTimers.add(retryTimer);
   }
 
   /**
