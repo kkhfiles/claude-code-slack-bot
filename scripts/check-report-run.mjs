@@ -9,7 +9,7 @@
  *   - 회차 열기 · 예정일(예약 발화 시각의 한국 날짜) · 재시도는 같은 회차 · 수동은 오늘
  *   - 프롬프트 자리 치환 · 남은 `{{` 면 세션을 안 띄움
  *   - 쓰기 범위(임시 파일 폴더) · 저장 시점 · 「썼나」 판정 · 저장 시점 · 산출물 없음이 정상인 종류 · 판정 필요 종류 · 러너 환경 · 월요일 보고 WEEK_INPUT · 처리 백엔드
- *   - 러너 미리 띄우기의 환경 변수 · `--date` · 월요일 보고의 `{{WEEK_INPUT}}`
+ *   - 러너 미리 띄우기의 환경 변수 · `--date` · 주간 보고(그 주 첫 업무일)의 `{{WEEK_INPUT}}`
  *   - agy 위임 경로가 걷혔나
  *
  * **외부를 안 부른다** — report-log 명령은 가짜(`deps.reportLog`)로, 세션은 가짜
@@ -717,7 +717,7 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   eq('러너 없는 종류는 안 띄운다', h2.launches.length, 0);
 }
 
-// ── S8 월요일 보고 · weekly-digest 의 {{WEEK_INPUT}} ─────────────────
+// ── S8 주간 보고(그 주 첫 업무일) · weekly-digest 의 {{WEEK_INPUT}} ─────────────────
 {
   const MONDAY = new Date('2026-10-05T03:00:00Z');   // 한국 10/5(월) 12:00 — UTC 로도 월요일
   const TUESDAY = new Date('2026-10-06T03:00:00Z');
@@ -728,14 +728,39 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   ok(`월요일 보고에 그 주 판이 들어간다 — 받음 ${extra}`, extra.includes('cli-usage · 2026-10-03 · complete — CLI') && extra.includes('- [ ] 권고 하나'));
   ok('월요일 보고에 {{WEEK_INPUT}} 가 안 남는다', !extra.includes('{{WEEK_INPUT}}'));
   eq('그 주 = 오늘(한국) 7일 전부터', rl.of('week-input').map((c) => argOf(c, '--since')), ['2026-09-28']);
-  eq('월요일이 아니면 빈 글자', await sched.mondayBriefingExtra(TUESDAY), '');
+
+  // 그 주 첫 업무일 — 월요일이 쉬는 주는 처음 일하는 날에 붙인다(2026-10-05 대체공휴일 주에 빠졌다)
+  // 쉬는 날은 시험이 정한다 — 운영 휴일 목록(config.json)에 기대지 않는다
+  const ymdOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const offWith = (days) => (d) => ({ skip: d.getDay() === 0 || d.getDay() === 6 || days.includes(ymdOf(d)) });
+  const at = (s) => new Date(`${s}T03:00:00Z`);   // 한국 12:00 — UTC 로도 같은 날
+  const weekCase = async (label, today, off, wantSince) => {
+    const rlW = fakeReportLog({ week: [] });
+    const hw = harness({ rl: rlW });
+    hw.sched.isNonWorkingDay = offWith(off);
+    const got = await hw.sched.mondayBriefingExtra(at(today));
+    eq(`${label} — 붙음`, got !== '', wantSince !== null);
+    eq(`${label} — 판 목록 시작`, rlW.of('week-input').map((c) => argOf(c, '--since')), wantSince ? [wantSince] : []);
+  };
+  await weekCase('평범한 월요일', '2026-10-12', [], '2026-10-05');
+  await weekCase('월요일이 일한 주의 화요일', '2026-10-13', [], null);
+  await weekCase('쉬는 월요일 다음 화요일', '2026-10-06', ['2026-10-05'], '2026-09-28');
+  await weekCase('월 · 화를 쉰 주의 수요일', '2026-10-07', ['2026-10-05', '2026-10-06'], '2026-09-28');
+  await weekCase('월요일만 쉰 주의 수요일(화요일에 이미 붙음)', '2026-10-07', ['2026-10-05'], null);
+  await weekCase('쉬는 월요일 그날 손으로 부른 브리핑', '2026-10-05', ['2026-10-05'], '2026-09-28');
+  await weekCase('주말', '2026-10-10', [], null);
+  await weekCase('월~금을 다 쉰 주의 토요일', '2026-10-10', ['2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09'], null);
+  // 이 시험의 화요일(10/6)은 월요일이 일한 주로 놓는다 — 실제 10/5 는 운영 휴일 목록에 있다
+  const hT = harness({ rl: fakeReportLog({ week: [] }) });
+  hT.sched.isNonWorkingDay = offWith([]);
+  eq('월요일이 일한 주의 화요일은 빈 글자', await hT.sched.mondayBriefingExtra(TUESDAY), '');
 
   // 못 채우면 덧붙임 없이(빈 글자) · 오류를 남긴다 — 브리핑 본문은 그대로 나간다
   errorCollector.getAndClear();
   const rlErr = fakeReportLog({ week: { error: 'rc 1 · 시험' } });
   const h = harness({ rl: rlErr });
   eq('목록을 못 읽으면 덧붙임 없음', await h.sched.mondayBriefingExtra(MONDAY), '');
-  ok('그 사실을 시스템 이슈로 남긴다', errorCollector.getAndClear().some((e) => e.message.includes('월요일 보고를 못 채워')));
+  ok('그 사실을 시스템 이슈로 남긴다', errorCollector.getAndClear().some((e) => e.message.includes('주간 보고를 못 채워')));
   fs.writeFileSync(path.join(PROMPTS, 'monday-briefing-extra.md'), '{{WEEK_INPUT}}\n{{MYSTERY}}\n', 'utf-8');
   eq('다른 자리가 남아도 덧붙임 없음', await sched.mondayBriefingExtra(MONDAY), '');
   ok('남은 자리도 시스템 이슈로', errorCollector.getAndClear().some((e) => e.message.includes('{{MYSTERY}}')));
@@ -967,5 +992,5 @@ if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 「썼나」 판정 · 저장 시점 · 산출물 없음이 정상인 종류 · 판정 필요 종류 · 러너 환경 · 월요일 보고 WEEK_INPUT · 처리 백엔드 · agy 위임 경로 걷힘)');
+  console.log('통과 — 분석 회차 쓰는 길 (회차 열기 · 예정일 · 재시도 같은 회차 · 수동 manual · 프롬프트 자리 · 남은 {{ 거부 · 쓰기 범위 · 「썼나」 판정 · 저장 시점 · 산출물 없음이 정상인 종류 · 판정 필요 종류 · 러너 환경 · 주간 보고 WEEK_INPUT(그 주 첫 업무일) · 처리 백엔드 · agy 위임 경로 걷힘)');
 }

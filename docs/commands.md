@@ -42,7 +42,7 @@
   - 캐시된 캘린더 데이터 사용 (MCP 미호출), 캐시 날짜가 오늘이 아니면 `refreshCache()` 호출 후 사용, 실패 시 MCP fallback
   - `ErrorCollector`에 수집된 봇 에러를 `⚠️ 시스템 이슈` 섹션으로 일괄 보고
   - **재시작 시 catch-up**: `catchUpBriefingIfNeeded()` — `.assistant-costs.json`에서 마지막 브리핑 날짜 확인, 오늘 미실행이면 15초 후 즉시 실행
-  - **월요일 주간 요약**: `monday-briefing-extra.md` 프롬프트 자동 주입 (주간 비용 통계 + 보고서 요약)
+  - **주간 요약(그 주 첫 업무일)**: `monday-briefing-extra.md` 프롬프트 자동 주입 (주간 비용 통계 + 보고서 요약) · 보통 월요일이고 월요일이 휴일 · 휴가면 그다음 업무일
 - **캘린더 리마인더**: `CalendarPoller` — 직접 Google Calendar REST API HTTP 폴링
   - 전체 캘린더 조회 후 `excludeCalendars`로만 제외 (화이트리스트 없음)
   - 5분 간격 폴링, diff 감지 시에만 AI 판단 (Haiku 모델, 경량 모드 ~$0.003/회)
@@ -81,5 +81,5 @@
     - 결과 메시지: 그룹 · 재시도 완료 줄은 종류 옆에 저장 결과(`saveTag` — `저장 complete` · `저장 안 함 → sweep` · `저장 보류 → 재시도` · `저장 실패(<코드>)`)와 Claude 가 아닌 처리 백엔드 · 수동 단일은 저장까지 된 것만 ✅(저장 실패 ❗ · 정리 작업 몫 ⏳)
     - 정리 작업: 한 시간마다 `report_log.py sweep --older-than 6`(`startRunSweeper` · 처리 제안 타이머와 별개 · report-log 클론이 있을 때만) — 6시간 동안 안 움직인 열린 회차를 report-log 가 `partial`·`machine` 으로 저장하거나 `abandoned` 로 닫음 · 실패는 「시스템 이슈」 · 안 던짐
     - 러너 미리 띄우기: 환경 변수 `REPORT_RUN` · `REPORT_OUT`(`/` 경로) · `REPORT_SLOT` · `REPORT_TYPE` + `--date <예정일>` · 세션 환경에도 같은 넷
-    - 월요일 브리핑: `monday-briefing-extra.md` 의 `{{WEEK_INPUT}}` 을 `week-input --since <오늘-7일>` 로 채움 · 못 채우면 덧붙임 없이 브리핑 본문만 보내고 「시스템 이슈」 로 남김
+    - 주간 요약 브리핑(그 주 첫 업무일): `monday-briefing-extra.md` 의 `{{WEEK_INPUT}}` 을 `week-input --since <그 주 월요일 7일 전>` 로 채움 · 못 채우면 덧붙임 없이 브리핑 본문만 보내고 「시스템 이슈」 로 남김
     - 처리 백엔드: `SessionResult.servedBy`(`spawnOrFallback` 이 붙임) · agy 위임 경로(`ANALYSIS_AGY_TYPES`)는 없앰 — agy 는 도구 없는 회차의 폴백 사다리에서만 씀

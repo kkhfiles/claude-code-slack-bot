@@ -2831,7 +2831,7 @@ export class AssistantScheduler {
       prompt = prompt.replace(/\{excludeCalendars\}/g, '(없음)');
     }
 
-    // Monday: inject weekly summary prompt
+    // 그 주 첫 업무일(보통 월요일): 주간 보고를 덧붙인다
     const mondayExtra = await this.mondayBriefingExtra();
     if (mondayExtra) prompt += '\n\n' + mondayExtra;
 
@@ -2887,26 +2887,47 @@ export class AssistantScheduler {
   }
 
   /**
-   * 월요일 브리핑에 덧붙이는 글(`monday-briefing-extra.md`). 월요일이 아니면 빈 글자.
+   * 주간 보고를 붙이는 날이면 그 판 목록의 시작 날짜(그 주 월요일 7일 전), 아니면 null.
    *
-   * `{{WEEK_INPUT}}` 를 그 주 판 목록(`week-input --since <오늘-7일>`)으로 채운다 — 세션이 옛
+   * **월요일이 아니라 그 주 첫 업무일이다** — 브리핑은 휴일 · 휴가를 건너뛰므로, 월요일만 보면
+   * 월요일이 쉬는 주는 주간 보고가 아예 없었다(2026-10-05 대체공휴일). 월요일부터 어제까지가 모두
+   * 쉬는 날이면 오늘이 그 주 첫 업무일이다. 월요일은 늘 붙는다(쉬는 월요일에 손으로 부른 브리핑 포함).
+   * 기간은 월요일에 붙일 때와 같게 맞춘다.
+   */
+  private weekReportSince(now: Date): string | null {
+    const day = now.getDay();
+    if (day < 1 || day > 5) return null;
+    for (let back = 1; back < day; back++) {
+      const d = new Date(now);
+      d.setDate(now.getDate() - back);
+      if (!this.isNonWorkingDay(d).skip) return null;
+    }
+    return shiftDate(kstDate(now), -(7 + day - 1));
+  }
+
+  /**
+   * 주간 보고 — 그 주 첫 업무일 브리핑에 덧붙이는 글(`monday-briefing-extra.md` · `weekReportSince`).
+   * 붙이는 날이 아니면 빈 글자.
+   *
+   * `{{WEEK_INPUT}}` 를 그 주 판 목록(`week-input --since <그 주 월요일 7일 전>`)으로 채운다 — 세션이 옛
    * 보고서 폴더를 훑지 않게. **못 채우면(목록을 못 읽음 · 다른 자리가 남음) 덧붙임 없이** 빈
    * 글자를 돌려주고 오류를 남긴다 — 브리핑 본문은 그대로 나가고, 빈 자리를 받은 세션이 옛
    * 폴더를 훑거나 지어내지 않게 한다(브리핑 「시스템 이슈」로 보인다).
    */
   private async mondayBriefingExtra(now: Date = new Date()): Promise<string> {
-    if (now.getDay() !== 1) return '';
+    const since = this.weekReportSince(now);
+    if (!since) return '';
     const file = path.join(this.promptsDir, 'monday-briefing-extra.md');
     if (!fs.existsSync(file)) return '';
     const text = fs.readFileSync(file, 'utf-8');
     const values: Record<string, string> = {};
     if (text.includes('{{WEEK_INPUT}}')) {
-      const w = await this.reportLog('report_log', ['week-input', '--since', shiftDate(kstDate(now), -7)]);
+      const w = await this.reportLog('report_log', ['week-input', '--since', since]);
       if (w && !w.error) values.WEEK_INPUT = renderWeekInput(w);
     }
     const filled = fillPrompt(text, values);
     if (filled.left.length > 0) {
-      const why = `월요일 보고를 못 채워 덧붙임 없이 보냄: ${filled.left.join(', ')}`;
+      const why = `주간 보고를 못 채워 덧붙임 없이 보냄: ${filled.left.join(', ')}`;
       this.logger.error(why);
       errorCollector.add('AssistantScheduler', why);
       return '';
