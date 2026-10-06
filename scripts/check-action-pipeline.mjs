@@ -12,7 +12,7 @@
  *   ② 폴백도 `next` 가 준 범위만 — 기본 폴더 목록으로 새지 않는다
  *   ③ 사용량 한도가 나오면 그 차례를 멈춘다(다음 제안으로 안 넘어간다)
  *   ④ 도는 고리가 영영 안 끝나지 않는다
- *   ⑤ 버튼 값은 믿지 않는다 — 형식이 틀리면 report-log 를 부르지도 않는다
+ *   ⑤ 버튼 값은 믿지 않는다 — 형식이 틀리면 report-log 를 부르지도 않는다 · 거절 답은 원래 메시지를 덮지 않는다
  *   ⑥ 아침 요약이 슬랙 한 메시지 한도 안에 든다 · 세 브리핑 모두에 붙는다
  *   ⑦ 밤 검토는 업무일 시간대 안에서만 · 이어 가기는 늘
  *   ⑧ 사람이 시킨 검토가 한도에 끊기면 회복 뒤 이어 간다 · 재시작에도 남는다 · 밤 검토는 안 남긴다
@@ -35,7 +35,7 @@ const RESUME_FILE = path.join(os.tmpdir(), `actions-check-resume-${Date.now()}.j
 process.env.ACTIONS_RESUME_FILE = RESUME_FILE;
 process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
 const {
-  ActionPipeline, buildDigestBlocks, buildReportReplyBlocks, markDecided, parseWindow,
+  ActionPipeline, buildDigestBlocks, buildReportReplyBlocks, decisionReply, markDecided, noticeReply, parseWindow,
 } = require(path.join(ROOT, 'dist', 'action-pipeline.js'));
 const { codexSessionArgs } = require(path.join(ROOT, 'dist', 'work-assistant.js'));
 const { SdkHandler } = require(path.join(ROOT, 'dist', 'sdk-handler.js'));
@@ -229,6 +229,33 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   await w.pipe.request('run');
   ok('그 한 건을 지금 검토한다', w.sessions.length === 1);
   ok('검토가 끝나 사람 차례가 되면 바로 알린다', w.posts.some((p) => /다시 검토 끝/.test(p.text)));
+}
+// ── ⑤b 버튼 답 — 거절은 누른 사람에게만 · 원래 메시지는 그대로(🗂 요약이 거절 답에 덮인 2026-10-06) ──
+{
+  const msg = {
+    text: '🗂 처리 제안',
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '요약' } },
+      { type: 'actions', block_id: 'actb_a-20260929-01', elements: [] }],
+  };
+  const refused = decisionReply({ ok: false, note: '⚠️ 보류 상태에서는 「보류」을 할 수 없음' }, msg, 'a-20260929-01', '🗂 처리 제안');
+  eq('거절 답은 원래 메시지를 바꿔 쓰지 않는다', refused.replace_original, false);
+  eq('거절 답은 누른 사람에게만', refused.response_type, 'ephemeral');
+  ok('거절 답은 원래 메시지의 블록을 싣지 않는다', !('blocks' in refused));
+  eq('실패 알림도 원래 메시지를 그대로 둔다', noticeReply('❌ 처리 실패').replace_original, false);
+  const accepted = decisionReply({ ok: true, note: '*보류* · 08:00' }, msg, 'a-20260929-01', '🗂 처리 제안');
+  eq('받아들이면 원래 메시지를 바꿔 쓴다', accepted.replace_original, true);
+  eq('누른 제안의 줄만 결과로', accepted.blocks.map((x) => x.block_id ?? x.type), ['section', 'actd_a-20260929-01']);
+  // 두 버튼 처리기가 이 둘로만 답하는가 — 옛 모양(`respond({ response_type: 'ephemeral', … })`)이 다시 들어오면 실패
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
+  for (const [name, re] of [
+    ['처리 제안', /actions_\(approve\|hold\|reject\|reopen\)/],
+    ['개선 제안', /improve_\(register\|hold\|drop\)/],
+  ]) {
+    const at = src.search(re);
+    const handler = at < 0 ? '' : src.slice(at, src.indexOf('\n    });', at));
+    ok(`${name} 버튼 처리기는 decisionReply · noticeReply 로만 답한다`,
+       handler.includes('decisionReply(') && handler.includes('noticeReply(') && !/respond\(\{/.test(handler));
+  }
 }
 
 // ── ⑥ 아침 요약 ────────────────────────────────────────────────────────

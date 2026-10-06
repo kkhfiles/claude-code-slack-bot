@@ -36,7 +36,7 @@ import { PremiumSeatSlack } from './premium-seat';
 import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
-import { markDecided, reportLogAvailable } from './action-pipeline';
+import { decisionReply, noticeReply, reportLogAvailable } from './action-pipeline';
 import { captureToInbox, checkinMap, checkinNow, dropCapture, isWorkAssistantEnabled,
   markCaptureFailed, markCaptureTried, pendingCaptures, quickUpdate } from './work-assistant';
 import { boardLabel } from './board-queue';
@@ -3804,19 +3804,10 @@ export class SlackHandler {
         const decision = String(act.action_id || '').replace(/^actions_/, '');
         const id = String(act.value || '');
         const r = await this.assistantScheduler.decideAction(id, decision);
-        if (!r.ok) {
-          await respond({ response_type: 'ephemeral', text: r.note });
-          return;
-        }
-        const msg = (body as any).message;
-        await respond({
-          replace_original: true,
-          text: msg?.text || '🗂 처리 제안',
-          blocks: markDecided(msg?.blocks || [], id, r.note),
-        });
+        await respond(decisionReply(r, (body as any).message, id, '🗂 처리 제안'));
       } catch (error) {
         this.logger.error('Action proposal decision failed', error);
-        await respond({ response_type: 'ephemeral', text: '❌ 처리 실패' }).catch(() => {});
+        await respond(noticeReply('❌ 처리 실패')).catch(() => {});
       }
     });
 
@@ -3831,19 +3822,10 @@ export class SlackHandler {
         const decision = String(act.action_id || '').replace(/^improve_/, '');
         const id = String(act.value || '');
         const r = await this.assistantScheduler.decideImprove(id, decision);
-        if (!r.ok) {
-          await respond({ response_type: 'ephemeral', text: r.note });
-          return;
-        }
-        const msg = (body as any).message;
-        await respond({
-          replace_original: true,
-          text: msg?.text || '💡 개선 제안',
-          blocks: markDecided(msg?.blocks || [], id, r.note),
-        });
+        await respond(decisionReply(r, (body as any).message, id, '💡 개선 제안'));
       } catch (error) {
         this.logger.error('Improvement proposal decision failed', error);
-        await respond({ response_type: 'ephemeral', text: '❌ 처리 실패' }).catch(() => {});
+        await respond(noticeReply('❌ 처리 실패')).catch(() => {});
       }
     });
 

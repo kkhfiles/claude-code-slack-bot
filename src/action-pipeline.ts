@@ -403,6 +403,28 @@ export function markDecided(blocks: any[], id: string, note: string): any[] {
     : b));
 }
 
+/**
+ * 결정 버튼의 답 — 받아들였으면 누른 제안의 줄만 결과로 바꾼 원래 메시지, 거절이면 누른 사람에게만
+ * 보이는 알림(`noticeReply`). 처리 제안 🗂 과 개선 제안 💡 버튼이 같이 쓴다.
+ */
+export function decisionReply(
+  r: { ok: boolean; note: string }, message: any, id: string, fallbackText: string,
+): Record<string, any> {
+  if (!r.ok) return noticeReply(r.note);
+  return { replace_original: true, text: message?.text || fallbackText, blocks: markDecided(message?.blocks || [], id, r.note) };
+}
+
+/**
+ * 버튼을 누른 사람에게만 보이는 알림 — **원래 메시지는 그대로 둔다.**
+ *
+ * `replace_original: false` 를 빼면 버튼 메시지의 `response_url` 로 보낸 답이 원래 메시지를 바꿔 쓴다
+ * (`response_type: 'ephemeral'` 이어도). 이미 보류된 제안을 한 번 더 누른 거절 답이 🗂 요약 전체를
+ * 한 줄 경고로 덮었다(2026-10-06 · 슬랙 기록 `edited`).
+ */
+export function noticeReply(text: string): Record<string, any> {
+  return { response_type: 'ephemeral', replace_original: false, text };
+}
+
 // ── 실행기 ─────────────────────────────────────────────────────────
 
 export class ActionPipeline {
