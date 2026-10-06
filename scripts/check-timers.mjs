@@ -1,6 +1,8 @@
 /**
- * 타이머 짝 검사 — 지우기만 하고 다시 안 거는 것을 찾는다. **소스만 읽는다.**
+ * 타이머 짝 검사 — 지우기만 하고 다시 안 거는 것을 찾는다. ①~⑤ 는 **소스만 읽는다.**
+ * ⑥ 은 분석 그룹 타이머를 실제로 돌려 센다(세션 · report-log 는 안 부른다).
  *
+ *   npm run build
  *   npm run check:timers
  *
  * `clearAllTimers()` 는 설정을 저장할 때마다 돈다. 거기서 지운 타이머를
@@ -10,8 +12,11 @@
  *
  * 주석은 다음 사람이 안 읽는다. 그래서 여기서 센다.
  */
+import './lib/fresh-dist.mjs';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -128,11 +133,122 @@ for (const [conn, fn] of Object.entries(CONNECTIONS)) {
   }
 }
 
+// ⑥ 분석 그룹 타이머 — **돌려서 센다.** 위 넷은 이름이 `…Timer` 인 칸만 보는데 분석 타이머는
+//    맵(`analysisTimers`)이라 안 걸렸다. 그래서 「그룹이 도는 사이 설정을 다시 읽으면 다음 회차
+//    타이머가 둘이 되어 같은 그룹이 두 번 돈다」(2026-10-07 검토 K1)를 못 잡았다. 짝이 깨지는 곳이
+//    타이머 콜백 안이라 소스 글자로는 못 가른다.
+//    상태 경로는 모듈을 읽기 전에 임시 폴더로 돌린다 · 업무 비서 타이머는 안 건다(없는 폴더).
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'timers-check-'));
+process.env.REPORT_LOG_STATE = path.join(TMP, 'report-log-state');
+process.env.REPORT_LOG_REPO = path.join(TMP, 'report-log-없는-클론');
+process.env.WORK_EVENTS_FILE = path.join(TMP, 'events.jsonl');
+process.env.WORK_ASSISTANT_STATE = path.join(TMP, 'wa-state');
+process.env.WORK_ASSISTANT_ROOT = path.join(TMP, 'wa-없는-폴더');
+process.env.ASSISTANT_COSTS_FILE = path.join(TMP, 'costs.json');
+process.env.ACTIONS_RESUME_FILE = path.join(TMP, 'actions-resume.json');
+const CFG = path.join(TMP, 'repo', 'assistant');
+fs.mkdirSync(path.join(CFG, 'prompts'), { recursive: true });
+const writeConfig = (enabled) => fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({
+  briefing: { time: '08:00', enabled: false, excludeCalendars: [] },
+  reminders: { enabled: false, beforeMinutes: 15, pollingIntervalMinutes: 5,
+    workingHoursStart: '08:00', workingHoursEnd: '20:00' },
+  analysis: {
+    schedule: 'saturday-00:00',
+    defaults: { allowedTools: ['Read'], writablePaths: ['reports/'], maxRetries: 1 },
+    types: { probe: { enabled, model: 'sonnet', effort: 'low' } },
+  },
+}), 'utf-8');
+writeConfig(true);
+
+// 걸린 타이머 장부 — 맵에서 빠졌어도 살아 있는 타이머를 센다(그것이 곧 두 번째 실행이다).
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
+const live = new Set();
+globalThis.setTimeout = (fn, ms, ...args) => {
+  const h = realSetTimeout(() => { live.delete(h); fn(...args); }, ms);
+  live.add(h);
+  return h;
+};
+globalThis.clearTimeout = (h) => { live.delete(h); realClearTimeout(h); };
+const wait = (ms) => new Promise((r) => realSetTimeout(r, ms));
+const waitFor = async (cond) => { for (let i = 0; i < 200 && !cond(); i++) await wait(10); };
+
+const require = createRequire(import.meta.url);
+const { AssistantScheduler } = require('../dist/assistant-scheduler.js');
+const DAY = 86_400_000;
+const GROUP = 'saturday-00:00';
+let nextIn = 20;
+const runs = [];
+let release = () => {};
+const sched = new AssistantScheduler(
+  async () => {},
+  async () => { throw new Error('시험이 세션을 불렀다'); },
+  CFG, undefined,
+  { reportLog: async () => ({ error: '시험 — report-log 를 안 부른다' }) },
+);
+sched.getNextAnalysisTime = () => new Date(Date.now() + nextIn);
+// 첫 실행은 문이 열릴 때까지 붙든다 — 「그룹이 도는 사이」를 만든다.
+sched.runAnalysisGroup = async (schedule) => {
+  runs.push(schedule);
+  if (runs.length === 1) await new Promise((r) => { release = r; });
+};
+/** 설정 파일 감시가 하는 그대로 — 지우고 · 다시 읽고 · 다시 건다. */
+const reload = () => { sched.clearAllTimers(); sched.loadConfig(); sched.scheduleAll(); };
+/** 다우 keep-alive 를 뺀 살아 있는 타이머 — 이 설정에서는 분석 타이머만 남는다. */
+const analysisLive = () => [...live].filter((h) => h !== sched.daouKeepAliveTimer);
+/** 한 판 — 그룹이 도는 사이에 `during()` 을 하고 그룹을 끝낸다. */
+const round = async (during) => {
+  runs.length = 0;
+  nextIn = 20;
+  writeConfig(true);
+  sched.loadConfig();
+  sched.scheduleAll();
+  await waitFor(() => runs.length === 1);
+  nextIn = DAY;
+  during();
+  release();
+  await wait(30);
+};
+try {
+  // 대조 — 아무 일 없으면 끝난 그룹이 다음 회차를 스스로 건다(지나치게 막아 그룹이 끊기면 안 된다).
+  await round(() => {});
+  const own = analysisLive();
+  if (own.length !== 1 || own[0] !== sched.analysisTimers.get(GROUP)) {
+    fails.push(`⑥ 끝난 그룹이 다음 회차를 안 건다 (타이머 ${own.length}개) — 그룹이 한 번 돌고 끊긴다`);
+  }
+  sched.stop();
+
+  await round(reload);
+  const left = analysisLive();
+  if (runs.length !== 1) fails.push(`⑥ 그룹이 한 번 돌아야 하는데 ${runs.length}번`);
+  if (left.length !== 1 || left[0] !== sched.analysisTimers.get(GROUP)) {
+    fails.push(`⑥ 그룹이 도는 사이 설정을 다시 읽으면 다음 회차 타이머가 ${left.length}개 — 하나(맵에 있는 것)여야 한다`
+      + ' (맵에서 빠진 타이머가 다음 예정 시각에 같은 그룹을 한 번 더 돌린다)');
+  }
+  sched.stop();
+
+  await round(() => { writeConfig(false); reload(); });
+  if (analysisLive().length !== 0) {
+    fails.push(`⑥ 도는 사이 그 그룹을 끈 설정을 읽었는데 끝난 그룹이 자기를 다시 건다 (타이머 ${analysisLive().length}개)`);
+  }
+  sched.stop();
+
+  await round(() => sched.stop());
+  if (live.size !== 0) fails.push(`⑥ 봇을 끄는 사이 끝난 그룹이 타이머를 다시 건다 (남은 타이머 ${live.size}개)`);
+} finally {
+  sched.stop();
+  for (const h of live) realClearTimeout(h);
+  globalThis.setTimeout = realSetTimeout;
+  globalThis.clearTimeout = realClearTimeout;
+  fs.rmSync(TMP, { recursive: true, force: true });
+}
+
 if (fails.length) {
   console.error('타이머 짝이 안 맞는다\n' + fails.map((f) => `  ✗ ${f}`).join('\n'));
   process.exitCode = 1;
 } else {
   const jobs = Object.values(ALSO_DOES).flat().length;
   console.log(`통과 — 타이머 ${cleared.size}개: 지움·다시 걺·자기 재예약 셋 다`
-    + ` · 한자리에서 같이 하는 일 ${jobs}개 · 상시 연결 ${Object.keys(CONNECTIONS).length}개`);
+    + ` · 한자리에서 같이 하는 일 ${jobs}개 · 상시 연결 ${Object.keys(CONNECTIONS).length}개`
+    + ' · 분석 그룹 타이머(도는 사이 설정 다시 읽기 · 그룹 끔 · 봇 끔)');
 }

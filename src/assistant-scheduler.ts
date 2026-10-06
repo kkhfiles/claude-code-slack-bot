@@ -3036,7 +3036,11 @@ export class AssistantScheduler {
       } catch (error) {
         this.logger.error('Analysis run failed', { schedule, error });
       }
-      // Reschedule for next regular occurrence
+      // **아직 이 타이머가 맵의 주인일 때만 다시 건다.** 그룹이 도는 사이 설정을 다시 읽으면
+      // (`clearAllTimers` → `scheduleAll`) 다음 회차는 이미 새 타이머가 쥐고 있다 — 여기서 또 걸면
+      // 맵에서 빠진 타이머가 살아 남아 다음 예정 시각에 같은 그룹이 두 번 돈다. 그 그룹을 껐거나
+      // 봇을 끄는 중(`stop`)이면 맵에 없으니 걸지 않는다(2026-10-07 검토 K1 · `check:timers` ⑥).
+      if (this.analysisTimers.get(schedule) !== timer) return;
       this.analysisTimers.delete(schedule);
       this.scheduleAnalysisGroup(schedule, types);
     }, msUntil);
