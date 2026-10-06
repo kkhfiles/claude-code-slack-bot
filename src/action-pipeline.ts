@@ -127,6 +127,20 @@ function readParked(): Parked {
   }
 }
 
+/** 미룬 몫 파일의 원문 — 이어 가는 동안 다른 쪽(다시 미룸 · 사람이 다시 시킴)이 손댔는지 가리는 도장. */
+function parkedStamp(): string {
+  try {
+    return fs.readFileSync(resumeFile(), 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
+/** 사람이 시킨 검토인가 — 시간대(`until`)가 없는 검토. 밤 검토는 늘 시간대를 붙인다. */
+function isManual(r: { until?: number } | null): boolean {
+  return r !== null && r.until === undefined;
+}
+
 function writeParked(p: Parked | null): void {
   try {
     if (p && (p.review || p.ids.length)) {
@@ -412,11 +426,20 @@ export class ActionPipeline {
    * [진행]). 밤 검토는 늘 시간대를 붙여 부른다.
    */
   request(kind: 'run' | 'review' | 'one', arg?: number | string): Promise<void> {
-    if (kind === 'run') this.wantRun = true;
-    else if (kind === 'review') this.wantReview = { until: arg as number | undefined };
-    else this.wantIds.add(arg as string);
     // 사람이 다시 시켰으면 미뤄 둔 같은 몫은 지금 돈다 — 남겨 두면 회복 때 한 번 더 돌고 요약도 두 번 온다.
     if ((kind === 'review' && arg === undefined) || kind === 'one') this.unpark(kind === 'one' ? arg as string : null);
+    return this.enqueue(kind, arg);
+  }
+
+  /** 차례에 얹기만 한다 — 미룬 몫을 건드리지 않는다(`resume` 이 자기 몫을 지우지 않게). */
+  private enqueue(kind: 'run' | 'review' | 'one', arg?: number | string): Promise<void> {
+    if (kind === 'run') this.wantRun = true;
+    else if (kind === 'review') {
+      // **사람이 시킨 검토는 뒤에 온 밤 검토에 덮이지 않는다** — 덮이면 시간대가 붙어 한도에 끊길 때
+      // 사람 몫으로 남지 않는다. 사람이 시킨 검토는 시간대 없이 끝까지 돈다.
+      const manual = arg === undefined || isManual(this.wantReview);
+      this.wantReview = { until: manual ? undefined : arg as number };
+    } else this.wantIds.add(arg as string);
     if (!this.pumping) {
       this.pumping = this.pump().finally(() => { this.pumping = null; });
     }
@@ -449,17 +472,22 @@ export class ActionPipeline {
         await this.sync();
         if (this.wantRun) {
           this.wantRun = false;
-          if (await this.pass('run') === 'rate-limited') { this.park(this.wantReview, [...this.wantIds]); clear(); break; }
+          if (await this.pass('run') === 'rate-limited') { this.park(isManual(this.wantReview), [...this.wantIds]); clear(); break; }
         }
         for (const id of [...this.wantIds]) {
           this.wantIds.delete(id);
-          if (await this.drain(id) === 'rate-limited') { this.park(this.wantReview, [id, ...this.wantIds]); clear(); break; }
+          if (await this.drain(id) === 'rate-limited') { this.park(isManual(this.wantReview), [id, ...this.wantIds]); clear(); break; }
           await this.announce(id);
         }
         if (this.wantReview) {
           const r = this.wantReview;
           this.wantReview = null;
-          if (await this.pass('review', r.until) === 'rate-limited') { this.park(r, [...this.wantIds]); clear(); break; }
+          // 도는 검토가 밤 검토여도 그사이 사람이 시킨 검토가 들어와 있으면 그 몫을 남긴다.
+          if (await this.pass('review', r.until) === 'rate-limited') {
+            this.park(isManual(r) || isManual(this.wantReview), [...this.wantIds]);
+            clear();
+            break;
+          }
         }
       }
     } catch (err) {
@@ -476,10 +504,10 @@ export class ActionPipeline {
    * 끌고 오면 사람 작업과 한도를 다툰다. 남기지 않던 동안 `-actions review` 는 한도에 걸리는 순간
    * 사라졌고, 검토 대기는 다음 업무일 새벽까지 그대로 있었다(10/2 17:13 · 7건 · 주말을 넘김).
    */
-  private park(review: { until?: number } | null, ids: string[]): void {
+  private park(manualReview: boolean, ids: string[]): void {
     const was = readParked();
     const next: Parked = {
-      review: was.review || (review !== null && review.until === undefined),
+      review: was.review || manualReview,
       ids: [...new Set([...was.ids, ...ids])],
       resetsAt: this.limitResetsAt ?? was.resetsAt,
     };
@@ -524,18 +552,26 @@ export class ActionPipeline {
     }
   }
 
-  /** 회복 시각 — 미뤄 둔 몫을 다시 청한다. 또 한도에 걸리면 다시 미루고 요약은 다 끝난 뒤에 한 번. */
+  /**
+   * 회복 시각 — 미뤄 둔 몫을 다시 청하고, 끝나면 요약을 한 번 보낸다.
+   *
+   * **파일은 일이 끝날 때까지 둔다** — 이어 가는 도중 재시작 · 오류가 나도 기동(`restoreResume`)이
+   * 다시 건다. 끝났을 때 파일이 시작 때와 같을 때만 지우고 요약한다. 그사이 또 한도에 걸려 다시
+   * 미뤘으면(`park`) 다음 회복이, 사람이 다시 시켰으면(`unpark`) 그 요청이 요약을 맡는다 — 둘이
+   * 같은 차례를 기다렸다 요약을 두 번 보내지 않게.
+   */
   async resume(): Promise<void> {
     const p = readParked();
-    writeParked(null);
     if (!p.review && !p.ids.length) return;
+    const stamp = parkedStamp();
     this.logger.info('한도가 풀려 사람이 시킨 처리 제안 검토를 이어 갑니다', p);
     let done: Promise<void> = Promise.resolve();
-    for (const id of p.ids) done = this.request('one', id);
-    if (p.review) done = this.request('review');
+    for (const id of p.ids) done = this.enqueue('one', id);
+    if (p.review) done = this.enqueue('review');
     await done;
-    const again = readParked();
-    if (!again.review && !again.ids.length) await this.deps.afterResume?.();
+    if (parkedStamp() !== stamp) return;
+    writeParked(null);
+    await this.deps.afterResume?.();
   }
 
   /** 원격에 맞춘다. 못 해도 멈추지 않는다 — 로컬에 있는 규칙으로 돈다. */

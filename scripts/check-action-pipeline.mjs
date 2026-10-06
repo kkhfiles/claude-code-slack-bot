@@ -458,6 +458,63 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
     ok('다 지우면 회복 타이머도 푼다', w.pipe.resumeTimer === null);
   }
   {
+    // 밤 검토가 도는 중에 사람이 -actions review 를 보냄 → 그 밤 검토가 한도에 끊김 → 사람 몫은 남는다
+    // (돌던 밤 검토 r 만 보고 남기던 동안 사람 요청이 clear() 로 사라졌다 · 10/6 검토)
+    let w;
+    w = world({ ...cut('a-20261002-30'), session: () => { void w.pipe.request('review'); return limited(resetsAt)(); } });
+    await w.pipe.request('review', Date.now() + 3600_000);
+    eq('밤 검토 도중 들어온 사람 요청은 한도에 끊겨도 남긴다', parked() && parked().review, true);
+    w.pipe.stopResume();
+    fs.rmSync(RESUME_FILE, { force: true });
+  }
+  {
+    // 사람 요청이 이어 가기 뒤에 기다리는데 밤 타이머가 시간대를 붙여 덮어씀 → 사람 표시가 남아야 한다
+    const id = 'a-20261002-31';
+    const w = world({
+      pending: { review: [id], run: [] }, nexts: { [id]: [spec(id, 'review', 1)] },
+      completes: [{ result: 'rate-limited', state: 'queued' }], session: limited(resetsAt),
+    });
+    const p = w.pipe.request('run');
+    void w.pipe.request('review');
+    void w.pipe.request('review', Date.now() + 3600_000);
+    await p;
+    eq('뒤에 온 밤 검토가 기다리던 사람 요청을 덮지 않는다', parked() && parked().review, true);
+    w.pipe.stopResume();
+    fs.rmSync(RESUME_FILE, { force: true });
+  }
+  {
+    // 이어 가는 동안에는 미룬 몫 파일을 남겨 둔다 — 도중 재시작 · 오류가 나도 기동이 다시 건다
+    put({ review: true, ids: [], resetsAt });
+    let during = null;
+    let after = 0;
+    const id = 'a-20261002-32';
+    const s = spec(id, 'review', 2);
+    const w = world({
+      pending: { review: [id] }, nexts: { [id]: [s, { job: 'wait', who: 'human', state: 'proposed' }] },
+      session: () => { during = parked(); return writes(s.out)(); },
+      afterResume: async () => { after += 1; },
+    });
+    await w.pipe.resume();
+    ok('이어 가는 동안 미룬 몫 파일이 남아 있다', during !== null && during.review === true);
+    eq('다 끝나면 지우고 요약 한 번', [parked(), after], [null, 1]);
+  }
+  {
+    // 이어 가는 중에 사람이 다시 -actions review → 요약은 그 요청이 맡는다(두 번 안 보냄)
+    put({ review: true, ids: [], resetsAt });
+    let after = 0;
+    let w;
+    const id = 'a-20261002-33';
+    const s = spec(id, 'review', 2);
+    w = world({
+      pending: { review: [id] }, nexts: { [id]: [s, { job: 'wait', who: 'human', state: 'proposed' }] },
+      session: () => { void w.pipe.request('review'); return writes(s.out)(); },
+      afterResume: async () => { after += 1; },
+    });
+    await w.pipe.resume();
+    eq('이어 가는 중 사람이 다시 시키면 이어 가기는 요약을 안 보낸다', after, 0);
+    eq('그 요청이 미룬 몫을 지운다', parked(), null);
+  }
+  {
     // 짝 — 설정 저장마다 clearAllTimers 가 지우고 scheduleAll → startActionsTicker 가 다시 건다
     const sched = fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8');
     const from = (name) => sched.indexOf(`private ${name}(`);
