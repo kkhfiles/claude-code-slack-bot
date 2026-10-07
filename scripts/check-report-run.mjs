@@ -1050,6 +1050,68 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
     errorCollector.getAndClear().some((e) => e.message.includes('cli-usage/2026-10-03') && e.message.includes('정리 등록 실패 시험')));
 }
 
+// ── S18 실패로 끝났는데 빈 임시 파일이라 no-output 으로 저장된 회차 — 정상 「산출물 없음」과 갈라 보인다 ──
+// report-log 는 본문이 비면 --partial 이든 아니든 no-output 으로 닫는다. 그래서 한도(재시도 없음) · 던진 한도 ·
+// 세션 오류로 끝난 회차가, 특히 산출물 없음이 정상인 종류(noOutputOk)에서 그룹 완료 메시지 · 「시스템 이슈」 ·
+// 시도 기록 어디에도 실패로 안 보였다. 세션 오류는 「완료」로까지 적혔다(2026-10-07 검토 W4).
+{
+  const QUIET = { probe: { enabled: true, schedule: 'daily-00:00', model: 'sonnet', effort: 'low', noOutputOk: true } };
+  const slot = { slot: '2026-10-03', trigger: 'scheduled' };
+  const NOOUT = () => fakeReportLog({ commits: [{ run_id: 'r', id: 'probe/2026-10-03', status: 'no-output' }] });
+  const SESSION_ERR = { ...WORKED, text: '', isError: true, subtype: 'error_during_execution', toolCalls: 5 };
+  /** 데일리 그룹 한 번 — 완료 메시지 · 시스템 이슈 · 결과 줄을 돌려준다. */
+  const once = async (results, tweak) => {
+    writeConfig(QUIET);
+    resetJournal();
+    errorCollector.getAndClear();
+    const h = harness({ rl: NOOUT(), results });
+    if (tweak) tweak(h.sched);
+    await h.sched.runAnalysisGroup('daily-00:00', ['probe'], slot);
+    writeConfig();
+    return {
+      msg: h.sent.find((t) => t.startsWith('📊')) ?? '',
+      issues: errorCollector.getAndClear().map((e) => e.message),
+      outcomes: journal('daily-00:00').filter((r) => r.kind === 'outcome').map((r) => r.outcome),
+    };
+  };
+  // 대조 — 조용한 날(도구를 돌리고 쓸 것이 없음)은 완료 · no-output · 시스템 이슈 없음
+  const calm = await once([WORKED]);
+  ok(`대조: 조용한 날은 완료 줄에 — 받음 ${calm.msg}`, calm.msg.includes('완료: probe(저장 no-output)') && !calm.msg.includes('❌'));
+  ok('대조: 조용한 날은 시스템 이슈 없음', !calm.issues.some((m) => m.includes('분석 실패')));
+  eq('대조: 조용한 날 결과 줄은 completed', calm.outcomes, ['completed']);
+
+  for (const [label, results, tweak, why, outcome] of [
+    ['한도(재시도 없음)', [LIMIT()], null, '한도 · 재시도 없음', 'rate_limited'],
+    ['한도(던짐)', [], (s) => { s.runSingleAnalysis = async () => { throw new Error('Claude usage limit reached'); }; }, '한도(던짐)', 'rate_limited'],
+    ['세션 오류(도구를 돌린 뒤)', [SESSION_ERR], null, '세션 오류 error_during_execution', 'error'],
+    ['오류(던짐)', [], (s) => { s.runSingleAnalysis = async () => { throw new Error('터짐 시험'); }; }, '오류 — 터짐 시험', 'error'],
+  ]) {
+    const r = await once(results, tweak);
+    ok(`${label} — 완료 줄에 안 들어간다 · 받음 ${r.msg}`, r.msg.includes('완료: (없음)'));
+    ok(`${label} — ❌ 실패 줄에 까닭 · 저장 상태`, r.msg.includes(`❌ 실패: probe(${why} · 저장 no-output)`));
+    ok(`${label} — 시스템 이슈에 종류 · 예정일 · 까닭 · 저장 상태 · 받음 ${JSON.stringify(r.issues)}`,
+      r.issues.filter((m) => m.includes('분석 실패 (probe 2026-10-03)') && m.includes(why) && m.includes('저장 no-output')).length === 1);
+    eq(`${label} — 결과 줄은 실패 모양`, r.outcomes, [outcome]);
+  }
+
+  // 재시도에서 실패한 것도 시스템 이슈로(재시도 완료 메시지에만 있던 것)
+  writeConfig();
+  resetJournal();
+  errorCollector.getAndClear();
+  const rr = harness({ rl: NOOUT(), results: [SESSION_ERR] });
+  await rr.sched.runAnalysisRetry('saturday-00:00', slot, [{ type: 'probe', run: null }]);
+  ok('재시도 실패 줄', (rr.sent.find((t) => t.startsWith('📊 재시도')) ?? '').includes('⚠️ 재시도 실패: probe'));
+  const retryIssues = errorCollector.getAndClear().map((e) => e.message);
+  ok(`재시도 실패는 시스템 이슈에 종류 · 예정일 · 결과 · 저장 상태 · 받음 ${JSON.stringify(retryIssues)}`,
+    retryIssues.some((m) => m.includes('분석 재시도 실패 (probe 2026-10-03)') && m.includes('error') && m.includes('저장 no-output')));
+  eq('재시도 세션 오류 결과 줄은 error', journal().filter((r) => r.viaRetry).map((r) => r.outcome), ['error']);
+
+  // 수동 단일 — 세션 오류는 ✅ 가 아니다
+  const m = harness({ rl: NOOUT(), results: [SESSION_ERR] });
+  const said = await m.sched.runAnalysisManual('probe');
+  ok(`수동 단일 세션 오류는 ❌ — 받음 ${said}`, said.startsWith('❌') && said.includes('error_during_execution'));
+}
+
 // ── S9 agy 위임 경로 — 걷혔나 ─────────────────────────────────────
 {
   ok('src/agy-handler.ts 가 남아 있다 — 부르는 곳이 없는 폐기 모듈', !fs.existsSync(path.join(SRC, 'agy-handler.ts')));

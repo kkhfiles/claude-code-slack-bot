@@ -79,6 +79,7 @@
     - 「썼나」 판정(`reportProduced`): 임시 파일 수정 시각 ≥ 세션 시작 · 본문 있음 · 대기 표식(`<!-- judgment: pending -->`) · 자리표시자 없음 — 도구 0회 재시도(되물음)와 한도 백스톱이 씀 · 산출물 없음이 정상인 종류(설정 `noOutputOk: true` 또는 `mode: 'change-detection'`)는 폴백(codex)이 빈손으로 끝내도 되물음으로 안 침
     - 저장(`commitPlan`): 완료 → 저장 · 한도로 이어받을 예정 → 저장 안 함 · 마지막 시도까지 실패 → `--partial` · 임시 파일이 비었으면 `--partial` 없이 저장(report-log 가 `no-output` — 변경 없는 회차 · 되물음) · 러너 종류인데 임시 파일이 비었으면 저장 안 함(러너가 아직 씀) · `--backend` 에 처리 백엔드 · 잠금 실패는 한 번 더, 그래도 실패면 정리 작업(`sweep`) 몫
     - 결과 메시지: 그룹 · 재시도 완료 줄은 종류 옆에 저장 결과(`saveTag` — `저장 complete` · `저장 안 함 → sweep` · `저장 보류 → 재시도` · `저장 실패(<코드>)`)와 Claude 가 아닌 처리 백엔드 · 수동 단일은 저장까지 된 것만 ✅(저장 실패 ❗ · 정리 작업 몫 ⏳)
+    - 실패로 끝난 회차: 재시도 없는 한도 · 던진 한도 · 세션 오류(낸 것 없이 `is_error`) · 오류는 그룹 완료 메시지의 「❌ 실패」 줄과 「시스템 이슈」에 까닭 · 저장 상태 · 재시도 실패도 「시스템 이슈」 — 임시 파일이 비면 report-log 가 정상 회차와 같은 `no-output` 으로 닫으므로 실패는 스탠리 쪽에서만 보인다 · 시도 기록 결과 줄은 세션 오류도 `error`
     - 정리 작업: 한 시간마다 `report_log.py sweep --older-than 6`(`startRunSweeper` · 처리 제안 타이머와 별개 · report-log 클론이 있을 때만) — 6시간 동안 안 움직인 열린 회차를 report-log 가 `partial`·`machine` 으로 저장하거나 `abandoned` 로 닫음 · 실패는 「시스템 이슈」 · 안 던짐
     - 러너 미리 띄우기: 환경 변수 `REPORT_RUN` · `REPORT_OUT`(`/` 경로) · `REPORT_SLOT` · `REPORT_TYPE` + `--date <예정일>` · 세션 환경에도 같은 넷
     - 주간 요약 브리핑(그 주 첫 업무일): `monday-briefing-extra.md` 의 `{{WEEK_INPUT}}` 을 `week-input --since <그 주 월요일 7일 전>` 로 채움 · 못 채우면 덧붙임 없이 브리핑 본문만 보내고 「시스템 이슈」 로 남김
