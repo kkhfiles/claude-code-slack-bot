@@ -284,6 +284,20 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
        handler.includes('decisionReply(') && handler.includes('noticeReply(') && !/respond\(\{/.test(handler));
   }
 }
+// ── ⑤c 다른 버튼의 ephemeral 답 — 원래 메시지를 남겨야 하는 곳은 noticeReply 로(2026-10-07 검토 W5) ──
+// `replace_original: false` 없이 response_url 로 보낸 ephemeral 답은 원래 메시지를 바꿔 쓴다. NAS 컨펌 큐의
+// [보류] 한 번이 큐 전체를, 도구 하나 허용이 남은 허용 버튼을 지웠다. 바꿔 써도 되는 곳은 이름으로만 둔다 —
+// 버튼만 있던 메시지라 잃는 것이 없고 그 버튼은 이미 죽었다(계획 만료 · 계획 취소 · 계정 설정 만료).
+{
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
+  const REPLACE_OK = ["t('plan.expired'", "t('plan.cancelled'", "t('account.setup.expired'"];
+  const raw = [...src.matchAll(/respond\(\{[^}]*?response_type:\s*'ephemeral'/g)]
+    .map((m) => src.slice(m.index, src.indexOf(');', m.index) + 2))
+    .filter((call) => !/replace_original/.test(call));
+  eq('원래 메시지를 남겨야 하는 ephemeral 답은 noticeReply 로',
+     raw.filter((call) => !REPLACE_OK.some((k) => call.includes(k))).map((call) => call.replace(/\s+/g, ' ')), []);
+  eq('바꿔 써도 된다고 본 곳은 그대로(목록과 같은 수)', raw.length, REPLACE_OK.length);
+}
 
 // ── ⑥ 아침 요약 ────────────────────────────────────────────────────────
 {

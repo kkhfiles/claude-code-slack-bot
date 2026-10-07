@@ -2642,7 +2642,7 @@ export class SlackHandler {
       }
     } catch (error) {
       this.logger.error('NAS message rerender failed', error);
-      await respond({ response_type: 'ephemeral', text: `${note}\n⚠️ 목록 갱신 실패 — \`-nas\`로 재조회하세요.` });
+      await respond(noticeReply(`${note}\n⚠️ 목록 갱신 실패 — \`-nas\`로 재조회하세요.`));
     }
   }
 
@@ -3717,7 +3717,7 @@ export class SlackHandler {
     this.action(/^archive_(report|all_reports|clean_reports)$/, async ({ ack, body, respond }) => {
       await ack();
       const locale = await this.getUserLocale((body as any).user?.id).catch(() => 'ko' as Locale);
-      await respond({ response_type: 'ephemeral', text: t('report.archiveRetired', locale) }).catch(() => {});
+      await respond(noticeReply(t('report.archiveRetired', locale))).catch(() => {});
     });
 
     // --- NAS 이동 컨펌 버튼 (inbox auto-classify) ---
@@ -3731,7 +3731,7 @@ export class SlackHandler {
         await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `✅ NAS 이동 완료 (\`${id}\`)`));
       } catch (error) {
         this.logger.error('NAS confirm item failed', error);
-        await respond({ response_type: 'ephemeral', text: '❌ 처리 실패' }).catch(() => {});
+        await respond(noticeReply('❌ 처리 실패')).catch(() => {});
       }
     });
 
@@ -3743,14 +3743,14 @@ export class SlackHandler {
         await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `❌ 거부 처리 — 파일은 Z:\\ABYSS에 남습니다 (\`${id}\`)`));
       } catch (error) {
         this.logger.error('NAS reject item failed', error);
-        await respond({ response_type: 'ephemeral', text: '❌ 처리 실패' }).catch(() => {});
+        await respond(noticeReply('❌ 처리 실패')).catch(() => {});
       }
     });
 
     this.action('nas_hold_item', async ({ ack, respond }) => {
       await ack();
       // DB 무변경 — 큐에 남아 다음 브리핑에 다시 표시 (무기한 대기 + 7일 🔴 정책)
-      await respond({ response_type: 'ephemeral', text: '⏸️ 보류 — 다음 브리핑에 다시 표시됩니다.' });
+      await respond(noticeReply('⏸️ 보류 — 다음 브리핑에 다시 표시됩니다.'));
     });
 
     this.action('nas_confirm_all_safe', async ({ ack, body, respond }) => {
@@ -3761,7 +3761,7 @@ export class SlackHandler {
         await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `✅ ${ids.length}건 NAS 이동 완료 (⚠️ 항목은 개별 결정)`));
       } catch (error) {
         this.logger.error('NAS bulk confirm failed', error);
-        await respond({ response_type: 'ephemeral', text: '❌ 일괄 승인 실패' });
+        await respond(noticeReply('❌ 일괄 승인 실패'));
       }
     });
 
@@ -3773,7 +3773,7 @@ export class SlackHandler {
         await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `❌ ${ids.length}건 거부 — 파일은 Z:\\ABYSS에 남습니다`));
       } catch (error) {
         this.logger.error('NAS bulk reject failed', error);
-        await respond({ response_type: 'ephemeral', text: '❌ 일괄 거부 실패' });
+        await respond(noticeReply('❌ 일괄 거부 실패'));
       }
     });
 
@@ -3789,7 +3789,7 @@ export class SlackHandler {
         await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `📂 분류 변경 → \`${category}\` (target 재계산됨 — ✅로 확정)`));
       } catch (error) {
         this.logger.error('NAS retarget failed', error);
-        await respond({ response_type: 'ephemeral', text: '❌ 분류 변경 실패' });
+        await respond(noticeReply('❌ 분류 변경 실패'));
       }
     });
 
@@ -3837,7 +3837,7 @@ export class SlackHandler {
         const actionValue = JSON.parse((body as any).actions[0].value);
         const denial = this.pendingDenials.get(actionValue.denialId);
         if (!denial) {
-          await respond({ response_type: 'ephemeral', text: `⚠️ ${t('approval.expired', actionLocale)}` });
+          await respond(noticeReply(`⚠️ ${t('approval.expired', actionLocale)}`));
           return;
         }
 
@@ -3872,7 +3872,7 @@ export class SlackHandler {
         const actionValue = JSON.parse((body as any).actions[0].value);
         const denial = this.pendingDenials.get(actionValue.denialId);
         if (!denial) {
-          await respond({ response_type: 'ephemeral', text: `⚠️ ${t('approval.expired', actionLocale)}` });
+          await respond(noticeReply(`⚠️ ${t('approval.expired', actionLocale)}`));
           return;
         }
 
@@ -3880,7 +3880,7 @@ export class SlackHandler {
         if (!denial.approvedTools) denial.approvedTools = new Set();
         denial.approvedTools.add(actionValue.tool);
 
-        await respond({ response_type: 'ephemeral', text: `✅ ${t('permission.allowTool', actionLocale, { toolName: actionValue.tool })}` });
+        await respond(noticeReply(`✅ ${t('permission.allowTool', actionLocale, { toolName: actionValue.tool })}`));
 
         // Check if all denied tools are now approved (one-time or channel-wide)
         const channelSet = this.channelAlwaysApproveTools.get(denial.channel) || new Set();
@@ -3920,6 +3920,8 @@ export class SlackHandler {
       const planId = (body as any).actions[0].value;
       const planInfo = this.pendingPlans.get(planId);
       if (!planInfo) {
+        // 원래 메시지를 이 한 줄로 바꿔 쓴다(replace_original 없음) — 버튼만 있던 메시지라 잃는 것이 없고
+        // 그 버튼은 이미 죽었다. 남겨야 하는 답은 noticeReply(`check:actions` ⑤c).
         await respond({ response_type: 'ephemeral', text: `⚠️ ${t('plan.expired', actionLocale)}` });
         return;
       }
@@ -3945,6 +3947,7 @@ export class SlackHandler {
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const planId = (body as any).actions[0].value;
       this.pendingPlans.delete(planId);
+      // 버튼만 있던 메시지를 결과 한 줄로 바꿔 쓴다(위 계획 만료와 같은 까닭).
       await respond({ response_type: 'ephemeral', text: t('plan.cancelled', actionLocale) });
     });
 
@@ -4010,13 +4013,14 @@ export class SlackHandler {
         const setupId = (body as any).actions[0].value as string;
         const setup = this.pendingAccountSetups.get(setupId);
         if (!setup) {
+          // 만료된 설정 안내를 바꿔 쓴다 — 그 안내 · 버튼은 이미 쓸 데가 없다(`check:actions` ⑤c).
           await respond({ response_type: 'ephemeral', text: t('account.setup.expired', actionLocale) });
           return;
         }
 
         const currentToken = this.accountManager.readCurrentToken();
         if (currentToken === setup.originalToken) {
-          await respond({ response_type: 'ephemeral', text: t('account.setup.captureNew.notChanged', actionLocale) });
+          await respond(noticeReply(t('account.setup.captureNew.notChanged', actionLocale)));
           return;
         }
 
@@ -4026,7 +4030,7 @@ export class SlackHandler {
         await respond({ replace_original: true, ...doneBlocks });
       } catch (error) {
         this.logger.error('Error in account_setup_next', error);
-        await respond({ response_type: 'ephemeral', text: '❌ An error occurred. Please try again.' });
+        await respond(noticeReply('❌ An error occurred. Please try again.'));
       }
     });
 
@@ -4264,7 +4268,7 @@ export class SlackHandler {
         const { retryId, postAt, retryTimeStr } = actionValue;
         const retryInfo = this.pendingRetries.get(retryId);
         if (!retryInfo) {
-          await respond({ response_type: 'ephemeral', text: `⚠️ ${t('rateLimit.retryExpired', actionLocale)}` });
+          await respond(noticeReply(`⚠️ ${t('rateLimit.retryExpired', actionLocale)}`));
           return;
         }
 
@@ -4329,7 +4333,7 @@ export class SlackHandler {
       this.pendingRetries.delete(retryId);
       // **캡처도 버린다.** 안 버리면 취소해 놓고도 회복 시각에 드레인이 다시 돌린다.
       if (captureId) await dropCapture(captureId, '사람이 취소함');
-      await respond({ response_type: 'ephemeral', text: t('misc.cancelled', actionLocale) });
+      await respond(noticeReply(t('misc.cancelled', actionLocale)));
     });
 
     // Switch account on rate limit
@@ -4341,7 +4345,7 @@ export class SlackHandler {
         const { retryId, account } = JSON.parse((body as any).actions[0].value) as { retryId: string; account: AccountId };
         const retryInfo = this.pendingRetries.get(retryId);
         if (!retryInfo) {
-          await respond({ response_type: 'ephemeral', text: `⚠️ ${t('rateLimit.retryExpired', actionLocale)}` });
+          await respond(noticeReply(`⚠️ ${t('rateLimit.retryExpired', actionLocale)}`));
           return;
         }
 
@@ -4349,7 +4353,7 @@ export class SlackHandler {
 
         const ok = await this.accountManager.switchTo(account);
         if (!ok) {
-          await respond({ response_type: 'ephemeral', text: t('account.notFound', actionLocale, { account }) });
+          await respond(noticeReply(t('account.notFound', actionLocale, { account })));
           return;
         }
 
