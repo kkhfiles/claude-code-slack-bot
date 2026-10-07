@@ -39,6 +39,9 @@ const REPORT_LINKS_MAX = 8;
 const RESUME_SLACK_MS = 60_000;
 /** 세션이 회복 시각을 안 알려 줬을 때 다시 해 보는 간격 — 이어 가기 타이머와 같은 한 시간. */
 const RESUME_UNKNOWN_MS = 60 * 60_000;
+/** 같은 까닭으로 원격에 못 맞춘 것을 「시스템 이슈」에 다시 남기는 간격 — 하루 한 번 비우는 브리핑마다
+ *  한 줄은 보이고, 한 시간마다 같은 줄이 쌓여 수집기 한도(50)에서 다른 이슈를 밀어내지는 않게. */
+const SYNC_REPORT_EVERY_MS = 12 * 60 * 60_000;
 
 /** 사람이 없는 세션에 붙이는 한 줄 — 분석 세션의 같은 지시와 같은 까닭(`SCHEDULED_SESSION_DIRECTIVE`). */
 const DIRECTIVE = '이 세션은 사람이 없는 예약 실행이다. 프롬프트는 설명이 아니라 지금 수행할 절차다. '
@@ -437,6 +440,8 @@ export class ActionPipeline {
   /** 방금 한도에 걸린 세션이 알려 준 회복 시각(epoch 초) — `runJob` 이 적고 `park` 가 읽는다. */
   private limitResetsAt: number | null = null;
   private resumeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 원격에 못 맞춘 까닭을 마지막으로 「시스템 이슈」에 남긴 것 — 맞추면 비운다(`sync`). */
+  private syncReported: { why: string; at: number } | null = null;
 
   constructor(private deps: PipelineDeps) {}
 
@@ -596,10 +601,25 @@ export class ActionPipeline {
     await this.deps.afterResume?.();
   }
 
-  /** 원격에 맞춘다. 못 해도 멈추지 않는다 — 로컬에 있는 규칙으로 돈다. */
+  /**
+   * 원격에 맞춘다. 못 해도 멈추지 않는다 — 로컬에 있는 규칙으로 돈다.
+   *
+   * **못 맞춘 것은 「시스템 이슈」로 남긴다**(원인 코드가 오면 같이 · 예: `dirty`). 경고 로그뿐이던 동안
+   * 자동 기록 클론에 커밋 안 된 파일 하나로 받아 얹기가 계속 실패했고, desk 갱신 · 규칙 반영이 조용히
+   * 멈췄다(2026-10-07 검토 W1). 같은 까닭이 이어지면 `SYNC_REPORT_EVERY_MS` 마다 한 번만.
+   */
   private async sync(): Promise<void> {
     const r = await this.deps.run('flow', ['sync']);
-    if (r?.error) this.logger.warn(`report-log 당겨 오기 실패 — ${r.error}`);
+    if (!r?.error) {
+      this.syncReported = null;
+      return;
+    }
+    const why = `${r.code ? `(${r.code}) ` : ''}${String(r.error).slice(0, 200)}`;
+    this.logger.warn(`report-log 당겨 오기 실패 — ${why}`);
+    const last = this.syncReported;
+    if (last && last.why === why && Date.now() - last.at < SYNC_REPORT_EVERY_MS) return;
+    this.syncReported = { why, at: Date.now() };
+    errorCollector.add('처리 제안', `자동 기록 클론을 원격에 못 맞춤 ${why} — desk 갱신 · 규칙 반영이 멈춤`);
   }
 
   private async pass(kind: 'run' | 'review', until?: number): Promise<DrainEnd | 'done'> {

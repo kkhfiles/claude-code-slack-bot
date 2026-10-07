@@ -76,7 +76,7 @@ const NOTICE = (id, kind, state, buttons = []) => ({
  * 부른 명령은 `calls` 에 남는다.
  */
 function world({ nexts = {}, completes = [], pending = {}, digest = null, decide = null,
-                 session = null, afterResume = undefined } = {}) {
+                 session = null, afterResume = undefined, sync = null } = {}) {
   const calls = [];
   const posts = [];
   const sessions = [];
@@ -84,7 +84,7 @@ function world({ nexts = {}, completes = [], pending = {}, digest = null, decide
     run: async (script, args) => {
       calls.push([script, ...args]);
       const cmd = args[0];
-      if (cmd === 'sync') return { pulled: false };
+      if (cmd === 'sync') return (Array.isArray(sync) ? sync.shift() : sync) || { pulled: false };
       if (cmd === 'pending') return { ids: pending[args[2]] || [] };
       if (cmd === 'next') return (nexts[args[1]] || []).shift() || { job: 'done' };
       if (cmd === 'complete') return completes.shift() || { result: 'ok', state: 'x', notify: [] };
@@ -174,6 +174,27 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   eq('한도 → --rate-limited', completes(w.calls)[0], ['a-20260929-04', '--seq', '1', '--rate-limited']);
   ok('한도 뒤에는 다음 제안을 안 건드린다', !w.calls.some((c) => c[2] === 'a-20260929-05'));
   ok('차례를 시작할 때 원격에 맞춘다', w.calls[0][1] === 'sync');
+}
+// ── ③b 원격에 못 맞추면 「시스템 이슈」로 — 경고 로그뿐이던 동안 자동 기록 클론에 커밋 안 된 파일
+//       하나로 받아 얹기가 계속 실패해 desk 갱신 · 규칙 반영이 조용히 멈췄다(2026-10-07 검토 W1) ──
+{
+  errorCollector.getAndClear();
+  const DIRTY = { error: '당겨 오기 실패: 커밋 안 된 변경 시험', code: 'dirty' };
+  const w = world({ sync: [DIRTY, DIRTY] });
+  await w.pipe.request('run');
+  ok('못 맞춰도 차례는 그대로 돈다(로컬 규칙으로)', w.calls.some((c) => c[1] === 'pending'));
+  await w.pipe.request('run');
+  const got = errorCollector.getAndClear();
+  ok(`못 맞춘 까닭과 원인 코드가 시스템 이슈에 — 받음 ${JSON.stringify(got.map((e) => e.message))}`,
+     got.some((e) => e.message.includes('dirty') && e.message.includes('커밋 안 된 변경 시험')));
+  eq('같은 까닭이 이어지면 한 번만(한 시간마다 같은 줄이 쌓여 다른 이슈를 밀어내지 않게)', got.length, 1);
+  const w2 = world({ sync: [{ error: 'rc 1 · 코드 없음 시험' }, { pulled: true }, { error: 'rc 1 · 코드 없음 시험' }] });
+  await w2.pipe.request('run');
+  ok('원인 코드가 없어도 남긴다', errorCollector.getAndClear().some((e) => e.message.includes('코드 없음 시험')));
+  await w2.pipe.request('run');
+  eq('맞추면 아무것도 안 남긴다', errorCollector.getAndClear().length, 0);
+  await w2.pipe.request('run');
+  eq('한 번 맞춘 뒤 다시 못 맞추면 다시 남긴다', errorCollector.getAndClear().length, 1);
 }
 
 // ── ② 폴백 허용이 아니면 폴백 없음(null) ─────────────────────────────────
