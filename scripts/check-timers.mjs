@@ -196,7 +196,7 @@ sched.runAnalysisGroup = async (schedule) => {
 const reload = () => { sched.clearAllTimers(); sched.loadConfig(); sched.scheduleAll(); };
 /** 다우 keep-alive 를 뺀 살아 있는 타이머 — 이 설정에서는 분석 타이머만 남는다. */
 const analysisLive = () => [...live].filter((h) => h !== sched.daouKeepAliveTimer);
-/** 한 판 — 그룹이 도는 사이에 `during()` 을 하고 그룹을 끝낸다. */
+/** 한 차례 — 그룹이 도는 사이에 `during()` 을 하고 그룹을 끝낸다. */
 const round = async (during) => {
   runs.length = 0;
   nextIn = 20;
