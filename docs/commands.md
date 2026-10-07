@@ -45,7 +45,7 @@
   - **주간 요약(그 주 첫 업무일)**: `monday-briefing-extra.md` 프롬프트 자동 주입 (주간 비용 통계 + 보고서 요약) · 보통 월요일이고 월요일이 휴일 · 휴가면 그다음 업무일
 - **캘린더 리마인더**: `CalendarPoller` — 직접 Google Calendar REST API HTTP 폴링
   - 전체 캘린더 조회 후 `excludeCalendars`로만 제외 (화이트리스트 없음)
-  - 5분 간격 폴링, diff 감지 시에만 AI 판단 (Haiku 모델, 경량 모드 ~$0.003/회)
+  - 5분 간격 폴링, diff 감지 시에만 AI 판단 (Haiku 모델 · 4.5 실측 중앙값 $0.072/회(20회, ~2026-10-07) · 5.5 는 단가가 그 1/10)
   - AI 판단 경량 모드: `cwd=tmpdir` + `--system-prompt` + `--tools ""` + `--no-session-persistence`
   - AI 판단 rate limit 시 다음 정시까지 자동 일시 중지 (`aiJudgmentPaused`)
   - 알림 큐 (`.calendar-notifications.json`) + 1분 간격 발송

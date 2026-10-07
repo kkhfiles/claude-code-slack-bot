@@ -2936,7 +2936,7 @@ export class SlackHandler {
 
     // Force haiku model for minimal token usage, restore after
     const prevModel = this.channelModels.get(channel);
-    this.channelModels.set(channel, 'claude-haiku-4-5-20251001');
+    this.channelModels.set(channel, config.models.haiku);
     try {
       await this.handleMessage(event, say);
     } finally {

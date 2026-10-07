@@ -18,7 +18,7 @@ const { SdkHandler } = require(path.join(ROOT, 'dist', 'sdk-handler.js'));
 
 const mcp = { getServerConfiguration: () => ({}), getDefaultAllowedTools: () => [] };
 const OPTS = {
-  model: 'claude-haiku-4-5-20251001',
+  model: 'claude-haiku-5-5',
   effort: 'low',
   permissionMode: 'dontAsk',
   tools: [], allowedTools: [], skills: [], settingSources: [],

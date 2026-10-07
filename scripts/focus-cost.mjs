@@ -7,7 +7,7 @@
  * 도는데, 문맥을 줄인 효과는 그때까지 기다려야 보인다. 같은 인자로 한 번 부른다 —
  * 다른 것이 하나라도 있으면 재려던 것과 다른 것을 재게 된다.
  *
- *     node scripts/focus-cost.mjs --model=claude-haiku-4-5-20251001 --dry
+ *     node scripts/focus-cost.mjs --model=claude-haiku-5-5 --dry
  *
  * **얼마나 들고 시작하나만 볼 때는 위 두 손잡이를 쓴다.** 캐시 쓰기·읽기 토큰은
  * 모델이 바뀌어도 같은 값이라, 값싼 모델로 재도 문맥 크기는 그대로 보인다.

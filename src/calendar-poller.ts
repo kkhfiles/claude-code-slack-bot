@@ -4,7 +4,8 @@
  * Replaces MCP-based AI polling with:
  * 1. Direct Google Calendar REST API calls (Node 22 native fetch)
  * 2. Deterministic diff algorithm (no AI cost)
- * 3. AI judgment only when diff detected (Haiku model, ~$0.005/call)
+ * 3. AI judgment only when diff detected (Haiku model · Haiku 4.5 measured median $0.072/call over 20 calls
+ *    to 2026-10-07 — Haiku 5.5 lists at 1/10 of that price)
  * 4. Notification queue with 1-minute dispatch timer
  *
  * Shares OAuth tokens with @cocal/google-calendar-mcp via

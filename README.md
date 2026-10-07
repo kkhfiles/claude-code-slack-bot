@@ -72,7 +72,7 @@ Claude Pro/Max subscriptions have session limits with 5-hour windows. Schedule a
 - At the scheduled hour, the bot sends a minimal greeting using the assigned account's token (randomized message, +0~10 min jitter)
 - **Auto follow-up**: 5 hours later, a second greeting fires automatically to cover the next session window (persisted to disk — survives restarts)
 - Different accounts can have overlapping times; conflict checking is per-account only (5-hour window)
-- Uses `claude-haiku-4-5-20251001` model for minimal token cost
+- Uses the `haiku` model alias (`config.models.haiku` — Haiku 5.5 as of 2026-10-08) for minimal token cost
 - **Non-working day skip**: Weekends, Korean public holidays (including lunar calendar), and the off-day list in the work-assistant `config.json` (`holidays` — substitute holidays and personal days off) are automatically skipped
 - Schedule repeats daily, persisted in `.schedule-config.json`
 
