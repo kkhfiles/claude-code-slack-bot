@@ -1413,6 +1413,12 @@ export class AssistantScheduler {
       if (failed.length > 0) {
         errorCollector.add('AssistantScheduler', `회차 정리(sweep) 일부 실패: ${failed.join(' · ').slice(0, 300)}`);
       }
+      // 저장과 같은 키 — 지금 정리 작업은 complete 로 안 저장해 등록할 일이 없지만, 실려 오면 남긴다(W3).
+      const unregistered = swept.filter((x) => x?.register_error)
+        .map((x) => `${x.id}: ${String(x.register_error).slice(0, 120)}`);
+      if (unregistered.length > 0) {
+        errorCollector.add('AssistantScheduler', `회차 정리(sweep) 권고 등록 실패: ${unregistered.join(' · ').slice(0, 300)}`);
+      }
       return r;
     } catch (err) {
       this.logger.error('분석 회차 정리(sweep) 예외', err);
@@ -3175,6 +3181,12 @@ export class AssistantScheduler {
       return r ?? { error: why };
     }
     this.logger.info('회차 저장', { runId: run.runId, status: r.status, partial, backend, commit: r.commit });
+    // 권고 등록은 저장 뒤 따로 돈다 — 실패해도 저장은 그대로라 결과에 키로만 온다. 남기지 않으면 처리
+    // 제안이 조용히 안 생긴다(2026-10-07 검토 W3).
+    if (r.register_error) {
+      errorCollector.add('AssistantScheduler',
+        `권고 등록 실패 (${run.type} ${run.slot}): ${String(r.register_error).slice(0, 200)} — 처리 제안이 안 생김`);
+    }
     return r;
   }
 

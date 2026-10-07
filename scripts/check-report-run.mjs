@@ -1024,6 +1024,32 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
     dailyLines.map((r) => [r.outcome, r.slot, r.trigger]), [['rate_limited', '2026-10-04', 'manual']]);
 }
 
+// ── S17 권고 등록 실패 — 저장은 됐는데 처리 제안이 안 생긴 것을 「시스템 이슈」로 ───────────
+// report-log 는 complete 저장 뒤 권고를 따로 등록하고, 실패해도 저장은 그대로 둔다. 그 실패가 저장 결과
+// 어디에도 안 보여 처리 제안이 조용히 안 생겼다(2026-10-07 검토 W3). 키 이름은 report-log 의 run 기록과
+// 같은 `register_error` 로 본다 — 직접 저장 · 정리 작업(sweep) 결과 둘 다.
+{
+  writeConfig();
+  errorCollector.getAndClear();
+  const REG = { run_id: 'p', id: 'probe/2026-10-03', status: 'complete', commit: 'c1', register_error: '권고 절을 못 읽음 시험' };
+  const g = harness({ rl: fakeReportLog({ commits: [REG] }), results: [writes('# probe\n본문\n')] });
+  await g.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  const got = errorCollector.getAndClear().map((e) => e.message);
+  ok(`권고 등록 실패는 시스템 이슈로 — 종류 · 예정일 · 사유 · 받음 ${JSON.stringify(got)}`,
+    got.some((m) => m.includes('권고 등록') && m.includes('probe 2026-10-03') && m.includes('권고 절을 못 읽음 시험')));
+  const ok2 = harness({ results: [writes('# probe\n본문\n')] });
+  await ok2.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
+  ok('등록까지 된 저장은 권고 등록 이슈 없음', !errorCollector.getAndClear().some((e) => e.message.includes('권고 등록')));
+
+  const rl = fakeReportLog();
+  rl.fn = async (script, args) => (args[0] === 'sweep'
+    ? { swept: [{ run_id: 'a', id: 'cli-usage/2026-10-03', action: 'committed', status: 'complete', register_error: '정리 등록 실패 시험' }] }
+    : { error: '시험 — 정리 말고는 안 부름' });
+  await harness({ rl }).sched.sweepReportRuns();
+  ok('정리 작업이 저장한 회차에 실려 와도 시스템 이슈로',
+    errorCollector.getAndClear().some((e) => e.message.includes('cli-usage/2026-10-03') && e.message.includes('정리 등록 실패 시험')));
+}
+
 // ── S9 agy 위임 경로 — 걷혔나 ─────────────────────────────────────
 {
   ok('src/agy-handler.ts 가 남아 있다 — 부르는 곳이 없는 폐기 모듈', !fs.existsSync(path.join(SRC, 'agy-handler.ts')));
