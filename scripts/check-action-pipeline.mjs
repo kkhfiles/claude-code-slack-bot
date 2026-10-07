@@ -257,6 +257,15 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   ok('그 한 건을 지금 검토한다', w.sessions.length === 1);
   ok('검토가 끝나 사람 차례가 되면 바로 알린다', w.posts.some((p) => /다시 검토 끝/.test(p.text)));
 }
+{
+  // 상태 때문인 거절(report-log code state)은 낡은 버튼 — 지금 상태를 담아 stale 로 · 다른 거절은 그대로 알림
+  const w = world({ decide: { error: '보류 상태에서는 「보류」 결정을 할 수 없음', code: 'state', state: 'held', state_label: '보류' } });
+  const r = await w.pipe.decide('a-20260803-02', 'hold');
+  ok(`상태 거절은 stale · 지금 상태를 담음 (${r.note})`, !r.ok && r.stale === true && /「보류」 상태/.test(r.note));
+  const w2 = world({ decide: { error: '잠금을 못 얻음', code: 'lock' } });
+  const r2 = await w2.pipe.decide('a-20260803-02', 'hold');
+  ok('일시 오류는 stale 아님 — 버튼을 남겨 다시 누르게', !r2.ok && !r2.stale);
+}
 // ── ⑤b 버튼 답 — 거절은 누른 사람에게만 · 원래 메시지는 그대로(🗂 요약이 거절 답에 덮인 2026-10-06) ──
 {
   const msg = {
@@ -272,6 +281,11 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   const accepted = decisionReply({ ok: true, note: '*보류* · 08:00' }, msg, 'a-20260929-01', '🗂 처리 제안');
   eq('받아들이면 원래 메시지를 바꿔 쓴다', accepted.replace_original, true);
   eq('누른 제안의 줄만 결과로', accepted.blocks.map((x) => x.block_id ?? x.type), ['section', 'actd_a-20260929-01']);
+  // 낡은 버튼(이미 결정된 제안) — 알림을 쌓지 않고 그 줄을 지금 상태 한 줄로(2026-10-07 사용자 결정)
+  const stale = decisionReply({ ok: false, stale: true, note: '⚠️ 이미 「보류」 상태 · 바꾸지 않음' }, msg, 'a-20260929-01', '🗂 처리 제안');
+  eq('낡은 버튼 거절은 그 줄을 바꿔 쓴다', stale.replace_original, true);
+  eq('낡은 버튼 거절 — 그 줄만 상태 한 줄로 · 나머지는 그대로', stale.blocks.map((x) => x.block_id ?? x.type), ['section', 'actd_a-20260929-01']);
+  ok('낡은 버튼 거절 — 줄에 지금 상태', JSON.stringify(stale.blocks).includes('이미 「보류」 상태'));
   // 두 버튼 처리기가 이 둘로만 답하는가 — 옛 모양(`respond({ response_type: 'ephemeral', … })`)이 다시 들어오면 실패
   const src = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
   for (const [name, re] of [

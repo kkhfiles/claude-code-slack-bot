@@ -1460,7 +1460,7 @@ export class AssistantScheduler {
   }
 
   /** 버튼 결정 — 진행이면 곧바로 실행을 시작한다. */
-  async decideAction(id: string, decision: string): Promise<{ ok: boolean; note: string }> {
+  async decideAction(id: string, decision: string): Promise<{ ok: boolean; note: string; stale?: boolean }> {
     if (!reportLogAvailable()) return { ok: false, note: '⚠️ report-log 자동 기록 클론이 없습니다' };
     return this.actionPipeline.decide(id, decision);
   }

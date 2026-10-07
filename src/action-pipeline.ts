@@ -411,9 +411,11 @@ export function markDecided(blocks: any[], id: string, note: string): any[] {
  * 보이는 알림(`noticeReply`). 처리 제안 🗂 과 개선 제안 💡 버튼이 같이 쓴다.
  */
 export function decisionReply(
-  r: { ok: boolean; note: string }, message: any, id: string, fallbackText: string,
+  r: { ok: boolean; note: string; stale?: boolean }, message: any, id: string, fallbackText: string,
 ): Record<string, any> {
-  if (!r.ok) return noticeReply(r.note);
+  // 낡은 버튼(이미 결정된 제안)의 거절은 그 줄을 지금 상태 한 줄로 — 알림으로 두면 버튼이 남아 누를 때마다
+  // 「나에게만 표시」가 쌓였다(2026-10-07 사용자 결정). 다시 누르면 될 수 있는 거절은 알림으로 두고 버튼을 남긴다.
+  if (!r.ok && !r.stale) return noticeReply(r.note);
   return { replace_original: true, text: message?.text || fallbackText, blocks: markDecided(message?.blocks || [], id, r.note) };
 }
 
@@ -756,11 +758,16 @@ export class ActionPipeline {
   }
 
   /** 버튼 결정. 진행이면 곧바로 차례를 청한다(승인 즉시 실행 · 2026-09-29 사용자 결정). */
-  async decide(id: string, decision: string): Promise<{ ok: boolean; note: string }> {
+  async decide(id: string, decision: string): Promise<{ ok: boolean; note: string; stale?: boolean }> {
     if (!ACTION_ID_RE.test(id) || !(DECISIONS as readonly string[]).includes(decision)) {
       return { ok: false, note: '⚠️ 버튼 값이 올바르지 않습니다' };
     }
     const r = await this.deps.run('report_log', ['decide', id, decision, '--by', 'slack']);
+    if (r?.error && r.code === 'state') {
+      // 지금 상태에서는 그 결정을 못 함 — 대개 이미 결정된 제안의 낡은 버튼(`decisionReply` 가 그 줄을 바꿈)
+      const at = new Date().toTimeString().slice(0, 5);
+      return { ok: false, stale: true, note: `⚠️ 이미 「${r.state_label ?? r.state}」 상태 · 바꾸지 않음 · ${at}` };
+    }
     if (!r || r.error) return { ok: false, note: `⚠️ ${r?.error ?? '결정을 기록하지 못했습니다'}` };
     const label = DECISION_LABEL[decision as Decision];
     const at = new Date().toTimeString().slice(0, 5);
