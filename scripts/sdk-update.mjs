@@ -30,7 +30,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  bumpPyproject, busyReason, guardReason, normalizeNpmView, pickTarget, requestFresh,
+  bumpPyproject, busyReason, childEnv, guardReason, normalizeNpmView, pickTarget, requestFresh,
 } from './lib/sdk-update-lib.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -82,7 +82,7 @@ function sh(cmd, args, { cwd = ROOT, timeout = 600_000, env, quiet = false } = {
   const shell = WIN && (cmd === 'npm' || cmd === 'pm2');
   const a = shell ? args.map((x) => (/[\s<>|&^]/.test(x) ? `"${x}"` : x)) : args;
   const r = spawnSync(cmd, a, {
-    cwd, encoding: 'utf-8', windowsHide: true, timeout, shell, env: env ? { ...process.env, ...env } : process.env,
+    cwd, encoding: 'utf-8', windowsHide: true, timeout, shell, env: childEnv(process.env, env),
   });
   const stdout = r.stdout ?? '';
   const stderr = r.stderr ?? '';

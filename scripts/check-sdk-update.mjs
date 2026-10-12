@@ -14,7 +14,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import {
-  bumpPyproject, busyReason, cmpVer, guardReason, normalizeNpmView, parseVer, pickTarget, requestFresh,
+  bumpPyproject, busyReason, childEnv, cmpVer, guardReason, normalizeNpmView, parseVer, pickTarget, requestFresh,
 } from './lib/sdk-update-lib.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -68,6 +68,21 @@ ok('15분 넘은 요청은 안 함', !requestFresh({ id: 'a', requestedAt: '2026
 ok('이미 쓴 요청은 안 함', !requestFresh({ id: 'a', requestedAt: '2026-10-05T00:59:00Z', consumed: true }, now));
 ok('요청 파일이 없으면 안 함', !requestFresh(null, now));
 ok('미래 시각이면 안 함', !requestFresh({ id: 'a', requestedAt: '2026-10-05T02:00:00Z' }, now));
+
+// ── 자식 명령 환경 — 봇의 NODE_ENV=production 을 npm 에 물려주지 않는다(2026-10-12 판 맞춤 실패) ──
+// 봇은 pm2 설정으로 production 이라, 그대로 물려받은 `npm install` 이 개발용 패키지(typescript · tsx)를
+// 지워 빌드와 되돌리기가 둘 다 실패했다. 실제 npm 으로 그 효과까지 본다.
+{
+  const e = childEnv({ NODE_ENV: 'production', PATH: process.env.PATH, KEEP: '1' }, { SDK_UPDATE_SELF: '1' });
+  ok('자식 환경에 NODE_ENV 없음', !('NODE_ENV' in e));
+  eq('나머지 환경 · 더한 값은 그대로', [e.KEEP, e.SDK_UPDATE_SELF, e.PATH === process.env.PATH], ['1', '1', true]);
+  const { spawnSync } = await import('node:child_process');
+  const omit = (env) => spawnSync('npm', ['config', 'get', 'omit'], { encoding: 'utf-8', shell: process.platform === 'win32', env })
+    .stdout.trim();
+  const prod = { ...process.env, NODE_ENV: 'production' };
+  eq('대조 — production 을 그대로 물려주면 npm 이 dev 를 뺀다', omit(prod), 'dev');
+  eq('childEnv 를 거치면 npm 이 아무것도 안 뺀다', omit(childEnv(prod)), '');
+}
 
 // ── 다른 작업 중 ──────────────────────────────────────────
 eq('기본 브랜치 · 깨끗함이면 비어 있음', busyReason('main', 'main', ''), '');
