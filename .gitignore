@@ -68,8 +68,8 @@ coverage/
 .rate-limit-until.json
 # 한도로 미룬 처리 제안 검토 (런타임 상태)
 .actions-resume*.json
-# 처리 제안 ↔ 슬랙 스레드 대응 (런타임 상태 · DM 메시지 ts)
-.actions-threads*.json
+# 처리 제안 ↔ 슬랙 스레드 대응 (런타임 상태 · DM 메시지 ts · 쓰는 중 임시 파일 `.tmp` 포함)
+.actions-threads*
 
 # 모델 실험 산출물 — 결과는 work-assistant/docs/design.md 에 정리해 둔다
 # ⚠️ `.bench-prev.json` 은 `.bench/` **밖**이라 따로 적어야 한다 — 벤치가

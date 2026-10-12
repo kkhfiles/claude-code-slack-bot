@@ -670,21 +670,26 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
 
 // ── ⑨ 제안마다 바깥 메시지 하나 · 이어지는 일은 그 스레드(2026-10-12 사용자 결정) ──
 {
-  /** 가짜 슬랙 통로 — 바깥 메시지 · 답글 · 고쳐 쓰기를 적는다. `gone` 은 지워진 메시지. */
-  const fakeThread = (gone = new Set()) => {
+  /**
+   * 가짜 슬랙 통로 — 바깥 메시지 · 답글 · 고쳐 쓰기를 적는다. `gone` 은 지워진 메시지. 실측(2026-10-12)대로
+   * 지운 메시지 고쳐 쓰기는 false · 지운 바깥 메시지에 단 답글은 성공하고 채널에 따로 뜬다. `delay` 는 응답 지연(ms).
+   */
+  const fakeThread = (gone = new Set(), delay = 0) => {
     let n = 0;
     const msgs = [];
     const updates = [];
+    const wait = () => (delay ? new Promise((r) => setTimeout(r, delay)) : Promise.resolve());
     return {
       msgs, updates, gone,
       api: {
         post: async (text, blocks, threadTs) => {
-          if (threadTs && gone.has(threadTs)) return null;
+          await wait();
           n += 1;
-          msgs.push({ ts: `t${n}`, text, blocks, threadTs });
+          msgs.push({ ts: `t${n}`, text, blocks, threadTs: threadTs && !gone.has(threadTs) ? threadTs : undefined });
           return `t${n}`;
         },
         update: async (ts, text, blocks) => {
+          await wait();
           if (gone.has(ts)) return false;
           updates.push({ ts, text, blocks });
           return true;
@@ -782,6 +787,92 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   } });
   const b8 = await w8.pipe.digestBlocks();
   ok('요약도 통로가 죽으면 예전 모양(버튼 포함)으로', b8.some((b) => b.type === 'actions'));
+
+  // ── 10/12 다시 검토에서 찾은 것 ──
+  const rootsOf = (tt, id) => tt.msgs.filter((m) => !m.threadTs && flat(m.blocks).includes(`/actions/${id}/`));
+  const readMap = () => JSON.parse(fs.readFileSync(THREADS_FILE, 'utf-8'));
+  const BTN = ['approve', 'hold', 'reject'];
+  // T1 — 서로 다른 제안을 동시에(아침 요약 · 즉시 알림) 처리해도 대응을 서로 덮지 않음 · 같은 제안은 차례로
+  {
+    const tt = fakeThread(new Set(), 20);
+    const A = 'a-20261012-21';
+    const B = 'a-20261012-22';
+    const wt = world({ thread: tt.api, digest: { need_you: [NOTICE(B, 'digest', 'proposed', BTN)], stuck: [], site: 'https://desk.example' } });
+    await Promise.all([wt.pipe.digestBlocks(), wt.pipe.tell([NOTICE(A, 'second-approval', 'awaiting-second-approval', BTN)])]);
+    ok('동시에 처리한 두 제안의 대응이 다 남음', [A, B].every((id) => readMap()[id]));
+    await wt.pipe.tell([NOTICE(A, 'result', 'achieved')]);
+    eq('그 뒤 알림도 같은 바깥 메시지', rootsOf(tt, A).length, 1);
+    const C = 'a-20261012-23';
+    await Promise.all([
+      wt.pipe.tell([NOTICE(C, 'second-approval', 'awaiting-second-approval', BTN)]),
+      wt.pipe.tell([NOTICE(C, 'stuck', 'executing')]),
+    ]);
+    eq('처음 보는 같은 제안을 동시에 — 바깥 메시지 하나', rootsOf(tt, C).length, 1);
+  }
+  // T2 · T3 — 일시 오류를 「지워짐」으로 보지 않음(바깥 메시지를 새로 안 만듦)
+  {
+    const tt = fakeThread();
+    const D = 'a-20261012-24';
+    const wt = world({ thread: tt.api });
+    await wt.pipe.tell([NOTICE(D, 'second-approval', 'awaiting-second-approval', BTN)]);
+    const realPost = tt.api.post;
+    let failOnce = true;
+    tt.api.post = async (text, blocks, threadTs) => {
+      if (threadTs && failOnce) { failOnce = false; return null; }
+      return realPost(text, blocks, threadTs);
+    };
+    await wt.pipe.tell([NOTICE(D, 'stuck', 'executing')]);
+    eq('답글 일시 오류 — 바깥 메시지는 그대로 · 예전 한 통으로', [rootsOf(tt, D).length, wt.posts.length], [1, 1]);
+    tt.api.post = realPost;
+    const realUpdate = tt.api.update;
+    tt.api.update = async () => { throw new Error('ratelimited'); };
+    await wt.pipe.tell([NOTICE(D, 'result', 'achieved')]);
+    tt.api.update = realUpdate;
+    eq('바깥 메시지 고쳐 쓰기 일시 오류 — 새로 안 만들고 그 스레드에 답글',
+       [rootsOf(tt, D).length, tt.msgs.filter((m) => m.threadTs === rootsOf(tt, D)[0].ts).length], [1, 2]);
+  }
+  // T4 · T5 — 결정 뒤 「지금」 줄 · 지나간 결정 요청은 버튼을 뺌
+  {
+    const tt = fakeThread();
+    const E = 'a-20261012-25';
+    const dg = (state) => ({ need_you: [NOTICE(E, 'digest', state, BTN)], stuck: [], site: 'https://desk.example' });
+    const wt = world({ thread: tt.api, digest: dg('proposed') });
+    await wt.pipe.digestBlocks();
+    const root = rootsOf(tt, E)[0].ts;
+    const askTs = () => tt.msgs.filter((m) => m.threadTs === root && m.blocks.some((b) => b.type === 'actions')).map((m) => m.ts);
+    const closed = (ts) => tt.updates.filter((u) => u.ts === ts).pop();
+    await wt.pipe.tell([NOTICE(E, 'reviewed', 'needs-decision', BTN)]);
+    const [first, second] = askTs();
+    ok('새 결정 요청이 오면 앞 요청은 버튼 없이 「지나간 요청」',
+       closed(first) && !closed(first).blocks.some((b) => b.type === 'actions') && flat(closed(first).blocks).includes('지나간 요청'));
+    ok('지나간 요청도 본문은 그대로', flat(closed(first)?.blocks).includes('결정할 차례'));
+    eq('새 요청은 아직 버튼이 살아 있음(고쳐 쓰지 않음)', closed(second), undefined);
+    const wd = world({ thread: tt.api, decide: { id: E, from: 'needs-decision', state: 'held' } });
+    await wd.pipe.decide(E, 'hold');
+    ok('결정하면 열린 요청은 「결정 — 보류」로 닫힘', flat(closed(second)?.blocks).includes('결정 — 보류'));
+    const rootText = flat(tt.updates.filter((u) => u.ts === root).pop().blocks);
+    ok('결정 뒤 「지금」 줄은 별표가 겹치지 않음', rootText.includes('지금 *보류 · ') && !rootText.includes('**'));
+    // 다른 길(한 통 DM 버튼 · 명령)로 결정된 뒤 결과가 오면 남은 요청을 닫음
+    const wr = world({ thread: tt.api, digest: dg('needs-decision') });
+    await wr.pipe.digestBlocks();
+    const third = askTs()[2];
+    await wr.pipe.tell([NOTICE(E, 'result', 'achieved')]);
+    ok('결과가 오면 남은 요청은 「지금 「…」」로 닫힘', flat(closed(third)?.blocks).includes('지나간 요청 — 지금'));
+  }
+  // T5 — 아침 요약이 상태가 바뀐 제안에 새 요청을 달 때도 앞 요청을 닫음
+  {
+    const tt = fakeThread();
+    const F = 'a-20261012-26';
+    const dg = (state) => ({ need_you: [NOTICE(F, 'digest', state, BTN)], stuck: [], site: 'https://desk.example' });
+    await world({ thread: tt.api, digest: dg('proposed') }).pipe.digestBlocks();
+    await world({ thread: tt.api, digest: dg('needs-decision') }).pipe.digestBlocks();
+    const root = rootsOf(tt, F)[0].ts;
+    const asked = tt.msgs.filter((m) => m.threadTs === root && m.blocks.some((b) => b.type === 'actions'));
+    const firstClosed = tt.updates.filter((u) => u.ts === asked[0].ts).pop();
+    ok('요약이 새 요청을 달면 앞 요청은 「지나간 요청」', asked.length === 2 && flat(firstClosed?.blocks).includes('지나간 요청'));
+  }
+  // T6 — 대응 파일은 임시 파일을 거쳐 씀 · 남는 임시 파일 없음
+  ok('대응 파일을 쓴 뒤 임시 파일이 안 남음', !fs.existsSync(`${THREADS_FILE}.tmp`) && typeof readMap() === 'object');
 }
 
 // ── ② Codex 폴백의 쓰기 범위 · SDK 추가 폴더 ─────────────────────────────

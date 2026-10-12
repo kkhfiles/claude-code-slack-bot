@@ -800,8 +800,9 @@ export class SlackHandler {
           await client.chat.update({ channel, ts, text, blocks: blocks as any });
           return true;
         } catch (err) {
-          this.logger.warn('처리 제안 바깥 메시지를 못 고침 — 새로 만듦', { ts, err: String(err) });
-          return false;
+          // 지워졌을 때만 false — 다른 오류(한도 · 네트워크)까지 지워짐으로 보면 바깥 메시지를 새로 만들어 스레드가 갈린다
+          if ((err as any)?.data?.error === 'message_not_found') return false;
+          throw err;
         }
       },
       permalink: async (ts) => {

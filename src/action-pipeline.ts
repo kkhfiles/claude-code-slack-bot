@@ -113,7 +113,10 @@ export interface PipelineDeps {
 export interface ThreadApi {
   /** 바깥 메시지(`threadTs` 없음) 또는 그 스레드의 답글 — 보낸 메시지의 ts. */
   post: (text: string, blocks: unknown[], threadTs?: string) => Promise<string | null>;
-  /** 바깥 메시지 고쳐 쓰기 — 지워졌으면 false. */
+  /**
+   * 메시지 고쳐 쓰기 — **지워졌을 때만 false**(슬랙 `message_not_found`) · 다른 오류는 던진다.
+   * 지워진 것을 아는 길은 이것 하나다 — 지운 바깥 메시지에 단 답글은 오류 없이 채널에 따로 뜬다(2026-10-12 실측).
+   */
   update: (ts: string, text: string, blocks: unknown[]) => Promise<boolean>;
   permalink: (ts: string) => Promise<string | null>;
   /** 결정을 묻는 답글에 넣을 사용자 ID — 남이 연 스레드의 답글은 알림이 안 갈 수 있다. */
@@ -128,12 +131,15 @@ interface ThreadEntry {
   emoji: string;
   tier: string;
   summary: string;
-  /** 바깥 메시지의 「지금」 — 마지막 일(예: 「✋ 두 번째 승인」 · 「*진행* · 08:32」). */
+  /** 바깥 메시지의 「지금」 — 마지막 일(예: 「✋ 두 번째 승인」 · 「진행 · 08:32」). */
   now: string;
   /** 지나온 일 — 바깥 메시지에 최근 몇 개만. */
   trail: string[];
-  /** 아직 안 누른 결정 요청 답글 — 같은 상태로 두 번 묻지 않게. */
-  ask?: { ts: string; state: string };
+  /**
+   * 아직 안 누른 결정 요청 답글 — 같은 상태로 두 번 묻지 않게 · 지나가면 버튼을 빼고 고쳐 쓰게 본문(`text`)을 둔다.
+   * `text` 가 없는 것은 이 필드가 생기기 전 기록이다.
+   */
+  ask?: { ts: string; state: string; text?: string };
   link?: string;
   at: string;
 }
@@ -155,11 +161,19 @@ function readThreads(): Record<string, ThreadEntry> {
   }
 }
 
+/**
+ * 대응 파일 쓰기 — 임시 파일에 쓰고 이름을 바꾼다. 바로 덮어쓰다 끊기면 반쪽 파일이 빈 대응으로 읽혀
+ * 모든 제안이 바깥 메시지를 새로 만든다. **부르는 쪽은 읽기와 쓰기 사이에 기다리지 않는다**
+ * (기다리는 사이 다른 제안이 쓴 것을 덮는다 — `ensureThread` 는 쓰기 직전에 다시 읽는다).
+ */
 function writeThreads(map: Record<string, ThreadEntry>): void {
   const cut = Date.now() - THREAD_KEEP_DAYS * 86_400_000;
   const kept = Object.fromEntries(Object.entries(map).filter(([, e]) => Date.parse(e.at) >= cut));
+  const file = threadsFile();
+  const tmp = `${file}.tmp`;
   try {
-    fs.writeFileSync(threadsFile(), JSON.stringify(kept, null, 1), 'utf-8');
+    fs.writeFileSync(tmp, JSON.stringify(kept, null, 1), 'utf-8');
+    fs.renameSync(tmp, file);
   } catch {
     /* 못 적으면 다음 알림이 새 바깥 메시지를 만든다 — 알림 자체는 나간다 */
   }
@@ -413,6 +427,19 @@ export function buildThreadReply(n: FlowNotice, head: string, mention?: string):
   return blocks;
 }
 
+/** 결정 요청 답글의 본문 — 지나간 뒤 버튼을 빼고 다시 그릴 때 쓴다(`buildClosedAsk`). */
+function askText(blocks: unknown[]): string {
+  return (blocks[0] as { text: { text: string } }).text.text;
+}
+
+/** 지나간 결정 요청 — 본문은 그대로 · 버튼 줄 대신 지나간 까닭 한 줄(`markDecided` 와 같은 모양). */
+export function buildClosedAsk(id: string, text: string, note: string): unknown[] {
+  return [
+    { type: 'section', block_id: `acts_${id}`, text: { type: 'mrkdwn', text } },
+    { type: 'context', block_id: `actd_${id}`, elements: [{ type: 'mrkdwn', text: note }] },
+  ];
+}
+
 /** 요약 목록에 싣는 줄 수 — 넘친 것은 desk 로 안내. 줄 10개마다 블록 하나라 50블록 안. */
 const DIGEST_MAX_LINES = 30;
 
@@ -589,6 +616,8 @@ export class ActionPipeline {
   private resumeTimer: ReturnType<typeof setTimeout> | null = null;
   /** 원격에 못 맞춘 까닭을 마지막으로 「시스템 이슈」에 남긴 것 — 맞추면 비운다(`sync`). */
   private syncReported: { why: string; at: number } | null = null;
+  /** 제안별 스레드 일의 차례 — 끝난 것은 지운다(`inTurn`). */
+  private threadTurns = new Map<string, Promise<unknown>>();
 
   constructor(private deps: PipelineDeps) {}
 
@@ -867,7 +896,7 @@ export class ActionPipeline {
         let done = false;
         if (this.deps.thread) {
           try {
-            done = await this.tellThread(n);
+            done = await this.inTurn(n.id, () => this.tellThread(n));
           } catch (err) {
             this.logger.warn('처리 제안 스레드로 못 보냄 — 한 통으로 보냄', err);
           }
@@ -890,8 +919,20 @@ export class ActionPipeline {
   }
 
   /**
+   * 같은 제안의 스레드 일은 차례로 한다 — 아침 요약 · 즉시 알림 · 버튼 결정이 겹치면 둘 다 「처음」으로 보고
+   * 바깥 메시지를 둘 만들거나 서로의 기록을 덮는다(2026-10-12 다시 검토). 다른 제안은 기다리지 않는다.
+   */
+  private inTurn<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const run = (this.threadTurns.get(id) ?? Promise.resolve()).catch(() => undefined).then(fn);
+    const tail = run.catch(() => undefined);
+    this.threadTurns.set(id, tail);
+    void tail.then(() => { if (this.threadTurns.get(id) === tail) this.threadTurns.delete(id); });
+    return run;
+  }
+
+  /**
    * 그 제안의 바깥 메시지를 찾아 지금 상태를 `now` 로 고쳐 쓰거나, 없으면(처음 · 지워짐) 새로 만든다.
-   * 못 보내면 null — 부르는 쪽이 예전 모양으로 물러난다.
+   * 못 보내면 null — 부르는 쪽이 예전 모양으로 물러난다. 같은 제안의 차례(`inTurn`) 안에서 부른다.
    */
   private async ensureThread(n: FlowNotice, now: string): Promise<ThreadEntry | null> {
     const api = this.deps.thread;
@@ -908,7 +949,14 @@ export class ActionPipeline {
     if (old) {
       e = { ...old, ...fields };
       ActionPipeline.step(e, now);
-      if (!(await api.update(e.ts, `🗂 ${e.title}`, buildThreadRoot(n.id, e)))) e = null;
+      let alive = true;
+      try {
+        alive = await api.update(e.ts, `🗂 ${e.title}`, buildThreadRoot(n.id, e));
+      } catch (err) {
+        // 지워진 것이 아닌 오류(한도 · 네트워크) — 스레드는 그대로 쓰고 「지금」 줄만 이번에 못 고침
+        this.logger.warn(`${n.id} 바깥 메시지를 못 고침 — 스레드는 그대로`, err);
+      }
+      if (!alive) e = null;
     }
     if (!e) {
       // 처음이거나 바깥 메시지가 지워짐 — 지나온 일은 이어 받고 링크 · 열린 요청은 버린다
@@ -919,8 +967,10 @@ export class ActionPipeline {
       fresh.ts = ts;
       e = fresh;
     }
-    map[n.id] = e;
-    writeThreads(map);
+    // 쓰기 직전에 다시 읽는다 — 슬랙을 기다리는 사이 다른 제안이 쓴 대응을 덮지 않게
+    const cur = readThreads();
+    cur[n.id] = e;
+    writeThreads(cur);
     return e;
   }
 
@@ -932,30 +982,54 @@ export class ActionPipeline {
     writeThreads(map);
   }
 
+  /** 지나간 결정 요청 답글에서 버튼을 뺀다 — 한 스레드에 살아 있는 버튼이 여러 벌 쌓이지 않게. 못 고쳐도 넘어간다. */
+  private async closeAsk(id: string, ask: ThreadEntry['ask'], note: string): Promise<void> {
+    const api = this.deps.thread;
+    if (!api || !ask?.text) return;
+    try {
+      await api.update(ask.ts, note, buildClosedAsk(id, ask.text, note));
+    } catch (err) {
+      this.logger.warn(`${id} 지나간 결정 요청을 못 고침`, err);
+    }
+  }
+
   /** 알림 한 건을 그 제안 스레드에 — 사람 차례면 버튼과 멘션. 못 하면 false(예전처럼 한 통으로). */
   private async tellThread(n: FlowNotice): Promise<boolean> {
     const api = this.deps.thread!;
     const head = noticeHead(n);
     const asks = buttonsBlock(n) !== null;
-    let e = await this.ensureThread(n, head);
+    const e = await this.ensureThread(n, head);
     if (!e) return false;
-    let ts = await api.post(`${head} — ${e.title}`, buildThreadReply(n, head, asks ? api.mention : undefined), e.ts);
-    if (!ts) {
-      // 그새 바깥 메시지가 지워졌다 — 대응을 지우고 새로 만들어 한 번 더
-      const map = readThreads();
-      delete map[n.id];
-      writeThreads(map);
-      e = await this.ensureThread(n, head);
-      if (!e) return false;
-      ts = await api.post(`${head} — ${e.title}`, buildThreadReply(n, head, asks ? api.mention : undefined), e.ts);
-      if (!ts) return false;
+    const blocks = buildThreadReply(n, head, asks ? api.mention : undefined);
+    // 답글이 안 가면 예전처럼 한 통으로 — 대응은 둔다. 지운 바깥 메시지에도 답글은 가므로(실측) 이것은 일시 오류다
+    const ts = await api.post(`${head} — ${e.title}`, blocks, e.ts);
+    if (!ts) return false;
+    if (e.ask && e.ask.ts !== ts) {
+      await this.closeAsk(n.id, e.ask, asks ? '지나간 요청 — 새 요청은 아래' : `지나간 요청 — 지금 「${n.state_label || n.state}」`);
     }
-    const replyTs = ts;
     ActionPipeline.patchThread(n.id, (x) => {
-      if (asks) x.ask = { ts: replyTs, state: n.state };
+      if (asks) x.ask = { ts, state: n.state, text: askText(blocks) };
       else delete x.ask;
     });
     return true;
+  }
+
+  /** 요약의 한 제안 — 스레드를 갖추고 결정 요청을 단다. 링크(못 얻으면 '') · 못 갖추면 null(예전 모양으로). */
+  private async digestItem(api: ThreadApi, n: FlowNotice): Promise<string | null> {
+    const e = await this.ensureThread(n, n.state_label || n.state);
+    if (!e) return null;
+    if (buttonsBlock(n) && (!e.ask || e.ask.state !== n.state)) {
+      // 요약 자체가 알림이라 멘션은 안 한다
+      const blocks = buildThreadReply(n, '🗂 결정할 차례');
+      const ts = await api.post(`결정할 차례 — ${e.title}`, blocks, e.ts);
+      // 결정 요청을 못 달면 버튼이 어디에도 없다 — 요약에 버튼을 싣는 예전 모양으로
+      if (!ts) return null;
+      if (e.ask) await this.closeAsk(n.id, e.ask, '지나간 요청 — 새 요청은 아래');
+      ActionPipeline.patchThread(n.id, (x) => { x.ask = { ts, state: n.state, text: askText(blocks) }; });
+    }
+    const link = e.link || (await api.permalink(e.ts));
+    if (link && link !== e.link) ActionPipeline.patchThread(n.id, (x) => { x.link = link; });
+    return link || '';
   }
 
   /**
@@ -969,20 +1043,9 @@ export class ActionPipeline {
     const links: Record<string, string> = {};
     try {
       for (const n of need.slice(0, DIGEST_MAX_LINES)) {
-        const e = await this.ensureThread(n, n.state_label || n.state);
-        if (!e) return buildDigestBlocks(d);
-        if (buttonsBlock(n) && (!e.ask || e.ask.state !== n.state)) {
-          // 요약 자체가 알림이라 멘션은 안 한다
-          const ts = await api.post(`결정할 차례 — ${e.title}`, buildThreadReply(n, '🗂 결정할 차례'), e.ts);
-          // 결정 요청을 못 달면 버튼이 어디에도 없다 — 요약에 버튼을 싣는 예전 모양으로
-          if (!ts) return buildDigestBlocks(d);
-          ActionPipeline.patchThread(n.id, (x) => { x.ask = { ts, state: n.state }; });
-        }
-        const link = e.link || (await api.permalink(e.ts));
-        if (link) {
-          links[n.id] = link;
-          if (link !== e.link) ActionPipeline.patchThread(n.id, (x) => { x.link = link; });
-        }
+        const link = await this.inTurn(n.id, () => this.digestItem(api, n));
+        if (link === null) return buildDigestBlocks(d);
+        if (link) links[n.id] = link;
       }
       const map = readThreads();
       for (const s of d.stuck || []) if (map[s.id]?.link) links[s.id] = map[s.id].link as string;
@@ -997,17 +1060,22 @@ export class ActionPipeline {
   private async markThread(id: string, now: string): Promise<void> {
     const api = this.deps.thread;
     if (!api) return;
-    const map = readThreads();
-    const e = map[id];
-    if (!e) return;
-    ActionPipeline.step(e, now);
-    delete e.ask;
-    writeThreads(map);
-    try {
-      await api.update(e.ts, `🗂 ${e.title}`, buildThreadRoot(id, e));
-    } catch (err) {
-      this.logger.warn('처리 제안 바깥 메시지를 못 고침', err);
-    }
+    await this.inTurn(id, async () => {
+      const map = readThreads();
+      const e = map[id];
+      if (!e) return;
+      const ask = e.ask;
+      ActionPipeline.step(e, now);
+      delete e.ask;
+      writeThreads(map);
+      // 열린 결정 요청은 버튼을 뺀다 — 누른 답글이 그것이면 곧이어 버튼 답(`decisionReply`)이 같은 모양으로 덮는다
+      await this.closeAsk(id, ask, `결정 — ${now}`);
+      try {
+        await api.update(e.ts, `🗂 ${e.title}`, buildThreadRoot(id, e));
+      } catch (err) {
+        this.logger.warn('처리 제안 바깥 메시지를 못 고침', err);
+      }
+    });
   }
 
   /** 사람이 불러 돈 제안이 다시 사람 차례가 됐으면 바로 알린다 — 아침 요약까지 기다리게 하지 않는다. */
@@ -1068,7 +1136,8 @@ export class ActionPipeline {
     } else if (decision === 'reopen') {
       tail = ' — 다음 밤 검토에 다시 올라갑니다';
     }
-    await this.markThread(id, `*${label}* · ${at}`);
+    // 굵게 없이 — 바깥 메시지가 「지금 *…*」으로 감싼다(겹치면 별표가 그대로 보였다 · 2026-10-12 다시 검토)
+    await this.markThread(id, `${label} · ${at}`);
     return { ok: true, note: `*${label}* · ${at}${tail}` };
   }
 }

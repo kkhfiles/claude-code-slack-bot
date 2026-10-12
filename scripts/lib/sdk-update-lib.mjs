@@ -79,7 +79,6 @@ export function guardReason({ branch, want, porcelain, allowed = [], head, base 
   return `판 맞춤이 안 건드린 파일이 바뀜(${extra.slice(0, 3).join(', ')}${extra.length > 3 ? ' …' : ''})`;
 }
 
-/** `git status --porcelain` · 현재 브랜치로 「다른 작업 중」인지. 이유 문장을 돌려준다(없으면 ''). */
 /**
  * 자식 명령(npm · 빌드 · 시험 · git)에 줄 환경 — 받은 환경에 `extra` 를 얹고 **`NODE_ENV` 를 뺀다.**
  * 봇은 pm2 설정(`ecosystem.config.js`)으로 `NODE_ENV=production` 이라, 그대로 물려준 `npm install` 이
@@ -91,6 +90,7 @@ export function childEnv(base, extra = {}) {
   return env;
 }
 
+/** `git status --porcelain` · 현재 브랜치로 「다른 작업 중」인지. 이유 문장을 돌려준다(없으면 ''). */
 export function busyReason(branch, want, porcelain) {
   if (branch !== want) return `기본 브랜치(${want})가 아니라 ${branch || '알 수 없는 브랜치'}에 있음`;
   const n = String(porcelain ?? '').split('\n').filter((l) => l.trim()).length;
