@@ -17,6 +17,7 @@
  *      붙는다 · 요약을 못 만들면 「시스템 이슈」
  *   ⑦ 밤 검토는 업무일 시간대 안에서만 · 이어 가기는 늘
  *   ⑧ 사람이 시킨 검토가 한도에 끊기면 회복 뒤 이어 간다 · 재시작에도 남는다 · 밤 검토는 안 남긴다
+ *   ⑨ 제안마다 바깥 메시지 하나 · 이어지는 일은 그 스레드 · 아침 요약은 링크 목록 · 재시작에도 같은 스레드
  */
 import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
@@ -34,6 +35,9 @@ process.env.WORK_EVENTS_FILE = EVENTS_FILE;
 // 한도로 미룬 검토 기록 — 운영 파일(`.actions-resume.json`)을 안 건드린다
 const RESUME_FILE = path.join(os.tmpdir(), `actions-check-resume-${Date.now()}.json`);
 process.env.ACTIONS_RESUME_FILE = RESUME_FILE;
+// 제안 ↔ 스레드 대응 — 운영 파일(`.actions-threads.json`)을 안 건드린다
+const THREADS_FILE = path.join(os.tmpdir(), `actions-check-threads-${Date.now()}.json`);
+process.env.ACTIONS_THREADS_FILE = THREADS_FILE;
 process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
 // report-log 자동 기록 클론 · 비용 원장 — 스케줄러를 만드는 절이 진짜 것을 부르지 않게(없는 자리)
 process.env.REPORT_LOG_STATE = path.join(os.tmpdir(), `actions-check-rl-${Date.now()}`);
@@ -76,7 +80,7 @@ const NOTICE = (id, kind, state, buttons = []) => ({
  * 부른 명령은 `calls` 에 남는다.
  */
 function world({ nexts = {}, completes = [], pending = {}, digest = null, decide = null,
-                 session = null, afterResume = undefined, sync = null } = {}) {
+                 session = null, afterResume = undefined, sync = null, thread = undefined } = {}) {
   const calls = [];
   const posts = [];
   const sessions = [];
@@ -98,6 +102,7 @@ function world({ nexts = {}, completes = [], pending = {}, digest = null, decide
     },
     post: async (text, blocks) => { posts.push({ text, blocks }); },
     afterResume,
+    thread,
   };
   return { calls, posts, sessions, pipe: new ActionPipeline(deps) };
 }
@@ -661,6 +666,122 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
     ok('startActionsTicker 가 회복 타이머를 되살린다', startBody.includes('this.actionPipeline.restoreResume()'));
     ok('회복 뒤 끝맺음은 -actions review 와 같은 요약 DM', sched.includes('afterResume: () => this.postActionDigest()'));
   }
+}
+
+// ── ⑨ 제안마다 바깥 메시지 하나 · 이어지는 일은 그 스레드(2026-10-12 사용자 결정) ──
+{
+  /** 가짜 슬랙 통로 — 바깥 메시지 · 답글 · 고쳐 쓰기를 적는다. `gone` 은 지워진 메시지. */
+  const fakeThread = (gone = new Set()) => {
+    let n = 0;
+    const msgs = [];
+    const updates = [];
+    return {
+      msgs, updates, gone,
+      api: {
+        post: async (text, blocks, threadTs) => {
+          if (threadTs && gone.has(threadTs)) return null;
+          n += 1;
+          msgs.push({ ts: `t${n}`, text, blocks, threadTs });
+          return `t${n}`;
+        },
+        update: async (ts, text, blocks) => {
+          if (gone.has(ts)) return false;
+          updates.push({ ts, text, blocks });
+          return true;
+        },
+        permalink: async (ts) => `https://slack.example/p/${ts}`,
+        mention: 'U0TEST',
+      },
+    };
+  };
+  const roots = (t) => t.msgs.filter((m) => !m.threadTs);
+  const repliesOf = (t, ts) => t.msgs.filter((m) => m.threadTs === ts);
+  const flat = (x) => JSON.stringify(x);
+  try { fs.unlinkSync(THREADS_FILE); } catch { /* 처음 */ }
+
+  const X = 'a-20261012-01';
+  const Y = 'a-20261012-02';
+  const t = fakeThread();
+  const w = world({ thread: t.api });
+  await w.pipe.tell([NOTICE(X, 'second-approval', 'awaiting-second-approval', ['approve', 'hold', 'reject'])]);
+  eq('첫 알림 — 바깥 메시지 하나 + 그 스레드에 답글 하나', [roots(t).length, repliesOf(t, 't1').length], [1, 1]);
+  ok('바깥 메시지에 제목 링크 · 지금 상태 줄', flat(roots(t)[0].blocks).includes(`/actions/${X}/`) && flat(roots(t)[0].blocks).includes('지금'));
+  ok('바깥 메시지에는 버튼 없음', !roots(t)[0].blocks.some((b) => b.type === 'actions'));
+  const ask = repliesOf(t, 't1')[0];
+  ok('결정을 묻는 답글에 버튼(제안 번호 block_id)', ask.blocks.some((b) => b.type === 'actions' && b.block_id === `actb_${X}`));
+  ok('결정을 묻는 답글은 사용자를 멘션 — 스레드 답글 알림', flat(ask.blocks).includes('<@U0TEST>'));
+  eq('스레드 통로가 있으면 예전 DM 한 통은 안 보냄', w.posts.length, 0);
+
+  await w.pipe.tell([NOTICE(X, 'result', 'achieved')]);
+  eq('같은 제안의 다음 일 — 바깥 메시지는 그대로 · 같은 스레드에 답글', [roots(t).length, repliesOf(t, 't1').length], [1, 2]);
+  ok('결과 답글에는 멘션 없음(묻는 것이 아님)', !flat(repliesOf(t, 't1')[1].blocks).includes('<@U0TEST>'));
+  ok('바깥 메시지의 지금 상태가 결과로 바뀜', t.updates.some((u) => u.ts === 't1' && flat(u.blocks).includes('달성')));
+
+  // 재시작 — 새 실행기도 같은 스레드에 붙인다(대응은 파일)
+  const w2 = world({ thread: t.api });
+  await w2.pipe.tell([NOTICE(X, 'stuck', 'executing')]);
+  eq('재시작 뒤에도 바깥 메시지를 새로 안 만듦', [roots(t).length, repliesOf(t, 't1').length], [1, 3]);
+
+  // 아침 요약 — 버튼 없는 목록 + 제안 스레드 링크 · 묻는 답글은 그 스레드에 한 번만
+  const digestD = {
+    need_you: [NOTICE(Y, 'digest', 'needs-decision', ['approve', 'hold', 'reject'])],
+    stuck: [], site: 'https://desk.example',
+  };
+  const w3 = world({ thread: t.api, digest: digestD });
+  const before = t.msgs.length;
+  const blocks = await w3.pipe.digestBlocks();
+  const yRoot = roots(t).find((m) => flat(m.blocks).includes(`/actions/${Y}/`));
+  ok('요약에 나온 제안은 바깥 메시지가 생김', !!yRoot);
+  ok('그 스레드에 묻는 답글(버튼)', repliesOf(t, yRoot.ts).some((m) => m.blocks.some((b) => b.type === 'actions')));
+  ok('요약 메시지 자체에는 버튼 없음', !blocks.some((b) => b.type === 'actions'));
+  ok('요약에 그 제안 스레드 링크', flat(blocks).includes(`https://slack.example/p/${yRoot.ts}`));
+  const mid = t.msgs.length;
+  await w3.pipe.digestBlocks();
+  eq('요약을 다시 만들어도 같은 상태로 또 묻지 않음', t.msgs.length, mid);
+  ok('요약이 새로 보낸 것은 바깥 메시지 하나 + 묻는 답글 하나', mid - before === 2);
+  ok('요약에서 만든 묻는 답글은 멘션 안 함(요약 자체가 알림)',
+     !flat(repliesOf(t, yRoot.ts)[0].blocks).includes('<@U0TEST>'));
+
+  // 결정 — 바깥 메시지의 지금 상태가 결정으로 · 묻는 답글 기록은 비움(같은 상태로 다시 오면 다시 물음)
+  const w4 = world({ thread: t.api, decide: { id: Y, from: 'needs-decision', state: 'held' } });
+  const r = await w4.pipe.decide(Y, 'hold');
+  ok(`결정 기록 (${r.note})`, r.ok);
+  ok('결정 뒤 바깥 메시지의 지금 상태가 「보류」', t.updates.some((u) => u.ts === yRoot.ts && flat(u.blocks).includes('보류')));
+  const w5 = world({ thread: t.api, digest: digestD });
+  const m5 = t.msgs.length;
+  await w5.pipe.digestBlocks();
+  eq('결정 뒤 같은 상태로 다시 오면 다시 묻는다', t.msgs.length - m5, 1);
+
+  // 바깥 메시지가 지워졌으면 새로 만든다
+  t.gone.add(yRoot.ts);
+  await w5.pipe.tell([NOTICE(Y, 'stuck', 'executing')]);
+  const yRoots = roots(t).filter((m) => flat(m.blocks).includes(`/actions/${Y}/`));
+  eq('지워진 바깥 메시지 대신 새 바깥 메시지', yRoots.length, 2);
+  eq('새 바깥 메시지 스레드에 답글', repliesOf(t, yRoots[1].ts).length, 1);
+  // 아침 요약도 — 지워진 바깥 메시지는 새로 만들고 링크 목록으로(예전 모양으로 물러나지 않음)
+  t.gone.add(yRoots[1].ts);
+  const wg = world({ thread: t.api, digest: digestD });
+  const bg = await wg.pipe.digestBlocks();
+  const yRoots2 = roots(t).filter((m) => flat(m.blocks).includes(`/actions/${Y}/`));
+  eq('요약 — 지워진 바깥 메시지 대신 새 바깥 메시지', yRoots2.length, 3);
+  ok('요약 — 새 스레드에 결정 요청 · 요약은 링크 목록(버튼 없음)',
+     repliesOf(t, yRoots2[2].ts).some((m) => m.blocks.some((b) => b.type === 'actions')) && !bg.some((b) => b.type === 'actions'));
+
+  // 스레드 통로가 없거나 바깥 메시지를 못 보내면 예전처럼 DM 한 통 — 알림을 잃지 않는다
+  const w6 = world();
+  await w6.pipe.tell([NOTICE('a-20261012-09', 'result', 'achieved')]);
+  eq('통로 없음 → 예전 DM 한 통', w6.posts.length, 1);
+  const dead = fakeThread();
+  dead.api.post = async () => null;
+  const w7 = world({ thread: dead.api });
+  await w7.pipe.tell([NOTICE('a-20261012-08', 'result', 'achieved')]);
+  eq('바깥 메시지를 못 보내면 → 예전 DM 한 통', w7.posts.length, 1);
+  // 처음 보는 제안인데 바깥 메시지조차 못 보냄 → 요약에 버튼을 싣는 예전 모양(결정할 길을 잃지 않게)
+  const w8 = world({ thread: dead.api, digest: {
+    need_you: [NOTICE('a-20261012-07', 'digest', 'proposed', ['approve', 'hold', 'reject'])], stuck: [], site: 'https://desk.example',
+  } });
+  const b8 = await w8.pipe.digestBlocks();
+  ok('요약도 통로가 죽으면 예전 모양(버튼 포함)으로', b8.some((b) => b.type === 'actions'));
 }
 
 // ── ② Codex 폴백의 쓰기 범위 · SDK 추가 폴더 ─────────────────────────────

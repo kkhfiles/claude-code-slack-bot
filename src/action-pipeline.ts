@@ -96,9 +96,73 @@ export interface PipelineDeps {
   session: (label: string, prompt: string, opts: SpawnOpts) => Promise<SessionResult>;
   /** 스탠리 DM 한 통. */
   post: (text: string, blocks?: unknown[]) => Promise<void>;
+  /** 제안마다 바깥 메시지 하나 · 이어지는 일은 그 스레드(`ThreadApi`). 없으면 예전처럼 `post` 로 한 통씩. */
+  thread?: ThreadApi;
   useSdk?: boolean;
   /** 한도 회복 뒤 이어 간 검토가 끝났을 때 — 스케줄러가 요약 DM 을 보낸다(`-actions review` 와 같은 끝맺음). */
   afterResume?: () => Promise<void>;
+}
+
+/**
+ * 처리 제안 스레드에 쓰는 슬랙 통로 — DM 채널 고정.
+ *
+ * 제안마다 바깥 메시지 하나(제목 · 요약 · 지금 상태)를 두고 검토 결과 · 결정 요청 · 결과를 그 스레드에
+ * 단다. 알림이 따로따로 뜨면 한 제안이 어떻게 흘러갔는지 이어 읽을 수 없었다(2026-10-12 사용자 결정).
+ * 못 보내면 `null` · `false` 로 — 던지지 않는다(부르는 쪽이 예전처럼 한 통으로 물러난다).
+ */
+export interface ThreadApi {
+  /** 바깥 메시지(`threadTs` 없음) 또는 그 스레드의 답글 — 보낸 메시지의 ts. */
+  post: (text: string, blocks: unknown[], threadTs?: string) => Promise<string | null>;
+  /** 바깥 메시지 고쳐 쓰기 — 지워졌으면 false. */
+  update: (ts: string, text: string, blocks: unknown[]) => Promise<boolean>;
+  permalink: (ts: string) => Promise<string | null>;
+  /** 결정을 묻는 답글에 넣을 사용자 ID — 남이 연 스레드의 답글은 알림이 안 갈 수 있다. */
+  mention?: string;
+}
+
+/** 제안 하나의 스레드 — 바깥 메시지를 다시 그릴 재료와 지금 열려 있는 결정 요청. */
+interface ThreadEntry {
+  ts: string;
+  title: string;
+  url: string;
+  emoji: string;
+  tier: string;
+  summary: string;
+  /** 바깥 메시지의 「지금」 — 마지막 일(예: 「✋ 두 번째 승인」 · 「*진행* · 08:32」). */
+  now: string;
+  /** 지나온 일 — 바깥 메시지에 최근 몇 개만. */
+  trail: string[];
+  /** 아직 안 누른 결정 요청 답글 — 같은 상태로 두 번 묻지 않게. */
+  ask?: { ts: string; state: string };
+  link?: string;
+  at: string;
+}
+
+/** 대응 기록을 몇 날 남기나 — 오래된 제안은 다시 오면 새 바깥 메시지를 만든다. */
+const THREAD_KEEP_DAYS = 90;
+
+/** 제안 ↔ 스레드 대응 파일 — **재시작에도 남아야 한다**(같은 제안의 뒷일이 새 바깥 메시지로 갈라지지 않게). */
+function threadsFile(): string {
+  return process.env.ACTIONS_THREADS_FILE || path.join(__dirname, '..', '.actions-threads.json');
+}
+
+function readThreads(): Record<string, ThreadEntry> {
+  try {
+    const v = JSON.parse(fs.readFileSync(threadsFile(), 'utf-8'));
+    return v && typeof v === 'object' ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeThreads(map: Record<string, ThreadEntry>): void {
+  const cut = Date.now() - THREAD_KEEP_DAYS * 86_400_000;
+  const kept = Object.fromEntries(Object.entries(map).filter(([, e]) => Date.parse(e.at) >= cut));
+  try {
+    fs.writeFileSync(threadsFile(), JSON.stringify(kept, null, 1), 'utf-8');
+  } catch {
+    /* 못 적으면 다음 알림이 새 바깥 메시지를 만든다 — 알림 자체는 나간다 */
+  }
 }
 
 /** 한도에 끊겨 회복 뒤로 미룬 「사람이 시킨」 몫. */
@@ -312,15 +376,97 @@ function itemBlocks(n: FlowNotice, head?: string): unknown[] {
   return blocks;
 }
 
-/** 즉시 알림 한 건 — 급한 제안 · 두 번째 승인 · 멈춤 · 결과. */
-export function buildNoticeBlocks(n: FlowNotice): unknown[] {
-  const head = n.kind === 'result'
+/** 알림 머리 — 결과는 달성 · 미달로 가른다. */
+function noticeHead(n: FlowNotice): string {
+  return n.kind === 'result'
     ? (n.state === 'achieved' ? '✅ 달성' : n.state === 'queued' ? '↩️ 미달 — 다시 검토' : '❌ 미달')
     : (KIND_HEAD[n.kind] || n.kind);
-  return itemBlocks(n, head);
 }
 
-/** 아침 요약 — 사람 차례인 제안(버튼)과 멈춘 제안. 둘 다 없으면 null(메시지를 안 보낸다). */
+/** 즉시 알림 한 건 — 급한 제안 · 두 번째 승인 · 멈춤 · 결과. 스레드 통로가 없을 때의 모양. */
+export function buildNoticeBlocks(n: FlowNotice): unknown[] {
+  return itemBlocks(n, noticeHead(n));
+}
+
+/** 제안 스레드의 바깥 메시지 — 제목 · 요약 · 지금 상태 · 지나온 일. 버튼은 없다(스레드 답글에 둔다). */
+export function buildThreadRoot(id: string, e: Pick<ThreadEntry, 'title' | 'url' | 'emoji' | 'tier' | 'summary' | 'now' | 'trail'>): unknown[] {
+  const tier = TIER_LABEL[e.tier] ? ` · ${TIER_LABEL[e.tier]}` : '';
+  const trail = e.trail.slice(0, -1).slice(-5);
+  const lines = [`${e.emoji ? `${e.emoji} ` : ''}*🗂 <${e.url}|${plain(clip(e.title, 140))}>*`, clip(e.summary, 600)].filter(Boolean);
+  return [
+    { type: 'section', block_id: `actp_${id}`, text: { type: 'mrkdwn', text: lines.join('\n') } },
+    { type: 'context', elements: [{ type: 'mrkdwn', text:
+      `지금 *${e.now}*${tier}${trail.length ? ` · 지나온 일 ${trail.join(' → ')}` : ''} · 이어지는 일은 스레드` }] },
+  ];
+}
+
+/**
+ * 제안 스레드의 답글 — 머리 · 본문 · 상태, 사람 차례면 버튼. 제목은 바깥 메시지에 있어 되풀이하지 않는다.
+ * `mention` 을 주면 결정을 묻는 답글에 사용자를 부른다 — 봇이 연 스레드의 답글은 알림이 안 갈 수 있다.
+ */
+export function buildThreadReply(n: FlowNotice, head: string, mention?: string): unknown[] {
+  const tier = TIER_LABEL[n.tier] ? ` · ${TIER_LABEL[n.tier]}` : '';
+  const btns = buttonsBlock(n);
+  const lines = [`*${head}*${btns && mention ? ` <@${mention}>` : ''}  _${n.state_label}${tier}_`, clip(n.text, 600)].filter(Boolean);
+  const blocks: unknown[] = [{ type: 'section', block_id: `acts_${n.id}`, text: { type: 'mrkdwn', text: lines.join('\n') } }];
+  if (btns) blocks.push(btns);
+  return blocks;
+}
+
+/** 요약 목록에 싣는 줄 수 — 넘친 것은 desk 로 안내. 줄 10개마다 블록 하나라 50블록 안. */
+const DIGEST_MAX_LINES = 30;
+
+/**
+ * 아침 요약(스레드 방식) — 버튼 없는 목록 · 줄마다 그 제안 스레드 링크. 결정 버튼은 제안 스레드의 답글에 있다.
+ * 머리 줄 · 검토 대기 설명 · 멈춤 줄은 `buildDigestBlocks` 와 같다. 보낼 것이 없으면 null.
+ */
+export function buildDigestLinkBlocks(d: FlowDigest, links: Record<string, string>): unknown[] | null {
+  const need = d.need_you || [];
+  const stuck = d.stuck || [];
+  const queued = d.counts?.queued || 0;
+  if (!need.length && !stuck.length && !queued) return null;
+  const main = need.filter((n) => n.state !== 'reject-proposed');
+  const rejects = need.filter((n) => n.state === 'reject-proposed');
+  const first = {
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: `*🗂 처리 제안* — 결정 필요 ${main.length}건`
+        + (rejects.length ? ` · 폐기 제안 ${rejects.length}건` : '')
+        + (stuck.length ? ` · 멈춤 ${stuck.length}건` : '')
+        + (queued ? ` · 검토 대기 ${queued}건` : '')
+        + ` · <${d.site}/actions/|desk 에서 보기>`,
+    },
+  };
+  const blocks: unknown[] = [first];
+  if (queued) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: QUEUED_NOTE }] });
+  const line = (n: FlowNotice) => {
+    const tier = TIER_LABEL[n.tier] ? ` · ${TIER_LABEL[n.tier]}` : '';
+    return `• ${n.emoji ? `${n.emoji} ` : ''}${n.state_label}${tier} — <${links[n.id] || n.url}|${plain(clip(n.title, 90))}>`;
+  };
+  const chunks = (rows: string[]) => {
+    for (let i = 0; i < rows.length; i += 10) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: rows.slice(i, i + 10).join('\n') } });
+  };
+  const shownMain = main.slice(0, DIGEST_MAX_LINES);
+  chunks(shownMain.map(line));
+  const shownRejects = rejects.slice(0, Math.max(0, DIGEST_MAX_LINES - shownMain.length));
+  if (shownRejects.length) {
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '폐기 제안 — 사유를 보고 확정하거나 다시 엽니다' }] });
+    chunks(shownRejects.map(line));
+  }
+  const tail: string[] = [];
+  if (need.length) tail.push('결정 버튼은 제안마다 스레드에 있습니다 — 줄을 누르면 그 스레드');
+  const rest = need.length - shownMain.length - shownRejects.length;
+  if (rest > 0) tail.push(`그 외 ${rest}건 — <${d.site}/actions/|desk>`);
+  for (const s of stuck.slice(0, 5)) tail.push(`⏸ <${links[s.id] || s.url}|${plain(clip(s.title, 80))}> — ${clip(s.text, 120)}`);
+  if (stuck.length > 5) tail.push(`멈춘 제안 ${stuck.length - 5}건 더`);
+  if (tail.length) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: tail.join('\n') }] });
+  return blocks;
+}
+
+const QUEUED_NOTE = '검토 대기 = 새벽 검토(업무일 02:00~07:00)가 아직 못 본 권고 · 아침마다 남아 있으면 검토가 멈춘 것(사용량 한도 · 실패)';
+
+/** 아침 요약 — 사람 차례인 제안(버튼)과 멈춘 제안. 둘 다 없으면 null(메시지를 안 보낸다). 스레드 통로가 없을 때의 모양. */
 export function buildDigestBlocks(d: FlowDigest): unknown[] | null {
   const need = d.need_you || [];
   const stuck = d.stuck || [];
@@ -342,10 +488,7 @@ export function buildDigestBlocks(d: FlowDigest): unknown[] | null {
         + ` · <${d.site}/actions/|desk 에서 보기>`,
     },
   }];
-  if (queued) {
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text:
-      '검토 대기 = 새벽 검토(업무일 02:00~07:00)가 아직 못 본 권고 · 아침마다 남아 있으면 검토가 멈춘 것(사용량 한도 · 실패)' }] });
-  }
+  if (queued) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: QUEUED_NOTE }] });
   let shown = 0;
   for (const n of main) {
     if (shown >= DIGEST_MAX_ITEMS) break;
@@ -380,8 +523,10 @@ export function buildDigestBlocks(d: FlowDigest): unknown[] | null {
  * `types` 는 report-log 에 있는 보고서 종류 — 주면 `종류` 를 이름 일부로도 찾는다(예전 `-report kg` 가
  * kg-health · kg-regression 을 함께 찾던 동작). 없으면 준 이름 그대로 링크한다.
  */
-export function buildReportReplyBlocks(d: FlowDigest, type?: string, types?: string[]): unknown[] {
-  const blocks = buildDigestBlocks(d) || [{
+export function buildReportReplyBlocks(
+  d: FlowDigest, type?: string, types?: string[], digest: unknown[] | null = buildDigestBlocks(d),
+): unknown[] {
+  const blocks = digest ? [...digest] : [{
     type: 'section',
     text: { type: 'mrkdwn', text: `*🗂 처리 제안* — 결정할 것 없음 · <${d.site}/actions/|desk 에서 보기>` },
   }];
@@ -719,10 +864,149 @@ export class ActionPipeline {
   private async tell(notes?: FlowNotice[]): Promise<void> {
     for (const n of notes || []) {
       try {
-        await this.deps.post(`${KIND_HEAD[n.kind] || n.kind} — ${n.title}`, buildNoticeBlocks(n));
+        let done = false;
+        if (this.deps.thread) {
+          try {
+            done = await this.tellThread(n);
+          } catch (err) {
+            this.logger.warn('처리 제안 스레드로 못 보냄 — 한 통으로 보냄', err);
+          }
+        }
+        if (!done) await this.deps.post(`${KIND_HEAD[n.kind] || n.kind} — ${n.title}`, buildNoticeBlocks(n));
       } catch (err) {
         this.logger.warn('처리 제안 알림을 못 보냄', err);
       }
+    }
+  }
+
+  // ── 제안 스레드(2026-10-12 사용자 결정) ─────────────────────────────
+
+  /** 지금 상태를 한 칸 옮긴다 — 바깥 메시지의 「지금」과 지나온 일. */
+  private static step(e: ThreadEntry, now: string): void {
+    e.now = now;
+    if (e.trail[e.trail.length - 1] !== now) e.trail.push(now);
+    if (e.trail.length > 12) e.trail = e.trail.slice(-12);
+    e.at = new Date().toISOString();
+  }
+
+  /**
+   * 그 제안의 바깥 메시지를 찾아 지금 상태를 `now` 로 고쳐 쓰거나, 없으면(처음 · 지워짐) 새로 만든다.
+   * 못 보내면 null — 부르는 쪽이 예전 모양으로 물러난다.
+   */
+  private async ensureThread(n: FlowNotice, now: string): Promise<ThreadEntry | null> {
+    const api = this.deps.thread;
+    if (!api) return null;
+    const map = readThreads();
+    const old = map[n.id];
+    const fields = {
+      title: n.title || old?.title || n.id, url: n.url || old?.url || '', emoji: n.emoji ?? old?.emoji ?? '',
+      tier: n.tier || old?.tier || '',
+      // 요약은 제안 머리말의 요약이 실려 오는 것(아침 요약 · 다시 검토 끝)만 — 다른 알림의 글은 그 단계의 글이다
+      summary: (n.kind === 'digest' || n.kind === 'reviewed') && n.text ? n.text : old?.summary || '',
+    };
+    let e: ThreadEntry | null = null;
+    if (old) {
+      e = { ...old, ...fields };
+      ActionPipeline.step(e, now);
+      if (!(await api.update(e.ts, `🗂 ${e.title}`, buildThreadRoot(n.id, e)))) e = null;
+    }
+    if (!e) {
+      // 처음이거나 바깥 메시지가 지워짐 — 지나온 일은 이어 받고 링크 · 열린 요청은 버린다
+      const fresh: ThreadEntry = { ts: '', ...fields, now, trail: [...(old?.trail || [])], at: '' };
+      ActionPipeline.step(fresh, now);
+      const ts = await api.post(`🗂 ${fresh.title}`, buildThreadRoot(n.id, fresh));
+      if (!ts) return null;
+      fresh.ts = ts;
+      e = fresh;
+    }
+    map[n.id] = e;
+    writeThreads(map);
+    return e;
+  }
+
+  /** 대응 기록의 한 제안을 고친다(열린 요청 · 링크) — 파일에서 다시 읽어 고친다. */
+  private static patchThread(id: string, patch: (e: ThreadEntry) => void): void {
+    const map = readThreads();
+    if (!map[id]) return;
+    patch(map[id]);
+    writeThreads(map);
+  }
+
+  /** 알림 한 건을 그 제안 스레드에 — 사람 차례면 버튼과 멘션. 못 하면 false(예전처럼 한 통으로). */
+  private async tellThread(n: FlowNotice): Promise<boolean> {
+    const api = this.deps.thread!;
+    const head = noticeHead(n);
+    const asks = buttonsBlock(n) !== null;
+    let e = await this.ensureThread(n, head);
+    if (!e) return false;
+    let ts = await api.post(`${head} — ${e.title}`, buildThreadReply(n, head, asks ? api.mention : undefined), e.ts);
+    if (!ts) {
+      // 그새 바깥 메시지가 지워졌다 — 대응을 지우고 새로 만들어 한 번 더
+      const map = readThreads();
+      delete map[n.id];
+      writeThreads(map);
+      e = await this.ensureThread(n, head);
+      if (!e) return false;
+      ts = await api.post(`${head} — ${e.title}`, buildThreadReply(n, head, asks ? api.mention : undefined), e.ts);
+      if (!ts) return false;
+    }
+    const replyTs = ts;
+    ActionPipeline.patchThread(n.id, (x) => {
+      if (asks) x.ask = { ts: replyTs, state: n.state };
+      else delete x.ask;
+    });
+    return true;
+  }
+
+  /**
+   * 요약 블록 — 스레드 통로가 있으면 사람 차례인 제안마다 스레드를 갖추고(바깥 메시지 · 결정 요청 답글)
+   * 링크 목록을 낸다. 통로가 없거나 못 갖추면 예전 모양(버튼 포함) — 결정할 길을 잃지 않게.
+   */
+  private async digestFrom(d: FlowDigest): Promise<unknown[] | null> {
+    const api = this.deps.thread;
+    const need = d.need_you || [];
+    if (!api || (!need.length && !(d.stuck || []).length && !d.counts?.queued)) return buildDigestBlocks(d);
+    const links: Record<string, string> = {};
+    try {
+      for (const n of need.slice(0, DIGEST_MAX_LINES)) {
+        const e = await this.ensureThread(n, n.state_label || n.state);
+        if (!e) return buildDigestBlocks(d);
+        if (buttonsBlock(n) && (!e.ask || e.ask.state !== n.state)) {
+          // 요약 자체가 알림이라 멘션은 안 한다
+          const ts = await api.post(`결정할 차례 — ${e.title}`, buildThreadReply(n, '🗂 결정할 차례'), e.ts);
+          // 결정 요청을 못 달면 버튼이 어디에도 없다 — 요약에 버튼을 싣는 예전 모양으로
+          if (!ts) return buildDigestBlocks(d);
+          ActionPipeline.patchThread(n.id, (x) => { x.ask = { ts, state: n.state }; });
+        }
+        const link = e.link || (await api.permalink(e.ts));
+        if (link) {
+          links[n.id] = link;
+          if (link !== e.link) ActionPipeline.patchThread(n.id, (x) => { x.link = link; });
+        }
+      }
+      const map = readThreads();
+      for (const s of d.stuck || []) if (map[s.id]?.link) links[s.id] = map[s.id].link as string;
+    } catch (err) {
+      this.logger.warn('처리 제안 스레드를 못 갖춤 — 예전 모양으로', err);
+      return buildDigestBlocks(d);
+    }
+    return buildDigestLinkBlocks(d, links);
+  }
+
+  /** 결정이 기록되면 바깥 메시지의 지금 상태를 그 결정으로 · 열린 요청은 닫힘. */
+  private async markThread(id: string, now: string): Promise<void> {
+    const api = this.deps.thread;
+    if (!api) return;
+    const map = readThreads();
+    const e = map[id];
+    if (!e) return;
+    ActionPipeline.step(e, now);
+    delete e.ask;
+    writeThreads(map);
+    try {
+      await api.update(e.ts, `🗂 ${e.title}`, buildThreadRoot(id, e));
+    } catch (err) {
+      this.logger.warn('처리 제안 바깥 메시지를 못 고침', err);
     }
   }
 
@@ -744,7 +1028,7 @@ export class ActionPipeline {
       errorCollector.add('처리 제안', `요약을 못 읽음 — ${String(d?.error ?? '답 없음').slice(0, 200)}`);
       return null;
     }
-    return buildDigestBlocks(d as FlowDigest);
+    return this.digestFrom(d as FlowDigest);
   }
 
   /** `-report` 답 블록. report-log 를 못 읽으면 null — 부르는 쪽이 그 사실을 알린다. */
@@ -754,7 +1038,7 @@ export class ActionPipeline {
       this.logger.warn(`보고서 안내를 못 만듦 — ${d?.error ?? 'site 없음'}`);
       return null;
     }
-    return buildReportReplyBlocks(d as FlowDigest, type, type ? reportTypes() : undefined);
+    return buildReportReplyBlocks(d as FlowDigest, type, type ? reportTypes() : undefined, await this.digestFrom(d as FlowDigest));
   }
 
   /** 버튼 결정. 진행이면 곧바로 차례를 청한다(승인 즉시 실행 · 2026-09-29 사용자 결정). */
@@ -772,16 +1056,19 @@ export class ActionPipeline {
     const label = DECISION_LABEL[decision as Decision];
     const at = new Date().toTimeString().slice(0, 5);
     let tail = '';
+    // 스레드 방식이면 뒷일은 그 제안 스레드에 붙는다(`tellThread`)
+    const where = this.deps.thread ? '결과는 이 제안 스레드' : '결과는 DM';
     if (decision === 'approve' && r.state === 'queued') {
       // 계획이 없던 제안 — 이 결정을 전제로 지금 다시 검토한다(report-log `cmd_decide`).
       void this.request('one', id);
-      tail = ' — 계획이 없어 이 결정으로 다시 검토합니다 · 결과는 DM';
+      tail = ` — 계획이 없어 이 결정으로 다시 검토합니다 · ${where}`;
     } else if (decision === 'approve') {
       void this.request('run');
-      tail = r.state === 'executing' ? ' — 실행합니다 · 결과는 DM' : ' — 실행 준비를 시작합니다 · 결과는 DM';
+      tail = r.state === 'executing' ? ` — 실행합니다 · ${where}` : ` — 실행 준비를 시작합니다 · ${where}`;
     } else if (decision === 'reopen') {
       tail = ' — 다음 밤 검토에 다시 올라갑니다';
     }
+    await this.markThread(id, `*${label}* · ${at}`);
     return { ok: true, note: `*${label}* · ${at}${tail}` };
   }
 }
