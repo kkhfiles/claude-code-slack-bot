@@ -55,12 +55,13 @@
   - 예약 문서 리마인더: 이벤트 description에 `[scheduled-doc] reports/scheduled/{파일명}` → type `"scheduled-doc"`, dispatch 시 `## 요약` 섹션 읽어서 Slack 메시지에 포함
   - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
   - 인증 연속 3회 실패 시 자동 일시 중지 + Slack 알림
-- `-report [type]`/`-rp [type]`: 처리 제안 요약(🗂 · 결정 버튼) + desk 의 보고서 링크(`buildReportReplyBlocks`)
+- `-report [type]`/`-rp [type]`: 처리 제안 요약(🗂 · 제안 스레드 링크 목록) + desk 의 보고서 링크(`buildReportReplyBlocks`)
   - **보고서 본문과 옛 버튼** — 보고서 본문은 report-log 저장소에 회차별로 쌓이고 desk 사이트가 그립니다 — 링크 주소는 `flow.py digest` 의 `site` 를 쓴다(이 저장소에 주소를 적지 않는다). report-log 4단계(읽는 쪽 전환)로 `reports/scheduled-reports/` 훑기 · 파일 업로드 · 매니페스트(`_status.json`) · 보관 버튼 · 브리핑 뒤 「📄 보고서 확인」 버튼을 뺐습니다. 이미 올라간 메시지의 옛 버튼은 처리기만 남겨 새 답이나 폐지 안내를 냅니다.
   - 로컬 HTTP 서버 (`src/report-server.ts`): 업무 칸반(`/board`)과 수동 분석 실행(`POST /trigger?type=<종류>` · `-analyze <종류>` 와 같은 `manual` 회차 · `type=@group` 이면 `-analyze` 와 같은 기본 스케줄 그룹 · 호출은 202 만 받고 결과 한 줄은 DM 으로)만 남음 · 127.0.0.1 바인딩, per-process 토큰(`?t=<hex>`) 인증. 옛 `/` 는 칸반으로 돌리고 `/report/…` 는 410. `index.ts`에서 `config.reports.localServer.enabled && config.assistant.configDir` 조건으로 부팅. `EADDRINUSE` 시 +5까지 재시도 후 비활성화.
   - 환경변수: `REPORTS_SERVER_ENABLED` (0이면 비활성), `REPORTS_SERVER_PORT` (기본 8765)
 - `-actions` / `-actions review` / `-actions run`: 처리 제안(report-log) — 그냥 `-actions` 는 결정이 필요한 제안 요약(🗂 · 아침 브리핑에 붙는 것과 같은 블록 · 없으면 한 줄) · `review` 는 검토 대기 제안을 밤 검토 시간대와 무관하게 지금 검토 · `run` 은 진행 중인 제안(실행 준비 · 실행 · 확인)을 지금 이어 가기 — 둘 다 끝나면 🗂 요약을 DM 으로 · 다른 차례가 도는 중이면 그 뒤에 이어 돎(`runActionsNow`) · report-log 자동 기록 클론(`~/.report-log/repo`)이 없으면 설정 안 됨 안내
-  - 처리 제안 흐름: 정기 보고서의 「## 권장 액션」이 `complete` 저장 때 처리 제안으로 등록 → 밤 검토(업무일 `config.json` `actions.reviewWindow` · 기본 02:00~07:00 · 한 시간 타이머 `startActionsTicker`) → 아침 🗂 요약의 [진행] · [보류] · [폐기] 버튼 → 실행 준비 · 실행 · 확인 → 결과 DM · 상태 전환 규칙은 report-log `tools/flow.py` 에 있고 여기 옮겨 적지 않음 · 사람이 시킨 검토가 한도에 끊기면 회복 시각에 이어 감(`.actions-resume.json`) · 원격에 못 맞추거나 요약을 못 만들면 「시스템 이슈」 · 검사 `npm run check:actions`
+  - 처리 제안 흐름: 정기 보고서의 「## 권장 액션」이 `complete` 저장 때 처리 제안으로 등록 → 밤 검토(업무일 `config.json` `actions.reviewWindow` · 기본 02:00~07:00 · 한 시간 타이머 `startActionsTicker`) → 제안 스레드의 [진행] · [보류] · [폐기] 버튼 → 실행 준비 · 실행 · 확인 → 결과는 같은 스레드 · 상태 전환 규칙은 report-log `tools/flow.py` 에 있고 여기 옮겨 적지 않음 · 사람이 시킨 검토가 한도에 끊기면 회복 시각에 이어 감(`.actions-resume.json`) · 원격에 못 맞추거나 요약을 못 만들면 「시스템 이슈」 · 검사 `npm run check:actions`
+  - 제안 스레드(2026-10-12): 제안마다 DM 바깥 메시지 하나(제목 · 요약 · 「지금」 상태 줄 · 상태가 바뀌면 고쳐 씀) · 검토 결과 · 결정 요청(버튼 · 사람 차례면 멘션) · 두 번째 승인 · 결과는 그 스레드 답글 · 아침 🗂 요약은 버튼 없는 목록 + 스레드 링크 · 제안 ↔ 스레드 대응은 `.actions-threads.json`(재시작에도 유지 · 90일) · 바깥 메시지가 지워졌으면 새로 만듦 · 스레드로 못 보내면 예전처럼 DM 한 통(요약은 버튼 포함 모양)
 - `-analyze [type]`/`-an [type]`/`분석 [타입]`: 분석 수동 실행 — 타입 지정 시 단일 실행, 미지정 시 기본 스케줄 그룹 실행 · 둘 다 `manual` 회차(예정일 = 오늘 한국 날짜) · 단일 실행 결과 메시지에 처리한 백엔드(`claude` · `codex`)와 저장 상태
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
   - `-as config`: 현재 설정 표시 (config.json 내용)

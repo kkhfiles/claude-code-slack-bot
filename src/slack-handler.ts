@@ -37,6 +37,7 @@ import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
 import { decisionReply, noticeReply, reportLogAvailable } from './action-pipeline';
+import type { ThreadApi } from './action-pipeline';
 import { captureToInbox, checkinMap, checkinNow, dropCapture, isWorkAssistantEnabled,
   markCaptureFailed, markCaptureTried, pendingCaptures, quickUpdate } from './work-assistant';
 import { boardLabel } from './board-queue';
@@ -353,6 +354,7 @@ export class SlackHandler {
         async (prompt, opts) => this.runAssistantSession(prompt, opts),
         config.assistant.configDir,
         async (text, lead, shown) => this.askFromBoard(text, lead, shown),
+        { actionThreads: this.actionThreadApi() },
       );
 
       // Loopback trigger endpoint for manual analysis (Phase 1.7 / 1.8 / 1.9).
@@ -773,6 +775,45 @@ export class SlackHandler {
    */
   private isAllowedUser(user: string | undefined): boolean {
     return !!user && config.bot.allowUsers.includes(user);
+  }
+
+  /**
+   * 처리 제안 스레드 통로 — 비서 DM 채널에 바깥 메시지 · 답글 · 고쳐 쓰기 · 링크(`ThreadApi`).
+   * **던지지 않는다** — 못 하면 null · false 로 돌려줘 실행기가 예전처럼 한 통으로 보낸다.
+   * 멘션은 봇을 쓰는 사람(허용 목록 첫 사람) — 봇이 연 스레드의 답글은 알림이 안 갈 수 있다.
+   */
+  private actionThreadApi(): ThreadApi {
+    const channel = config.assistant.dmChannel;
+    const client = this.app.client;
+    return {
+      post: async (text, blocks, threadTs) => {
+        try {
+          const r = await client.chat.postMessage({ channel, text, blocks: blocks as any, ...(threadTs ? { thread_ts: threadTs } : {}) });
+          return r.ts ?? null;
+        } catch (err) {
+          this.logger.warn('처리 제안 스레드 메시지를 못 보냄', err);
+          return null;
+        }
+      },
+      update: async (ts, text, blocks) => {
+        try {
+          await client.chat.update({ channel, ts, text, blocks: blocks as any });
+          return true;
+        } catch (err) {
+          this.logger.warn('처리 제안 바깥 메시지를 못 고침 — 새로 만듦', { ts, err: String(err) });
+          return false;
+        }
+      },
+      permalink: async (ts) => {
+        try {
+          const r = await client.chat.getPermalink({ channel, message_ts: ts });
+          return r.permalink ?? null;
+        } catch {
+          return null;
+        }
+      },
+      mention: config.bot.allowUsers[0],
+    };
   }
 
   /**

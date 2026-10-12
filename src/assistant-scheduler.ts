@@ -25,6 +25,7 @@ import type { ContactItem } from './board-queue';
 import { config } from './config';
 import { ladderEventLines, ladderTable, ladderText, sameTier } from './model-ladder';
 import { ActionPipeline, parseWindow, reportLogAvailable, reportLogState, runReportLog } from './action-pipeline';
+import type { ThreadApi } from './action-pipeline';
 
 /**
  * 처리 제안 타이머 간격. **이 값이 곧 멈춘 제안이 다시 움직이기까지의 최대 시간이다** —
@@ -653,6 +654,8 @@ interface RetryEntry {
 export interface SchedulerDeps {
   /** report-log 명령(`runReportLog` 와 같은 모양). 실패도 `{ error }` 로 — 던지지 않는다. */
   reportLog?: (script: 'flow' | 'report_log', args: string[]) => Promise<any>;
+  /** 처리 제안 스레드 통로(DM 채널) — 없으면 처리 제안 알림이 예전처럼 한 통씩 나간다. */
+  actionThreads?: ThreadApi;
 }
 
 export interface SpawnOpts {
@@ -873,6 +876,7 @@ export class AssistantScheduler {
         return result;
       },
       post: (text, blocks) => this.sendMessage(text, blocks),
+      thread: deps.actionThreads,
       useSdk: shouldUseSdk('analysis:actions'),
       afterResume: () => this.postActionDigest(),
     });
