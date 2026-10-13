@@ -12,6 +12,13 @@ import { ReportServer } from './report-server';
 
 const logger = new Logger('Main');
 
+// **봇이 띄운 세션이라는 표시** (2026-10-13). 세션이 이 프로세스의 환경을 물려받으므로
+// 여기 한 번 심으면 대화·예약 세션 모두에 실린다. 사용자 설정의 훅이 이 표시를 보고
+// 사람이 앉은 터미널에서만 할 일을 건너뛴다 — 세션 끝 동기화가 그랬다. Claude Code 는
+// 세션 끝 훅을 1.5초까지 기다리고 봇 대화는 차례마다 세션이 끝나서, 답 뒤처리가 차례마다
+// 1.76초(중앙) 늘어져 있었다.
+process.env.CLAUDE_BOT_SESSION = '1';
+
 async function start() {
   try {
     // Validate configuration
