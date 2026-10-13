@@ -41,6 +41,8 @@ import type { ThreadApi } from './action-pipeline';
 import { captureToInbox, checkinMap, checkinNow, dropCapture, isWorkAssistantEnabled,
   markCaptureFailed, markCaptureTried, pendingCaptures, quickUpdate } from './work-assistant';
 import { boardLabel } from './board-queue';
+import { readUnseen } from './dm-context';
+import { containsPrivate } from './privacy-guard';
 
 /**
  * 슬랙 대화 세션의 사고 깊이. SDK 기본값은 `'high'` 다.
@@ -1400,6 +1402,22 @@ export class SlackHandler {
     const finalPrompt = processedFiles.length > 0
       ? await this.fileHandler.formatFilePrompt(processedFiles, basePrompt)
       : basePrompt;
+    // **세션이 못 본 대화방 글을 사람 말 앞에 붙인다** (2026-10-13 · `dm-context.ts`).
+    // 스레드 댓글은 빈 새 세션이 떠서 댓글을 단 글을 모르고, 넛지·좁은 길의 ❓ 처럼
+    // 세션 밖에서 나간 글은 세션 기록에 없다 — 짧은 답이 엉뚱하게 읽힌 까닭이 그 둘이었다.
+    // 봇이 스스로 넘긴 차례(`pushed`)는 사람 말이 아니라 안 붙인다. 슬랙 왕복이라 아래
+    // 준비와 같이 돌게 여기서 걸어 두고, 세션을 띄우기 직전에 받는다.
+    const unseenPending: Promise<string> =
+      (isDM && !(event as any).pushed && !planParsed && !resumeData)
+        ? this.getBotUserId().then((botUserId) => readUnseen(this.app.client as any, channel, {
+            currentTs: ts,
+            threadTs: thread_ts,
+            isNewSession,
+            sinceSec: isNewSession ? undefined : session!.lastActivity.getTime() / 1000,
+            botUserId,
+            isPrivate: containsPrivate,
+          })).catch(() => '')
+        : Promise.resolve('');
 
     // Determine permission mode
     const isPlanMode = !!planParsed;
@@ -1543,6 +1561,11 @@ export class SlackHandler {
       // 위에서 미리 걸어 둔 것을 여기서 받는다 — 그동안 토큰 동기화가 돌았다.
       const slotMap = await slotMapPending;
       mark('체크인 번호표');
+      const unseen = await unseenPending;
+      mark('못 본 글');
+      // 로그에는 글을 안 남긴다 — 몇 줄을 붙였는지만.
+      if (unseen) this.logger.info('세션이 못 본 대화방 글을 붙임', { lines: unseen.split('\n').filter((l) => l.startsWith('- ')).length });
+      const sessionPrompt = unseen ? `${unseen}\n${finalPrompt}` : finalPrompt;
       const surfaceNote = [
         SLACK_SURFACE_NOTE,
         capture ? CAPTURE_NOTE : '',
@@ -1581,8 +1604,8 @@ export class SlackHandler {
       mark('옵션 짓기');
       this.logger.info('띄우기 전 준비', { ms: lap });
       const cliProcess = useSdk
-        ? this.sdkHandler.runQuery(finalPrompt, sdkOpts)
-        : this.cliHandler.runQuery(finalPrompt, {
+        ? this.sdkHandler.runQuery(sessionPrompt, sdkOpts)
+        : this.cliHandler.runQuery(sessionPrompt, {
             ...runOpts, env: sessionEnv, appendSystemPrompt: surfaceNote,
           });
 
