@@ -34,6 +34,10 @@ process.env.WORK_ASSISTANT_STATE = path.join(TMP, 'wa-state');
 // 폴백이 진짜 실행체를 부르지 않게 — 없는 이름이면 빈손으로 물러난다.
 process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
 process.env.LADDER_PYTHON = 'python-없는-이름-2026';
+// 엔진 상태 · 브리핑 자국 · 한도 재시도 계획 — 운영 파일을 읽으면 그날 막힘에 따라 1차를 안 띄우고, 쓰면 운영이 바뀐다.
+process.env.ENGINE_STATE_FILE = path.join(TMP, 'engine-state.json');
+process.env.BRIEFING_DELIVERED_FILE = path.join(TMP, 'briefing-delivered.json');
+process.env.ANALYSIS_RETRY_FILE = path.join(TMP, 'analysis-retry.json');
 fs.mkdirSync(path.join(STATE, 'tmp'), { recursive: true });
 
 const require = createRequire(import.meta.url);
@@ -58,9 +62,14 @@ const wa = require('../dist/work-assistant.js');
 const ladder = require('../dist/model-ladder.js');
 // 폴백 둘을 시험 내내 빈손으로 — 시험이 엇나가 1차가 터져도 진짜 codex · 사다리를 띄우지 않게.
 // (없는 실행체 이름이 두 번째 문이다.) 폴백을 재는 절만 잠깐 갈아 끼운다.
-const quietCodex = async () => '';
+/** codex 한 차례를 가짜로 — 글을 돌려주는 함수를 `codexTurn` 결과 모양으로 감싼다(빈 글이면 실패). */
+const codexSays = (fn) => async (prompt, opts) => {
+  const text = await fn(prompt, opts);
+  return { text: text || '', kind: text ? 'ok' : 'fail', steps: [], writeRan: false, ms: 0 };
+};
+const quietCodex = codexSays(async () => '');
 const quietLadder = async () => null;
-wa.codexSession = quietCodex;
+wa.codexTurn = quietCodex;
 ladder.ladderText = quietLadder;
 
 // ── 임시 레포 모양 — assistant/config.json + prompts ─────────────────
@@ -570,8 +579,8 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   await h.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
   eq('조용한 회차 → 세션 한 번 · --partial 없이 저장', [h.spawns.length, commitsOf(rl)], [1, [['2026-10-03-probe-r1', 'claude', false]]]);
   // 폴백(codex · 도구 0회로 돌아옴)이 빈손 → 되물음으로 안 침(다시 안 돌림) · --backend codex
-  const prevCodex = wa.codexSession;
-  wa.codexSession = async () => '바뀐 것 없음';
+  const prevCodex = wa.codexTurn;
+  wa.codexTurn = codexSays(async () => '바뀐 것 없음');
   try {
     const rl2 = fakeReportLog();
     const FAIL0 = { ...WORKED, text: '', isError: true, subtype: 'error', toolCalls: 0 };
@@ -580,7 +589,7 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
     eq('폴백 빈손은 되물음 아님 · codex 로 저장', [h2.spawns.length, commitsOf(rl2)], [1, [['2026-10-03-probe-r1', 'codex', false]]]);
     eq('조용한 회차는 완료로 적는다', journal().filter((r) => r.kind === 'outcome').at(-1)?.outcome, 'completed');
   } finally {
-    wa.codexSession = prevCodex;
+    wa.codexTurn = prevCodex;
   }
   // 같은 종류라도 Claude 가 도구 0회로 끝나면 여전히 되물음 — 확인도 안 한 것이다
   const rl3 = fakeReportLog();
@@ -599,8 +608,8 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   eq('설정 없음', S.noOutputOkType(undefined), false);
   eq('참 글자는 안 받음(true 만)', S.noOutputOkType({ noOutputOk: 'true' }), false);
 
-  const prevCodex = wa.codexSession;
-  wa.codexSession = async () => '조용한 날 — 쓸 것 없음';
+  const prevCodex = wa.codexTurn;
+  wa.codexTurn = codexSays(async () => '조용한 날 — 쓸 것 없음');
   const FAIL0 = { ...WORKED, text: '', isError: true, subtype: 'error', toolCalls: 0 };
   try {
     // mode 없이 noOutputOk 만 — 폴백 빈손은 되물음 아님 · 완료 · --partial 없이(no-output)
@@ -618,7 +627,7 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
     await h2.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
     eq('표시 없는 종류 — 폴백 빈손은 되물음으로 다시 돌림', h2.spawns.length, 2);
   } finally {
-    wa.codexSession = prevCodex;
+    wa.codexTurn = prevCodex;
     writeConfig();
   }
 }
@@ -908,15 +917,15 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   ok('타임아웃 줄에 저장 안 함 → sweep(러너 종류 · 빈 임시 파일)', done.includes('⏱️ 타임아웃: kg-regression(저장 안 함 → sweep)'));
 
   // 폴백이 받은 종류는 처리 백엔드도
-  const prevCodex = wa.codexSession;
-  wa.codexSession = async (prompt) => { const o = outIn(prompt); if (o) fs.writeFileSync(o, '# codex\n', 'utf-8'); return '썼다'; };
+  const prevCodex = wa.codexTurn;
+  wa.codexTurn = codexSays(async (prompt) => { const o = outIn(prompt); if (o) fs.writeFileSync(o, '# codex\n', 'utf-8'); return '썼다'; });
   try {
     const gc = harness({ rl: fakeReportLog(), results: [{ ...WORKED, text: '', isError: true, subtype: 'error', toolCalls: 0 }] });
     await gc.sched.runAnalysisGroup('saturday-00:00', ['probe'], { slot: '2026-10-03', trigger: 'scheduled' });
     const line = gc.sent.find((t) => t.startsWith('📊')) ?? '';
     ok(`폴백이 받으면 처리 백엔드 · 저장 — 받음 ${line}`, line.includes('probe(codex · 저장 complete)'));
   } finally {
-    wa.codexSession = prevCodex;
+    wa.codexTurn = prevCodex;
   }
 
   // 재시도 완료 메시지도 같은 모양
@@ -939,13 +948,13 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   eq('1차가 해내면 servedBy=claude', r.servedBy, 'claude');
 
   // 1차가 도구 0회로 실패 → codex 가 받음 → codex
-  const prevCodex = wa.codexSession;
+  const prevCodex = wa.codexTurn;
   // codex 가 보고서를 남겼다고 친다 — 안 남기면 도구 0회 재시도(되물음)가 Claude 로 다시 돈다.
-  wa.codexSession = async (prompt) => {
+  wa.codexTurn = codexSays(async (prompt) => {
     const out = outIn(prompt);
     if (out) fs.writeFileSync(out, '# codex 보고서\n', 'utf-8');
     return 'codex 가 썼다';
-  };
+  });
   try {
     const { sched: s2 } = harness({ results: [{ ...WORKED, text: '', isError: true, subtype: 'error', toolCalls: 0 }] });
     const r2 = await s2.spawnOrFallback('시험', '아무 말', { workingDirectory: TMP });
@@ -956,7 +965,7 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
     const msg = await s3.runAnalysisManual('probe');
     ok(`수동 실행 메시지에 「처리 codex」 — 받음 ${msg}`, msg.includes('처리 codex'));
   } finally {
-    wa.codexSession = prevCodex;
+    wa.codexTurn = prevCodex;
   }
 
   // 도구 없는 회차가 사다리의 agy 로 넘어가면 → agy

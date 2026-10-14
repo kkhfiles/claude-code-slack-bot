@@ -82,6 +82,51 @@ eq('빈 결말은 리미트 아님', isSessionRateLimited({}), false);
 eq('경고 단계는 리미트가 아니다',
    isSessionRateLimited({ rateLimited: false, isError: false, text: 'approaching usage limit' }), false);
 
+// --- codex 실패 글 (2026-10-14 · 엔진 폴백 4단계) ---------------------------
+//
+// **실측 전이다** — codex 가 한도에 걸린 글은 아직 봇 로그에 없다. 아래는 codex 가 내는 문구와
+// llm-playbook 이 겪은 글이다. 막힘으로 적는 것은 아는 문구뿐 — 그 밖의 실패를 막힘으로 적으면
+// 한 시간 동안 codex 를 건너뛴다. 「try again」 하나만으로는 안 본다(일시 오류도 그렇게 끝난다).
+{
+  const { classifyCodexErrorText, parseCodexResetAt } = require(MOD);
+  // 2026-10-14 15:00 (이 PC 시각) — codex 는 같은 PC 시각으로 「try again at」 을 적는다.
+  const NOW = new Date(2026, 9, 14, 15, 0, 0).getTime();
+  const sec = (d) => Math.floor(d.getTime() / 1000);
+  const kind = (t) => classifyCodexErrorText(t, NOW)?.kind ?? null;
+  for (const t of [
+    "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro) or try again at 3:45 PM.",
+    "You've hit your usage limit. Try again in 2 hours 5 minutes.",
+    'Your workspace is out of credits',
+    'exceeded retry limit, last status: 429 Too Many Requests',
+    '{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":1200}}',
+    'Rate limit reached for requests',
+    'Quota exceeded. Check your plan and billing details.',
+  ]) eq(`codex 한도 글 → usage: ${t.slice(0, 50)}`, kind(t), 'usage');
+  for (const t of [
+    'stream disconnected before completion: error sending request',
+    'An error occurred. Please try again later.',
+    "'codex-없는-이름-2026' is not recognized as an internal or external command",
+    'try again at the next opportunity',
+    '',
+  ]) eq(`codex 그 밖의 실패는 막힘 아님: ${t.slice(0, 50) || '(빈 글)'}`, kind(t), null);
+
+  eq('「try again at 3:45 PM」 — 오늘 그 시각',
+     parseCodexResetAt('try again at 3:45 PM.', NOW), sec(new Date(2026, 9, 14, 15, 45)));
+  eq('「try again at 9:05 AM」 — 지났으면 내일',
+     parseCodexResetAt('try again at 9:05 AM.', NOW), sec(new Date(2026, 9, 15, 9, 5)));
+  eq('「try again at Oct 16th, 2026 1:30 PM」 — 그 날짜',
+     parseCodexResetAt('or try again at Oct 16th, 2026 1:30 PM.', NOW), sec(new Date(2026, 9, 16, 13, 30)));
+  eq('「try again in 2 hours 5 minutes」 — 더한 값',
+     parseCodexResetAt('Try again in 2 hours 5 minutes.', NOW), Math.floor(NOW / 1000) + 7500);
+  eq('「try again in 3 days 1 hour」',
+     parseCodexResetAt('try again in 3 days 1 hour', NOW), Math.floor(NOW / 1000) + 3 * 86400 + 3600);
+  eq('서버 글의 resets_at', parseCodexResetAt('{"resets_at": 1789534414}', NOW), 1789534414);
+  eq('서버 글의 resets_in_seconds', parseCodexResetAt('"resets_in_seconds":1200', NOW), Math.floor(NOW / 1000) + 1200);
+  eq('시각이 없으면 null(엔진 상태가 다시 볼 시각을 정한다)', parseCodexResetAt('Your workspace is out of credits', NOW), null);
+  eq('한도 글의 시각이 판정에 실린다',
+     classifyCodexErrorText("You've hit your usage limit. Try again at 3:45 PM.", NOW)?.until, sec(new Date(2026, 9, 14, 15, 45)));
+}
+
 // --- 소스 구조 검사 — 옛 모양이 되돌아오는 것을 막는다 -----------------------
 //
 // 위 단위 검사는 함수 하나가 맞게 판정하는지만 본다. 부르는 쪽이 그 함수를
@@ -178,4 +223,4 @@ if (fails.length) {
   process.exit(1);
 }
 console.log('통과 — 한도 판정 (정상 완료 본문 · 구조화 신호 · 에러 뒷문 · 경고 단계'
-            + ' · 소비처 배선 · 중단↔재개 대칭 · 산출물 백스톱)');
+            + ' · 소비처 배선 · 중단↔재개 대칭 · 산출물 백스톱 · codex 한도 글)');

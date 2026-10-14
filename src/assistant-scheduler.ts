@@ -14,11 +14,12 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell, dropCapture,
-  offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexSession, codexWritableDirs,
+  offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexTurn, codexWritableDirs,
   improveGather, improveAccept, improveShow, improvePosted, improveDecide } from './work-assistant';
 import type { QuickOutcome } from './work-assistant';
 import { engineState } from './engine-state';
-import { isHeldOutcome, type TurnOutcome } from './turn-outcome';
+import { codexQuota } from './codex-quota';
+import { isHeldOutcome, READ_ONLY_TOOLS, type TurnOutcome } from './turn-outcome';
 import { buildImproveBlocks, improveEnabled, improvePreviewText,
   IMPROVE_DECISIONS, IMPROVE_ID_RE } from './improve-message';
 import { boardLabel, boardPushAuthBroken, boardPushTarget, boardQueueEnabled, drain, event as recordEvent } from './board-queue';
@@ -565,7 +566,8 @@ export function slashPath(p: string): string {
 
 // ── 프롬프트 자리 ────────────────────────────────────────────────────
 //
-// 값은 **프롬프트 본문에 직접** 넣는다 — Codex 폴백은 환경 변수를 못 받는다. 직전 보고서 ·
+// 값은 **프롬프트 본문에 직접** 넣는다 — 처음엔 Codex 폴백이 환경 변수를 못 받아서였다(2026-10-14 부터
+// 받는다 · `codexTurn`). 본문이 정본인 것은 그대로다. 직전 보고서 ·
 // 피할 권고를 세션이 읽게 두지 않고 여기서 넣는 까닭은 Bash 가 없는 종류(6종)도 받게 하려는 것이다.
 
 /**
@@ -755,6 +757,60 @@ const GCAL_WRITE_TOOLS = [
 
 const GCAL_ALL_TOOLS = [...GCAL_READ_TOOLS, ...GCAL_WRITE_TOOLS];
 
+/**
+ * 1차가 읽기만 할 수 있나 — 그러면 codex 폴백도 읽기 전용 모래상자로 간다(**폴백은 1차보다 넓게 쓰지
+ * 않는다** · 2026-10-14). 볼 목록은 `tools`(쓸 수 있는 도구)가 있으면 그것이고, 없으면 `allowedTools`
+ * (묻지 않고 쓰는 도구 · `trust` 면 막는 것이 없어 안 본다). 목록이 없으면 쓸 수 있다고 본다.
+ * 아침 브리핑(Read · Glob · Grep · 달력 읽기)이 읽기 전용이다.
+ */
+export function primaryReadOnly(opts: Pick<SpawnOpts, 'tools' | 'allowedTools' | 'permissionMode'>): boolean {
+  const ro = (t: string) => READ_ONLY_TOOLS.has(t) || GCAL_READ_TOOLS.includes(t);
+  if (Array.isArray(opts.tools) && opts.tools.length > 0) return opts.tools.every(ro);
+  if (opts.permissionMode === 'trust') return false;
+  return Array.isArray(opts.allowedTools) && opts.allowedTools.length > 0 && opts.allowedTools.every(ro);
+}
+
+/**
+ * 아침 브리핑을 올린 날 — **올린 뒤에만** 찍는다(`deliverBriefing`). 놓친 브리핑 · 한도 회복 뒤 다시
+ * 돌리기가 이것을 본다. 시험은 `BRIEFING_DELIVERED_FILE` 로 옮긴다(부를 때마다 읽는다).
+ */
+function briefingMarkFile(): string {
+  return process.env.BRIEFING_DELIVERED_FILE || path.join(__dirname, '..', '.briefing-delivered.json');
+}
+
+/**
+ * 한도 재시도 계획 — 재시작해도 남게 파일에 둔다(`scheduleAnalysisRetry`). 시험은 `ANALYSIS_RETRY_FILE`.
+ */
+function analysisRetryFile(): string {
+  return process.env.ANALYSIS_RETRY_FILE || path.join(__dirname, '..', '.analysis-retry.json');
+}
+
+/** 한도가 풀려 브리핑을 다시 돌리는 마지막 시각(한국 시각) — 넘으면 그날 브리핑은 없다. */
+const BRIEFING_RECOVER_UNTIL = '12:00';
+/** 브리핑이 한도로 못 나갔을 때의 한 줄 — 회복 타이머가 정오 전에 다시 돌린다(`recoverBriefingIfNeeded`). */
+const BRIEFING_LIMIT_NOTICE = '⏳ 브리핑 실행 중 rate limit 도달. 한도가 정오 전에 풀리면 그때 다시 돌립니다.';
+const BRIEFING_CATCHUP_LIMIT_NOTICE = '⏳ Catch-up 브리핑 중 rate limit 도달.';
+
+/**
+ * 브리핑 결과를 올려도 되나 — 한도면 `limited`, 오류 · 빈 글이면 `failed`. **오류 글을 브리핑으로
+ * 올리지 않는다.** 자기 예산 상한(`error_max_budget_usd`)만 있는 만큼 올린다(「브리핑은 있는 만큼 전달」).
+ */
+export function briefingOutcome(r: SessionResult): 'ok' | 'limited' | 'failed' {
+  if (isSessionRateLimited(r)) return 'limited';
+  if (!(r.text || '').trim() || (r.isError && r.subtype !== 'error_max_budget_usd')) return 'failed';
+  return 'ok';
+}
+
+/** 파일에 남긴 한도 재시도 한 건. */
+interface RetryPlan {
+  id: string;
+  schedule: string;
+  origin: { slot: string; trigger: RunTrigger };
+  queue: RetryEntry[];
+  /** 돌릴 시각(epoch 밀리초). */
+  due: number;
+}
+
 // --- Cost tracking ---
 
 interface CostEntry {
@@ -798,8 +854,9 @@ export class AssistantScheduler {
   private briefingTimer: ReturnType<typeof setTimeout> | null = null;
   private analysisTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   /** 한도 재시도 — `clearAllTimers` 밖에 둔다. 설정을 다시 읽어도 살아남아야 하고(다시 걸어 줄
-   *  곳이 없다) 같은 스케줄의 재시도가 둘이어도 둘 다 쥔다. 봇을 끌 때(`stop`)만 푼다. */
-  private analysisRetryTimers = new Set<ReturnType<typeof setTimeout>>();
+   *  곳이 없다) 같은 스케줄의 재시도가 둘이어도 둘 다 쥔다. 봇을 끌 때(`stop`)만 푼다.
+   *  열쇠는 계획 id — 계획은 파일에 있어 재시작해도 다시 건다(`rearmAnalysisRetries`). */
+  private analysisRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private workNudgeTimer: ReturnType<typeof setTimeout> | null = null;
   private offsitePushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -809,6 +866,10 @@ export class AssistantScheduler {
   private daouKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
   private focusTimer: ReturnType<typeof setTimeout> | null = null;
   private focusBusy = false;
+  /** 브리핑이 도는 중 — 예약 · 놓친 것 · 회복 뒤 다시가 겹쳐 두 번 올리지 않게. */
+  private briefingBusy = false;
+  /** 한도 재시도 계획을 지금 돌리는 중 — 기동 · 회복이 겹쳐 같은 계획을 두 번 돌리지 않게. */
+  private retryBusy = false;
   private summaryTimer: ReturnType<typeof setTimeout> | null = null;
   private improveTimer: ReturnType<typeof setTimeout> | null = null;
   private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
@@ -905,6 +966,10 @@ export class AssistantScheduler {
     setTimeout(() => this.catchUpBriefingIfNeeded().catch(e =>
       this.logger.error('Catch-up briefing failed', e)), 15_000);
 
+    // 한도 재시도 계획을 파일에서 다시 건다 — 전에는 메모리 타이머라 재시작하면 그 주 분석이 사라졌다.
+    setTimeout(() => this.rearmAnalysisRetries().catch(e =>
+      this.logger.error('한도 재시도 다시 걸기 실패', e)), 35_000);
+
     // Catch-up spinner fresh batch if missing (e.g. PC off at 00:00 data-sync → no novelty).
     // Lightweight: only fresh_pool_generator + build_daily_pool, not the full data-sync.
     setTimeout(() => this.catchUpSpinnerFreshIfNeeded().catch(e =>
@@ -931,7 +996,8 @@ export class AssistantScheduler {
 
   stop(): void {
     this.clearAllTimers();
-    for (const timer of this.analysisRetryTimers) clearTimeout(timer);
+    // 타이머만 푼다 — 계획은 파일에 남아 다음 기동이 다시 건다.
+    for (const timer of this.analysisRetryTimers.values()) clearTimeout(timer);
     this.analysisRetryTimers.clear();
     this.stopConfigWatcher();
     if (this.midnightTimer) {
@@ -946,14 +1012,25 @@ export class AssistantScheduler {
     return this.isWorkingHours();
   }
 
-  /** Manual trigger for -briefing command. */
-  async runBriefing(): Promise<{ text: string }> {
+  /**
+   * Manual trigger for -briefing command. 올리는 것은 대화 처리기다 — `ok` 면 올린 뒤
+   * `markBriefingDelivered('manual')` 를 부른다. **한도 · 실패 글은 브리핑으로 안 돌려준다.**
+   */
+  async runBriefing(): Promise<{ text: string; ok: boolean; servedBy?: Backend }> {
     if (!this.config?.briefing.enabled) {
-      return { text: 'Briefing is disabled in config.' };
+      return { text: 'Briefing is disabled in config.', ok: false };
     }
     const result = await this.executeBriefing();
     this.recordSessionCost('briefing', result);
-    return { text: result.text + this.formatErrorReport() + this.formatCostLine() };
+    const got = briefingOutcome(result);
+    if (got === 'limited') {
+      return { text: '⏳ 브리핑을 못 만들었습니다 — rate limit 도달(대신 받을 엔진도 못 함).', ok: false };
+    }
+    if (got === 'failed') {
+      this.logger.error('Manual briefing failed', { subtype: result.subtype, servedBy: result.servedBy });
+      return { text: '❌ 브리핑을 못 만들었습니다. 로그를 보세요.', ok: false };
+    }
+    return { text: result.text + this.formatErrorReport() + this.formatCostLine(), ok: true, servedBy: result.servedBy };
   }
 
   /** Manual trigger for -analyze command. Run single type or all default-schedule types. */
@@ -2329,6 +2406,7 @@ export class AssistantScheduler {
         return;
       }
 
+      this.briefingBusy = true;
       try {
         const result = await this.executeBriefing();
         this.recordSessionCost('briefing', result);
@@ -2337,33 +2415,27 @@ export class AssistantScheduler {
         // 요약하는데, 그 보고서 주제가 「사용량·한도·실패」다. 본문만 보고 판정하면
         // 「429가 적힌 보고서를 요약한 브리핑」이 통째로 삼켜지고 사용자는 그날
         // 브리핑 대신 「rate limit 도달」 한 줄만 받는다. 판정은 구조화 신호로 한다.
-        if (isSessionRateLimited(result)) {
+        const sent = await this.deliverBriefing(result, 'scheduled');
+        if (sent === 'limited') {
           this.logger.warn('Briefing hit rate limit');
-          await this.sendMessage('⏳ 브리핑 실행 중 rate limit 도달. 다음 업무일에 재시도합니다.').catch(() => {});
+          await this.sendMessage(BRIEFING_LIMIT_NOTICE).catch(() => {});
+        } else if (sent === 'failed') {
+          this.logger.error('Briefing failed', { subtype: result.subtype, servedBy: result.servedBy });
+          await this.sendMessage('❌ Morning briefing failed. Check logs for details.').catch(() => {});
         } else {
-          // Append error report + cost stats line
-          await this.sendMessage(result.text +
-            this.formatErrorReport() + this.formatCostLine());
-
-          // NAS 이동 컨펌 큐 — 항목별 결정 버튼 (inbox auto-classify company 분류분)
-          try {
-            const nasBlocks = await buildNasQueueBlocks(await listNasQueue());
-            if (nasBlocks) {
-              await this.sendMessage('📦 NAS 이동 컨펌 대기', nasBlocks).catch(() => {});
-            }
-          } catch (err) {
-            this.logger.warn('NAS confirm queue check failed', err);
-          }
+          await this.postNasQueue();
         }
       } catch (error) {
         const msg = (error as Error).message || '';
         if (isRateLimitText(msg)) {
           this.logger.warn('Briefing hit rate limit');
-          await this.sendMessage('⏳ 브리핑 실행 중 rate limit 도달. 다음 업무일에 재시도합니다.').catch(() => {});
+          await this.sendMessage(BRIEFING_LIMIT_NOTICE).catch(() => {});
         } else {
           this.logger.error('Briefing failed', error);
           await this.sendMessage('❌ Morning briefing failed. Check logs for details.').catch(() => {});
         }
+      } finally {
+        this.briefingBusy = false;
       }
 
       // **처리 제안 요약은 브리핑 결과와 무관하게 붙인다** — 요약은 세션이 아니라 report-log 를 읽어
@@ -2381,40 +2453,147 @@ export class AssistantScheduler {
     if (!this.config?.briefing.enabled) return;
     if (this.isNonWorkingDay().skip) return;
 
-    // Check if briefing already ran today (KST)
-    const todayKST = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
-    const lastBriefing = [...this.costEntries]
-      .reverse()
-      // 폴백이 돌다 실패한 회차(`ok: false`)는 「돌았다」로 안 친다 — 재시작 뒤에 다시 돌아야 한다.
-      .find(e => e.type === 'briefing' && e.ok !== false);
-
-    if (lastBriefing) {
-      const lastDateKST = new Date(new Date(lastBriefing.timestamp).getTime() + 9 * 3600_000)
-        .toISOString().slice(0, 10);
-      if (lastDateKST === todayKST) return; // Already ran today
-    }
+    // 오늘 올렸나 — 「돌았나」(비용 원장)가 아니라 「올렸나」(자국)로 본다. 원장으로 보면 돌다 한도에
+    // 막힌 회차도 「돌았다」라 그날 브리핑이 영영 안 나갔다.
+    if (this.briefingDeliveredToday()) return;
 
     // Check if briefing time has passed
-    const [h, m] = this.config.briefing.time.split(':').map(Number);
-    const nowKST = new Date(Date.now() + 9 * 3600_000);
-    if (nowKST.getUTCHours() < h || (nowKST.getUTCHours() === h && nowKST.getUTCMinutes() < m)) return;
+    if (!this.pastBriefingTime()) return;
+    if (this.briefingBusy) return;
 
     this.logger.info('Catch-up briefing: missed today, running now');
+    this.briefingBusy = true;
     try {
       const result = await this.executeBriefing();
       this.recordSessionCost('briefing', result);
-      await this.sendMessage(result.text +
-        this.formatErrorReport() + this.formatCostLine());
+      // 한도 · 실패 글을 브리핑인 양 올리지 않는다 — 전에는 막힌 회차의 오류 글이 그대로 나갔다.
+      const sent = await this.deliverBriefing(result, 'catch-up');
+      if (sent === 'limited') {
+        await this.sendMessage(BRIEFING_CATCHUP_LIMIT_NOTICE).catch(() => {});
+      } else if (sent === 'failed') {
+        this.logger.error('Catch-up briefing failed', { subtype: result.subtype, servedBy: result.servedBy });
+      }
     } catch (error) {
       const msg = (error as Error).message || '';
       if (isRateLimitText(msg)) {
-        await this.sendMessage('⏳ Catch-up 브리핑 중 rate limit 도달.').catch(() => {});
+        await this.sendMessage(BRIEFING_CATCHUP_LIMIT_NOTICE).catch(() => {});
       } else {
         this.logger.error('Catch-up briefing failed', error);
       }
+    } finally {
+      this.briefingBusy = false;
     }
     // 예약 브리핑과 같은 까닭으로 브리핑 결과와 무관하게 붙인다.
     await this.postMorningProposals();
+  }
+
+  /** 오늘(한국 날짜) 브리핑 시각이 지났나. */
+  private pastBriefingTime(now: Date = new Date()): boolean {
+    if (!this.config) return false;
+    const [h, m] = this.config.briefing.time.split(':').map(Number);
+    const nowKST = new Date(now.getTime() + 9 * 3600_000);
+    return nowKST.getUTCHours() > h || (nowKST.getUTCHours() === h && nowKST.getUTCMinutes() >= m);
+  }
+
+  /**
+   * 브리핑 결과를 올린다 — **올렸을 때만** 그날 자국을 찍는다. 한도 · 실패로 끝난 결과는 안 올리고
+   * 갈래만 돌려준다(부르는 쪽이 한 줄 안내를 정한다). 자기 예산 상한(`error_max_budget_usd`)은 있는
+   * 만큼 올린다(`rate-limit-utils.ts` 「브리핑은 있는 만큼 전달」).
+   */
+  private async deliverBriefing(
+    result: SessionResult, how: 'scheduled' | 'catch-up' | 'recovery',
+  ): Promise<'posted' | 'limited' | 'failed'> {
+    const got = briefingOutcome(result);
+    if (got !== 'ok') return got;
+    await this.sendMessage(result.text + this.formatErrorReport() + this.formatCostLine());
+    this.markBriefingDelivered(how, result.servedBy);
+    return 'posted';
+  }
+
+  /** NAS 이동 컨펌 큐 — 항목별 결정 버튼 (inbox auto-classify company 분류분). 브리핑을 올린 뒤에. */
+  private async postNasQueue(): Promise<void> {
+    try {
+      const nasBlocks = await buildNasQueueBlocks(await listNasQueue());
+      if (nasBlocks) {
+        await this.sendMessage('📦 NAS 이동 컨펌 대기', nasBlocks).catch(() => {});
+      }
+    } catch (err) {
+      this.logger.warn('NAS confirm queue check failed', err);
+    }
+  }
+
+  /**
+   * 오늘 브리핑을 올렸다고 적는다 — 수동 `-briefing` 은 대화 처리기가 올린 뒤 부른다.
+   * 실패해도 던지지 않는다(못 적으면 놓친 브리핑이 한 번 더 돌 뿐이다).
+   */
+  markBriefingDelivered(how: string, via?: string): void {
+    const body = JSON.stringify({ date: kstDate(new Date()), at: new Date().toISOString(), how, via: via ?? null });
+    try {
+      fs.writeFileSync(briefingMarkFile(), body, 'utf-8');
+    } catch (err) {
+      this.logger.warn('브리핑 자국을 못 적었습니다', err);
+    }
+  }
+
+  /**
+   * 오늘(한국 날짜) 브리핑을 올렸나.
+   *
+   * **자국 파일이 아직 한 번도 없으면 옛 기준(비용 원장)을 한 번 쓴다** — 이 판을 처음 띄우는 날, 이미
+   * 08시 브리핑이 나간 뒤 재시작하면 자국이 없어 같은 브리핑이 또 나간다. 자국이 한 번 생기면 원장은 안 본다.
+   */
+  private briefingDeliveredToday(now: Date = new Date()): boolean {
+    const today = kstDate(now);
+    const file = briefingMarkFile();
+    if (fs.existsSync(file)) {
+      try {
+        return JSON.parse(fs.readFileSync(file, 'utf-8'))?.date === today;
+      } catch {
+        return false;
+      }
+    }
+    return this.costEntries.some((e) => e.type === 'briefing' && e.ok !== false
+      && kstDate(new Date(e.timestamp)) === today);
+  }
+
+  /**
+   * 엔진이 풀렸다 — 회복 타이머(대화 처리기의 `engineRecovery`)가 부른다. **던지지 않고 기다리지 않는다**
+   * (밀린 대화 드레인을 막지 않게). 막혀서 못 한 예약 일 둘을 다시 본다.
+   *   - 오늘 브리핑을 못 올렸고 업무일 · 브리핑 시각 뒤 · 정오 전이면 지금 돌린다
+   *   - 때가 지난 한도 재시도 계획이 있고 Claude 가 풀렸으면 지금 돌린다
+   */
+  onEngineRecover(why: string): void {
+    void this.recoverBriefingIfNeeded(why)
+      .catch((err) => this.logger.error('회복 뒤 브리핑이 터졌습니다', err));
+    void this.runDueAnalysisRetries(why)
+      .catch((err) => this.logger.error('회복 뒤 한도 재시도가 터졌습니다', err));
+  }
+
+  /** 한도가 풀린 뒤 그날 못 올린 브리핑 — 실패해도 안내를 또 올리지 않는다(08시에 이미 알렸다). */
+  async recoverBriefingIfNeeded(why: string, now: Date = new Date()): Promise<boolean> {
+    if (!this.config?.briefing.enabled) return false;
+    if (this.isNonWorkingDay(now).skip) return false;
+    if (this.briefingDeliveredToday(now)) return false;
+    // 브리핑 시각 전이면 예약이 한다 · 정오가 지났으면 그날 브리핑은 늦었다.
+    if (!this.pastBriefingTime(now)) return false;
+    const [uh, um] = BRIEFING_RECOVER_UNTIL.split(':').map(Number);
+    const nowKST = new Date(now.getTime() + 9 * 3600_000);
+    if (nowKST.getUTCHours() * 60 + nowKST.getUTCMinutes() >= uh * 60 + um) return false;
+    if (this.briefingBusy) return false;
+    this.briefingBusy = true;
+    this.logger.info(`한도가 풀려 오늘 못 올린 브리핑을 돌립니다 (${why})`);
+    try {
+      const result = await this.executeBriefing();
+      this.recordSessionCost('briefing', result);
+      const sent = await this.deliverBriefing(result, 'recovery');
+      if (sent !== 'posted') {
+        this.logger.warn(`회복 뒤 브리핑도 못 올렸습니다 (${sent})`);
+        return false;
+      }
+      await this.postNasQueue();
+      return true;
+    } finally {
+      this.briefingBusy = false;
+    }
   }
 
   /**
@@ -2775,28 +2954,41 @@ export class AssistantScheduler {
    *
    * ⚠️ **`toolCalls` 를 못 읽는 회차는 안 한 것으로 치지 않는다** — 값이 없으면
    * (`undefined`) 셋째 갈래로 본다. 모르는 것을 0 으로 읽으면 그 회차가 두 번 돈다.
+   *
+   * **Claude 가 막혀 있다고 엔진 상태가 말하면 1차를 안 띄운다**(2026-10-14) — 띄워도 한도 글만 받고
+   * 끝난다. 「한도로 끝난 1차(도구 0회)」로 치고 곧장 폴백으로 간다 · 폴백도 못 하면 그 결과가
+   * 한도 갈래로 돌아가 부르는 쪽이 예전처럼 처리한다(분석은 재시도 · 브리핑은 회복 뒤 다시).
    */
   private async spawnOrFallback(
     label: string, prompt: string, opts: SpawnOpts,
   ): Promise<SessionResult> {
     let result: SessionResult | null = null;
     let why = '';
-    try {
-      result = await this.spawnSession(prompt, opts);
-      // 1차가 낸 결과는 실패든 성공이든 Claude 몫이다 — 폴백이 받을 때만 아래에서 바꾼다.
-      result.servedBy = 'claude';
-      const said = (result.text || '').trim();
-      if (result.isError || result.rateLimited) {
-        why = result.rateLimited ? 'rate-limited' : (result.subtype || 'error');
-      } else if (!said) {
-        why = 'empty';
-      } else {
-        return result;
+    if (engineState.isBlocked('claude')) {
+      why = 'claude-blocked';
+      this.logger.warn(`${label} — Claude 가 막혀 있어 1차를 안 띄웁니다(엔진 상태)`);
+      result = {
+        text: '', costUsd: 0, sessionId: '', subtype: 'rate-limited', isError: true, rateLimited: true,
+        toolCalls: 0, servedBy: 'claude', rateLimitResetsAt: engineState.blockedUntil('claude') ?? undefined,
+      };
+    } else {
+      try {
+        result = await this.spawnSession(prompt, opts);
+        // 1차가 낸 결과는 실패든 성공이든 Claude 몫이다 — 폴백이 받을 때만 아래에서 바꾼다.
+        result.servedBy = 'claude';
+        const said = (result.text || '').trim();
+        if (result.isError || result.rateLimited) {
+          why = result.rateLimited ? 'rate-limited' : (result.subtype || 'error');
+        } else if (!said) {
+          why = 'empty';
+        } else {
+          return result;
+        }
+      } catch (err) {
+        // 구독 만료·인증 실패는 여기로 온다 — 스트림을 열기 전이라 아무것도 안 돌았다.
+        why = 'threw';
+        this.logger.warn(`${label} 1차(Agent SDK)가 터졌습니다`, err);
       }
-    } catch (err) {
-      // 구독 만료·인증 실패는 여기로 온다 — 스트림을 열기 전이라 아무것도 안 돌았다.
-      why = 'threw';
-      this.logger.warn(`${label} 1차(Agent SDK)가 터졌습니다`, err);
     }
 
     // ⚠️ **이어받는 회차는 폴백을 안 한다** — 그때 프롬프트는 `'continue'` 한
@@ -2842,9 +3034,23 @@ export class AssistantScheduler {
         servedBy = got.backend === 'agy' ? 'agy' : 'codex';
       }
     } else {
+      // **codex 가 막혔으면 안 부른다** — 한도 조회(5분에 한 번 · 못 읽으면 모름)를 엔진 상태에 옮긴 뒤
+      // 엔진 상태로 가린다. 차례에서 한도 글을 받아 적은 막힘도 같은 곳에 있다. `SESSION_FALLBACK=off` 도 여기서.
+      const off = process.env.SESSION_FALLBACK === 'off';
+      if (!off) await codexQuota.refresh();
+      if (off || engineState.isBlocked('codex')) {
+        const skipped = off ? 'env-off' : 'codex-blocked';
+        this.logger.warn(`${label} 폴백 안 함 — ${off ? 'SESSION_FALLBACK=off' : 'codex 도 막혀 있음(엔진 상태)'}`);
+        recordEvent('session-fallback', { label, why, skipped });
+        if (!off) errorCollector.add('폴백', `${label} — Claude ${why} · codex 도 한도라 폴백 안 함`);
+        return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
+      }
       const cell = await sameTier(primary, 'codex');
       const scope = opts.fallbackScope;
-      said = await codexSession(prompt, {
+      // **1차보다 넓게 쓰지 않는다** — 1차가 읽기 도구뿐이면 읽기 전용 모래상자(쓰기 폴더도 안 엶).
+      const sandbox = primaryReadOnly(opts) ? 'read-only' : 'workspace-write';
+      const turn = await codexTurn(prompt, {
+        sandbox,
         workingDirectory: scope ? scope.cwd : opts.workingDirectory,
         // 범위를 받은 회차는 그 범위만 연다 — 작업 폴더(`-C`)는 이미 쓰기가 열려 있어 빼고 넘긴다.
         writableDirs: scope ? scope.writable.filter((d) => d !== scope.cwd) : undefined,
@@ -2854,10 +3060,20 @@ export class AssistantScheduler {
         // 산출물이 나오고, 그건 실패보다 알아채기 어렵다(2026-09-08).
         effort: opts.effort,
         model: cell?.model,
+        // 1차에 주던 환경 변수 그대로 — 전에는 codex 쪽에서 `CLAUDE_SCHEDULED` 등이 사라졌다.
+        env: opts.env,
       });
-      via = `codex ${cell?.model ?? '(기본 모델)'}`;
+      said = turn.kind === 'ok' ? turn.text.trim() : '';
+      via = `codex ${cell?.model ?? '(기본 모델)'} ${sandbox}`;
       // 사다리를 안 거친 폴백은 기록 파일에 안 남으므로 브리핑 「시스템 이슈」로 직접 알린다.
-      errorCollector.add('폴백', `${label} — Claude ${why} → ${said ? `${via} 가 받음` : '폴백도 실패'}`);
+      errorCollector.add('폴백', `${label} — Claude ${why} → ${said ? `${via} 가 받음`
+        : turn.kind === 'usage' ? 'codex 도 한도(엔진 상태에 적음)' : '폴백도 실패'}`);
+      if (!said) {
+        recordEvent('session-fallback', { label, why, ok: false, via, codex: turn.kind,
+          steps: turn.steps.length, writeRan: turn.writeRan });
+        this.logger.warn(`${label} 1차·폴백 둘 다 못 했습니다(${why} · codex ${turn.kind}${turn.detail ? ` ${turn.detail}` : ''})`);
+        return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
+      }
     }
     recordEvent('session-fallback', { label, why, ok: !!said, via });
     if (said) {
@@ -3489,12 +3705,108 @@ export class AssistantScheduler {
   private scheduleAnalysisRetry(
     schedule: string, origin: { slot: string; trigger: RunTrigger }, queue: RetryEntry[], retryTime: Date,
   ): void {
-    const retryTimer = setTimeout(() => {
-      this.analysisRetryTimers.delete(retryTimer);
-      this.runAnalysisRetry(schedule, origin, queue).catch((error) =>
-        this.logger.error('Analysis retry failed', { schedule, error }));
-    }, Math.max(0, retryTime.getTime() - Date.now()));
-    this.analysisRetryTimers.add(retryTimer);
+    // **계획을 먼저 파일에 남긴다**(2026-10-14) — 타이머만 있던 동안 재시작이 그 재시도를 지웠다.
+    const plan: RetryPlan = {
+      id: `${schedule}:${origin.slot}:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      schedule, origin, queue, due: retryTime.getTime(),
+    };
+    this.saveRetryPlans([...this.loadRetryPlans(), plan]);
+    this.armRetryPlan(plan);
+  }
+
+  /** 파일의 계획들. 깨졌거나 없으면 빈 목록(안 던진다). */
+  private loadRetryPlans(): RetryPlan[] {
+    try {
+      const raw = JSON.parse(fs.readFileSync(analysisRetryFile(), 'utf-8'));
+      const plans = Array.isArray(raw?.plans) ? raw.plans : [];
+      return plans.filter((p: any) => p && typeof p.id === 'string' && typeof p.schedule === 'string'
+        && typeof p.due === 'number' && Array.isArray(p.queue) && p.origin && typeof p.origin.slot === 'string');
+    } catch {
+      return [];
+    }
+  }
+
+  /** 임시 파일에 쓰고 바꿔 끼운다 — 비면 파일을 지운다. 실패해도 던지지 않는다(타이머는 그대로 돈다). */
+  private saveRetryPlans(plans: RetryPlan[]): void {
+    const file = analysisRetryFile();
+    try {
+      if (plans.length === 0) { fs.rmSync(file, { force: true }); return; }
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ v: 1, plans }, null, 2), 'utf-8');
+      try {
+        fs.renameSync(tmp, file);
+      } catch {
+        fs.writeFileSync(file, fs.readFileSync(tmp, 'utf-8'), 'utf-8');
+        fs.rmSync(tmp, { force: true });
+      }
+    } catch (err) {
+      this.logger.warn('한도 재시도 계획을 못 적었습니다 — 재시작하면 이 재시도는 사라집니다', err);
+    }
+  }
+
+  /** 계획을 파일에서 꺼낸다(돌리기 **전에** — 재시도는 한 번뿐이라 도중에 죽어도 두 번 안 돈다). */
+  private takeRetryPlan(id: string): RetryPlan | null {
+    const plans = this.loadRetryPlans();
+    const plan = plans.find((p) => p.id === id) ?? null;
+    if (plan) this.saveRetryPlans(plans.filter((p) => p.id !== id));
+    const t = this.analysisRetryTimers.get(id);
+    if (t) { clearTimeout(t); this.analysisRetryTimers.delete(id); }
+    return plan;
+  }
+
+  /** 계획 하나에 타이머를 건다. 때가 되면 Claude 가 풀렸을 때만 돌린다 — 막혀 있으면 회복을 기다린다. */
+  private armRetryPlan(plan: RetryPlan): void {
+    const prev = this.analysisRetryTimers.get(plan.id);
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      this.analysisRetryTimers.delete(plan.id);
+      void this.runRetryPlanIfClear(plan.id, '예약 시각');
+    }, Math.max(0, plan.due - Date.now()));
+    this.analysisRetryTimers.set(plan.id, timer);
+  }
+
+  /**
+   * 때가 된 계획 하나를 돌린다 — **Claude 가 막혀 있으면 안 돌리고 파일에 둔다**(회복 타이머가
+   * `onEngineRecover` 로 다시 부른다). 막힌 채 돌리면 한 번뿐인 재시도를 헛되이 쓴다.
+   */
+  private async runRetryPlanIfClear(id: string, why: string): Promise<boolean> {
+    if (engineState.isBlocked('claude')) {
+      this.logger.info(`한도 재시도를 미룹니다 — Claude 가 아직 막혀 있음 (${why})`, { id });
+      return false;
+    }
+    const plan = this.takeRetryPlan(id);
+    if (!plan) return false;
+    try {
+      await this.runAnalysisRetry(plan.schedule, plan.origin, plan.queue);
+    } catch (error) {
+      this.logger.error('Analysis retry failed', { schedule: plan.schedule, error });
+    }
+    return true;
+  }
+
+  /**
+   * 기동 때 파일의 계획을 다시 건다 — 때가 안 됐으면 타이머, 지났으면 Claude 가 풀렸을 때 지금 돌린다.
+   * 막혀 있으면 파일에 둔다(회복 때 `runDueAnalysisRetries`).
+   */
+  async rearmAnalysisRetries(now: number = Date.now()): Promise<void> {
+    const plans = this.loadRetryPlans();
+    if (plans.length === 0) return;
+    this.logger.info('한도 재시도 계획을 다시 겁니다', { plans: plans.map((p) => [p.id, new Date(p.due).toISOString()]) });
+    for (const p of plans) if (p.due > now) this.armRetryPlan(p);
+    await this.runDueAnalysisRetries('기동', now);
+  }
+
+  /** 때가 지난 계획을 차례로 돌린다(겹쳐 돌지 않게). Claude 가 막혀 있으면 아무것도 안 한다. */
+  async runDueAnalysisRetries(why: string, now: number = Date.now()): Promise<void> {
+    if (this.retryBusy) return;
+    this.retryBusy = true;
+    try {
+      for (const p of this.loadRetryPlans().filter((x) => x.due <= now)) {
+        if (!(await this.runRetryPlanIfClear(p.id, why)) && engineState.isBlocked('claude')) break;
+      }
+    } finally {
+      this.retryBusy = false;
+    }
   }
 
   /**
@@ -3732,7 +4044,7 @@ export class AssistantScheduler {
         additionalDirectories: tmpOpen,
         fallbackScope: { cwd: this.workingDir, writable: [...codexWritableDirs(), ...tmpOpen] },
         // 회차를 세션에도 알린다(audit.py 처럼 세션이 부르는 스크립트가 `REPORT_OUT` 을 읽는다).
-        // Codex 폴백은 환경 변수를 못 받으므로 프롬프트 본문의 `{{REPORT_OUT}}` 이 정본이다.
+        // Codex 폴백도 이 값을 받지만(2026-10-14 `codexTurn`) 정본은 프롬프트 본문의 `{{REPORT_OUT}}` 이다.
         env: { ASSISTANT_MODE: 'analysis', CLAUDE_SCHEDULED: '1', ...(ctx.run ? reportRunEnv(ctx.run) : {}) },
         resumeSessionId,
         skipMcp: true,

@@ -31,13 +31,16 @@
 - `-briefing`/`-br`/`브리핑`: 모닝 브리핑 즉시 실행 (`AssistantScheduler.runBriefing()`)
   - 캐시된 캘린더 데이터 사용 (MCP 미호출), 캐시 날짜가 오늘이 아니면 `refreshCache()` 호출 후 사용, 실패 시 MCP fallback
   - `ErrorCollector`에 수집된 봇 에러를 `⚠️ 시스템 이슈` 섹션으로 일괄 보고
-  - **재시작 시 catch-up**: `catchUpBriefingIfNeeded()` — `.assistant-costs.json`에서 마지막 브리핑 날짜 확인, 오늘 미실행이면 15초 후 즉시 실행
+  - **재시작 시 catch-up**: `catchUpBriefingIfNeeded()` — 「올린 날」 자국(`.briefing-delivered.json` · 올린 뒤에만 찍음)이 오늘이 아니면 15초 후 즉시 실행 · 자국 파일이 아직 없으면 `.assistant-costs.json` 으로 한 번 판단 (2026-10-14)
+  - **한도 · 오류 글은 브리핑으로 안 올림** — 예약 · catch-up · 수동 모두 · 한도면 ⏳ 한 줄
+  - **한도 회복 뒤**: 회복 타이머(`onEngineRecover`)가 업무일 · 브리핑 시각 뒤 · 정오 전이고 오늘 못 올렸으면 다시 실행
   - **주간 요약(그 주 첫 업무일)**: `monday-briefing-extra.md` 프롬프트 자동 주입 (주간 비용 통계 + 보고서 요약) · 보통 월요일이고 월요일이 휴일 · 휴가면 그다음 업무일
 - **캘린더 리마인더**: `CalendarPoller` — 직접 Google Calendar REST API HTTP 폴링
   - 전체 캘린더 조회 후 `excludeCalendars`로만 제외 (화이트리스트 없음)
   - 5분 간격 폴링, diff 감지 시에만 AI 판단 (Haiku 모델 · 4.5 실측 중앙값 $0.072/회(20회, ~2026-10-07) · 5.5 는 단가가 그 1/10)
   - AI 판단 경량 모드: `cwd=tmpdir` + `--system-prompt` + `--tools ""` + `--no-session-persistence`
   - AI 판단 rate limit 시 다음 정시까지 자동 일시 중지 (`aiJudgmentPaused`)
+  - Claude · 사다리가 다 못 하면 비교 기준(캐시의 `baseline`)과 중복 표시를 안 옮김 — 다음 폴링에 같은 변경을 다시 판단 (2026-10-14)
   - 알림 큐 (`.calendar-notifications.json`) + 1분 간격 발송
   - 토큰 공유: `~/.config/google-calendar-mcp/tokens.json` (MCP 서버와 동일)
   - 어시스턴트 세션은 `skipMcp: true`로 MCP 서버 연결 건너뜀
@@ -67,7 +70,7 @@
   - 분석 회차와 보고서 저장 — report-log 5단계(쓰는 쪽). **저장 주체는 스탠리 하나** · 설계 정본은 report-log `docs/stage5-plan.md` 「쓰는 흐름」 · 검사 `npm run check:reportrun`
     - 회차 열기: 종류마다 첫 시도 전에 `report_log.py open --type --slot --trigger` · 예정일 = 예약 발화 시각(`nextFire`)의 한국 날짜(늦게 깨거나 자정을 넘겨도 그대로) · 수동은 오늘
     - 같은 회차: 타임아웃 · 오류 재시도, 한도 재시도(다른 날 포함) — 재시도 큐가 회차를 들고 감 · 한도로 못 돈 뒤쪽 종류도 그때 회차를 엶 · 원래 회차가 없던 칸만 `retry` 로 엶
-    - 프롬프트 자리: `{{REPORT_OUT}}`(임시 파일 · `/` 경로) · `{{SLOT}}` · `{{PREV_REPORT}}` · `{{AVOID_LIST}}`(`prompt-context --type`) · `{{PREV_REPORT:<종류>}}`(다른 종류의 직전 보고서 · 같은 상한) · `{{WEEK_INPUT}}`(`week-input --since <예정일-7일>`) — 본문에 직접 넣음(Codex 폴백은 환경 변수를 못 받음) · 틀에 있는 자리만 report-log 에 물음 · 한 번에 바꿈(넣은 값 안의 `{{SLOT}}` 같은 글은 다시 안 바꾸고 거부에도 안 셈) · 틀에 남은 `{{` 가 있으면 세션을 안 띄우고 오류
+    - 프롬프트 자리: `{{REPORT_OUT}}`(임시 파일 · `/` 경로) · `{{SLOT}}` · `{{PREV_REPORT}}` · `{{AVOID_LIST}}`(`prompt-context --type`) · `{{PREV_REPORT:<종류>}}`(다른 종류의 직전 보고서 · 같은 상한) · `{{WEEK_INPUT}}`(`week-input --since <예정일-7일>`) — 본문에 직접 넣음(본문이 정본 · Codex 폴백도 2026-10-14 부터 환경 변수를 받음) · 틀에 있는 자리만 report-log 에 물음 · 한 번에 바꿈(넣은 값 안의 `{{SLOT}}` 같은 글은 다시 안 바꾸고 거부에도 안 셈) · 틀에 남은 `{{` 가 있으면 세션을 안 띄우고 오류
     - 쓰기 범위: `~/.report-log/tmp` 를 Claude 추가 폴더 · Codex 쓰기 허용 폴더로 엶 · 시스템 문구의 쓰기 허용은 설정 `writablePaths` 에서 `reports/` 를 빼고 그 폴더를 더함
     - 「썼나」 판정(`reportProduced`): 임시 파일 수정 시각 ≥ 세션 시작 · 본문 있음 · 대기 표식(`<!-- judgment: pending -->`) · 자리표시자 없음 — 도구 0회 재시도(되물음)와 한도 백스톱이 씀 · 산출물 없음이 정상인 종류(설정 `noOutputOk: true` 또는 `mode: 'change-detection'`)는 폴백(codex)이 빈손으로 끝내도 되물음으로 안 침
     - 저장(`commitPlan`): 완료 → 저장 · 한도로 이어받을 예정 → 저장 안 함 · 마지막 시도까지 실패 → `--partial` · 임시 파일이 비었으면 `--partial` 없이 저장(report-log 가 `no-output` — 변경 없는 회차 · 되물음) · 러너 종류인데 임시 파일이 비었으면 저장 안 함(러너가 아직 씀) · `--backend` 에 처리 백엔드 · 잠금 실패는 한 번 더, 그래도 실패면 정리 작업(`sweep`) 몫

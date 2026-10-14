@@ -149,11 +149,21 @@ Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(
 - **정본은 `src/engine-state.ts` 하나** — `.engine-state.json`(임시 파일에 쓰고 바꿔 끼움) · 엔진별 막힘 · 마지막 성공 · 사용률 · 최근 5시간 사용 시각 · 한도 안내 키 · 엔진 안내 차례. `rate-limit-until.ts` 는 옛 이름을 두는 얇은 층(Claude 칸) · 옛 `.rate-limit-until.json` 은 처음 뜰 때 한 번 옮겨 옴
 - **갈래별 다시 볼 시각** — 사용량 소진은 서버가 준 `resetsAt`(같은 갈래 안에서 앞당기지 않음) · 과부하(529)는 10 → 20 → 40 → 60분, 한 번 되면 처음으로 · auth · unknown 은 60분. **과부하에 5시간을 걸지 않는다**(2026-08-24 에 과부하 한 번으로 큐를 다섯 시간 세웠다)
 - **적는 곳은 전송 탭 하나**(`src/engine-tap.ts`) — `SdkProcess` · `CliProcess` 가 이벤트를 내보내는 자리에서 `rate_limit_event` 와 `result` 를 본다. 대화 · 예약 세션 · 분석이 다 지나므로 부르는 쪽에서 따로 적지 않는다. 한 흐름에 막힘은 한 번(과부하 한 번이 결과 둘로 온다)
-- **회복 타이머는 하나**(`src/engine-recovery.ts`) — 가장 이른 회복 시각 + 1분에 `drainStuck('한도 회복')` · 막힘이 바뀔 때마다 다시 걸고 **기동 드레인 뒤에 파일에서 다시 건다**(`startEngineWatch`)
+- **회복 타이머는 하나**(`src/engine-recovery.ts`) — 가장 이른 회복 시각 + 1분에 `drainStuck('한도 회복')` + 예약 쪽 `onEngineRecover` · 막힘이 바뀔 때마다 다시 걸고 **기동 드레인 뒤에 파일에서 다시 건다**(`startEngineWatch`)
 - **한도 안내는 막힘마다 한 번** — 키 `claude:<갈래>:<until>` 을 엔진 상태에 적어 재시작해도 남음 · 두 번째부터는 ✋ 만
 - **엔진 안내(`src/engine-notice.ts`)는 기본 꺼짐** — `ENGINE_NOTICE=on` 일 때만 비서 DM 에 한 줄, 꺼져 있으면 로그만. 모델 이름은 llm-playbook `models.json`(`LLM_PLAYBOOK_MODELS`)에서 읽는다 — 판 번호를 코드에 적지 않는다
 - **캡처 덧붙이기도 잠근다** — 파이썬(`tasks.py`)과 같은 `<inbox>.lock` · 30초 지나면 묵은 것 · 2초 안에 못 잡으면 경고 남기고 그대로 붙임(받은 말을 잃지 않는 것이 먼저)
 - 검사 `npm run check:engine` · `npm run check:inboxlock`
+
+### 예약 일의 codex 폴백 · 빈틈 (2026-10-14 · 4단계)
+
+- **codex 한 차례는 `codexTurn`(`src/work-assistant.ts`) 하나** — `--json` 이벤트로 답 · 한 일(명령 ≤120자) · `writeRan` · `ok|usage|fail` · 한도 글이면 엔진 상태에 codex 막힘 · 부르는 쪽 `env` 를 얹고 API 키는 뺌
+- **폴백은 1차보다 넓게 안 씀** — 1차 도구가 읽기뿐이면(`primaryReadOnly` · 브리핑) `-s read-only` · 아니면 `--approve-for-me`(둘을 같이 주면 rc 2)
+- **Claude 가 막혀 있으면 1차를 안 띄움**(`spawnOrFallback`) · codex 는 한도 조회(`src/codex-quota.ts` · 5분 캐시 · 못 읽으면 모름)나 엔진 상태가 막혔다고 하면 건너뜀
+- **브리핑 「올린 날」 자국 `.briefing-delivered.json`** — 올린 뒤에만 찍음 · 놓친 브리핑이 이것을 봄 · 한도 · 오류 글은 브리핑으로 안 올림 · 회복 때 업무일 정오 전이면 다시 돌림
+- **분석 한도 재시도 계획 `.analysis-retry.json`** — 재시작 뒤 다시 걸고, 때가 지났으면 Claude 가 풀렸을 때만 돌림(재시도는 한 번)
+- 회의 알림 판단이 다 실패하면 비교 기준을 안 옮김(다음 차례에 다시 판단)
+- 검사 `check:sessionfb` · `check:limit` · `check:schedgaps` · `check:calbase`
 
 ### 보류 재실행 v2 — 막힌 동안 모아 두고 받은 자리에서 처리 (2026-10-14 · `HOLD_V2=on`)
 
@@ -283,3 +293,5 @@ git checkout -b feature/<name>
 | `.engine-state.json` | 프로젝트 루트 | ❌ (막힘 · 회복 시각 · 사용률 · 안내 키) |
 | `.engine-drill.json` | 프로젝트 루트 | ❌ (엔진 폴백 연습용 · 다음 단계 · Git 추적 제외만 걸어 둠) |
 | `.held-files/` | 프로젝트 루트 | ❌ 비밀 아님 · 사용자가 보낸 첨부 (보류 v2 · Git 추적 제외) |
+| `.briefing-delivered.json` | 프로젝트 루트 | ❌ (브리핑 올린 날) |
+| `.analysis-retry.json` | 프로젝트 루트 | ❌ (한도 재시도 계획 · 회차 id) |

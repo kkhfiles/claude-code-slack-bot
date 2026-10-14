@@ -19,6 +19,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { config } from './config';
 import { Logger } from './logger';
+import { withoutApiKey } from './child-env';
+import { engineState, type EngineState } from './engine-state';
+import { classifyCodexErrorText } from './rate-limit-utils';
+import { STEP_INPUT_MAX, STEP_MAX } from './turn-outcome';
 import type { HeldItem, HoldExtra } from './hold-replay';
 
 export type { HoldExtra };
@@ -1092,63 +1096,161 @@ export async function narrowCodex(
   system: string, user: string, timeoutMs = 90_000,
 ): Promise<string> {
   if (process.env.BOARD_NARROW_FALLBACK === 'off') return '';
-  const id = randomId();
-  const pf = path.join(os.tmpdir(), `wa-cx-${id}.txt`);
-  const sf = path.join(os.tmpdir(), `wa-cx-${id}.schema.json`);
-  const of = path.join(os.tmpdir(), `wa-cx-${id}.out.txt`);
   try {
-    // 시스템 프롬프트를 앞에 이어 붙인다 — `codex exec` 에 그 칸이 따로 없다.
-    fs.writeFileSync(pf, `${system}\n\n----\n\n${user}`, 'utf-8');
-    fs.writeFileSync(sf, JSON.stringify(NARROW_SCHEMA), 'utf-8');
-    const args = [
-      'exec', '--ephemeral', '--skip-git-repo-check',
+    // `codexTurn` 한 곳을 지난다 — 한도에 걸리면 엔진 상태에 적히고(되면 「됐다」도) 예약 세션 폴백이 그것을 본다.
+    const r = await codexTurn(user, {
+      // 시스템 프롬프트를 앞에 이어 붙인다 — `codex exec` 에 그 칸이 따로 없다.
+      appendSystemPrompt: system,
       // 읽기 전용 — 이 호출은 파일을 건드릴 일이 없다. 쓰는 것은 파이썬이 한다.
-      '-s', 'read-only', '--color', 'never',
+      sandbox: 'read-only',
       // 이 저장소를 작업 뿌리로 주지 않는다 — 규칙은 위 `system` 이 다 들고 있고,
       // 주면 `CLAUDE.md` 가 따라 들어와 좁은 길이 아니게 된다.
-      '-C', os.tmpdir(),
-      '-m', NARROW_CODEX_MODEL,
-      '-c', `model_reasoning_effort=${NARROW_CODEX_EFFORT}`,
-      '--output-schema', sf, '-o', of, '-',
-    ];
-    const code = await runCodex(args, pf, timeoutMs);
-    if (code !== 0) {
-      logger.warn(`좁은 길 폴백(codex) rc ${code}`);
+      workingDirectory: os.tmpdir(),
+      model: NARROW_CODEX_MODEL,
+      effort: NARROW_CODEX_EFFORT,
+      outputSchema: NARROW_SCHEMA,
+      timeoutMs,
+    });
+    if (r.kind !== 'ok') {
+      logger.warn(`좁은 길 폴백(codex) ${r.kind}${r.detail ? ` — ${r.detail}` : ''}`);
       return '';
     }
-    return fs.existsSync(of) ? fs.readFileSync(of, 'utf-8').trim() : '';
+    return r.text;
   } catch (err) {
     logger.warn('좁은 길 폴백(codex)이 터졌습니다 — 세션으로 갑니다', err);
     return '';
-  } finally {
-    for (const f of [pf, sf, of]) {
-      try { fs.unlinkSync(f); } catch { /* 이미 없다 */ }
+  }
+}
+
+/** `codex exec --json` 이 내보내는 이벤트를 읽은 것 — 한 줄씩 받아 쌓는다(출력 전체를 쥐지 않는다). */
+interface CodexEvents {
+  /** 마지막 `agent_message` — `-o` 파일이 비었을 때의 답. */
+  text: string;
+  steps: CodexStep[];
+  /** 명령 · 파일 바꾸기 · MCP 호출이 하나라도 **시작했나**(결과가 안 왔어도 셈). */
+  touched: boolean;
+  /** `turn.completed` 를 봤나. */
+  completed: boolean;
+  /** `turn.failed` 를 봤나. */
+  failed: boolean;
+  /** `turn.failed` · `error` · 오류 항목의 글 — 실패를 가를 때만 읽는다. */
+  errors: string[];
+  /** JSON 이벤트를 하나라도 봤나 — 못 봤으면 옛 판처럼 rc 와 `-o` 파일로 가른다. */
+  sawEvents: boolean;
+}
+
+class CodexEventReader {
+  readonly ev: CodexEvents = {
+    text: '', steps: [], touched: false, completed: false, failed: false, errors: [], sawEvents: false,
+  };
+  private rest = '';
+  private byId = new Map<string, CodexStep>();
+
+  push(chunk: string): void {
+    const lines = (this.rest + chunk).split(/\r?\n/);
+    this.rest = lines.pop() ?? '';
+    for (const l of lines) this.line(l);
+  }
+
+  end(): CodexEvents {
+    if (this.rest) this.line(this.rest);
+    this.rest = '';
+    return this.ev;
+  }
+
+  private line(raw: string): void {
+    const s = raw.trim();
+    if (!s.startsWith('{')) return;
+    let e: any;
+    try { e = JSON.parse(s); } catch { return; }
+    if (!e || typeof e.type !== 'string') return;
+    const ev = this.ev;
+    ev.sawEvents = true;
+    const msg = (x: any) => String(x?.message ?? x ?? '');
+    if (e.type === 'turn.completed') { ev.completed = true; return; }
+    if (e.type === 'turn.failed') { ev.failed = true; ev.errors.push(msg(e.error ?? e)); return; }
+    if (e.type === 'error') { ev.errors.push(msg(e.error ?? e)); return; }
+    if (!e.type.startsWith('item.')) return;
+    const it = e.item ?? {};
+    const done = e.type === 'item.completed';
+    if (it.type === 'agent_message') {
+      if (done && typeof it.text === 'string') ev.text = it.text;
+    } else if (it.type === 'error') {
+      ev.errors.push(msg(it));
+    } else if (it.type === 'command_execution' || it.type === 'file_change' || it.type === 'mcp_tool_call') {
+      ev.touched = true;
+      const id = String(it.id ?? `#${this.byId.size}`);
+      let st = this.byId.get(id);
+      if (!st) {
+        st = { cmd: clipLine(describeCodexItem(it), STEP_INPUT_MAX), done: false };
+        this.byId.set(id, st);
+        if (ev.steps.length < STEP_MAX) ev.steps.push(st);
+      }
+      if (done) st.done = true;
     }
   }
 }
 
+function describeCodexItem(it: any): string {
+  if (it.type === 'command_execution') {
+    return Array.isArray(it.command) ? it.command.join(' ') : String(it.command ?? '');
+  }
+  if (it.type === 'file_change') {
+    const paths = Array.isArray(it.changes) ? it.changes.map((c: any) => String(c?.path ?? '')).filter(Boolean) : [];
+    return `파일 바꿈 ${paths.join(', ')}`.trim();
+  }
+  return `mcp ${it.server ?? ''}.${it.tool ?? ''}`;
+}
+
+function clipLine(s: string, max: number): string {
+  const one = s.replace(/\s+/g, ' ').trim();
+  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+}
+
 /**
- * `codex` 를 띄우고 rc 만 돌려준다. 답은 `-o` 파일로 받는다.
+ * `codex` 를 띄운다. 답은 `-o` 파일로, 이벤트는 표준 출력(`--json`)으로 받는다.
  *
  * ⚠️ **인자를 셸에 그대로 넘기지 않는다** — `shell:true` 는 공백에서 인자를
  * 쪼갠다(이 레포가 한 번 겪었다). `runTasks` 와 같은 따옴표 함수를 쓴다.
+ * ⚠️ **환경 변수는 부르는 쪽 것을 얹는다** — 전에는 `process.env` 만 넘겨 예약 세션의
+ * `CLAUDE_SCHEDULED` · `WORK_ASSISTANT_CAPTURE_FILE` 가 codex 쪽에서 사라졌다. API 키는 뺀다(`child-env.ts`).
  */
-function runCodex(args: string[], stdinFile: string, timeoutMs: number): Promise<number> {
+function runCodex(
+  args: string[], stdinFile: string,
+  o: { timeoutMs: number; env?: Record<string, string>; onSpawn?: (kill: () => void) => void },
+): Promise<{ code: number; stderr: string; timedOut: boolean; events: CodexEvents }> {
   const useShell = process.platform === 'win32';
   const argv = useShell ? args.map(quoteForShell) : args;
+  const reader = new CodexEventReader();
   return new Promise((resolve) => {
-    // 실행체 이름을 바꿀 수 있게 둔다 — **검사가 없는 이름을 넣어**
-    // 「폴백이 터져도 빈손으로 물러나나」를 실제로 재려면 이 문이 필요하다.
+    // 실행체 이름을 바꿀 수 있게 둔다 — **검사가 없는 이름이나 가짜 codex 를 넣어**
+    // 「폴백이 터져도 빈손으로 물러나나」 · 「이벤트를 어떻게 읽나」를 실제로 재려면 이 문이 필요하다.
     const bin = process.env.BOARD_NARROW_CODEX_BIN || 'codex';
-    const proc = spawn(bin, argv, {
-      stdio: [fs.openSync(stdinFile, 'r'), 'ignore', 'pipe'],
-      shell: useShell,
-      env: { ...process.env },
-      windowsHide: true,
-    });
+    let fd: number | null = null;
+    let proc: ReturnType<typeof spawn>;
+    try {
+      fd = fs.openSync(stdinFile, 'r');
+      proc = spawn(bin, argv, {
+        stdio: [fd, 'pipe', 'pipe'],
+        shell: useShell,
+        env: withoutApiKey({ ...process.env, ...(o.env ?? {}) }),
+        windowsHide: true,
+      });
+    } catch (err) {
+      resolve({ code: -1, stderr: String(err), timedOut: false, events: reader.end() });
+      return;
+    } finally {
+      // 자식이 제 사본을 들고 있다 — 이쪽 손잡이는 닫는다(전에는 회차마다 하나씩 남았다).
+      if (fd !== null) { try { fs.closeSync(fd); } catch { /* 이미 닫힘 */ } }
+    }
     let err = '';
-    proc.stderr?.on('data', (c: Buffer) => { err += c.toString('utf-8'); });
-    const killTimer = setTimeout(() => {
+    let timedOut = false;
+    // 글자로 받는다 — 덩어리 경계에서 한글이 반쪽으로 잘려 깨지지 않게.
+    proc.stdout?.setEncoding('utf8');
+    proc.stderr?.setEncoding('utf8');
+    proc.stdout?.on('data', (c: string) => reader.push(c));
+    proc.stderr?.on('data', (c: string) => { if (err.length < 20_000) err += c; });
+    const kill = () => {
       try {
         if (process.platform === 'win32' && proc.pid) {
           execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
@@ -1156,12 +1258,17 @@ function runCodex(args: string[], stdinFile: string, timeoutMs: number): Promise
           proc.kill('SIGKILL');
         }
       } catch { /* 이미 끝난 프로세스 */ }
-    }, timeoutMs);
-    proc.on('error', () => { clearTimeout(killTimer); resolve(-1); });
+    };
+    try { o.onSpawn?.(kill); } catch { /* 손잡이를 받는 쪽의 사고가 차례를 막지 않는다 */ }
+    const killTimer = setTimeout(() => { timedOut = true; kill(); }, o.timeoutMs);
+    proc.on('error', (e) => {
+      clearTimeout(killTimer);
+      resolve({ code: -1, stderr: err + String(e), timedOut, events: reader.end() });
+    });
     proc.on('close', (code) => {
       clearTimeout(killTimer);
       if (code !== 0 && err) logger.warn(`codex stderr: ${err.slice(0, 300)}`);
-      resolve(code ?? -1);
+      resolve({ code: code ?? -1, stderr: err, timedOut, events: reader.end() });
     });
   });
 }
@@ -1198,12 +1305,19 @@ export function codexWritableDirs(): string[] {
 }
 
 /**
- * **주 작업용 폴백** — 예약 세션을 codex 로 한 번 돌린다 (2026-09-03).
+ * **codex 한 차례** — 예약 세션 폴백 · 좁은 길 폴백이 다 여기를 지난다 (2026-10-14 · 엔진 폴백 4단계).
  *
- * `narrowCodex` 와 다른 점 둘.
- *   - **도구를 쓴다.** 좁은 길은 읽기도 쓰기도 파이썬이 하지만 예약 작업은
- *     세션이 스스로 `bin/tasks.py` 를 돌린다 — 그래서 `workspace-write` 다.
- *   - **답의 모양을 강제하지 않는다.** 산출물이 사람이 읽을 글이라 스키마가 없다.
+ * 전에는 rc 하나만 봤다. 그래서 「한도에 걸렸나 · 무엇을 돌렸나 · 썼을 수 있나」를 몰랐고,
+ * 한도에 걸린 codex 를 다음 차례도 그대로 불렀다. 이제 `--json` 이벤트를 읽는다.
+ *   - 답 — `-o` 파일이 정본 · 비면 마지막 `agent_message`
+ *   - 한 일 — `command_execution` 마다 한 줄(≤120자) · 끝났나(`item.completed`)
+ *   - 썼을 수 있나(`writeRan`) — 쓰기 모래상자에서 명령 · 파일 바꾸기 · MCP 가 **하나라도 시작했으면** 참.
+ *     명령은 무엇이든 쓰기로 본다(읽기만 하는 명령을 가려낼 길이 없다 · 모르면 쓰기 쪽)
+ *   - 끝 — `ok`(차례가 끝남) · `usage`(사용량 소진 · 엔진 상태에 막힘으로 적음) · `fail`(그 밖 · 막힘으로 안 적음)
+ *
+ * **모래상자는 둘 중 하나다** — 읽기 전용은 `-s read-only`, 쓰기는 `--approve-for-me`(그 깃발이
+ * workspace-write 로 돈다). ⚠️ **둘을 같이 주지 않는다** — `--sandbox` 와 `--approve-for-me` 를 같이 주면
+ * codex 가 rc 2 로 **매번 죽는다**(2026-09-04 실측).
  *
  * **규칙을 codex 가 스스로 읽는다** — `~/.codex/config.toml` 의
  * `project_doc_fallback_filenames = ["CLAUDE.md"]` 와 `~/.agents/skills` 투영이
@@ -1212,65 +1326,116 @@ export function codexWritableDirs(): string[] {
  * 바이트로 센다(2026-10-02 84,954바이트 대 131,072바이트 · 65%). 넘기 시작하면
  * 이 폴백이 반쪽 규칙으로 돈다.
  *
- * 못 하면 **빈 글자**를 돌려준다 — 부르는 쪽이 오늘까지와 같이 물러난다.
- * `SESSION_FALLBACK=off` 로 끈다.
+ * **절대 안 던진다** — 무엇이 나든 `fail` 로 물러난다. 폴백이 터져서 본 경로까지 막으면 안 된다.
  */
-export interface CodexSessionOpts {
+export type CodexSandbox = 'read-only' | 'workspace-write';
+
+export interface CodexTurnOpts {
   workingDirectory: string;
+  sandbox: CodexSandbox;
   appendSystemPrompt?: string;
+  /** 기본 600초 — 넘으면 트리째 죽인다. */
   timeoutMs?: number;
   /** 1차가 쓰던 것과 같은 깊이로 돈다. 생략하면 `SESSION_CODEX_EFFORT`. */
   effort?: string;
   model?: string;
-  /** 작업 폴더 밖에 쓰기를 열 곳. **주면 이것만** — 생략하면 `codexWritableDirs()`. */
+  /** 쓰기 차례에서 작업 폴더 밖에 쓰기를 열 곳. **주면 이것만** — 생략하면 `codexWritableDirs()`.
+   *  읽기 전용 차례는 아무 데도 안 연다. */
   writableDirs?: string[];
+  /** 자식에게 얹을 환경 변수 — 1차 세션에 주던 것 그대로(`CLAUDE_SCHEDULED` 등). */
+  env?: Record<string, string>;
+  /** 마지막 답의 모양(JSON Schema) — 좁은 길이 쓴다. */
+  outputSchema?: object;
+  /** 띄운 직후 죽이는 손잡이를 넘긴다. */
+  onSpawn?: (kill: () => void) => void;
+  /** 엔진 상태 — 시험이 바꿔 끼운다. */
+  store?: EngineState;
 }
 
-export async function codexSession(prompt: string, opts: CodexSessionOpts): Promise<string> {
-  if (process.env.SESSION_FALLBACK === 'off') return '';
-  const id = randomId();
-  const pf = path.join(os.tmpdir(), `wa-cs-${id}.txt`);
-  const of = path.join(os.tmpdir(), `wa-cs-${id}.out.txt`);
-  try {
-    const head = opts.appendSystemPrompt ? `${opts.appendSystemPrompt}\n\n----\n\n` : '';
-    fs.writeFileSync(pf, head + prompt, 'utf-8');
-    const code = await runCodex(codexSessionArgs(opts, of), pf, opts.timeoutMs ?? 600_000);
-    if (code !== 0) {
-      logger.warn(`주 작업 폴백(codex) rc ${code}`);
-      return '';
-    }
-    return fs.existsSync(of) ? fs.readFileSync(of, 'utf-8').trim() : '';
-  } catch (err) {
-    logger.warn('주 작업 폴백(codex)이 터졌습니다 — 물러납니다', err);
-    return '';
-  } finally {
-    for (const f of [pf, of]) {
-      try { fs.unlinkSync(f); } catch { /* 이미 없다 */ }
-    }
-  }
+export interface CodexStep { cmd: string; done: boolean }
+
+export type CodexTurnKind = 'ok' | 'usage' | 'fail';
+
+export interface CodexTurnResult {
+  /** `ok` 일 때만 채운다 — 한도 · 실패 글이 답으로 새지 않게. */
+  text: string;
+  kind: CodexTurnKind;
+  steps: CodexStep[];
+  writeRan: boolean;
+  /** 사용량 소진이면 풀리는 시각(epoch 초 · 글에서 읽었을 때만). */
+  resetsAt?: number;
+  ms: number;
+  /** 실패 까닭 한 줄 — 로그 · 관찰 기록용. */
+  detail?: string;
 }
 
-/** `codexSession` 이 넘기는 깃발 묶음. **내보내는 이유는 검사가 쓰기 범위를 세기 위해서다.** */
-export function codexSessionArgs(opts: CodexSessionOpts, outFile: string): string[] {
+/** `codexTurn` 이 넘기는 깃발 묶음. **내보내는 이유는 검사가 모래상자 · 쓰기 범위를 세기 위해서다.** */
+export function codexTurnArgs(opts: CodexTurnOpts, outFile: string, schemaFile?: string): string[] {
+  const write = opts.sandbox === 'workspace-write';
   return [
-    'exec', '--ephemeral', '--skip-git-repo-check',
+    'exec', '--json', '--ephemeral', '--skip-git-repo-check',
     // **작업 디렉터리 밖에도 쓸 곳이 있다.** codex 모래상자는 그 밖을 막는데,
     // `tasks.py` 는 `find` 조차 상태 파일을 쓴다(`analyze()` 가 체크인 스냅숏을
     // 남긴다) — 안 열어 주면 `PermissionError` 로 넘어진다(2026-09-04 실측).
     // 볼트와 판 배포 폴더도 같은 이유로 연다. 범위를 받은 회차(처리 흐름)는 그 범위만.
-    ...(opts.writableDirs ?? codexWritableDirs()).flatMap((d) => ['--add-dir', d]),
-    // 승인을 사람에게 묻지 않는다 — 아무도 안 보는 시각에 도는 길이라
-    // 물으면 그대로 멈춘다.
-    //
-    // ⚠️ ** 를 같이 주면 안 된다** — codex 가 `--sandbox 는 --approve-for-me
-    // 와 같이 못 쓴다` 로 rc 2 를 내며 **매번 죽는다**(2026-09-04 실측).
-    // 이 깃발이 이미 workspace-write 로 돈다(도움말: 「using the
-    // workspace-write sandbox」)라 따로 줄 필요가 없다.
-    '--approve-for-me',
+    ...(write ? (opts.writableDirs ?? codexWritableDirs()).flatMap((d) => ['--add-dir', d]) : []),
+    // 쓰기 차례는 승인을 사람에게 묻지 않는다 — 아무도 안 보는 시각에 도는 길이라
+    // 물으면 그대로 멈춘다. 이 깃발이 이미 workspace-write 로 돈다(도움말:
+    // 「using the workspace-write sandbox」).
+    ...(write ? ['--approve-for-me'] : ['-s', 'read-only']),
     '--color', 'never',
     '-C', opts.workingDirectory,
     '-m', opts.model ?? SESSION_CODEX_MODEL,
     '-c', `model_reasoning_effort=${opts.effort ?? SESSION_CODEX_EFFORT}`,
+    ...(schemaFile ? ['--output-schema', schemaFile] : []),
     '-o', outFile, '-',
   ];
+}
+
+export async function codexTurn(prompt: string, opts: CodexTurnOpts): Promise<CodexTurnResult> {
+  const t0 = Date.now();
+  const store = opts.store ?? engineState;
+  const id = randomId();
+  const pf = path.join(os.tmpdir(), `wa-cx-${id}.txt`);
+  const of = path.join(os.tmpdir(), `wa-cx-${id}.out.txt`);
+  const sf = opts.outputSchema ? path.join(os.tmpdir(), `wa-cx-${id}.schema.json`) : undefined;
+  const fail = (detail: string, steps: CodexStep[] = [], writeRan = false): CodexTurnResult =>
+    ({ text: '', kind: 'fail', steps, writeRan, ms: Date.now() - t0, detail });
+  try {
+    const head = opts.appendSystemPrompt ? `${opts.appendSystemPrompt}\n\n----\n\n` : '';
+    fs.writeFileSync(pf, head + prompt, 'utf-8');
+    if (sf) fs.writeFileSync(sf, JSON.stringify(opts.outputSchema), 'utf-8');
+    const run = await runCodex(codexTurnArgs(opts, of, sf), pf, {
+      timeoutMs: opts.timeoutMs ?? 600_000, env: opts.env, onSpawn: opts.onSpawn,
+    });
+    const ev = run.events;
+    const writeRan = opts.sandbox === 'workspace-write' && ev.touched;
+    let out = '';
+    try { out = fs.existsSync(of) ? fs.readFileSync(of, 'utf-8').trim() : ''; } catch { /* 없으면 이벤트 쪽 */ }
+    // 차례가 끝났나 — 이벤트를 봤으면 `turn.completed`, 못 봤으면(옛 판) rc 로.
+    const finished = run.code === 0 && !run.timedOut && !ev.failed && (ev.completed || !ev.sawEvents);
+    if (finished) {
+      store.recordOk('codex');
+      return { text: out || ev.text.trim(), kind: 'ok', steps: ev.steps, writeRan, ms: Date.now() - t0 };
+    }
+    // 실패 글에서만 한도를 가린다 — 끝난 차례의 답 본문은 안 본다(한도를 이야기한 답이 막힘으로 둔갑한다).
+    const why = [...ev.errors, run.stderr].join('\n');
+    const c = run.timedOut ? null : classifyCodexErrorText(why);
+    if (c) {
+      store.recordBlocked('codex', c);
+      return {
+        text: '', kind: 'usage', steps: ev.steps, writeRan, ms: Date.now() - t0,
+        ...(c.until ? { resetsAt: c.until } : {}), detail: clipLine(why, 200),
+      };
+    }
+    return fail(run.timedOut ? `시간 초과(${opts.timeoutMs ?? 600_000}ms)` : `rc ${run.code} ${clipLine(why, 200)}`.trim(),
+      ev.steps, writeRan);
+  } catch (err) {
+    logger.warn('codex 한 차례가 터졌습니다 — 물러납니다', err);
+    return fail(String((err as Error)?.message ?? err));
+  } finally {
+    for (const f of [pf, of, sf]) {
+      if (f) { try { fs.unlinkSync(f); } catch { /* 이미 없다 */ } }
+    }
+  }
 }

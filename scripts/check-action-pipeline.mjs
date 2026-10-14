@@ -43,11 +43,16 @@ process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
 process.env.REPORT_LOG_STATE = path.join(os.tmpdir(), `actions-check-rl-${Date.now()}`);
 process.env.REPORT_LOG_REPO = path.join(process.env.REPORT_LOG_STATE, '없는-클론');
 process.env.ASSISTANT_COSTS_FILE = path.join(os.tmpdir(), `actions-check-costs-${Date.now()}.json`);
+// 엔진 상태 · 브리핑 자국 · 한도 재시도 계획 — 운영 파일을 읽으면 그날 막힘 · 자국에 따라 결과가 바뀌고 쓰면 운영이 바뀐다
+const STATE_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'actions-check-state-'));
+process.env.ENGINE_STATE_FILE = path.join(STATE_TMP, 'engine-state.json');
+process.env.BRIEFING_DELIVERED_FILE = path.join(STATE_TMP, 'briefing-delivered.json');
+process.env.ANALYSIS_RETRY_FILE = path.join(STATE_TMP, 'analysis-retry.json');
 const {
   ActionPipeline, buildDigestBlocks, buildReportReplyBlocks, decisionReply, markDecided, noticeReply, parseWindow,
 } = require(path.join(ROOT, 'dist', 'action-pipeline.js'));
 const { errorCollector } = require(path.join(ROOT, 'dist', 'error-collector.js'));
-const { codexSessionArgs } = require(path.join(ROOT, 'dist', 'work-assistant.js'));
+const { codexTurnArgs } = require(path.join(ROOT, 'dist', 'work-assistant.js'));
 const { SdkHandler } = require(path.join(ROOT, 'dist', 'sdk-handler.js'));
 
 const fails = [];
@@ -400,6 +405,8 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
       for (let i = 0; i < 200 && armed < 2; i++) await new Promise((r) => setTimeout(r, 10));
       s.stop();
       eq(`예약 브리핑 ${label} — 🗂 요약 한 번`, digests(sent), 1);
+      // 앞 갈래가 올린 브리핑의 「올린 날」 자국을 지운다 — 남아 있으면 놓친 브리핑이 「이미 올림」으로 안 돈다.
+      fs.rmSync(process.env.BRIEFING_DELIVERED_FILE, { force: true });
       const c = brief(how);
       await c.s.catchUpBriefingIfNeeded();
       eq(`놓친 브리핑 ${label} — 🗂 요약 한 번`, digests(c.sent), 1);
@@ -876,11 +883,11 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
 
 // ── ② Codex 폴백의 쓰기 범위 · SDK 추가 폴더 ─────────────────────────────
 {
-  const args = codexSessionArgs({ workingDirectory: 'W', writableDirs: ['J'] }, 'OUT');
+  const args = codexTurnArgs({ workingDirectory: 'W', sandbox: 'workspace-write', writableDirs: ['J'] }, 'OUT');
   const addDirs = args.flatMap((a, i) => (a === '--add-dir' ? [args[i + 1]] : []));
   eq('범위를 받으면 그 폴더만 쓰기를 연다', addDirs, ['J']);
   eq('작업 폴더는 범위의 cwd', args[args.indexOf('-C') + 1], 'W');
-  const none = codexSessionArgs({ workingDirectory: 'W', writableDirs: [] }, 'OUT');
+  const none = codexTurnArgs({ workingDirectory: 'W', sandbox: 'workspace-write', writableDirs: [] }, 'OUT');
   eq('빈 범위면 추가로 여는 곳 없음', none.filter((a) => a === '--add-dir').length, 0);
 }
 {

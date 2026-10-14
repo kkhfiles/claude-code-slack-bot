@@ -108,7 +108,9 @@ export class EngineRecovery {
     this.armedFor = null;
     if (this.now() < at - 1000) { this.arm(); return; }
     try {
-      this.store.clearNotice();
+      // **Claude 가 풀렸을 때만 한도 안내 열쇠를 지운다** — 다른 엔진(codex 등)이 깨어나도 Claude 가
+      // 아직 막혀 있으면 같은 막힘 구간이라, 지우면 다음 DM 에 같은 안내가 또 나간다(4단계 검토).
+      if (!this.store.isBlocked('claude')) this.store.clearNotice();
       Promise.resolve(this.opts.onRecover('한도 회복'))
         .catch((err) => this.logger.error('회복 뒤 일이 터졌습니다', err));
     } catch (err) {

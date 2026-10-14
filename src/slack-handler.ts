@@ -306,8 +306,14 @@ export class SlackHandler {
   // 한도 회복 시각에 깨어나는 타이머 하나 — 시각은 엔진 상태 파일에 있어 재시작 뒤에도 다시 건다
   // (`engine-recovery.ts`). 깨어나면 밀린 것을 드레인하고 엔진 안내를 다시 본다.
   private engineRecovery = new EngineRecovery({
-    onRecover: async () => {
+    onRecover: async (why) => {
       await this.engineNotice.check();
+      // 예약 쪽(못 올린 브리핑 · 미룬 한도 재시도) — 기다리지 않고 던지지 않는다(드레인을 안 막게).
+      try {
+        this.assistantScheduler?.onEngineRecover(why);
+      } catch (err) {
+        this.logger.warn('회복 뒤 예약 일을 못 걸었습니다', err);
+      }
       await this.drainStuck('한도 회복');
     },
   });
@@ -1067,6 +1073,8 @@ export class SlackHandler {
       try {
         const result = await this.assistantScheduler.runBriefing();
         await say({ text: result.text, thread_ts: thread_ts || ts });
+        // 올린 뒤에만 그날 자국 — 놓친 브리핑 · 회복 뒤 다시가 같은 브리핑을 또 올리지 않게.
+        if (result.ok) this.assistantScheduler.markBriefingDelivered('manual', result.servedBy);
         // NAS 이동 컨펌 큐 버튼 (스케줄 브리핑 후처리와 동일)
         try {
           const nasBlocks = await buildNasQueueBlocks(await listNasQueue());

@@ -146,6 +146,10 @@ process.env.WORK_ASSISTANT_STATE = path.join(TMP, 'wa-state');
 process.env.WORK_ASSISTANT_ROOT = path.join(TMP, 'wa-없는-폴더');
 process.env.ASSISTANT_COSTS_FILE = path.join(TMP, 'costs.json');
 process.env.ACTIONS_RESUME_FILE = path.join(TMP, 'actions-resume.json');
+// 한도 재시도 계획 · 엔진 상태 · 브리핑 자국 — 재시도가 파일에 남으므로 운영 파일에 쓰지 않게
+process.env.ANALYSIS_RETRY_FILE = path.join(TMP, 'analysis-retry.json');
+process.env.ENGINE_STATE_FILE = path.join(TMP, 'engine-state.json');
+process.env.BRIEFING_DELIVERED_FILE = path.join(TMP, 'briefing-delivered.json');
 const CFG = path.join(TMP, 'repo', 'assistant');
 fs.mkdirSync(path.join(CFG, 'prompts'), { recursive: true });
 const writeConfig = (enabled) => fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({

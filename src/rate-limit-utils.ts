@@ -168,3 +168,75 @@ export function classifyClaudeErrorText(
   if (OVERLOAD_PATTERN.test(text)) return { kind: 'overload' };
   return null;
 }
+
+// --- codex (2026-10-14) -------------------------------------------------------
+//
+// codex 의 한도 글은 아직 봇 로그에 온 적이 없다 — 실측 전이라 codex 가 내는 문구와 llm-playbook 이
+// 겪은 글을 함께 받는다. **아는 문구만 사용량 소진으로 본다** — 그 밖의 실패(네트워크 · 모델 오류)를
+// 막힘으로 적으면 한 시간 동안 codex 를 건너뛴다.
+//   「You've hit your usage limit. Upgrade to Pro (…) or try again at 3:45 PM.」 · 옛 판 「… try again in
+//   2 hours 5 minutes.」 · 「Your workspace is out of credits」(팀 플랜 · llm-playbook 2026-09-16) ·
+//   「exceeded retry limit, last status: 429 Too Many Requests」 · 서버 글의 `usage_limit_reached`.
+// 「try again」 하나만으로는 안 본다 — 일시 오류도 그렇게 끝난다. 뒤에 시각(at · in)이 붙을 때만.
+
+const CODEX_USAGE_PATTERN = new RegExp([
+  'usage[ _]limit', 'hit your (?:[a-z]+ )?limit', 'out of credits', 'credits? (?:depleted|exhausted)',
+  'quota exceeded', 'rate[ _-]?limit', 'too many requests', '\\b429\\b',
+  'try again (?:at|in) \\d', `try again at (?:${MONTHS.join('|')})`,
+].join('|'), 'i');
+
+/**
+ * codex 글에 적힌 「풀리는 시각」 — epoch 초. 못 읽으면 `null`.
+ *
+ * - `try again at 3:45 PM` — 이 PC 시각대로 오늘(지났으면 내일) · codex 가 같은 PC 시각으로 적는다
+ * - `try again at Oct 5th, 2026 3:45 PM` — 그 날짜
+ * - `try again in 2 hours 5 minutes` · `in 3 days 1 hour` — 더한 값
+ * - `"resets_at": 1789534414` · `"resets_in_seconds": 1200` — 서버 글이 그대로 실려 올 때
+ * - 그 밖은 Claude 와 같은 규칙(`parseResetAt` · `retry after N` 등)
+ */
+export function parseCodexResetAt(text: string, nowMs: number = Date.now()): number | null {
+  const nowSec = Math.floor(nowMs / 1000);
+  const epoch = text.match(/resets_at"?\s*[:=]\s*(\d{10})\b/);
+  if (epoch) return Number(epoch[1]);
+  const secs = text.match(/resets_in_seconds"?\s*[:=]\s*(\d+)/);
+  if (secs) return nowSec + Number(secs[1]);
+  const at = text.match(
+    /try again at (?:([A-Za-z]{3})[a-z]*\.? (\d{1,2})(?:st|nd|rd|th)?,? (\d{4})?,? ?)?(\d{1,2}):(\d{2})(?:\s*([AP]M))?/i,
+  );
+  if (at) {
+    const [, mon, day, year, hh, mm, ampm] = at;
+    // 오전·오후가 없으면 24시간 표기로 읽는다.
+    const hour = ampm ? (Number(hh) % 12) + (ampm.toUpperCase() === 'PM' ? 12 : 0) : Number(hh);
+    const now = new Date(nowMs);
+    const mi = mon ? MONTHS.indexOf(mon.toLowerCase()) : -1;
+    if (mi >= 0) {
+      const t = new Date(year ? Number(year) : now.getFullYear(), mi, Number(day), hour, Number(mm));
+      return Math.floor(t.getTime() / 1000);
+    }
+    const t = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, Number(mm));
+    if (t.getTime() <= nowMs) t.setDate(t.getDate() + 1);
+    return Math.floor(t.getTime() / 1000);
+  }
+  const inPart = text.match(/try again in ((?:\d+\s*(?:days?|hours?|minutes?|seconds?)(?:\s*,?\s*(?:and\s+)?)?)+)/i);
+  if (inPart) {
+    let sum = 0;
+    for (const m of inPart[1].matchAll(/(\d+)\s*(day|hour|minute|second)/gi)) {
+      const unit = m[2].toLowerCase();
+      sum += Number(m[1]) * (unit === 'day' ? 86_400 : unit === 'hour' ? 3_600 : unit === 'minute' ? 60 : 1);
+    }
+    if (sum > 0) return nowSec + sum;
+  }
+  return parseResetAt(text, nowMs);
+}
+
+/**
+ * codex 실패 글을 가른다 — 사용량 소진이면 `{kind: 'usage', until?}`, 아니면 `null`(막힘으로 안 적음).
+ * **실패한 회차의 글에만 쓴다** — 정상으로 끝난 답 본문은 넣지 않는다(Claude 쪽과 같은 까닭).
+ */
+export function classifyCodexErrorText(
+  text: string, nowMs: number = Date.now(),
+): { kind: 'usage'; until?: number } | null {
+  if (!text || !CODEX_USAGE_PATTERN.test(text)) return null;
+  const until = parseCodexResetAt(text, nowMs);
+  return until !== null ? { kind: 'usage', until } : { kind: 'usage' };
+}

@@ -37,6 +37,10 @@ process.env.WORK_EVENTS_FILE = evFile;
 const rlState = fs.mkdtempSync(path.join(os.tmpdir(), 'askback-rl-'));
 fs.mkdirSync(path.join(rlState, 'tmp'), { recursive: true });
 process.env.REPORT_LOG_STATE = rlState;
+// 엔진 상태 · 브리핑 자국 · 한도 재시도 계획 — 운영 파일을 읽으면 그날 막힘에 따라 1차를 안 띄운다
+process.env.ENGINE_STATE_FILE = path.join(rlState, 'engine-state.json');
+process.env.BRIEFING_DELIVERED_FILE = path.join(rlState, 'briefing-delivered.json');
+process.env.ANALYSIS_RETRY_FILE = path.join(rlState, 'analysis-retry.json');
 function readEvents() {
   if (!fs.existsSync(evFile)) return [];
   return fs.readFileSync(evFile, 'utf-8').trim().split('\n')

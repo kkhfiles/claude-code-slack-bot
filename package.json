@@ -57,7 +57,9 @@
     "check:xroom": "node scripts/check-rooms-recent.mjs",
     "check:engine": "node scripts/check-engine-state.mjs",
     "check:inboxlock": "node scripts/check-inbox-lock.mjs",
-    "check:hold": "node scripts/check-hold-replay.mjs"
+    "check:hold": "node scripts/check-hold-replay.mjs",
+    "check:schedgaps": "node scripts/check-scheduled-gaps.mjs",
+    "check:calbase": "node scripts/check-calendar-baseline.mjs"
   },
   "keywords": [],
   "author": "",

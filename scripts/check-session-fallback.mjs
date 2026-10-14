@@ -16,13 +16,18 @@
  *   ② 몇 번 돌렸는지 **모름**(`undefined`) → 안 함. 모르는 것을 0 으로 읽으면 두 번 돈다
  *   ③ 이어받는 회차(`resumeSessionId`) → 안 함. 프롬프트가 `'continue'` 한 낱말이다
  *
- * **외부 서비스를 안 부른다** — 없는 실행체를 넣어 「부르러 갔나」만 잰다.
+ * codex 한 차례(`codexTurn` · 2026-10-14)도 여기서 잰다 — 가짜 codex(`lib/fake-codex.mjs`)로
+ * 환경 변수가 닿나 · 모래상자 깃발 · 이벤트에서 한 일 · 한도 글 → 엔진 상태 · Claude 가 막혔으면 1차를
+ * 안 띄움 · codex 한도 조회가 소진이면 codex 를 안 부름.
+ *
+ * **외부 서비스를 안 부른다** — 없는 실행체나 가짜 codex 를 넣어 「부르러 갔나」만 잰다.
  */
 import './lib/fresh-dist.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeFakeCodex } from './lib/fake-codex.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fails = [];
@@ -39,6 +44,13 @@ const evFile = path.join(os.tmpdir(), `wa-sev-${Date.now()}.jsonl`);
 const costFile = path.join(os.tmpdir(), `wa-cost-${Date.now()}.json`);
 process.env.ASSISTANT_COSTS_FILE = costFile;
 process.env.WORK_EVENTS_FILE = evFile;
+// 엔진 상태 · 브리핑 자국 · 재시도 계획도 임시로 — 운영 파일을 읽으면 그날 막힘에 따라 결과가 바뀌고,
+// 쓰면 운영 봇이 codex 를 건너뛴다.
+const STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sessionfb-'));
+const engineFile = path.join(STATE_DIR, 'engine-state.json');
+process.env.ENGINE_STATE_FILE = engineFile;
+process.env.BRIEFING_DELIVERED_FILE = path.join(STATE_DIR, 'briefing-delivered.json');
+process.env.ANALYSIS_RETRY_FILE = path.join(STATE_DIR, 'analysis-retry.json');
 // 폴백이 실제로 불리는지만 보고 싶다 — 없는 실행체를 주면 빈손으로 돌아온다.
 process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
 // 등급 사다리(파이썬)도 같은 까닭으로 — 없는 실행체면 표도 사다리도 빈손으로 물러난다(2026-09-23).
@@ -133,6 +145,160 @@ const OKR = { text: '잘 됐다', costUsd: 0, sessionId: 's', subtype: 'success'
      ev.length === 1 && String(ev[0].via).startsWith('codex'));
 }
 
+// ── codex 한 차례 — 가짜 codex 로 실행해서 잰다 (2026-10-14) ─────────────
+const fake = makeFakeCodex();
+const wa = await import('../dist/work-assistant.js');
+const { engineState } = await import('../dist/engine-state.js');
+const { codexQuota, applyQuota } = await import('../dist/codex-quota.js');
+const { primaryReadOnly } = await import('../dist/assistant-scheduler.js');
+const resetEngine = () => fs.rmSync(engineFile, { force: true });
+// 부르는 쪽이 얹은 값만 닿아야 한다 — 이 프로세스에 같은 이름이 있으면 「닿았다」를 못 가른다.
+delete process.env.CLAUDE_SCHEDULED;
+delete process.env.WORK_ASSISTANT_CAPTURE_FILE;
+// 가짜 값 — codex 에 넘어가면 안 된다(`child-env.ts`).
+process.env.ANTHROPIC_API_KEY = 'test-not-a-key';
+process.env.BOARD_NARROW_CODEX_BIN = fake.bin;
+codexQuota.forget();
+const FAIL0 = { ...OKR, text: '', isError: true, subtype: 'error', toolCalls: 0 };
+const ENV = { CLAUDE_SCHEDULED: '1', WORK_ASSISTANT_CAPTURE_FILE: 'cap-시험.json' };
+const WRITE = { ...OPTS, allowedTools: ['Read', 'Write', 'Bash'], env: ENV };
+const turn = (sandbox, extra = {}) => wa.codexTurn('말', { workingDirectory: os.tmpdir(), sandbox, writableDirs: [], ...extra });
+try {
+  // ① 부르는 쪽 환경 변수가 codex 까지 닿는다 · API 키는 안 닿는다 · 쓰기 차례 깃발
+  {
+    resetEngine();
+    process.env.FAKE_CODEX_MODE = 'ok';
+    const n0 = fake.calls().length;
+    const { out } = await run(FAIL0, WRITE);
+    const c = fake.calls().slice(n0);
+    eq('가짜 codex 를 한 번 부른다', c.length, 1);
+    eq('부르는 쪽 환경 변수(CLAUDE_SCHEDULED · 캡처 파일)가 codex 까지 닿는다', c[0]?.env, ENV);
+    eq('API 키는 codex 에 안 넘긴다', c[0]?.apiKey, false);
+    const a = c[0]?.argv ?? [];
+    ok(`쓰기 차례는 --approve-for-me 만 (받음 ${a.join(' ')})`, a.includes('--approve-for-me') && !a.includes('-s'));
+    ok('이벤트를 읽게 --json', a.includes('--json'));
+    eq('codex 가 받은 답 · 처리 백엔드', [out.text, out.servedBy], ['☀️ codex 답', 'codex']);
+    ok('된 차례는 엔진 상태에 「됐다」', engineState.load().engines.codex.lastOkAt !== null);
+  }
+
+  // ② 1차가 읽기 도구뿐이면 읽기 전용 모래상자 — 쓰기 폴더도 안 연다(폴백이 1차보다 넓게 안 씀)
+  {
+    const n0 = fake.calls().length;
+    await run(FAIL0, { ...OPTS, allowedTools: ['Read', 'Glob', 'Grep'], env: ENV });
+    const a = fake.calls().slice(n0)[0]?.argv ?? [];
+    ok(`읽기 전용 1차 → -s read-only (받음 ${a.join(' ')})`, a[a.indexOf('-s') + 1] === 'read-only');
+    ok('읽기 전용이면 --approve-for-me 없음', a.length > 0 && !a.includes('--approve-for-me'));
+    ok('읽기 전용이면 쓰기 폴더(--add-dir)를 안 연다', a.length > 0 && !a.includes('--add-dir'));
+    eq('브리핑 도구(Read · Glob · Grep · 달력 읽기)는 읽기 전용',
+       primaryReadOnly({ allowedTools: ['Read', 'Glob', 'Grep', 'mcp__google-calendar__list-events'] }), true);
+    eq('쓰기 도구가 하나라도 있으면 읽기 전용 아님', primaryReadOnly({ allowedTools: ['Read', 'Write'] }), false);
+    eq('도구 목록이 없으면 읽기 전용 아님', primaryReadOnly({}), false);
+    eq('trust 는 allowedTools 로 못 막아 읽기 전용 아님', primaryReadOnly({ allowedTools: ['Read'], permissionMode: 'trust' }), false);
+    eq('tools 가 읽기뿐이면 읽기 전용', primaryReadOnly({ tools: ['Read', 'Grep'] }), true);
+  }
+
+  // ③ 이벤트에서 한 일 · 썼을 수 있나 · 답
+  {
+    process.env.FAKE_CODEX_MODE = 'ok';
+    const w = await turn('workspace-write');
+    eq('명령마다 한 줄 · 끝났나', w.steps.map((s) => [s.cmd.slice(0, 31), s.done]),
+       [['python -X utf8 bin/tasks.py log', true], ['xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', false]]);
+    ok(`긴 명령은 120자 안으로 (받음 ${w.steps[1]?.cmd.length})`, (w.steps[1]?.cmd.length ?? 999) <= 120);
+    eq('쓰기 차례에서 명령이 시작했으면 writeRan', [w.kind, w.writeRan], ['ok', true]);
+    const r = await turn('read-only');
+    eq('읽기 전용 차례는 writeRan 아님', [r.kind, r.writeRan, r.steps.length], ['ok', false, 2]);
+    process.env.FAKE_CODEX_NO_OUT = '1';
+    const e = await turn('read-only');
+    eq('-o 파일이 비면 마지막 agent_message 가 답', e.text, '이벤트 쪽 답');
+    delete process.env.FAKE_CODEX_NO_OUT;
+  }
+
+  // ④ 한도 글 → 엔진 상태에 codex 막힘 · 그 밖의 실패는 안 적음
+  {
+    resetEngine();
+    process.env.FAKE_CODEX_MODE = 'fail';
+    const f = await turn('read-only');
+    eq('그 밖의 실패는 fail · 답 없음 · 막힘 안 적음', [f.kind, f.text, engineState.isBlocked('codex')], ['fail', '', false]);
+    process.env.FAKE_CODEX_MODE = 'usage-event';
+    const t0 = Math.floor(Date.now() / 1000);
+    const u = await turn('read-only');
+    eq('한도 이벤트(turn.failed) → usage · 답 없음', [u.kind, u.text], ['usage', '']);
+    ok(`풀리는 시각을 글에서 읽는다(2시간 5분 · 받음 ${u.resetsAt ? u.resetsAt - t0 : '없음'}초)`,
+       typeof u.resetsAt === 'number' && Math.abs(u.resetsAt - t0 - 7500) < 30);
+    ok('엔진 상태에 codex 막힘(그 시각까지)', engineState.isBlocked('codex') && engineState.blocked('codex')?.until === u.resetsAt);
+    resetEngine();
+    process.env.FAKE_CODEX_MODE = 'usage-stderr';
+    const s = await turn('read-only');
+    eq('표준 오류의 429 → usage', s.kind, 'usage');
+    ok('시각을 모르면 엔진 상태가 정한 다시 볼 시각까지 막힘',
+       engineState.isBlocked('codex') && engineState.blocked('codex')?.untilKnown === false);
+  }
+
+  // ⑤ codex 가 막혀 있으면 폴백을 안 부른다(④ 의 막힘이 남아 있다)
+  {
+    process.env.FAKE_CODEX_MODE = 'ok';
+    const n0 = fake.calls().length;
+    const { out, ev } = await run(FAIL0, WRITE);
+    eq('codex 가 막혔으면 부르지 않는다', fake.calls().length - n0, 0);
+    eq('건너뛴 까닭을 남긴다', ev.map((e) => e.skipped), ['codex-blocked']);
+    ok('1차 결과를 그대로 돌려준다', out.isError === true && out.servedBy === 'claude');
+  }
+
+  // ⑥ 한도 조회가 소진이면 codex 를 안 부른다 · 못 읽으면 「모름」이라 부른다
+  {
+    resetEngine();
+    const now = Math.floor(Date.now() / 1000);
+    codexQuota.forget();
+    codexQuota.fetch = async () => ({ plan: 'team', primary: { used_percent: 100, window_mins: 300, resets_at: now + 3600 },
+      secondary: { used_percent: 40, window_mins: 10080, resets_at: now + 86400 }, reached: null, error: null });
+    const n0 = fake.calls().length;
+    const { ev } = await run(FAIL0, WRITE);
+    eq('한도 조회가 소진이면 codex 를 안 부른다', [fake.calls().length - n0, ev.map((e) => e.skipped)], [0, ['codex-blocked']]);
+    eq('막힘은 다 쓴 창이 풀리는 시각까지', engineState.blocked('codex')?.until, now + 3600);
+    const util = engineState.load().engines.codex.util ?? {};
+    eq('사용률도 적는다(0~1)', [util.five_hour, util.seven_day], [1, 0.4]);
+    let asked = 0;
+    codexQuota.fetch = async () => { asked += 1; return null; };
+    await codexQuota.refresh();
+    eq('5분 안에는 다시 안 묻고 앞 답을 쓴다', asked, 0);
+
+    resetEngine();
+    codexQuota.forget();
+    codexQuota.fetch = async () => ({ error: '조회 실패(시험)' });
+    const n1 = fake.calls().length;
+    const { out } = await run(FAIL0, WRITE);
+    eq('조회를 못 하면 모름 — codex 를 부른다', [fake.calls().length - n1, out.servedBy], [1, 'codex']);
+    codexQuota.forget();
+    codexQuota.fetch = async () => { throw new Error('터짐(시험)'); };
+    eq('조회가 던져도 모름(안 던진다)', await codexQuota.refresh(), 'unknown');
+    resetEngine();
+    eq('reached 만 차 있어도 소진', applyQuota({ primary: { used_percent: 50 }, reached: 'workspace_owner_credits_depleted' }), 'exhausted');
+    resetEngine();
+    codexQuota.forget();
+    codexQuota.fetch = async () => null;
+  }
+
+  // ⑦ Claude 가 막혀 있다고 엔진 상태가 말하면 1차를 안 띄운다
+  {
+    resetEngine();
+    engineState.recordBlocked('claude', { kind: 'usage', until: Math.floor(Date.now() / 1000) + 3600 });
+    let spawned = 0;
+    const sched = new AssistantScheduler(async () => {}, async () => { spawned += 1; return OKR; }, config.assistant.configDir);
+    process.env.FAKE_CODEX_MODE = 'ok';
+    const r = await sched.spawnOrFallback('시험', '말', WRITE);
+    eq('Claude 가 막혀 있으면 1차를 안 띄우고 codex 가 받는다', [spawned, r.servedBy, r.text], [0, 'codex', '☀️ codex 답']);
+    const rr = await sched.spawnOrFallback('시험', 'continue', { ...OPTS, resumeSessionId: 'abc' });
+    eq('이어받는 회차는 한도 결과로 돌아간다(1차도 폴백도 없음)', [spawned, rr.rateLimited, rr.isError], [0, true, true]);
+    resetEngine();
+    const r2 = await sched.spawnOrFallback('시험', '말', WRITE);
+    eq('풀리면 1차를 띄운다', [spawned, r2.servedBy], [1, 'claude']);
+  }
+} finally {
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.FAKE_CODEX_MODE;
+  fake.cleanup();
+}
+
 delete process.env.BOARD_NARROW_CODEX_BIN;
 delete process.env.LADDER_PYTHON;
 delete process.env.WORK_EVENTS_FILE;
@@ -149,28 +315,28 @@ try { fs.unlinkSync(evFile); } catch { /* 없으면 그만 */ }
 // 「실패하면 빈손」만 봤지 **성공 경로를 한 번도 안 봤다.**
 {
   const { spawnSync } = await import('node:child_process');
-  const { codexWritableDirs } = await import('../dist/work-assistant.js');
+  const { codexWritableDirs, codexTurnArgs } = await import('../dist/work-assistant.js');
   const dirs = codexWritableDirs();
   // 여기가 비면 폴백이 도는 것처럼 보이면서 `tasks.py` 마다 넘어진다 —
   // `analyze()` 가 상태 파일을 쓰기 때문이다.
   ok(`작업 디렉터리 밖에 쓸 곳을 찾는다 (${dirs.length}곳)`, dirs.length >= 1);
 
-  const flags = [
-    'exec', '--ephemeral', '--skip-git-repo-check',
-    ...dirs.flatMap((d) => ['--add-dir', d]),
-    '--approve-for-me', '--color', 'never',
-    '-C', os.tmpdir(), '-m', 'gpt-6.1-sol',
-    '-c', 'model_reasoning_effort=low', '-',
-  ];
-  const r = spawnSync('codex', flags, {
-    input: '', encoding: 'utf-8', shell: process.platform === 'win32', timeout: 30_000,
-  });
-  const err = `${r.stderr || ''}${r.stdout || ''}`;
-  if (r.error && r.error.code === 'ENOENT') {
-    notes.push('codex 가 없어 깃발 검증을 못 했다 — 통과가 아니라 안 본 것');
-  } else {
+  // 실제로 넘기는 깃발 묶음 그대로(`codexTurnArgs`) — 쓰기 · 읽기 전용 둘 다. 손으로 다시 적으면
+  // 코드와 어긋난 묶음을 재게 된다.
+  const outFile = path.join(STATE_DIR, 'flag-check.out.txt');
+  for (const sandbox of ['workspace-write', 'read-only']) {
+    const flags = codexTurnArgs({ workingDirectory: os.tmpdir(), sandbox, model: 'gpt-6.1-sol', effort: 'low' }, outFile);
+    ok(`${sandbox} — --sandbox 와 --approve-for-me 를 같이 안 준다`, !(flags.includes('-s') && flags.includes('--approve-for-me')));
+    const r = spawnSync('codex', flags, {
+      input: '', encoding: 'utf-8', shell: process.platform === 'win32', timeout: 30_000,
+    });
+    const err = `${r.stderr || ''}${r.stdout || ''}`;
+    if (r.error && r.error.code === 'ENOENT') {
+      notes.push('codex 가 없어 깃발 검증을 못 했다 — 통과가 아니라 안 본 것');
+      break;
+    }
     const first = err.trim().split('\n')[0];
-    ok(`깃발이 서로 안 부딪힌다 (rc ${r.status} · ${first})`,
+    ok(`${sandbox} — 깃발이 서로 안 부딪힌다 (rc ${r.status} · ${first})`,
        !/cannot be used with|unexpected argument|invalid value/i.test(err));
   }
 }
@@ -188,8 +354,9 @@ try { fs.unlinkSync(evFile); } catch { /* 없으면 그만 */ }
   const got = sched.costEntries.slice(n0).map((e) => [e.type, e.costUsd, e.via, e.ok, e.resultMs]);
   eq('폴백 회차는 값 0 · 백엔드 · 성패 · 걸린 시간으로 남고, 값 0 인 1차 실패는 그대로 안 남는다',
      got, [['briefing', 0, 'codex', true, 1234]]);
-  // 폴백이 돌다 실패한 브리핑을 「오늘 돌았다」로 읽으면 재시작 뒤 따라잡기가 안 돈다.
-  ok('따라잡기는 실패한 폴백 회차를 「돌았다」로 안 친다',
+  // 놓친 브리핑은 이제 「올린 날」 자국으로 본다(`check:briefing`). 자국이 아직 없는 첫날만 옛 기준(원장)을
+  // 쓰는데, 그때도 폴백이 돌다 실패한 브리핑을 「오늘 돌았다」로 읽으면 재시작 뒤 따라잡기가 안 돈다.
+  ok('옛 기준(원장)은 실패한 폴백 회차를 「돌았다」로 안 친다',
      /e\.type === 'briefing' && e\.ok !== false/.test(
        fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8')));
 }
@@ -222,11 +389,14 @@ const direct = [...src.matchAll(/await this\.spawnSession\(/g)].length;
 // 둘만 정상이다 — 좁은 길(제 폴백이 따로 있다)과 `spawnOrFallback` 자기 자신.
 eq('폴백을 안 거치는 직접 호출은 둘뿐 (좁은 길 · 폴백 자신)', direct, 2);
 
+fs.rmSync(STATE_DIR, { recursive: true, force: true });
+
 if (notes.length) console.log('\n⚠️  ' + notes.join('\n⚠️  '));
 if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);
   process.exitCode = 1;
 } else {
   console.log('통과 — 주 작업 폴백 (도구 돌린 뒤 · 몇 번인지 모름 · 이어받기 셋 다 안 함 · '
-    + '던짐·빈손·도구 0회는 부르러 감 · 새는 호출 없음)');
+    + '던짐·빈손·도구 0회는 부르러 감 · 새는 호출 없음 · codex 환경 변수 · 모래상자 · 한 일 · '
+    + '한도 → 엔진 상태 · Claude 막힘이면 1차 안 띄움 · codex 소진이면 안 부름)');
 }

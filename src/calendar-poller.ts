@@ -46,6 +46,12 @@ export interface GCalEvent {
 export interface CalendarCache {
   fetchedAt: string;
   events: GCalEvent[];
+  /**
+   * 아직 판단을 못 끝낸 변경의 비교 기준 — 판단이 끝나야(알림 없음 포함) 지운다(2026-10-14).
+   * 없으면 `events` 가 기준이다. 전에는 판단 전에 캐시를 새 일정으로 바꿔, Claude 와 사다리가 다 못 한
+   * 차례의 변경은 다음 차례에 비교할 것이 없어 영영 판단되지 않았다.
+   */
+  baseline?: GCalEvent[];
 }
 
 interface CalendarDiff {
@@ -117,6 +123,8 @@ export class CalendarPoller {
   // Diff dedup
   private lastDiffHash = '';
   private lastPollDate = '';
+  /** 판단 실패를 「시스템 이슈」에 이미 적었나 — 실패가 이어지는 동안 한 줄만(판단이 되면 다시 적음). */
+  private judgeFailNoted = false;
 
   constructor(
     private sendMessage: (text: string, blocks?: unknown[]) => Promise<void>,
@@ -229,7 +237,8 @@ export class CalendarPoller {
 
     try {
       const events = await this.fetchAllEvents(accessToken);
-      this.saveCache(events);
+      // 판단을 못 끝낸 기준이 있으면 그대로 둔다 — 브리핑이 캐시를 새로 받았다고 그 변경이 사라지면 안 된다.
+      this.saveCache(events, this.loadCache()?.baseline);
       return this.getCache();
     } catch (error) {
       this.logger.error('Failed to refresh cache', error);
@@ -571,10 +580,11 @@ export class CalendarPoller {
     return null;
   }
 
-  private saveCache(events: GCalEvent[]): void {
+  private saveCache(events: GCalEvent[], baseline?: GCalEvent[]): void {
     const cache: CalendarCache = {
       fetchedAt: new Date().toISOString(),
       events,
+      ...(baseline ? { baseline } : {}),
     };
     try {
       fs.writeFileSync(this.cacheFile, JSON.stringify(cache, null, 2), 'utf-8');
@@ -657,7 +667,12 @@ export class CalendarPoller {
 
   // --- AI judgment ---
 
-  private async getAIJudgment(diff: CalendarDiff): Promise<CalendarNotification[]> {
+  /**
+   * 변경을 판단한다 — 알림 목록(없으면 `[]` = 「판단했고 알릴 것 없음」). **Claude 도 사다리도 못 하면
+   * `null`** — 부르는 쪽이 비교 기준을 옮기지 않아 다음 차례에 다시 판단한다(2026-10-14).
+   * 설정 · 프롬프트가 없는 것은 다시 해도 같으므로 `[]`.
+   */
+  private async getAIJudgment(diff: CalendarDiff): Promise<CalendarNotification[] | null> {
     const config = this.getConfig();
     if (!config) return [];
 
@@ -769,17 +784,22 @@ export class CalendarPoller {
 
   /**
    * Claude 가 못 한 판단을 같은 등급의 다른 회사 모델로(codex → agy · llm-playbook 사다리).
-   * 도구 없이 JSON 만 주고받는 판단이라 사다리에 그대로 맞는다. 못 하면 빈 목록(예전 동작).
+   * 도구 없이 JSON 만 주고받는 판단이라 사다리에 그대로 맞는다. 못 하면 `null` — 다음 차례에 다시
+   * 판단한다(예전에는 빈 목록이라 그 변경의 알림이 영영 사라졌다).
    */
   private async judgeByLadder(
     prompt: string, diff: CalendarDiff, beforeMinutes: number, why: string,
-  ): Promise<CalendarNotification[]> {
+  ): Promise<CalendarNotification[] | null> {
     const got = await ladderText('회의 알림 판단', prompt, {
       model: CALENDAR_MODEL, system: JUDGE_SYSTEM, timeoutMs: 180_000,
     });
     if (!got) {
-      errorCollector.add('CalendarPoller', `회의 알림 판단 — ${why} · 사다리(codex·agy)도 실패 — 그 차례 알림 없음`);
-      return [];
+      // 실패가 이어지는 동안 한 줄만 — 폴링마다 다시 판단하므로 매번 적으면 「시스템 이슈」 칸(최근 50개)을 덮는다.
+      if (!this.judgeFailNoted) {
+        errorCollector.add('CalendarPoller', `회의 알림 판단 — ${why} · 사다리(codex·agy)도 실패 — 다음 차례에 다시 판단`);
+        this.judgeFailNoted = true;
+      }
+      return null;
     }
     this.logger.warn(`회의 알림 판단: ${why} → ${got.backend} ${got.model} 가 받음`);
     return this.clampNotifyAt(this.parseJudgmentResponse(got.text), diff, beforeMinutes);
@@ -1067,23 +1087,29 @@ export class CalendarPoller {
       return;
     }
 
-    // 3. Load previous cache
+    // 3. Load previous cache — 판단을 못 끝낸 기준이 있으면 그것과 비교한다
     const previousCache = this.loadCache();
-    const previousEvents = previousCache?.events || [];
+    const baseline = previousCache?.baseline ?? previousCache?.events ?? [];
 
-    // 4. Always save current cache (for briefing and next diff)
-    this.saveCache(currentEvents);
+    // 4. Compute diff (future non-all-day events only)
+    const diff = this.computeDiff(baseline, currentEvents);
 
-    // 5. Compute diff (future non-all-day events only)
-    const diff = this.computeDiff(previousEvents, currentEvents);
+    // 5. No diff → 지금 일정이 곧 기준
+    if (this.isDiffEmpty(diff)) {
+      this.saveCache(currentEvents);
+      return;
+    }
 
-    // 6. No diff → done
-    if (this.isDiffEmpty(diff)) return;
+    // 6. 캐시는 지금 일정으로(브리핑이 읽는다) · 비교 기준은 판단이 끝날 때까지 그대로 —
+    //    판단 도중 죽거나 판단이 다 실패해도 다음 차례가 같은 변경을 다시 본다.
+    this.saveCache(currentEvents, baseline);
 
     // 7. Check diff hash for dedup
     const diffHash = this.hashDiff(diff);
-    if (diffHash === this.lastDiffHash) return;
-    this.lastDiffHash = diffHash;
+    if (diffHash === this.lastDiffHash) {
+      this.saveCache(currentEvents);
+      return;
+    }
 
     this.logger.info('Calendar diff detected', {
       added: diff.added.length,
@@ -1093,6 +1119,15 @@ export class CalendarPoller {
 
     // 8. AI judgment → notification queue
     const notifications = await this.getAIJudgment(diff);
+    if (notifications === null) {
+      // Claude 도 사다리도 못 했다 — 기준 · 중복 표시를 안 옮긴다(다음 차례에 다시 판단).
+      this.logger.warn('회의 알림 판단 실패 — 비교 기준을 그대로 두고 다음 차례에 다시 봅니다');
+      return;
+    }
+    // 판단이 끝났다(알릴 것 없음 포함) — 이제야 기준을 지금 일정으로 옮긴다.
+    this.lastDiffHash = diffHash;
+    this.judgeFailNoted = false;
+    this.saveCache(currentEvents);
     if (notifications.length > 0) {
       this.addNotifications(notifications);
     }

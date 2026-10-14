@@ -38,6 +38,8 @@ const eq = (label, got, want) => {
 const ok = (label, cond) => { if (!cond) fails.push(label); };
 
 const NOBIN = 'codex-없는-이름-2026';
+// 엔진 상태 — codex 한 차례(`codexTurn`)가 적는 곳. 운영 파일에 안 쓰게.
+process.env.ENGINE_STATE_FILE = path.join(os.tmpdir(), `narrow-engine-${Date.now()}.json`);
 
 // ── ③ 꺼 두면 아무것도 안 한다 ──────────────────────────────────
 process.env.BOARD_NARROW_FALLBACK = 'off';

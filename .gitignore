@@ -68,6 +68,9 @@ coverage/
 .rate-limit-until.json
 # 엔진 상태(막힘 · 회복 시각 · 사용률 · 안내 키) — 쓰는 중 임시 파일 `.engine-state.json.<pid>.tmp` 포함
 .engine-state.json*
+# 아침 브리핑을 올린 날 · 한도 재시도 계획(재시작해도 남게 · 쓰는 중 임시 파일 포함)
+.briefing-delivered.json*
+.analysis-retry.json*
 # 엔진 폴백 연습용 상태(다음 단계)
 .engine-drill.json*
 # 한도로 미룬 처리 제안 검토 (런타임 상태)

@@ -379,7 +379,20 @@ try {
     nowMs = (nowSec() + 3600) * 1000 + RECOVERY_SLACK_MS;
     timers.at(-1).fn();
     eq('깨어나면 드레인을 부른다', recovered, ['한도 회복']);
-    eq('깨어나면 한도 안내 키를 비운다', s2.load().notice, null);
+    // codex 만 깨어나고 Claude 는 아직 막힘 — 같은 막힘 구간이라 안내 열쇠를 남긴다(4단계 검토)
+    eq('다른 엔진만 깨면 Claude 한도 안내 키는 남긴다', s2.load().notice?.key, `claude:usage:${U}`);
+    {
+      const s3 = new EngineState({ file: path.join(TMP, 'notice-clear.json'), legacyFile: path.join(TMP, 'none-c.json'), now: clock });
+      s3.recordBlocked('claude', { kind: 'usage', until: nowSec() + 60 });
+      s3.noticeOnce('claude:usage:x');
+      const t3 = [];
+      const r3 = new EngineRecovery({ store: s3, now: clock, onRecover: () => {},
+        setTimer: (fn, ms) => { t3.push({ fn, ms }); return t3.length; }, clearTimer: () => {} });
+      r3.init();
+      nowMs = (nowSec() + 120) * 1000 + RECOVERY_SLACK_MS;
+      t3.at(-1).fn();
+      eq('Claude 가 풀려 깨어나면 한도 안내 키를 비운다', s3.load().notice, null);
+    }
     eq('깨어난 뒤 남은 막힘으로 다시 건다', r.armedFor, U * 1000 + RECOVERY_SLACK_MS);
 
     // 회복 시각 전에 풀림(어느 차례가 됨) — 1분 뒤에 돌린다.
