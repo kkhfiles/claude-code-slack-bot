@@ -42,10 +42,15 @@ import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retarg
 import { decisionReply, noticeReply, reportLogAvailable } from './action-pipeline';
 import type { ThreadApi } from './action-pipeline';
 import { captureToInbox, checkinMap, checkinNow, dropCapture, isWorkAssistantEnabled,
-  markCaptureFailed, markCaptureTried, pendingCaptures, quickUpdate } from './work-assistant';
+  markCaptureFailed, markCaptureReplayed, markCaptureTold, markCaptureTried, pendingCaptures,
+  pendingHeld, quickUpdate } from './work-assistant';
 import { boardLabel } from './board-queue';
 import { readUnseen } from './dm-context';
 import { containsPrivate } from './privacy-guard';
+import { ChannelGate, HOLD_SWEEP_MS, REPLAY_FRAME, buildHoldExtra, drainHeld, dropHeldFiles, holdV2On,
+  leadText, markChoice, needsCanary, oldListMessage, receivedSec, replayNote, replayTarget,
+  type HeldFile, type HeldItem } from './hold-replay';
+import { StepLog, isHeldOutcome, outcomeFrom, type TurnOutcome, type TurnStep } from './turn-outcome';
 
 /**
  * 슬랙 대화 세션의 사고 깊이. SDK 기본값은 `'high'` 다.
@@ -106,7 +111,17 @@ const INFLIGHT_FILE = path.join(__dirname, '..', '.inflight-sessions.json');
 interface InflightRecord { channel: string; threadTs?: string; text: string;
   startedAt: string;
   /** 이 차례가 든 캡처. 재시작으로 끊기면 그 캡처에 표시를 남긴다. */
-  captureId?: string; }
+  captureId?: string;
+  /**
+   * 돈 도구(보류 v2) — 재시작으로 끊겼을 때 쓰기가 돌았나를 가른다. 도구가 시작할 때마다 고쳐
+   * 쓴다(도구 하나에 한 번). 쓰기가 돌았으면 처음부터가 아니라 이 세션으로 이어 간다.
+   */
+  steps?: TurnStep[];
+  sessionId?: string;
+  /** 이 차례가 이어 가던 앞 차례의 「이미 한 것」 — 또 끊기면 합쳐서 넘긴다. */
+  heldSteps?: string[];
+  /** 첨부(임시 파일) — 끊기면 보관 폴더로 옮긴다. */
+  files?: HeldFile[]; }
 
 function readInflight(): Record<string, InflightRecord> {
   try { return JSON.parse(fs.readFileSync(INFLIGHT_FILE, 'utf-8')); } catch { return {}; }
@@ -114,6 +129,19 @@ function readInflight(): Record<string, InflightRecord> {
 
 function writeInflight(map: Record<string, InflightRecord>): void {
   try { fs.writeFileSync(INFLIGHT_FILE, JSON.stringify(map), 'utf-8'); } catch { /* 알림용이라 실패해도 본 작업을 막지 않는다 */ }
+}
+
+/** 첨부의 보관용 모양 — 임시 파일 자리(`tempPath`)는 뺀다. */
+function heldFileOf(f: ProcessedFile): HeldFile {
+  return { path: f.path, name: f.name, mimetype: f.mimetype, isImage: f.isImage, isText: f.isText, size: f.size };
+}
+
+/** 처리 중 기록 한 건을 고친다 — 없으면(이미 끝남) 안 만든다. */
+function patchInflight(key: string, patch: Partial<InflightRecord>): void {
+  const m = readInflight();
+  if (!m[key]) return;
+  m[key] = { ...m[key], ...patch };
+  writeInflight(m);
 }
 
 const SLACK_SURFACE_NOTE = [
@@ -202,6 +230,20 @@ interface MessageEvent {
    * **줄어드는 게 아니라 늘어난다** — 옛 것은 열린 채 남고 새 것이 하나 더 생긴다.
    */
   captureId?: string;
+  /**
+   * 보류 v2 — 다시 돌리는 차례가 싣는 것. 사람이 보낸 메시지에는 없다.
+   *   - `outcomeSink` 차례가 끝나면 결과(`TurnOutcome`)를 여기에 채운다 — 부른 쪽이 「다시 막혔나」를 본다
+   *   - `replay` 다시 돌리는 차례 — 방의 문(`holdGate`)을 기다리지 않는다(자기가 잡은 문이다)
+   *   - `replayNote` 세션 앞에 붙일 메모(받은 시각 · 그 뒤의 글 · 이미 한 것)
+   *   - `resumeSessionId` · `heldSteps` 일하다 끊긴 차례를 같은 세션으로 이어 감
+   *   - `heldFiles` 보관해 둔 첨부
+   */
+  outcomeSink?: Partial<TurnOutcome>;
+  replay?: boolean;
+  replayNote?: string;
+  resumeSessionId?: string;
+  heldSteps?: string[];
+  heldFiles?: HeldFile[];
   files?: Array<{
     id: string;
     name: string;
@@ -276,6 +318,9 @@ export class SlackHandler {
       await this.app.client.chat.postMessage({ channel: config.assistant.dmChannel, text });
     },
   });
+  // 보류 v2 — 밀린 것을 다시 돌리는 동안 같은 방의 새 차례는 기다린다(`hold-replay.ts`). 대화 처리기는
+  // 같은 대화의 새 차례가 오면 앞 차례를 끊는데, 다시 돌리는 차례가 끊기면 반쯤 쓴 채로 남는다.
+  private holdGate = new ChannelGate();
 
   // Plan mode: store session info for "Execute" button
   private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string | undefined; user: string }> = new Map();
@@ -840,7 +885,7 @@ export class SlackHandler {
    * 이 방에서 이어 가던 대화와 갈라진다.
    */
   private async askFromBoard(text: string, lead?: string, shown?: string,
-                             captureId?: string): Promise<void> {
+                             captureId?: string): Promise<TurnOutcome> {
     const channel = config.assistant.dmChannel;
     const user = config.bot.allowUsers[0];
     if (!channel || !user) throw new Error('비서 방 또는 사용자가 설정되지 않았습니다');
@@ -875,7 +920,29 @@ export class SlackHandler {
     //
     // ⚠️ **판단이 든 것은 그대로 말한다** — 해석해서 넣은 날짜, 되물을 것,
     // 못 한 것. 조용한 것이 「그대로 됐다」는 뜻이 되려면 그래야 한다.
-    const say = async (msg: any) => {
+    const say = this.pushedSay(channel);
+    // `pushed` 는 **사람이 말을 건 것이 아니라는 표시**다 — 완료 줄을 남길지가
+    // 여기서 갈린다(사람이 물었으면 「끝났다」이고, 안 물었으면 아무 말도 아니다).
+    //
+    // **결과를 돌려준다**(2026-10-14) — 드레인은 다시 막혔으면 멈추고, 메일 폴러는 표시를 안
+    // 옮긴다. 결과가 비었으면(빠른 길 · 명령) 막힌 것도 터진 것도 없이 끝난 것이다.
+    const outcomeSink: Partial<TurnOutcome> = {};
+    await this.handleMessage(
+      { type: 'message', channel, user, text, ts: String(posted.ts), pushed: true,
+        captureId, outcomeSink } as unknown as MessageEvent,
+      say,
+    );
+    return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink };
+  }
+
+  /**
+   * 봇이 스스로 넘긴 차례의 `say` — 그 방에 올리되 비서가 `[조용히]` 한 줄을 내면 삼킨다.
+   *
+   * **말한 대로 반영하기만 했으면 답하지 않는다** (2026-08-19 사용자 결정) — 판에서 한 줄 던진
+   * 사람은 그 화면을 보고 있다. 판단이 든 것(해석한 날짜 · 되물을 것 · 못 한 것)은 그대로 말한다.
+   */
+  private pushedSay(channel: string): (msg: any) => Promise<{ ts?: string }> {
+    return async (msg: any) => {
       const text = typeof msg === 'string' ? msg : String(msg?.text ?? '');
       if (/^\s*\[조용히\]\s*$/m.test(text.split('\n')[0])) {
         this.logger.info('판에서 온 것을 조용히 처리 — 답을 안 보냅니다');
@@ -885,13 +952,6 @@ export class SlackHandler {
         typeof msg === 'string' ? { channel, text: msg } : { channel, ...msg },
       );
     };
-    // `pushed` 는 **사람이 말을 건 것이 아니라는 표시**다 — 완료 줄을 남길지가
-    // 여기서 갈린다(사람이 물었으면 「끝났다」이고, 안 물었으면 아무 말도 아니다).
-    await this.handleMessage(
-      { type: 'message', channel, user, text, ts: String(posted.ts), pushed: true,
-        captureId } as unknown as MessageEvent,
-      say,
-    );
   }
 
   /**
@@ -929,7 +989,11 @@ export class SlackHandler {
 
     // Process any attached files
     let processedFiles: ProcessedFile[] = [];
-    if (files && files.length > 0) {
+    if (event.heldFiles?.length) {
+      // 보관해 둔 첨부(보류 v2) — `tempPath` 를 안 달아 차례 끝의 정리가 안 지운다. 끝까지 가면
+      // 드레인이 보관 폴더째 지운다(`dropHeldFiles`).
+      processedFiles = event.heldFiles.filter((f) => fs.existsSync(f.path)).map((f) => ({ ...f }));
+    } else if (files && files.length > 0) {
       this.logger.info('Processing uploaded files', { count: files.length });
       processedFiles = await this.fileHandler.downloadAndProcessFiles(files);
 
@@ -1325,6 +1389,23 @@ export class SlackHandler {
     // 그 「복잡한 건」 앞을 막고 있었다. 아침에 한 번 묻는 것은 08:55 넛지에
     // 남아 있고, 부르면 나오는 「체크인」도 그대로다.
 
+    // **밀린 것을 다시 돌리는 중이면 이 방의 새 차례는 기다린다**(보류 v2 · `holdGate`). 아래에서
+    // 같은 대화의 앞 차례를 끊는데, 다시 돌리는 차례가 끊기면 반쯤 쓴 채로 남는다. 문은 보류 v2
+    // 드레인만 잡으므로 꺼져 있으면 지나간다. 기다리는 동안 ⏳ 를 달아 받았다는 것만 보인다.
+    if (!event.replay && this.holdGate.isHeld(channel)) {
+      const isHuman = !(event as any).pushed;
+      if (isHuman) {
+        await this.app.client.reactions.add({ channel, timestamp: originalMessageTs, name: 'hourglass_flowing_sand' })
+          .catch(() => { });
+      }
+      const waited = await this.holdGate.wait(channel);
+      this.logger.info('밀린 것을 다시 돌리는 동안 기다렸습니다', { channel, waited });
+      if (isHuman) {
+        await this.app.client.reactions.remove({ channel, timestamp: originalMessageTs, name: 'hourglass_flowing_sand' })
+          .catch(() => { });
+      }
+    }
+
     this.originalMessages.set(sessionKey, { channel, ts: originalMessageTs });
 
     // Cancel any existing CLI process for this conversation
@@ -1403,6 +1484,17 @@ export class SlackHandler {
     let tailT0 = 0;
     const tail: Record<string, number> = {};
     const tmark = (k: string) => { if (tailT0) tail[k] = Date.now() - tailT0; };
+    // **차례가 어떻게 끝났나 · 무엇을 돌렸나**(보류 v2 · `turn-outcome.ts`). 부른 쪽(드레인 · 메일
+    // 폴러)이 `outcomeSink` 로 받는다. 실패 표시도 여기서 기다릴 수 있게 들어 둔다 — 부른 쪽이
+    // 그 캡처를 곧바로 버리면(메일 폴러) 늦게 온 표시가 버린 것을 다시 「끊긴 채 닫힘」으로 만든다.
+    const stepLog = new StepLog();
+    let turnBlock: Block | null = null;
+    let turnThrew = false;
+    let markDone: Promise<void> | null = null;
+    // 일하다 끊긴 차례를 같은 세션으로 이어 갔으면, 끝나고 이 대화의 세션을 원래대로 돌린다 —
+    // 안 돌리면 이 방의 다음 차례가 옛 세션을 이어받아 그 사이의 대화를 잃는다.
+    const restoreSession = event.resumeSessionId
+      ? { sessionId: session.sessionId, uuid: session.lastAssistantUuid } : null;
 
     try {
       this.logger.info('Spawning Claude CLI process', {
@@ -1460,7 +1552,10 @@ export class SlackHandler {
         queryEnv = { CLAUDE_CODE_OAUTH_TOKEN: oauthToken };
       }
 
-      const resumeSessionId = resumeData?.mode === 'uuid' ? resumeData.resumeOptions.resumeSessionId : undefined;
+      // 일하다 끊긴 차례를 이어 가는 길(보류 v2)이면 그 세션을 잇는다 — 처음부터 다시 하면 같은
+      // 쓰기가 두 번 들어간다. 이미 한 것은 `replayNote` 가 세션 앞에 적어 넘긴다.
+      const resumeSessionId = resumeData?.mode === 'uuid'
+        ? resumeData.resumeOptions.resumeSessionId : (event.resumeSessionId || undefined);
       const continueLastSession = resumeData?.mode === 'continue' ? true : undefined;
 
       const useSdk = shouldUseSdk('interactive');
@@ -1479,9 +1574,10 @@ export class SlackHandler {
       // JSONL 에 직접 붙이므로, 노션이 막혀도 세션이 재시작에 죽어도 원문은 남는다.
       // 세션에 맡겼더니 안 했다(2026-08-06: 캡처 0건) — 그래서 봇이 한다.
       // 다시 돌리는 길이면 **원래 캡처를 쓴다** — 새로 붙이면 큐가 안 줄어든다.
+      // 받은 대화방 · 메시지도 같이 적는다 — 밀린 것을 **받은 자리에서** 다시 돌린다(보류 v2).
       const capture = event.captureId
         ? { id: event.captureId }
-        : (text?.trim() ? captureToInbox(text, 'slack', thread_ts) : null);
+        : (text?.trim() ? captureToInbox(text, 'slack', thread_ts, { channel, msgTs: ts }) : null);
       captureId = capture?.id ?? '';
       mark('원문 캡처');
       // 체크인이 화면에 떠 있는데 답이 짧은 문법에 안 맞아 여기까지 왔다면,
@@ -1495,7 +1591,8 @@ export class SlackHandler {
       mark('못 본 글');
       // 로그에는 글을 안 남긴다 — 몇 줄을 붙였는지만.
       if (unseen) this.logger.info('세션이 못 본 대화방 글을 붙임', { lines: unseen.split('\n').filter((l) => l.startsWith('- ')).length });
-      const sessionPrompt = unseen ? `${unseen}\n${finalPrompt}` : finalPrompt;
+      // 다시 돌리는 차례면 그 메모(받은 시각 · 그 뒤의 글 · 이미 한 것)를 맨 앞에 — 보류 v2.
+      const sessionPrompt = [event.replayNote, unseen, finalPrompt].filter(Boolean).join('\n');
       const surfaceNote = [
         SLACK_SURFACE_NOTE,
         capture ? CAPTURE_NOTE : '',
@@ -1544,9 +1641,16 @@ export class SlackHandler {
       // 아래 스트림이 그 `ts` 로 상태를 고쳐 쓰므로 들어가기 전에 받아 둔다.
       await statusSent;
       this.activeProcesses.set(sessionKey, cliProcess);
-      { const m = readInflight(); m[sessionKey] = { channel, threadTs: replyTs, text: (text || '').slice(0, 160), startedAt: new Date().toISOString(), captureId }; writeInflight(m); }
+      { const m = readInflight(); m[sessionKey] = { channel, threadTs: replyTs, text: (text || '').slice(0, 160), startedAt: new Date().toISOString(), captureId,
+        ...(event.heldSteps?.length ? { heldSteps: event.heldSteps } : {}),
+        ...(processedFiles.length ? { files: processedFiles.map(heldFileOf) } : {}) }; writeInflight(m); }
 
       for await (const event of cliProcess) {
+        // **돈 도구를 적는다**(보류 v2) — 새 도구가 시작할 때만 처리 중 기록을 고쳐 쓴다(도구 하나에
+        // 한 번). 재시작으로 끊기면 기동이 이것으로 「쓰기가 돌았나」를 가른다.
+        if (stepLog.see(event)) {
+          patchInflight(sessionKey, { steps: stepLog.steps, sessionId: session?.sessionId });
+        }
         // Session init tracking
         if (event.type === 'system' && (event as any).subtype === 'init') {
           const initEvent = event as any;
@@ -1815,10 +1919,12 @@ export class SlackHandler {
         // **캡처에 남긴다 — 이유를 안 가리는 그 자국이다.** 아래 한도 큐는
         // 이유별 장치라 실제로 어긋났다(08/24 의 서버 과부하를 5시간짜리 한도로
         // 잡아 이레를 들고 있었다). 정본은 캡처 큐 한 곳으로 간다.
-        void markCaptureFailed(captureId, 'limit');
+        // 보류 v2 면 쓰기가 돈 뒤였는지(`partial`) · 세션 · 이미 한 것 · 첨부까지 같이 적는다.
+        markDone = this.markTurnFailed(captureId, 'limit', stepLog, session?.sessionId, event, processedFiles);
         // **언제 다시 할지는 엔진 상태가 정한다** — 사용량 소진은 서버가 준 시각, 과부하는 10분부터.
         // 전에는 시각을 못 읽으면 5시간으로 잡아 529 한 번에 큐를 다섯 시간 세웠다.
         const block = currentClaudeBlock(rateLimitInfo?.resetsAt, rateLimitMessageText);
+        turnBlock = block;
 
         await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, block, locale, say, ts, captureId);
       }
@@ -1842,10 +1948,13 @@ export class SlackHandler {
       const block = rateLimitMessageText
         ? currentClaudeBlock(rateLimitInfo?.resetsAt, rateLimitMessageText)
         : this.isRateLimitError(error) ? thrownClaudeBlock(error) : null;
+      turnBlock = block;
+      turnThrew = true;
 
       // **터진 것도 같은 자국을 남긴다.** 한도인지 아닌지는 재시도 *시점*만
       // 가르고, 「처리 못 했다」는 사실은 둘이 같다.
-      void markCaptureFailed(captureId, block ? 'limit' : 'error');
+      markDone = this.markTurnFailed(captureId, block ? 'limit' : 'error', stepLog, session?.sessionId,
+        event, processedFiles);
 
       if (block) {
         await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, block, locale, say, ts, captureId);
@@ -1864,6 +1973,27 @@ export class SlackHandler {
       // 평소에 기대는 길이 아니다.
       writeCapturePointer(channel, '');
 
+      // 같은 세션으로 이어 갔으면 이 대화의 세션을 원래대로 돌린다(보류 v2 · 위 `restoreSession`).
+      if (restoreSession?.sessionId && session && session.sessionId !== restoreSession.sessionId) {
+        session.sessionId = restoreSession.sessionId;
+        session.lastAssistantUuid = restoreSession.uuid;
+        this.cliHandler.saveNow();
+      }
+
+      // **결과를 부른 쪽에 돌려준다**(보류 v2 · `turn-outcome.ts`). 실패 표시가 끝나기를 기다린 뒤에
+      // 돌려준다 — 부른 쪽이 곧바로 그 캡처를 버리거나 다시 집을 수 있다.
+      if (event.outcomeSink) {
+        Object.assign(event.outcomeSink, {
+          outcome: outcomeFrom(turnBlock, cliError || turnThrew),
+          engine: 'claude',
+          steps: stepLog.steps,
+          writeRan: stepLog.writeRan || (event.heldSteps?.length ?? 0) > 0,
+          sessionId: session?.sessionId,
+          captureId,
+        } satisfies TurnOutcome);
+        if (markDone) await markDone.catch(() => { });
+      }
+
       // **다음 차례를 미리 띄워 둔다** — 방금 쓴 것과 **한 글자도 안 고친** 옵션으로.
       // 판에서 오는 말처럼 모양이 같은 것이 이어질 때 그대로 맞는다(부팅 2.7~3.4초).
       //
@@ -1879,7 +2009,8 @@ export class SlackHandler {
       //
       // ⚠️ **터져도 아무 일이 없어야 한다** — 빠르게 하는 장치이지 반영의 일부가
       // 아니다. `prewarm` 이 통째로 `try` 로 감싸여 있다.
-      if (sdkOptsForWarm && shouldUseSdk('interactive')) {
+      // 옛 세션을 이어 간 차례(보류 v2) 뒤에는 안 띄운다 — 다음 차례는 원래 세션이라 지문이 안 맞는다.
+      if (sdkOptsForWarm && shouldUseSdk('interactive') && !event.resumeSessionId) {
         this.sdkHandler.prewarm(sdkOptsForWarm);
       }
 
@@ -2080,9 +2211,13 @@ export class SlackHandler {
    * 같은 캡처를 두 세션이 동시에 처리한다.
    */
   private draining = false;
+  /** 돌고 있는 보류 v2 드레인 — [실행] 버튼이 끝나기를 기다린다. */
+  private drainRun: Promise<void> | null = null;
 
   private async drainStuck(why: string): Promise<void> {
     if (this.draining || !isWorkAssistantEnabled()) return;
+    // 보류 v2(`HOLD_V2=on`) — 받은 자리에서 · 다시 막히면 멈춤 · 일하다 끊긴 것은 이어 감(`hold-replay.ts`).
+    if (holdV2On()) return this.drainStuckV2(why);
     // **아직 안 풀렸으면 안 돈다.** 기동 드레인이 한도에 곧바로 다시 부딪히면
     // 아무것도 못 하면서 **시도 횟수만 태운다** — 상한이 3회라 두 번 재시작하면
     // 사람 손으로 넘어간다.
@@ -2092,7 +2227,13 @@ export class SlackHandler {
     }
     this.draining = true;
     try {
-      const items = await pendingCaptures(DRAIN_MAX);
+      // 이어 가야 하는 것(보류 v2 로 적힌 세션)은 옛 드레인이 안 집는다 — 처음부터 돌리면 같은
+      // 쓰기가 두 번 들어간다. `HOLD_V2` 를 다시 켜면 그쪽이 이어 간다.
+      const all = await pendingCaptures(DRAIN_MAX);
+      const items = all.filter((it) => !it.session_id);
+      if (items.length < all.length) {
+        this.logger.warn('이어 가야 하는 밀린 것은 보류 v2 가 켜져야 돕니다', { count: all.length - items.length });
+      }
       if (!items.length) return;
       this.logger.warn('밀린 것을 다시 돌립니다', { count: items.length, why });
       for (const [i, it] of items.entries()) {
@@ -2103,10 +2244,16 @@ export class SlackHandler {
           // **`askFromBoard` 를 그대로 쓴다** — 방·사용자·`[조용히]` 삼키기·
           // `pushed` 표시가 전부 거기 있다. 여기서 다시 짜면 규칙이 두 곳으로
           // 갈라지고, 갈라진 쪽이 조용히 낡는다.
-          await this.askFromBoard(
+          const out = await this.askFromBoard(
             it.text,
             `↻ 밀렸던 것 (${i + 1}/${items.length} · ${it.tries + 1}번째 시도)`,
             '', it.id);
+          // **다시 막히면 그 자리에서 멈춘다**(2026-10-14 · 켜는 문과 무관한 고침). 전에는 결과를
+          // 몰라 다음 것을 집었고, 막힌 동안 건마다 시도 횟수만 탔다. 남은 것은 회복 때 다시 돈다.
+          if (isHeldOutcome(out)) {
+            this.logger.warn('다시 막혀 밀린 것 돌리기를 멈춥니다', { id: it.id, left: items.length - i - 1 });
+            break;
+          }
         } catch (err) {
           // 한 건이 터져도 나머지는 간다 — 여기서 멈추면 뒤가 통째로 밀린다.
           this.logger.error('밀린 것을 다시 돌리다 터졌습니다', { id: it.id, err });
@@ -2115,6 +2262,164 @@ export class SlackHandler {
     } finally {
       this.draining = false;
     }
+  }
+
+  /**
+   * 보류 v2 드레인 — 순서와 멈추는 조건은 `drainHeld`(`hold-replay.ts`), 여기는 슬랙 · 파이썬을 잇는다.
+   *
+   * - 막혀 있으면 아무것도 안 한다(시도도 안 셈) · 막힌 뒤 된 적이 없으면 작은 호출로 먼저 떠 봄
+   * - 오래된 것부터 받은 자리에서 · 도는 동안 그 방의 새 차례는 기다림 · 다시 막히면 멈춤
+   * - 끝까지 간 것은 실패 자국 · 보관 첨부를 걷음 · 한 건 이상 돌았으면 한 줄 요약
+   */
+  private async drainStuckV2(why: string): Promise<void> {
+    this.draining = true;
+    let finish!: () => void;
+    this.drainRun = new Promise<void>((r) => { finish = r; });
+    try {
+      const dm = config.assistant.dmChannel;
+      const rep = await drainHeld({
+        blocked: () => stillBlocked(),
+        needsCanary: () => needsCanary(engineState),
+        canary: () => this.canaryClaude(),
+        pending: (n) => pendingHeld(n),
+        tried: (id) => markCaptureTried(id),
+        replay: (it) => this.replayHeld(it),
+        replayed: async (it) => {
+          await markCaptureReplayed(it.id);
+          dropHeldFiles(it.id);
+        },
+        summary: async (text) => {
+          if (dm) await this.app.client.chat.postMessage({ channel: dm, text });
+        },
+        askOld: (items) => this.askOldHeld(items),
+        gate: this.holdGate,
+        channelOf: (it) => replayTarget(it, dm).channel,
+        log: (msg, meta) => this.logger.info(msg, { why, ...(meta ?? {}) }),
+      }, DRAIN_MAX);
+      if (rep.ran || rep.stopped) this.logger.info('밀린 것 다시 돌림', { why, ...rep });
+    } catch (err) {
+      this.logger.error('밀린 것을 다시 돌리다 터졌습니다', { why, err });
+    } finally {
+      this.draining = false;
+      this.drainRun = null;
+      finish();
+    }
+  }
+
+  /**
+   * 막힌 뒤 한 번도 된 적이 없으면 아주 작은 호출로 먼저 떠 본다 — 밀린 것을 집었다가 곧바로
+   * 또 막히면 그 건의 시도만 탄다. 결과는 전송 탭이 엔진 상태에 적는다(되면 막힘을 지우고
+   * 막히면 다시 적는다). 도구 · 설정 · MCP 없이 한 줄.
+   */
+  private async canaryClaude(): Promise<void> {
+    try {
+      const r = await this.runAssistantSession('「확인」 한 낱말로만 답한다.', {
+        workingDirectory: os.tmpdir(),
+        model: SlackHandler.resolveModelAlias(config.defaultModel),
+        effort: 'low',
+        tools: [],
+        settingSources: [],
+        skipMcp: true,
+        noSessionPersistence: true,
+        maxDurationMs: 60_000,
+        useSdk: shouldUseSdk('interactive'),
+      });
+      this.logger.info('한도 떠 보기', { rateLimited: r.rateLimited, isError: r.isError });
+    } catch (err) {
+      // 스트림 밖에서 던진 Claude 막힘도 적는다 — 안 적으면 막힌 줄 모르고 밀린 것을 집는다.
+      thrownClaudeBlock(err);
+      throw err;
+    }
+  }
+
+  /**
+   * 밀린 것 하나를 **받은 자리에서** 다시 돌린다 — 머리 줄을 그 대화방 · 스레드에 올리고, 받은
+   * 시각과 그 뒤에 올라온 글을 세션 앞에 붙인다(그 사이 뒤집혔는지 세션이 가린다). 일하다 끊긴
+   * 것이면 같은 세션을 「이미 한 것」과 함께 잇는다. 결과를 돌려준다.
+   */
+  private async replayHeld(item: HeldItem): Promise<TurnOutcome> {
+    const dm = config.assistant.dmChannel;
+    const user = config.bot.allowUsers[0];
+    if (!dm || !user) throw new Error('비서 방 또는 사용자가 설정되지 않았습니다');
+    const target = replayTarget(item, dm);
+    const posted = await this.app.client.chat.postMessage({
+      channel: target.channel, text: leadText(item), ...(target.thread ? { thread_ts: target.thread } : {}),
+    });
+    const ts = String(posted.ts);
+    const since = receivedSec(item);
+    // 받은 뒤 올라온 글 — 스레드에서 받은 것이면 스레드 첫 글도 같이(그 글에 단 답이었다).
+    const unseen = since === undefined ? '' : await this.getBotUserId()
+      .then((botUserId) => readUnseen(this.app.client as any, target.channel, {
+        currentTs: ts,
+        threadTs: target.thread,
+        isNewSession: Boolean(item.thread && item.thread !== item.msg_ts),
+        sinceSec: since,
+        botUserId,
+        isPrivate: containsPrivate,
+        frame: REPLAY_FRAME,
+      })).catch(() => '');
+    const outcomeSink: Partial<TurnOutcome> = {};
+    await this.handleMessage({
+      type: 'message', channel: target.channel, user, text: item.text, ts,
+      ...(target.thread ? { thread_ts: target.thread } : {}),
+      pushed: true, replay: true, captureId: item.id, outcomeSink,
+      replayNote: replayNote(item, unseen),
+      ...(item.session_id ? { resumeSessionId: item.session_id, heldSteps: item.done_steps ?? [] } : {}),
+      ...(item.files?.length ? { heldFiles: item.files } : {}),
+    } as unknown as MessageEvent, this.pushedSay(target.channel));
+    return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink };
+  }
+
+  /** 받은 지 7일이 지난 것 — 건마다 [실행]·[버림] 을 한 번 묻고 물었다고 적는다. */
+  private async askOldHeld(items: HeldItem[]): Promise<void> {
+    const dm = config.assistant.dmChannel;
+    if (!dm || !items.length) return;
+    const msg = oldListMessage(items);
+    await this.app.client.chat.postMessage({ channel: dm, text: msg.text, blocks: msg.blocks });
+    await markCaptureTold(items.map((i) => i.id));
+  }
+
+  /**
+   * [실행] 을 누른 7일 지난 것 하나를 지금 돌린다 — 드레인과 같은 길(`replayHeld`). 사람에게 낼
+   * 한 줄과 버튼을 걷을지를 돌려준다(다시 막혔으면 버튼을 남겨 나중에 다시 누르게).
+   */
+  private async runHeldNow(id: string): Promise<{ text: string; settle: boolean }> {
+    if (stillBlocked()) return { text: '⏳ 아직 사용량 한도에 막혀 있습니다 — 풀린 뒤 다시 눌러 주세요', settle: false };
+    if (this.drainRun) await this.drainRun;
+    if (this.draining) return { text: '밀린 요청을 처리하는 중입니다 — 끝난 뒤 다시 눌러 주세요', settle: false };
+    const { run, tell } = await pendingHeld(50);
+    const item = [...tell, ...run].find((x) => x.id === id);
+    if (!item) return { text: '이미 처리했거나 버린 요청입니다', settle: true };
+    this.draining = true;
+    const release = this.holdGate.hold([replayTarget(item, config.assistant.dmChannel).channel]);
+    try {
+      await markCaptureTried(id);
+      const out = await this.replayHeld(item);
+      if (out.outcome === 'ok') {
+        await markCaptureReplayed(id);
+        dropHeldFiles(id);
+        return { text: '▶ 처리했습니다', settle: true };
+      }
+      if (isHeldOutcome(out)) return { text: '⏳ 다시 한도에 막혔습니다 — 풀린 뒤 다시 눌러 주세요', settle: false };
+      return { text: '⚠️ 처리하다 문제가 났습니다 — 확인이 필요합니다', settle: true };
+    } finally {
+      release();
+      this.draining = false;
+    }
+  }
+
+  /**
+   * 처리 못 한 차례의 실패 표시 — 보류 v2 면 쓰기가 돈 뒤였는지(`partial`) · 세션 · 이미 한 것 ·
+   * 첨부까지 같이 적는다. **첨부 보관은 동기로** 한다 — 바로 뒤에서 임시 파일을 지운다.
+   */
+  private markTurnFailed(captureId: string, why: 'limit' | 'error', steps: StepLog,
+                         sessionId: string | undefined, event: MessageEvent,
+                         files: ProcessedFile[]): Promise<void> {
+    if (!captureId) return Promise.resolve();
+    if (!holdV2On()) return markCaptureFailed(captureId, why);
+    const { extra, writeRan } = buildHoldExtra(
+      captureId, steps.steps, event.heldSteps ?? [], sessionId, files.map(heldFileOf));
+    return markCaptureFailed(captureId, why === 'limit' && writeRan ? 'partial' : why, extra);
   }
 
   // --- Message content helpers ---
@@ -3124,11 +3429,27 @@ export class SlackHandler {
     if (keys.length === 0) return;
     writeInflight({});
     this.logger.warn('Reporting interrupted sessions', { count: keys.length });
+    const v2 = holdV2On();
+    // **끊긴 것도 캡처에 남긴다.** 「다시 보내주세요」는 사람이 친 말에나
+    // 통하지, 판이나 메일 폴러가 민 것은 보낸 사람이 그 화면을 떠났다.
+    //
+    // **표시를 다 남긴 뒤에 돌아간다**(2026-10-14 · 켜는 문과 무관한 고침) — 바로 뒤에 기동
+    // 드레인이 돈다. 기다리지 않으면 끊긴 차례의 자국이 아직 안 찍혀 그 건이 목록에서 빠진다.
+    await Promise.all(keys.map((key) => this.markInterrupted(pending[key], v2)));
+
+    // 보류 v2 — 실제로 자동으로 이어질 것(드레인 목록에 든 것)만 「다시 보내지 않으셔도 됩니다」로
+    // 묶는다. 목록에 안 든 것(닫힌 채 끊김 · 첨부를 못 보관함 등)은 예전처럼 다시 보내 달라고 한다.
+    const auto = v2 ? new Set((await pendingHeld(50)).run.map((i) => i.id)) : new Set<string>();
+    const groups = new Map<string, { channel: string; threadTs?: string; n: number }>();
     for (const key of keys) {
       const r = pending[key];
-      // **끊긴 것도 캡처에 남긴다.** 「다시 보내주세요」는 사람이 친 말에나
-      // 통하지, 판이나 메일 폴러가 민 것은 보낸 사람이 그 화면을 떠났다.
-      void markCaptureFailed(r.captureId ?? '', 'interrupted');
+      if (r.captureId && auto.has(r.captureId)) {
+        const g = `${r.channel}:${r.threadTs ?? ''}`;
+        const cur = groups.get(g) ?? { channel: r.channel, threadTs: r.threadTs, n: 0 };
+        cur.n += 1;
+        groups.set(g, cur);
+        continue;
+      }
       await this.app.client.chat.postMessage({
         channel: r.channel,
         thread_ts: r.threadTs,
@@ -3136,6 +3457,25 @@ export class SlackHandler {
           + r.text + '\n다시 보내주세요.',
       }).catch(() => { });
     }
+    for (const g of groups.values()) {
+      await this.app.client.chat.postMessage({
+        channel: g.channel,
+        thread_ts: g.threadTs,
+        text: `⚠️ 재시작으로 끊긴 요청 ${g.n}건 — 자동으로 이어서 처리합니다(다시 보내지 않으셔도 됩니다)`,
+      }).catch(() => { });
+    }
+  }
+
+  /**
+   * 재시작으로 끊긴 차례 하나에 실패 표시를 남긴다. 보류 v2 면 처리 중 기록의 도구로 가른다 —
+   * 쓰기가 돌았으면 `partial`(그 세션으로 이어 감) · 아니면 `interrupted`(처음부터).
+   */
+  private markInterrupted(r: InflightRecord, v2: boolean): Promise<void> {
+    const id = r.captureId ?? '';
+    if (!v2) return markCaptureFailed(id, 'interrupted');
+    if (!id) return Promise.resolve();
+    const { extra, writeRan } = buildHoldExtra(id, r.steps ?? [], r.heldSteps ?? [], r.sessionId, r.files ?? []);
+    return markCaptureFailed(id, writeRan ? 'partial' : 'interrupted', extra);
   }
 
   setupEventHandlers() {
@@ -3536,8 +3876,42 @@ export class SlackHandler {
         captureId = parsed.captureId ?? parsed.rlqId;
       } catch { /* 예전 형식 — 버릴 캡처가 없다 */ }
       // **캡처도 버린다.** 안 버리면 취소해 놓고도 회복 시각에 드레인이 다시 돌린다.
-      if (captureId) await dropCapture(captureId, '사람이 취소함');
+      if (captureId) {
+        await dropCapture(captureId, '사람이 취소함');
+        dropHeldFiles(captureId);
+      }
       await respond(noticeReply(t('misc.cancelled', actionLocale)));
+    });
+
+    // 보류 v2 — 받은 지 7일이 지난 요청의 [실행]·[버림]. 누른 건의 버튼은 결과 한 줄로 바꾼다
+    // (다시 막혔으면 버튼을 남겨 나중에 다시 누르게).
+    const heldId = (body: any): string => {
+      try { return String(JSON.parse(body?.actions?.[0]?.value ?? '{}').id ?? ''); } catch { return ''; }
+    };
+    this.action('held_run', async ({ ack, body, respond }) => {
+      await ack();
+      const id = heldId(body);
+      if (!id) return;
+      const r = await this.runHeldNow(id);
+      const blocks = (body as any)?.message?.blocks;
+      if (r.settle && Array.isArray(blocks)) {
+        await respond({ replace_original: true, text: (body as any).message.text ?? r.text,
+          blocks: markChoice(blocks, id, r.text) }).catch(() => { });
+      } else {
+        await respond({ replace_original: false, text: r.text }).catch(() => { });
+      }
+    });
+    this.action('held_drop', async ({ ack, body, respond }) => {
+      await ack();
+      const id = heldId(body);
+      if (!id) return;
+      await dropCapture(id, '7일 지남 — 사람이 버림');
+      dropHeldFiles(id);
+      const blocks = (body as any)?.message?.blocks;
+      if (Array.isArray(blocks)) {
+        await respond({ replace_original: true, text: (body as any).message.text ?? '버렸습니다',
+          blocks: markChoice(blocks, id, '🗑 버렸습니다') }).catch(() => { });
+      }
     });
 
     // Calendar notification mute button
@@ -3575,6 +3949,16 @@ export class SlackHandler {
       .then(() => this.drainStuck('기동'))
       .catch(() => { })
       .then(() => this.startEngineWatch()), 12_000);
+
+    // 보류 v2 — 30분마다 쓸어 본다. 회복 타이머가 못 깨우는 것(오류로 밀린 것 · 시각을 모르는 막힘이
+    // 시간으로 풀린 것)을 줍는다. 막혀 있으면 안 돌고, 밀린 것이 없으면 드레인이 바로 돌아온다.
+    if (holdV2On()) {
+      const sweep = setInterval(() => {
+        if (stillBlocked()) return;
+        void this.drainStuck('쓸어보기');
+      }, HOLD_SWEEP_MS);
+      sweep.unref?.();
+    }
 
     // Cleanup inactive sessions periodically
     setInterval(() => {

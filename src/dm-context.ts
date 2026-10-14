@@ -42,6 +42,11 @@ export interface UnseenOpts {
   isPrivate: (text: string) => boolean;
   /** 시각 표시 — 시험에서 시간대를 고정하려고 받는다 */
   clock?: (sec: number) => string;
+  /**
+   * 머리 줄 · 꼬리 줄을 바꾼다 — 밀린 요청을 다시 돌릴 때(`hold-replay.ts`)는 「바로 위 글에 대한
+   * 답」 안내가 맞지 않고, 며칠에 걸친 글이라 날짜까지 적는다(`withDate`). 없으면 대화 차례용 그대로.
+   */
+  frame?: { header: string; footer: string[]; withDate?: boolean };
 }
 
 /** 붙이는 글 수와 글마다 길이 — 넛지·좁은 길 답은 한두 줄이라 이 정도면 남는다. */
@@ -57,6 +62,11 @@ const kst = (sec: number): string => {
   return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
 };
 
+const kstDate = (sec: number): string => {
+  const d = new Date((sec + 9 * 3600) * 1000);
+  return `${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')} ${kst(sec)}`;
+};
+
 /**
  * 세션 앞에 붙일 덩어리. 붙일 것이 없으면 빈 문자열.
  *
@@ -67,7 +77,7 @@ const kst = (sec: number): string => {
  */
 export function unseenBlock(msgs: SlackMsg[], o: UnseenOpts): string {
   const now = Number(o.currentTs);
-  const clock = o.clock ?? kst;
+  const clock = o.clock ?? (o.frame?.withDate ? kstDate : kst);
   const picked: { sec: number; who: string; text: string; head: boolean }[] = [];
   let hidden = 0;
   const seen = new Set<string>();
@@ -93,7 +103,7 @@ export function unseenBlock(msgs: SlackMsg[], o: UnseenOpts): string {
   const rest = picked.filter((p) => !p.head).slice(-(headMsg ? MAX_MSGS - 1 : MAX_MSGS));
   const shown = headMsg ? [headMsg, ...rest] : rest;
   const lines = [
-    '[세션이 못 본 대화방 글 — 봇이 슬랙에서 읽어 붙임 · 오래된 것부터 · 맨 아래가 바로 위 글]',
+    o.frame?.header ?? '[세션이 못 본 대화방 글 — 봇이 슬랙에서 읽어 붙임 · 오래된 것부터 · 맨 아래가 바로 위 글]',
   ];
   for (const p of shown) {
     const body = p.text.length > MAX_CHARS ? `${p.text.slice(0, MAX_CHARS)}…` : p.text;
@@ -101,6 +111,7 @@ export function unseenBlock(msgs: SlackMsg[], o: UnseenOpts): string {
     lines.push(`- ${clock(p.sec)} ${tag}: ${body.replace(/\n+/g, ' / ')}`);
   }
   if (hidden) lines.push(`(개인 글이 든 ${hidden}건은 뺐다)`);
+  if (o.frame) return [...lines, ...o.frame.footer].join('\n');
   lines.push(
     '아래 사람 말이 대상을 짚지 않았으면 **맨 아래 글(바로 위)에 대한 답으로 먼저 읽는다** — '
     + '그 글이 묻는 업무·메일에 반영하고, 이름이 비슷한 다른 대상을 짐작하지 않는다. '

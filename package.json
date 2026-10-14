@@ -56,7 +56,8 @@
     "check:reportrun": "node scripts/check-report-run.mjs",
     "check:xroom": "node scripts/check-rooms-recent.mjs",
     "check:engine": "node scripts/check-engine-state.mjs",
-    "check:inboxlock": "node scripts/check-inbox-lock.mjs"
+    "check:inboxlock": "node scripts/check-inbox-lock.mjs",
+    "check:hold": "node scripts/check-hold-replay.mjs"
   },
   "keywords": [],
   "author": "",

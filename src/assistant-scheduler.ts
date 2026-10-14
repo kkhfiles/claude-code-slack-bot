@@ -13,10 +13,12 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   noteUpdate, stageUpdate, summaryCandidates, summaryApply,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone,
-  workAssistantRoot, mailCandidates, mailMark, boardOutputToTell,
+  workAssistantRoot, mailCandidates, mailMark, boardOutputToTell, dropCapture,
   offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexSession, codexWritableDirs,
   improveGather, improveAccept, improveShow, improvePosted, improveDecide } from './work-assistant';
 import type { QuickOutcome } from './work-assistant';
+import { engineState } from './engine-state';
+import { isHeldOutcome, type TurnOutcome } from './turn-outcome';
 import { buildImproveBlocks, improveEnabled, improvePreviewText,
   IMPROVE_DECISIONS, IMPROVE_ID_RE } from './improve-message';
 import { boardLabel, boardPushAuthBroken, boardPushTarget, boardQueueEnabled, drain, event as recordEvent } from './board-queue';
@@ -812,6 +814,8 @@ export class AssistantScheduler {
   private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
   private mailPollTimer: ReturnType<typeof setInterval> | null = null;
   private mailPollBusy = false;
+  /** 막혀서 건너뛴다는 로그를 이 막힘(시작 시각)에 이미 남겼나 — 10분마다 같은 줄이 안 쌓이게. */
+  private mailBlockedLogged: number | null = null;
   private remindTimer: ReturnType<typeof setInterval> | null = null;
   private remindBusy = false;
   private actionsTimer: ReturnType<typeof setInterval> | null = null;
@@ -860,7 +864,7 @@ export class AssistantScheduler {
      * 판에서 온 **사람 말**을 이 방의 대화로 들여보내는 길. 없으면 그런 항목은
      * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
      */
-    private askFromBoard?: (text: string, lead?: string, shown?: string) => Promise<void>,
+    private askFromBoard?: (text: string, lead?: string, shown?: string) => Promise<TurnOutcome | void>,
     deps: SchedulerDeps = {},
   ) {
     this.reportLog = deps.reportLog ?? runReportLog;
@@ -1936,6 +1940,16 @@ export class AssistantScheduler {
     const nonWorking = this.isNonWorkingDay();
     if (nonWorking.skip) return;
     if (this.mailPollBusy) return;
+    // **Claude 가 막혀 있으면 읽지도 않는다**(2026-10-14) — 넘겨 봐야 막힐 차례를 10분마다 띄우고,
+    // 표시를 안 옮겨야 풀린 뒤 첫 회차가 그동안 온 메일을 그대로 읽는다. 로그는 막힘마다 한 줄.
+    if (engineState.isBlocked('claude')) {
+      const since = engineState.blocked('claude')?.since ?? 0;
+      if (this.mailBlockedLogged !== since) {
+        this.mailBlockedLogged = since;
+        this.logger.info('Mail poll: Claude 가 막혀 있어 건너뜁니다 — 표시는 그대로 둡니다');
+      }
+      return;
+    }
     this.mailPollBusy = true;
     try {
       const r = await mailCandidates(1);
@@ -1956,9 +1970,18 @@ export class AssistantScheduler {
       // **사람에게는 한 줄만 보인다.** 본문은 세션이 읽을 것이라 통계·머리표·지시가
       // 들어 있고, 그것을 그대로 채널에 붙이면 같은 내용이 두 번 뜬다(2026-08-19
       // 사용자 지적). 세 번째 인자가 빈 문자열이면 머리 줄만 남는다.
-      await this.askFromBoard(
+      const out = await this.askFromBoard(
         `[메일] 후보 ${r.threads.length}건\n${r.text}`,
         r.lead || `📬 메일 후보 ${r.threads.length}건`, '');
+      // **막혀 끝났으면 표시를 안 옮긴다**(2026-10-14) — 풀린 뒤 첫 회차가 같은 메일을 그때의 목록으로
+      // 다시 읽는다. 그러면 이번 차례의 캡처는 **버린다** — 남겨 두면 회복 때 드레인이 옛 목록을 한 번
+      // 더 넘겨 같은 후보가 두 번 나간다. 쓰기가 돈 뒤 막힌 것(일하다 끊김)은 표시를 옮기고 캡처가
+      // 이어 가게 둔다 — 다시 읽으면 이미 한 쓰기를 또 한다.
+      if (out && isHeldOutcome(out) && !out.writeRan) {
+        if (out.captureId) await dropCapture(out.captureId, '메일 후보 — 회복 뒤 다음 회차가 다시 읽음');
+        this.logger.warn('Mail poll: 막혀 끝나 표시를 안 옮깁니다 — 회복 뒤 다시 읽습니다');
+        return;
+      }
       // **표시가 안 찍히면 큰 소리로 남긴다.** 결과를 버리면 넘기기는 되는데
       // 표시만 안 되는 상태가 조용히 이어져 **같은 후보가 10분마다 다시 나간다**
       // (2026-08-18 실측: 같은 스레드 셋 · 다음 날 아침 둘 · 세션 다섯 번).
@@ -2212,7 +2235,9 @@ export class AssistantScheduler {
     this.boardQueueLast = now;
     this.boardQueueBusy = true;
     try {
-      const r = await drain(quickUpdate, this.askFromBoard ?? null, undefined,
+      // 판 큐는 차례 결과를 안 본다(막힌 것은 캡처가 들고 드레인이 다시 돌린다) — 결과는 버리고 넘긴다.
+      const ask = this.askFromBoard;
+      const r = await drain(quickUpdate, ask ? async (text: string) => { await ask(text); } : null, undefined,
         noteUpdate, stageUpdate, this.narrowFromBoard, this.tellContact);
       if (this.boardQueueFailures) {
         this.logger.info(`Board queue recovered (${this.boardQueueFailures}회 실패 뒤)`);

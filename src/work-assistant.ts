@@ -19,6 +19,9 @@ import * as os from 'os';
 import * as path from 'path';
 import { config } from './config';
 import { Logger } from './logger';
+import type { HeldItem, HoldExtra } from './hold-replay';
+
+export type { HoldExtra };
 
 const logger = new Logger('WorkAssistant');
 
@@ -44,6 +47,9 @@ export interface InboxRecord {
   status: 'open' | 'filed' | 'dropped';
   task: string | null;
   note: string | null;
+  /** 받은 대화방 · 메시지 — 밀린 것을 **받은 자리에서** 다시 돌린다(보류 v2). 옛 파이썬은 그대로 둔다. */
+  channel?: string;
+  msg_ts?: string;
 }
 
 /** `2026-08-05T09:12:33+09:00` — 파이썬 쪽 형식과 맞춘다. */
@@ -126,7 +132,9 @@ function takeInboxLock(lock: string, waitMs: number): boolean {
  * **덧붙일 때 파이썬과 같은 잠금을 잡는다**(`<inbox>.lock`) — 파이썬이 파일을 통째로 다시 쓰는
  * 사이에 덧붙인 줄은 덮여 사라진다. 2초 안에 못 잡으면 경고를 남기고 그대로 덧붙인다.
  */
-export function captureToInbox(text: string, source = 'slack', thread?: string): InboxRecord | null {
+export function captureToInbox(
+  text: string, source = 'slack', thread?: string, where?: { channel?: string; msgTs?: string },
+): InboxRecord | null {
   const root = workAssistantRoot();
   if (!root) return null;
   const rec: InboxRecord = {
@@ -138,6 +146,8 @@ export function captureToInbox(text: string, source = 'slack', thread?: string):
     status: 'open',
     task: null,
     note: null,
+    ...(where?.channel ? { channel: where.channel } : {}),
+    ...(where?.msgTs ? { msg_ts: where.msgTs } : {}),
   };
   const file = inboxFile(root);
   const lock = `${file}.lock`;
@@ -170,29 +180,44 @@ export function captureToInbox(text: string, source = 'slack', thread?: string):
  * 느리지만(0.4초) 이 길은 드물게 돈다 — 로그 전체에서 실제로 막힌 것이 1건이다.
  *
  * ⚠️ **닫힌 캡처에도 적는다.** 「닫힘」은 「다 했다」가 아니라 「무언가 썼다」라서
- * (첫 쓰기에 닫힌다), 일하다 끊긴 차례가 닫힌 채로 남는다. 다시 돌리지는 않고
- * 아침 브리핑이 한 줄로 알린다.
+ * (첫 쓰기에 닫힌다), 일하다 끊긴 차례가 닫힌 채로 남는다. 옛 규칙은 다시 돌리지 않고
+ * 아침 브리핑이 한 줄로 알린다 · 보류 v2 는 세션이 적혀 있으면 그 세션으로 이어 간다.
+ *
+ * **보류 칸(`extra`)은 파일로 넘긴다** — 슬랙에서 온 글이 섞여 셸 인자로는 못 넘긴다
+ * (`quoteForShell`). 옛 파이썬은 `--extra-file` · `partial` 을 모른다(rc 2) — 그러면 옛 모양
+ * (`limit`)으로 한 번 더 적는다. 표시가 안 남는 것이 칸을 잃는 것보다 나쁘다.
  */
 export async function markCaptureFailed(
-  id: string, why: 'limit' | 'error' | 'interrupted',
+  id: string, why: 'limit' | 'error' | 'interrupted' | 'partial', extra?: HoldExtra,
 ): Promise<void> {
   if (!id || !isWorkAssistantEnabled()) return;
+  let extraFile = '';
   try {
-    const { code, stderr, stdout } = await runTasks(
-      ['inbox', 'fail', '--id', id, '--why', why], 30_000);
+    const args = ['inbox', 'fail', '--id', id, '--why', why];
+    if (extra && Object.keys(extra).length) {
+      extraFile = path.join(os.tmpdir(), `hold-extra-${randomId()}.json`);
+      fs.writeFileSync(extraFile, JSON.stringify(extra), 'utf-8');
+      args.push('--extra-file', extraFile);
+    }
+    let { code, stderr, stdout } = await runTasks(args, 30_000);
+    if (code !== 0 && (extraFile || why === 'partial')) {
+      logger.warn('보류 칸과 함께 못 적어 옛 모양으로 적습니다', { id, why, out: (stderr || stdout).slice(-200) });
+      ({ code, stderr, stdout } = await runTasks(
+        ['inbox', 'fail', '--id', id, '--why', why === 'partial' ? 'limit' : why], 30_000));
+    }
     if (code !== 0) logger.error('캡처에 실패를 못 적었습니다', { id, why, out: (stderr || stdout).slice(-200) });
   } catch (err) {
     // 안전망이라 실패해도 본 차례를 막지 않는다 — 대신 조용히 지나가지 않게 남긴다.
     logger.error('캡처에 실패를 못 적었습니다', err);
+  } finally {
+    if (extraFile) {
+      try { fs.rmSync(extraFile, { force: true }); } catch { /* 임시 파일 — 남아도 해가 없다 */ }
+    }
   }
 }
 
-export interface PendingCapture {
-  id: string;
-  text: string;
-  thread: string | null;
-  tries: number;
-}
+/** 밀린 것 한 건 — 칸은 `hold-replay.ts` 의 `HeldItem`(옛 파이썬이면 앞 넷만 있다). */
+export type PendingCapture = HeldItem;
 
 /**
  * 다시 돌릴 것 — 가르는 규칙은 파이썬(`drain_list`)에 있다.
@@ -210,6 +235,47 @@ export async function pendingCaptures(limit = 5): Promise<PendingCapture[]> {
   } catch (err) {
     logger.error('밀린 캡처를 못 읽었습니다', err);
     return [];
+  }
+}
+
+/** 다시 돌릴 것과 사람에게 낼 것 둘 다 — 보류 v2 가 7일 지난 것을 묻는 데 쓴다. */
+export async function pendingHeld(limit = 5): Promise<{ run: HeldItem[]; tell: HeldItem[] }> {
+  if (!isWorkAssistantEnabled()) return { run: [], tell: [] };
+  try {
+    const { code, stdout } = await runTasks(['inbox', 'pending', '--limit', String(limit)], 30_000);
+    if (code !== 0) return { run: [], tell: [] };
+    const j = JSON.parse(stdout);
+    return { run: Array.isArray(j.run) ? j.run : [], tell: Array.isArray(j.tell) ? j.tell : [] };
+  } catch (err) {
+    logger.error('밀린 캡처를 못 읽었습니다', err);
+    return { run: [], tell: [] };
+  }
+}
+
+/** 7일 지난 것을 사람에게 물었다고 적는다 — 같은 것을 두 번 안 묻게. */
+export async function markCaptureTold(ids: string[]): Promise<void> {
+  if (!ids.length || !isWorkAssistantEnabled()) return;
+  try {
+    const { code, stderr } = await runTasks(['inbox', 'told', ...ids.flatMap((id) => ['--id', id])], 30_000);
+    if (code !== 0) logger.error('물었다는 표시를 못 적었습니다', { ids, out: stderr.slice(-200) });
+  } catch (err) {
+    logger.error('물었다는 표시를 못 적었습니다', err);
+  }
+}
+
+/**
+ * 다시 돌린 차례가 끝까지 갔다 — 실패 자국과 보류 칸을 걷는다.
+ *
+ * ⚠️ **안 걷으면 닫힌 채 이어 간 것이 다음 드레인에 또 돈다** — 닫힌 캡처는 닫는 쪽이 자국을
+ * 못 지운다(이미 닫혀 있다).
+ */
+export async function markCaptureReplayed(id: string): Promise<void> {
+  if (!id || !isWorkAssistantEnabled()) return;
+  try {
+    const { code, stderr } = await runTasks(['inbox', 'replayed', '--id', id], 30_000);
+    if (code !== 0) logger.error('다시 돌림 끝을 못 적었습니다', { id, out: stderr.slice(-200) });
+  } catch (err) {
+    logger.error('다시 돌림 끝을 못 적었습니다', err);
   }
 }
 

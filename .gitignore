@@ -81,3 +81,5 @@ coverage/
 .bench/
 .bench-prev.json
 .bench-run.log
+# 보류 재실행 v2 — 한도로 밀린 차례의 첨부 보관(사용자가 보낸 파일이 들어간다)
+.held-files/

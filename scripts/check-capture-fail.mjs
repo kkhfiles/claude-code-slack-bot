@@ -113,6 +113,15 @@ try {
     eq('시도를 넘기기 전에 센다', iTry >= 0 && iAsk >= 0 && iTry < iAsk, true);
     eq('겹쳐 돌지 않게 막는다', /this\.draining = true;/.test(body), true);
     eq('한 건이 터져도 나머지는 간다', /catch \(err\)/.test(body), true);
+    // **다시 막히면 그 자리에서 멈춘다**(2026-10-14 · 켜는 문과 무관) — 결과를 받아 막혔으면 `break`.
+    // 전에는 결과를 몰라 다음 것을 집었고, 막힌 동안 건마다 시도 횟수만 탔다.
+    eq('옛 드레인도 결과를 받는다', /const out = await this\.askFromBoard\(/.test(body), true);
+    eq('옛 드레인도 다시 막히면 멈춘다',
+       /if \(isHeldOutcome\(out\)\) \{[\s\S]{0,200}?break;/.test(body), true);
+    // 결과를 돌려주는 쪽 — `askFromBoard` 가 차례 결과를 받아 넘긴다(비면 별일 없이 끝난 것).
+    eq('askFromBoard 가 차례 결과를 돌려준다',
+       /outcomeSink[\s\S]{0,300}?return \{ outcome: 'ok'[\s\S]{0,80}?\.\.\.outcomeSink \}/.test(
+         h.slice(h.indexOf('private async askFromBoard'))), true);
 
     // 트리거 둘 — 하나라도 빠지면 그 길로 밀린 것이 영영 안 돈다.
     eq('기동 때 돈다', /this\.drainStuck\('기동'\)/.test(h), true);
@@ -206,12 +215,32 @@ try {
      /'inbox',\s*'tried',\s*'--id',\s*id/.test(bridge), true);
 
   // 세 자리에서 다 부르는가 — 하나라도 빠지면 그 갈래만 조용히 샌다.
+  // 2026-10-14 부터 차례의 두 자리(한도 · 터짐)는 `markTurnFailed`, 재시작은 `markInterrupted` 를
+  // 지나 `markCaptureFailed` 에 닿는다(보류 v2 면 보류 칸을 같이 싣는다 · 꺼져 있으면 옛 모양 그대로).
   const h = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
-  const calls = h.match(/markCaptureFailed\(/g) || [];
-  eq('실패 세 자리에서 다 부른다', calls.length, 3);
-  eq('재시작 갈래는 inflight 의 캡처를 쓴다',
-     /markCaptureFailed\(r\.captureId \?\? '', 'interrupted'\)/.test(h), true);
+  eq('한도 자리에서 부른다', /this\.markTurnFailed\(captureId, 'limit'/.test(h), true);
+  eq('터진 자리에서 부른다', /this\.markTurnFailed\(captureId, block \? 'limit' : 'error'/.test(h), true);
+  eq('재시작 자리에서 부른다', /this\.markInterrupted\(pending\[key\]/.test(h), true);
+  const bodyOf = (name) => {
+    const from = h.indexOf(`private ${name}(`);
+    return from < 0 ? '' : h.slice(from, h.indexOf('\n  }', from));
+  };
+  const turn = bodyOf('markTurnFailed');
+  const inter = bodyOf('markInterrupted');
+  eq('차례 자리는 꺼져 있으면 옛 모양(이유 하나)', /if \(!holdV2On\(\)\) return markCaptureFailed\(captureId, why\);/.test(turn), true);
+  eq('차례 자리는 켜져 있으면 보류 칸까지', /markCaptureFailed\(captureId, [^;]*extra\)/.test(turn), true);
+  eq('재시작 갈래는 inflight 의 캡처를 쓴다', /const id = r\.captureId \?\? '';/.test(inter), true);
+  eq('재시작 갈래는 꺼져 있으면 옛 모양', /if \(!v2\) return markCaptureFailed\(id, 'interrupted'\);/.test(inter), true);
+  eq('markCaptureFailed 를 부르는 곳은 두 도우미 안뿐',
+     (h.match(/markCaptureFailed\(/g) || []).length,
+     (turn.match(/markCaptureFailed\(/g) || []).length + (inter.match(/markCaptureFailed\(/g) || []).length);
   eq('inflight 가 캡처를 싣는다', /startedAt: new Date\(\)\.toISOString\(\), captureId/.test(h), true);
+  // **기동 드레인 전에 표시를 다 남긴다**(2026-10-14 · 켜는 문과 무관) — 기다리지 않으면 끊긴 차례의
+  // 자국이 아직 안 찍혀 그 건이 기동 드레인 목록에서 빠진다.
+  const rep = bodyOf('async reportInterruptedSessions');
+  eq('재시작 표시를 기다린다',
+     /await Promise\.all\(keys\.map\(\(key\) => this\.markInterrupted\(pending\[key\], v2\)\)\)/.test(rep), true);
+  eq('표시를 fire-and-forget 으로 안 부른다', /void (this\.)?mark/.test(rep), false);
 } finally {
   fs.rmSync(HOME, { recursive: true, force: true });
 }
@@ -222,6 +251,6 @@ if (fails.length) {
   process.exitCode = 1;
 } else {
   console.log('통과 — 처리 못 한 차례 (자국 남김 · 이유 안 가림 · 시도 상한 · 닫힌 것 제외 '
-    + '· 조회 제외 · 닫으면 자국 지움 · 드레인 배선 · 회복 시각 · 한도 큐 없음 '
-    + '· 봇이 부르는 이름 · 세 자리 배선)');
+    + '· 조회 제외 · 닫으면 자국 지움 · 드레인 배선 · 다시 막히면 멈춤 · 회복 시각 · 한도 큐 없음 '
+    + '· 봇이 부르는 이름 · 세 자리 배선 · 재시작 표시를 기다린 뒤 드레인)');
 }

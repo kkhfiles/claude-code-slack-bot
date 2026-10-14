@@ -155,6 +155,19 @@ Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(
 - **캡처 덧붙이기도 잠근다** — 파이썬(`tasks.py`)과 같은 `<inbox>.lock` · 30초 지나면 묵은 것 · 2초 안에 못 잡으면 경고 남기고 그대로 붙임(받은 말을 잃지 않는 것이 먼저)
 - 검사 `npm run check:engine` · `npm run check:inboxlock`
 
+### 보류 재실행 v2 — 막힌 동안 모아 두고 받은 자리에서 처리 (2026-10-14 · `HOLD_V2=on`)
+
+모든 엔진이 막혔을 때의 안전망이다(폴백 엔진이 붙기 전까지는 Claude 가 막힐 때). 순서·멈춤은 `src/hold-replay.ts`(`drainHeld`) · 차례 결과와 돈 도구는 `src/turn-outcome.ts` · 무엇을 다시 돌릴지는 파이썬 `drain_list`.
+
+- **켜는 문 `HOLD_V2=on`** — 꺼져 있으면 옛 드레인 그대로(비서 DM 맨 위 · 「↻ 밀렸던 것 (i/N · k번째 시도)」)
+- **켜는 문과 무관하게 고친 것** — 다시 막히면 드레인이 멈춤(뒤의 것은 시도 안 셈) · 재시작 표시를 다 남긴 뒤 기동 드레인 · 메일 폴러는 Claude 가 막혀 있으면 안 읽고, 막혀 끝난 회차는 표시를 안 옮기고 그 캡처를 버림(쓰기가 돈 뒤 막혔으면 옮김)
+- **창은 받은 시각부터 7일** — 실패 시각이 아니다(다시 실패할 때마다 창이 밀린다). 7일 지난 것은 건마다 [실행]·[버림] 을 **한 번** 묻는다(`told_at`). v2 규칙은 `hold: v2` 로 적힌 캡처만 받는다
+- **받은 자리에서 처리** — 받은 대화방 · 스레드에 「↻ MM/DD HH:mm 에 받은 요청을 이제 처리합니다」 · 받은 뒤 올라온 글을 세션 앞에 붙여 뒤집혔는지 세션이 가린다 · 오래된 것부터 한 줄로 · 도는 동안 그 방의 새 차례는 기다림(`ChannelGate` · 상한 15분)
+- **일하다 끊긴 것(`partial`)** — 쓰기 도구가 돈 뒤 막히거나 재시작에 끊긴 차례는 처음부터가 아니라 **같은 세션**을 「이미 한 것(다시 하지 말 것)」과 함께 잇는다. 읽기 도구(Read · Grep · Glob · LS · WebFetch · WebSearch · TodoWrite · TodoRead · NotebookRead) 밖은 다 쓰기로 본다
+- **막힌 뒤 된 적이 없으면 작은 호출로 먼저 떠 본다** · 30분마다 쓸어 봄 · 끝까지 간 것은 `inbox replayed` 로 자국을 걷음 · 한 건 이상 돌면 「▶ 밀린 N건 처리 — 완료 a · 확인 필요 b」
+- **첨부는 `.held-files/<캡처>/` 에 보관**(Git 추적 제외) — 못 옮기면 자동으로 안 돌리고 사람에게 넘김
+- 검사 `npm run check:hold` · `npm run check:capfail`
+
 ### CLI Integration
 - `child_process.spawn('claude', ['-p', '--output-format', 'stream-json', ...])` 방식
 - `CliProcess` 클래스: AsyncIterable<CliEvent> 패턴으로 stdout 스트리밍
@@ -269,3 +282,4 @@ git checkout -b feature/<name>
 | `.calendar-muted-events.json` | 프로젝트 루트 | ❌ |
 | `.engine-state.json` | 프로젝트 루트 | ❌ (막힘 · 회복 시각 · 사용률 · 안내 키) |
 | `.engine-drill.json` | 프로젝트 루트 | ❌ (엔진 폴백 연습용 · 다음 단계 · Git 추적 제외만 걸어 둠) |
+| `.held-files/` | 프로젝트 루트 | ❌ 비밀 아님 · 사용자가 보낸 첨부 (보류 v2 · Git 추적 제외) |
