@@ -24,6 +24,7 @@ import { engineState, type EngineState } from './engine-state';
 import { classifyCodexErrorText } from './rate-limit-utils';
 import { STEP_INPUT_MAX, STEP_MAX } from './turn-outcome';
 import type { HeldItem, HoldExtra } from './hold-replay';
+import { codexDrill, drillBlockUntil, type DrillScope } from './engine-drill';
 
 export type { HoldExtra };
 
@@ -1062,7 +1063,7 @@ const NARROW_CODEX_EFFORT = process.env.BOARD_NARROW_CODEX_EFFORT || 'low';
  * 등급 대응은 **Opus 5.5 ↔ GPT-6.1 Sol**(2026-09-23 둘 다 한 세대 올림 · Sol 은 09-30 에 6.1) 이고 effort 는 부르는 쪽 값을 그대로
  * 받는다(2026-09-08 사용자). 정기 작업에 Astra·Fable 급은 쓰지 않는다.
  */
-const SESSION_CODEX_MODEL = process.env.SESSION_FALLBACK_CODEX_MODEL || 'gpt-6.1-sol';
+export const SESSION_CODEX_MODEL = process.env.SESSION_FALLBACK_CODEX_MODEL || 'gpt-6.1-sol';
 const SESSION_CODEX_EFFORT = process.env.SESSION_FALLBACK_CODEX_EFFORT || 'low';
 
 /**
@@ -1350,6 +1351,8 @@ export interface CodexTurnOpts {
   onSpawn?: (kill: () => void) => void;
   /** 엔진 상태 — 시험이 바꿔 끼운다. */
   store?: EngineState;
+  /** 엔진 연습을 받는 차례인가 — 대화 차례(DM 폴백)는 `interactive`(생략하면 예약 일 · `engine-drill.ts`). */
+  drillScope?: DrillScope;
 }
 
 export interface CodexStep { cmd: string; done: boolean }
@@ -1401,6 +1404,14 @@ export async function codexTurn(prompt: string, opts: CodexTurnOpts): Promise<Co
   const sf = opts.outputSchema ? path.join(os.tmpdir(), `wa-cx-${id}.schema.json`) : undefined;
   const fail = (detail: string, steps: CodexStep[] = [], writeRan = false): CodexTurnResult =>
     ({ text: '', kind: 'fail', steps, writeRan, ms: Date.now() - t0, detail });
+  // 엔진 연습 — codex 를 안 띄우고 막힌 모양만 낸다. 사용량 소진은 진짜처럼 엔진 상태에 적는다.
+  const drill = codexDrill(opts.drillScope);
+  if (drill === 'usage') {
+    const until = drillBlockUntil();
+    store.recordBlocked('codex', { kind: 'usage', until });
+    return { text: '', kind: 'usage', steps: [], writeRan: false, resetsAt: until, ms: Date.now() - t0, detail: '연습 주입(usage)' };
+  }
+  if (drill === 'fail') return fail('연습 주입(fail)');
   try {
     const head = opts.appendSystemPrompt ? `${opts.appendSystemPrompt}\n\n----\n\n` : '';
     fs.writeFileSync(pf, head + prompt, 'utf-8');

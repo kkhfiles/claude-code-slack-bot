@@ -13,6 +13,7 @@
 - `-r`/`-resume`: 전체 프로젝트 세션 피커 (버튼 선택 → cwd 자동 전환 + 세션 재개)
 - `-sessions all`: 전체 프로젝트 세션 목록 (세션 피커와 동일)
 - `-version`: 봇 버전 + git hash + 업데이트 확인 (`src/version.ts`)
+- `-engines`: 엔진 상태 — 엔진마다 막힘, 풀리는 시각, 마지막 성공, 사용률과 연습 중인지를 글로만 냄(버튼 없음, `engineStatusText`, 상세 `docs/engine-fallback.md`)
 - OAuth 토큰 (명령 없음, `AccountManager`, `~/.claude/.bot-accounts.json` 영속화)
   - 토큰 저장: `~/.claude/.bot-accounts.json` 의 `account-1` 자리 하나 (accessToken, refreshToken, expiresAt, email, oauthAccount)
   - 주입: 대화 세션과 비서 세션 모두, 띄울 때마다 `syncFromCredentialsFile()` 후 `CLAUDE_CODE_OAUTH_TOKEN` env var 주입

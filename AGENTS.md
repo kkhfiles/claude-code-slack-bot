@@ -144,7 +144,7 @@ npm test        # 빌드 + check:* 전부
 
 ### 엔진 상태 — 막힘과 회복 시각의 정본 (2026-10-14)
 
-Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(Claude → GPT → agy Claude → agy Gemini → 모아 두고 회복 때 처리)의 바탕이다. 지금은 적기 · 회복 타이머 · 안내까지이고 DM 폴백은 아직 없다.
+Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(Claude → GPT → agy Claude → agy Gemini → 모아 두고 회복 때 처리)의 바탕이다. DM 을 넘기는 것은 아래 「DM 폴백」.
 
 - **정본은 `src/engine-state.ts` 하나** — `.engine-state.json`(임시 파일에 쓰고 바꿔 끼움) · 엔진별 막힘 · 마지막 성공 · 사용률 · 최근 5시간 사용 시각 · 한도 안내 키 · 엔진 안내 차례. `rate-limit-until.ts` 는 옛 이름을 두는 얇은 층(Claude 칸) · 옛 `.rate-limit-until.json` 은 처음 뜰 때 한 번 옮겨 옴
 - **갈래별 다시 볼 시각** — 사용량 소진은 서버가 준 `resetsAt`(같은 갈래 안에서 앞당기지 않음) · 과부하(529)는 10 → 20 → 40 → 60분, 한 번 되면 처음으로 · auth · unknown 은 60분. **과부하에 5시간을 걸지 않는다**(2026-08-24 에 과부하 한 번으로 큐를 다섯 시간 세웠다)
@@ -177,6 +177,12 @@ Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(
 - **막힌 뒤 된 적이 없으면 작은 호출로 먼저 떠 본다** · 30분마다 쓸어 봄 · 끝까지 간 것은 `inbox replayed` 로 자국을 걷음 · 한 건 이상 돌면 「▶ 밀린 N건 처리 — 완료 a · 확인 필요 b」
 - **첨부는 `.held-files/<캡처>/` 에 보관**(Git 추적 제외) — 못 옮기면 자동으로 안 돌리고 사람에게 넘김
 - 검사 `npm run check:hold` · `npm run check:capfail`
+
+### DM 폴백 — Claude 가 막히면 GPT 가 이어 받음 (2026-10-14 · 5단계 · `DM_FALLBACK=on`)
+
+- 고르기는 `src/engine-ladder.ts` 하나 · 채널 · 계획 · `-r` · 개인 글 · 업무 비서 밖 디렉터리는 안 넘김
+- 쓰기 뒤 끊김도 넘김(「이미 한 것」) · 한도 글 안 올림 · 같은 방은 한 줄로 · 답 뒤 「↪ GPT(모델) 가 답함」
+- 장부 · 연습 파일 · `-engines` 는 `docs/engine-fallback.md` · 검사 `check:dmfallback`
 
 ### CLI Integration
 - `child_process.spawn('claude', ['-p', '--output-format', 'stream-json', ...])` 방식
@@ -291,7 +297,8 @@ git checkout -b feature/<name>
 | `.calendar-notifications.json` | 프로젝트 루트 | ❌ |
 | `.calendar-muted-events.json` | 프로젝트 루트 | ❌ |
 | `.engine-state.json` | 프로젝트 루트 | ❌ (막힘 · 회복 시각 · 사용률 · 안내 키) |
-| `.engine-drill.json` | 프로젝트 루트 | ❌ (엔진 폴백 연습용 · 다음 단계 · Git 추적 제외만 걸어 둠) |
+| `.engine-drill.json` | 프로젝트 루트 | ❌ (엔진 폴백 연습 파일) |
+| `.fallback-ledger.jsonl` | 프로젝트 루트 | ❌ (DM 폴백 장부 · 말 없음) |
 | `.held-files/` | 프로젝트 루트 | ❌ 비밀 아님 · 사용자가 보낸 첨부 (보류 v2 · Git 추적 제외) |
 | `.briefing-delivered.json` | 프로젝트 루트 | ❌ (브리핑 올린 날) |
 | `.analysis-retry.json` | 프로젝트 루트 | ❌ (한도 재시도 계획 · 회차 id) |

@@ -390,6 +390,7 @@ export function getHelpText(locale: Locale): string {
     help += `\`-opus\` / \`-o\`, \`-sonnet\` / \`-s\`, \`-haiku\` / \`-h\` — 채널 모델을 한 번에 전환\n`;
     help += `\`!o <prompt>\`, \`!s <prompt>\`, \`!h <prompt>\` — 이 메시지 한 번만 다른 모델로 실행\n`;
     help += `\`-cost\` / \`비용\` — 마지막 쿼리 비용 및 세션 ID\n`;
+    help += `\`-engines\` — 엔진 상태 (막힘 · 풀리는 시각 · 마지막 성공 · 사용률 · 연습 중인가)\n`;
     help += `\`-v\` / \`-version\` / \`버전\` — 봇 버전 및 업데이트 확인\n\n`;
     help += `*MCP*\n`;
     help += `\`-mcp\` — MCP 서버 상태 표시\n`;
@@ -434,6 +435,7 @@ export function getHelpText(locale: Locale): string {
   help += `\`-opus\` / \`-o\`, \`-sonnet\` / \`-s\`, \`-haiku\` / \`-h\` — Switch channel model in one shot\n`;
   help += `\`!o <prompt>\`, \`!s <prompt>\`, \`!h <prompt>\` — Run this single message with a different model\n`;
   help += `\`-cost\` — Show last query cost and session ID\n`;
+  help += `\`-engines\` — Engine status (blocked · resets · last success · usage · drill)\n`;
   help += `\`-v\` / \`-version\` — Show bot version and check for updates\n\n`;
   help += `*MCP*\n`;
   help += `\`-mcp\` — Show MCP server status\n`;

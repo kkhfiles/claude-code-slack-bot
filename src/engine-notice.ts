@@ -8,8 +8,9 @@
  * **모델 이름은 표에서 읽는다** — llm-playbook 의 `models.json`(별칭 → 실제 모델). 판 번호를 여기
  * 적으면 새 모델이 나올 때 안내만 낡는다. 표를 못 읽으면 판 없이 「GPT」·「Gemini」로만 쓴다.
  *
- * **기본은 꺼짐**(`ENGINE_NOTICE=on` 일 때만 보냄) — 이번 단계에는 DM 을 넘겨받는 엔진이 아직 없어
- * Claude 가 막히면 「GPT 로 이어 갑니다」가 사실이 아니다. 꺼져 있으면 보낼 줄을 로그에만 남긴다.
+ * **기본은 꺼짐**(`ENGINE_NOTICE=on` 일 때만 보냄) — 꺼져 있으면 보낼 줄을 로그에만 남긴다. 봇은 실제로
+ * 붙은 칸만 사다리로 넘긴다(5단계: `DM_FALLBACK=on` 이면 Claude · GPT, 꺼져 있으면 Claude 하나) —
+ * 안 붙은 엔진을 「이어 갑니다」로 알리면 사실이 아니다.
  * 마지막으로 알린 차례는 엔진 상태에 적어 재시작해도 같은 안내를 되풀이하지 않는다.
  */
 import * as fs from 'fs';
@@ -81,10 +82,18 @@ function activeBlock(st: EngineStateData, e: Engine, nowSec: number) {
   return b && b.until !== null && b.until > nowSec ? b : null;
 }
 
-/** 지금 DM 을 맡을 차례 — 막히지 않은 첫 엔진. 다 막혔으면 `none`. */
-export function dmRung(st: EngineStateData, nowSec: number): Rung {
-  for (const e of ENGINES) if (!activeBlock(st, e, nowSec)) return e;
+/**
+ * 지금 DM 을 맡을 차례 — 막히지 않은 첫 엔진. 다 막혔으면 `none`.
+ * `ladder` 는 실제로 붙은 칸만 넘긴다(5단계는 Claude · GPT) — 안 붙은 agy 를 「이어 갑니다」로 알리지 않게.
+ */
+export function dmRung(st: EngineStateData, nowSec: number, ladder: readonly Engine[] = ENGINES): Rung {
+  for (const e of ladder) if (!activeBlock(st, e, nowSec)) return e;
   return 'none';
+}
+
+/** 차례의 위아래 — 사다리가 바뀌어도(폴백을 켜고 끔) 같은 순서로 견준다. */
+function rank(r: Rung): number {
+  return r === 'none' ? RUNGS.length : RUNGS.indexOf(r);
 }
 
 /** 「누구로 이어 가나」 부분. */
@@ -114,21 +123,21 @@ function blockedOne(st: EngineStateData, e: Engine, nowSec: number): string {
  */
 export function composeTransition(
   from: Rung, to: Rung, st: EngineStateData, labels: ModelLabels, nowSec: number,
+  ladder: readonly Engine[] = ENGINES,
 ): string | null {
   if (from === to) return null;
   if (to === 'none') {
-    const next = ENGINES.map((e) => activeBlock(st, e, nowSec)?.until ?? null)
+    const next = ladder.map((e) => activeBlock(st, e, nowSec)?.until ?? null)
       .filter((u): u is number => u !== null)
       .sort((a, b) => a - b)[0];
     const when = next !== undefined ? formatKst(next) : '시각 모름';
     return `⏸ 모든 엔진 소진 — 받은 말은 모아 두고 가장 빠른 회복(${when})에 차례대로 처리합니다`
       + ' · 다시 보내지 않으셔도 됩니다';
   }
-  if (RUNGS.indexOf(to) < RUNGS.indexOf(from)) {
-    if (to === 'claude') return '✅ Claude 회복 — 돌아왔습니다';
-    return `✅ ${to === 'codex' ? 'GPT' : to === 'agy-claude' ? 'agy Claude' : labels.gemini || 'Gemini'} 회복 — ${target(to, labels)}`;
-  }
-  const above = ENGINES.slice(0, ENGINES.indexOf(to));
+  if (rank(to) < rank(from) && to === 'claude') return '✅ Claude 회복 — 돌아왔습니다';
+  // Claude 가 아닌 칸으로 올라가면(모두 막힘 → GPT 가 풀림 · 폴백을 켬) 「회복」이라 하지 않고 지금 모양을
+  // 그대로 말한다 — 폴백을 켜는 순간에는 GPT 가 막힌 적이 없는데 「✅ GPT 회복」이 나갔다(5단계 검토).
+  const above = ladder.slice(0, Math.max(0, ladder.indexOf(to)));
   let what: string;
   if (above.length === 1) {
     what = blockedOne(st, above[0], nowSec);
@@ -147,6 +156,8 @@ export interface EngineNoticeOptions {
   /** 기본 — `ENGINE_NOTICE=on` 일 때만 켜짐. */
   enabled?: () => boolean;
   labels?: () => ModelLabels;
+  /** DM 을 맡는 칸 — 기본은 네 엔진 전부. 봇은 실제로 붙은 칸만 넘긴다(`dm-fallback.ts` `dmLadder`). */
+  ladder?: () => readonly Engine[];
   log?: { info: (msg: string, data?: any) => void; warn: (msg: string, data?: any) => void };
 }
 
@@ -183,10 +194,11 @@ export class EngineNotice {
     try {
       const st = this.store.load();
       const now = this.store.nowSec();
-      const rung = dmRung(st, now);
+      const ladder = this.opts.ladder?.() ?? ENGINES;
+      const rung = dmRung(st, now, ladder);
       const last = (st.ladder?.rung ?? 'claude') as Rung;
       if (rung === last) return null;
-      const line = composeTransition(last, rung, st, (this.opts.labels ?? loadModelLabels)(), now);
+      const line = composeTransition(last, rung, st, (this.opts.labels ?? loadModelLabels)(), now, ladder);
       this.store.setLadder(rung, `${last}>${rung}`);
       if (!line) return null;
       if (!this.enabled) {

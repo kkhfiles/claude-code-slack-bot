@@ -316,7 +316,8 @@ try {
     const q = fresh();
     eq('한도 안내: 못 가르면 한 시간', currentClaudeBlock(undefined, 'too many things', q).until - nowSec(), 3600);
     const sh = fs.readFileSync(path.join(SRC, 'slack-handler.ts'), 'utf-8');
-    eq('한도 안내 두 자리가 엔진 상태에서 시각을 받는다', (sh.match(/currentClaudeBlock\(/g) ?? []).length, 2);
+    // 셋째 자리는 DM 폴백(엔진 폴백 5단계) — 넘길 때 표시 줄 · 한도 안내가 같은 막힘을 쓴다.
+    eq('한도 안내 두 자리 · DM 폴백 한 자리가 엔진 상태에서 시각을 받는다', (sh.match(/currentClaudeBlock\(/g) ?? []).length, 3);
     ok('5시간 기본값이 남았다(parseRetryAfterSeconds)', !/parseRetryAfterSeconds|5 \* 60 \* 60/.test(sh));
     // 던진 오류 — 슬랙의 빈도 제한은 Claude 막힘이 아니다(글에 「rate-limit」이 있어도)
     const sl = fresh();

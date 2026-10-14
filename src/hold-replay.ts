@@ -245,6 +245,22 @@ export class ChannelGate {
     return this.held.has(channel);
   }
 
+  /**
+   * 비면 잡고, 잡혀 있으면 놓일 때까지 기다렸다 잡는다 — 돌려준 함수로 놓는다.
+   *
+   * **보고 잡는 것을 한 덩어리로** 한다(`await` 없이 이어서). `wait` 뒤에 따로 `hold` 하면 같은 문을
+   * 기다리던 둘이 함께 깨어나 둘 다 잡는다 — DM 폴백(GPT 차례)이 같은 방에서 둘 겹쳐 돈다.
+   * 상한을 넘기면 그냥 잡는다(`wait` 와 같은 규칙 — 멈춘 차례가 방을 영영 막지 않게).
+   */
+  async acquire(channel: string, maxMs: number = GATE_MAX_WAIT_MS): Promise<() => void> {
+    const deadline = Date.now() + maxMs;
+    for (;;) {
+      if (!this.held.has(channel)) return this.hold([channel]);
+      const left = deadline - Date.now();
+      if (left <= 0 || await this.wait(channel, left) === 'timeout') return this.hold([channel]);
+    }
+  }
+
   /** 잡혀 있으면 놓일 때까지 기다린다(상한 `maxMs`). */
   async wait(channel: string, maxMs: number = GATE_MAX_WAIT_MS): Promise<'free' | 'waited' | 'timeout'> {
     if (!this.held.has(channel)) return 'free';

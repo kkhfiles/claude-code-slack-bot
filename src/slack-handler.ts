@@ -19,7 +19,7 @@ import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n }
 import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
 import { stillBlocked } from './rate-limit-until';
-import { engineState, type Block } from './engine-state';
+import { ENGINES, engineState, type Block, type Engine } from './engine-state';
 import { currentClaudeBlock, thrownClaudeBlock } from './engine-tap';
 import { EngineRecovery } from './engine-recovery';
 import { EngineNotice } from './engine-notice';
@@ -41,9 +41,9 @@ import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
 import { decisionReply, noticeReply, reportLogAvailable } from './action-pipeline';
 import type { ThreadApi } from './action-pipeline';
-import { captureToInbox, checkinMap, checkinNow, dropCapture, isWorkAssistantEnabled,
+import { captureToInbox, checkinMap, checkinNow, codexTurn, dropCapture, isWorkAssistantEnabled,
   markCaptureFailed, markCaptureReplayed, markCaptureTold, markCaptureTried, pendingCaptures,
-  pendingHeld, quickUpdate } from './work-assistant';
+  pendingHeld, quickUpdate, SESSION_CODEX_MODEL, workAssistantRoot } from './work-assistant';
 import { boardLabel } from './board-queue';
 import { readUnseen } from './dm-context';
 import { containsPrivate } from './privacy-guard';
@@ -51,6 +51,13 @@ import { ChannelGate, HOLD_SWEEP_MS, REPLAY_FRAME, buildHoldExtra, drainHeld, dr
   leadText, markChoice, needsCanary, oldListMessage, receivedSec, replayNote, replayTarget,
   type HeldFile, type HeldItem } from './hold-replay';
 import { StepLog, isHeldOutcome, outcomeFrom, type TurnOutcome, type TurnStep } from './turn-outcome';
+import { fallbackEligible, pickEngine, type DmOrigin, type LadderPick } from './engine-ladder';
+import { CODEX_INFLIGHT_STEP, FALLBACK_EFFORT, FALLBACK_TIMEOUT_MS, appendLedger, codexSteps, dmFallbackOn, fallbackEnv,
+  dmLadder, engineStatusText, filesNote, handoverNote, isQuietReply, ledgerNote, ledgerServedSince,
+  markerLines } from './dm-fallback';
+import { codexQuota } from './codex-quota';
+import { sameTier } from './model-ladder';
+import { readDrill } from './engine-drill';
 
 /**
  * 슬랙 대화 세션의 사고 깊이. SDK 기본값은 `'high'` 다.
@@ -106,7 +113,8 @@ const INTERACTIVE_COMPACT_WINDOW = 433_000;
  * 발생했다(레포를 두 세션이 같이 만지던 날). 프로세스가 강제 종료돼도 남아야
  * 하므로 종료 훅이 아니라 **파일**에 적고, 다음 기동 때 읽어 알린다.
  */
-const INFLIGHT_FILE = path.join(__dirname, '..', '.inflight-sessions.json');
+// 검사는 `INFLIGHT_SESSIONS_FILE` 로 옮긴다 — 대화 처리기를 통째로 돌리는 검사가 운영 파일을 안 건드리게.
+const INFLIGHT_FILE = process.env.INFLIGHT_SESSIONS_FILE || path.join(__dirname, '..', '.inflight-sessions.json');
 
 interface InflightRecord { channel: string; threadTs?: string; text: string;
   startedAt: string;
@@ -121,7 +129,23 @@ interface InflightRecord { channel: string; threadTs?: string; text: string;
   /** 이 차례가 이어 가던 앞 차례의 「이미 한 것」 — 또 끊기면 합쳐서 넘긴다. */
   heldSteps?: string[];
   /** 첨부(임시 파일) — 끊기면 보관 폴더로 옮긴다. */
-  files?: HeldFile[]; }
+  files?: HeldFile[];
+  /** 지금 맡은 엔진 — GPT 가 이어 받는 중이면 `codex`(DM 폴백). */
+  engine?: 'claude' | 'codex'; }
+
+/**
+ * 대화 차례가 들고 있는 것 — Claude 프로세스 또는 GPT 대체 차례의 손잡이. `-stop` 과 새 차례가 끊고,
+ * 메모리 감시기가 pid 로 찾는다.
+ */
+interface TurnHandle { interrupt(): void; readonly pid?: number }
+
+/** Claude 를 건너뛴 차례(DM 폴백 · 엔진 상태가 막혔다고 함)의 빈 흐름 — 스트림 고리가 그냥 지나간다. */
+function skippedTurn(): AsyncIterable<CliEvent> & TurnHandle {
+  return {
+    async *[Symbol.asyncIterator]() { /* 띄운 것이 없다 */ },
+    interrupt() { /* 끊을 것이 없다 */ },
+  };
+}
 
 function readInflight(): Record<string, InflightRecord> {
   try { return JSON.parse(fs.readFileSync(INFLIGHT_FILE, 'utf-8')); } catch { return {}; }
@@ -273,7 +297,9 @@ export class SlackHandler {
   private reportServer?: ReportServer;
 
   // Active CLI process tracking (for interrupt/stop)
-  private activeProcesses: Map<string, CliProcess | SdkProcess> = new Map();
+  private activeProcesses: Map<string, TurnHandle> = new Map();
+  // GPT 대체 차례가 도는 대화 — 문을 안 기다리는 차례(다시 돌리기)도 끊지 않고 끝나기를 기다린다.
+  private fallbackRuns: Map<string, Promise<void>> = new Map();
 
   // UI state
   private todoMessages: Map<string, string> = new Map();
@@ -319,6 +345,8 @@ export class SlackHandler {
   });
   // DM 을 맡는 엔진이 바뀔 때 한 줄 안내 — 기본 꺼짐(`ENGINE_NOTICE=on`) · 꺼져 있으면 로그만.
   private engineNotice = new EngineNotice({
+    // 실제로 붙은 칸만 — DM 폴백이 꺼져 있으면 Claude 하나(막히면 곧 모아 둠).
+    ladder: () => dmLadder(),
     post: async (text) => {
       if (!config.assistant.dmChannel) return;
       await this.app.client.chat.postMessage({ channel: config.assistant.dmChannel, text });
@@ -1156,6 +1184,18 @@ export class SlackHandler {
       return;
     }
 
+    // 엔진 상태(엔진 폴백 5단계) — 엔진마다 막힘 · 풀리는 시각 · 마지막 성공 · 사용률, 연습 중인가.
+    // 버튼 없이 글만 — 고칠 것이 아니라 볼 것이다. 쓸 수 있는 사람은 위 `isAllowedUser` 가 이미 걸렀다.
+    if (text && this.isEnginesCommand(text)) {
+      await say({
+        text: engineStatusText(engineState.load(), engineState.nowSec(), {
+          fallback: dmFallbackOn(), notice: process.env.ENGINE_NOTICE === 'on', drill: readDrill(), ladder: dmLadder(),
+        }),
+        thread_ts: thread_ts,
+      });
+      return;
+    }
+
     // Stop command (interrupt running CLI process)
     if (text && this.isStopCommand(text)) {
       const sessionKey = this.cliHandler.getSessionKey(user, channel, thread_ts || ts);
@@ -1414,6 +1454,11 @@ export class SlackHandler {
       }
     }
 
+    // **GPT 대체 차례는 끊지 않는다**(DM 폴백) — 새 차례는 대개 위 문에서 기다리고, 문을 안 기다리는
+    // 차례(다시 돌리기)가 겹치면 여기서 끝나기를 기다린다. 끊으면 쓰기를 하다 만 채로 남는다.
+    const fallbackRun = this.fallbackRuns.get(sessionKey);
+    if (fallbackRun) await fallbackRun;
+
     this.originalMessages.set(sessionKey, { channel, ts: originalMessageTs });
 
     // Cancel any existing CLI process for this conversation
@@ -1444,8 +1489,13 @@ export class SlackHandler {
     // 세션 밖에서 나간 글은 세션 기록에 없다 — 짧은 답이 엉뚱하게 읽힌 까닭이 그 둘이었다.
     // 봇이 스스로 넘긴 차례(`pushed`)는 사람 말이 아니라 안 붙인다. 슬랙 왕복이라 아래
     // 준비와 같이 돌게 여기서 걸어 두고, 세션을 띄우기 직전에 받는다.
+    //
+    // **Claude 가 막힌 동안 다른 엔진이 받은 것이 있으면**(DM 폴백 장부) 돌아온 첫 차례가 판 · 메일이
+    // 민 것이어도 붙인다 — 안 붙이면 그 차례가 세션 시각을 밀어 사람의 다음 차례도 그 글을 못 받는다.
+    const served = isDM && !isNewSession ? ledgerServedSince(channel, session.lastActivity.getTime() / 1000) : 0;
+    const attachUnseen = (isDM && !(event as any).pushed) || (isDM && served > 0 && !event.replay);
     const unseenPending: Promise<string> =
-      (isDM && !(event as any).pushed && !planParsed && !resumeData)
+      (attachUnseen && !planParsed && !resumeData)
         ? this.getBotUserId().then((botUserId) => readUnseen(this.app.client as any, channel, {
             currentTs: ts,
             threadTs: thread_ts,
@@ -1503,6 +1553,27 @@ export class SlackHandler {
     // 안 돌리면 이 방의 다음 차례가 옛 세션을 이어받아 그 사이의 대화를 잃는다.
     const restoreSession = event.resumeSessionId
       ? { sessionId: session.sessionId, uuid: session.lastAssistantUuid } : null;
+    // **DM 폴백**(엔진 폴백 5단계 · `DM_FALLBACK=on`) — Claude 가 막히면 이 차례를 GPT 가 이어 받는다.
+    // 넘겨도 되는 차례인지는 `engine-ladder.ts` 가 정한다. 개인 글 검사는 넘길 일이 생겼을 때 한 번만
+    // 돌린다(긴 첨부에서 느리다). 꺼져 있으면 `fbOn()` 이 늘 거짓이라 예전 그대로 돈다.
+    const origin: DmOrigin = !isDM ? 'channel' : event.replay ? 'replay' : (event as any).pushed ? 'pushed' : 'dm';
+    const fbBase = dmFallbackOn() && fallbackEligible({
+      origin, planMode: isPlanMode, resumeCmd: !!resumeData, isPrivate: false,
+      cwdIsWorkAssistant: this.isWorkAssistantDir(workingDirectory),
+    });
+    let fbPrivate: boolean | undefined;
+    const isPrivateTurn = (): boolean =>
+      (fbPrivate ??= containsPrivate([finalPrompt, event.replayNote ?? ''].join('\n')));
+    const fbOn = (): boolean => fbBase && !isPrivateTurn();
+    /** 띄우기 전에 Claude 를 건너뛰었나(엔진 상태가 막혔다고 함) — 그러면 아래 스트림이 비어 있다. */
+    let claudeSkipped = false;
+    /** 거절 이벤트 · 한도/과부하 표시 메시지를 봤나 — 넘길 차례면 그 뒤의 Claude 글(한도 글)을 안 올린다. */
+    let limitSeen = false;
+    /** 폴백이 끝을 맡았나(답 · 실패 표시 · 한도 안내) — 그러면 아래 예전 한도 길은 건너뛴다. */
+    let fallbackDone = false;
+    let turnEngine: 'claude' | 'codex' = 'claude';
+    let fallbackSteps: TurnStep[] = [];
+    let fallbackWrote = false;
 
     try {
       this.logger.info('Spawning Claude CLI process', {
@@ -1576,6 +1647,8 @@ export class SlackHandler {
         permissionMode: isPlanMode ? 'plan' as const : botPermLevel,
         allowedTools,
         env: queryEnv,
+        // 엔진 연습(`.engine-drill.json`)은 대화 차례에만 — 예약 일은 `scope: all` 일 때만 받는다.
+        drillScope: 'interactive' as const,
       };
       // **원문을 먼저 저장한다 — 세션을 띄우기 전에.** 순서가 규칙이다(work-assistant
       // CLAUDE.md): 저장(결정론) → 해석(세션) → 닫기. 파이썬도 노션도 안 거치고
@@ -1599,8 +1672,10 @@ export class SlackHandler {
       mark('못 본 글');
       // 로그에는 글을 안 남긴다 — 몇 줄을 붙였는지만.
       if (unseen) this.logger.info('세션이 못 본 대화방 글을 붙임', { lines: unseen.split('\n').filter((l) => l.startsWith('- ')).length });
+      // **Claude 가 막힌 동안 다른 엔진이 받은 것이 있으면 한 줄 알린다**(DM 폴백 · 위 `served`) — 내용은
+      // 「못 본 대화방 글」이 싣는다. 세션이 마지막으로 돈 뒤의 장부만 세므로 돌아온 첫 차례에만 붙는다.
       // 다시 돌리는 차례면 그 메모(받은 시각 · 그 뒤의 글 · 이미 한 것)를 맨 앞에 — 보류 v2.
-      const sessionPrompt = [event.replayNote, unseen, finalPrompt].filter(Boolean).join('\n');
+      const sessionPrompt = [event.replayNote, ledgerNote(served), unseen, finalPrompt].filter(Boolean).join('\n');
       const surfaceNote = [
         SLACK_SURFACE_NOTE,
         capture ? CAPTURE_NOTE : '',
@@ -1638,13 +1713,27 @@ export class SlackHandler {
       // 안에 로그가 없어 **무엇이 도는지조차 몰랐다**(2026-08-29). 재고 나서 정한다.
       mark('옵션 짓기');
       this.logger.info('띄우기 전 준비', { ms: lap });
-      const cliProcess = useSdk
-        ? this.sdkHandler.runQuery(sessionPrompt, sdkOpts)
-        : this.cliHandler.runQuery(sessionPrompt, {
-            ...runOpts, env: sessionEnv, appendSystemPrompt: surfaceNote,
-          });
+      // **DM 폴백 — 띄우기 전**: 엔진 상태가 Claude 가 막혔다고 하면 안 띄운다(띄워도 한도 글만 받는다).
+      // 다음 칸(GPT)이 비었으면 스트림 뒤에서 그리로 넘기고, 다 막혔으면 예전 한도 길로 모아 둔다.
+      let pick: LadderPick = 'claude';
+      if (engineState.isBlocked('claude') && fbOn()) {
+        pick = pickEngine({
+          origin, planMode: isPlanMode, resumeCmd: !!resumeData, hasFiles: processedFiles.length > 0,
+          isPrivate: isPrivateTurn(), cwdIsWorkAssistant: this.isWorkAssistantDir(workingDirectory),
+          blocked: await this.ladderBlocked(),
+        });
+        claudeSkipped = pick !== 'claude';
+        if (claudeSkipped) this.logger.warn('Claude 가 막혀 있어 띄우지 않습니다(DM 폴백)', { next: pick });
+      }
+      const cliProcess: AsyncIterable<CliEvent> & TurnHandle = claudeSkipped
+        ? skippedTurn()
+        : useSdk
+          ? this.sdkHandler.runQuery(sessionPrompt, sdkOpts)
+          : this.cliHandler.runQuery(sessionPrompt, {
+              ...runOpts, env: sessionEnv, appendSystemPrompt: surfaceNote,
+            });
 
-      this.logger.info('Interactive session started', { via: useSdk ? 'sdk' : 'cli' });
+      this.logger.info('Interactive session started', { via: claudeSkipped ? 'skipped' : useSdk ? 'sdk' : 'cli' });
       // 여기서 상태 한 줄의 `ts` 를 받는다 — 세션이 뜨기를 기다리는 중이라 공짜다.
       // 아래 스트림이 그 `ts` 로 상태를 고쳐 쓰므로 들어가기 전에 받아 둔다.
       await statusSent;
@@ -1720,11 +1809,16 @@ export class SlackHandler {
             const retryAfterSec = Math.max(60, info.resetsAt - Math.floor(Date.now() / 1000));
             rateLimitInfo = { retryAfterSec, resetsAt: info.resetsAt, rateLimitType: info.rateLimitType ?? 'unknown' };
           }
+          // 시각이 없어도 거절은 거절이다 — DM 폴백이 이 뒤의 Claude 글을 안 올리고 넘긴다.
+          if (info.status === 'rejected') limitSeen = true;
           continue;
         }
 
         if (event.type === 'assistant') {
           const assistantEvent = event as CliAssistantEvent;
+          // API 오류를 대신 전하는 메시지(SDK `error` 칸) — 한도 · 과부하면 거절 이벤트와 같게 본다.
+          const apiError = (assistantEvent as any).error;
+          if (apiError === 'rate_limit' || apiError === 'overloaded') limitSeen = true;
 
           // Track last assistant message UUID for session continuity
           if (assistantEvent.uuid && session) {
@@ -1759,7 +1853,11 @@ export class SlackHandler {
             }
           } else {
             const content = this.extractTextFromContent(contentParts);
-            if (content) {
+            if (content && limitSeen && fbOn()) {
+              // **넘길 차례면 막힌 뒤의 Claude 글(「You've hit your limit…」)을 안 올린다** — 이어 받는
+              // 엔진이 답하고, 못 받으면 한도 안내가 나간다. 판정은 이벤트로만 한다(아래 NOTE).
+              this.logger.info('막힌 뒤의 Claude 글을 올리지 않습니다(DM 폴백)');
+            } else if (content) {
               // NOTE: Do NOT check isRateLimitText on assistant text content here.
               // It causes false positives when Claude mentions "rate limit" in normal conversation.
               // Rate limits are reliably detected via rate_limit_event (line ~524) and result.is_error (line ~616).
@@ -1820,7 +1918,9 @@ export class SlackHandler {
             }
           }
 
-          if (resultEvent.subtype === 'success' && resultEvent.result) {
+          // 막힌 차례의 결과 글(한도 글 그대로)도 넘길 차례면 안 올린다 — 위 어시스턴트 글과 같은 까닭.
+          const handOff = (limitSeen || !!rateLimitMessageText) && fbOn();
+          if (resultEvent.subtype === 'success' && resultEvent.result && !handOff) {
             if (!currentMessages.includes(resultEvent.result)) {
               await say({ text: this.formatMessage(resultEvent.result, true), thread_ts: replyTs });
               tmark('마지막 글');
@@ -1831,8 +1931,52 @@ export class SlackHandler {
       }
       tmark('스트림 닫힘');
 
+      // **DM 폴백 — Claude 가 끝난 뒤**(엔진 폴백 5단계): 한도 · 과부하로 막혔거나 띄우기 전에 건너뛰었으면
+      // 다음 칸으로 넘긴다. 쓰기가 돌았어도 넘긴다 — 「이미 한 것」을 같이 준다. 다 막혔으면(`hold`)
+      // 아래 예전 한도 길이 실패 표시와 안내를 맡는다. Claude 의 보통 오류는 안 넘긴다(예전 오류 길).
+      const claudeLimited = !!(rateLimitInfo || rateLimitMessageText || limitSeen);
+      if ((claudeSkipped || claudeLimited) && fbOn()) {
+        const claudeBlock = currentClaudeBlock(rateLimitInfo?.resetsAt, rateLimitMessageText);
+        if (!claudeSkipped) {
+          pick = pickEngine({
+            origin, planMode: isPlanMode, resumeCmd: !!resumeData, hasFiles: processedFiles.length > 0,
+            isPrivate: isPrivateTurn(), cwdIsWorkAssistant: this.isWorkAssistantDir(workingDirectory),
+            blocked: await this.ladderBlocked(),
+            claudeOutcome: claudeBlock.kind === 'overload' ? 'overload' : 'limited', writeRan: stepLog.writeRan,
+          });
+        }
+        if (pick === 'codex') {
+          const fb = await this.runDmFallback({
+            event, channel, sessionKey, replyTs, ts, thread_ts, captureId, surfaceNote, finalPrompt,
+            files: processedFiles, claudeSteps: stepLog.steps, claudeModel: channelModel, block: claudeBlock,
+            sessionId: session?.sessionId, locale, say,
+            status: (s) => { if (statusMessageTs) this.queueStatus(sessionKey, channel, statusMessageTs, s); },
+          });
+          fallbackDone = true;
+          fallbackSteps = fb.steps;
+          fallbackWrote = fb.writeRan;
+          if (fb.result === 'ok') {
+            turnEngine = 'codex';
+            cliError = false;
+          } else {
+            cliError = true;
+            if (fb.result === 'failed') {
+              turnBlock = claudeBlock;
+              markDone = fb.markDone ?? null;
+            }
+          }
+        } else {
+          // 다 막혔다 — 아래 예전 한도 길이 모아 둔다(띄우기 전에 건너뛰었어도 ❌ 로 끝을 보인다).
+          cliError = true;
+          appendLedger({ channel, engine: 'none', model: '', captureId, outcome: 'hold' });
+        }
+        // 맡는 엔진이 바뀌었으면 안내 한 줄(켜는 문 `ENGINE_NOTICE` · 막힘이 바뀔 때도 저절로 돈다).
+        void this.engineNotice.check();
+      }
+
       // Update session activity timestamp and flush to disk
-      if (session) {
+      // Claude 를 건너뛴 차례는 안 고친다 — Claude 세션이 못 본 이 차례의 글을 다음 차례가 「못 본 글」로 받는다.
+      if (session && !claudeSkipped) {
         session.lastActivity = new Date();
         this.cliHandler.saveNow();
         tmark('세션 저장');
@@ -1875,7 +2019,7 @@ export class SlackHandler {
       if (tailT0) this.logger.info('뒤처리', { ms: tail });
 
       // Register session in sessions-index.json for CLI compatibility
-      if (session?.sessionId && workingDirectory) {
+      if (session?.sessionId && workingDirectory && !claudeSkipped) {
         this.sessionScanner.registerSession({
           sessionId: session.sessionId,
           projectPath: workingDirectory,
@@ -1923,7 +2067,8 @@ export class SlackHandler {
       }
 
       // Handle rate limit (from rate_limit_event or error text)
-      if (rateLimitInfo || rateLimitMessageText) {
+      // DM 폴백이 끝을 맡았으면 건너뛴다 · 넘길 차례인데 다 막혔으면(띄우기 전에 건너뜀 · 시각 없는 거절) 여기서 모아 둔다.
+      if (!fallbackDone && (rateLimitInfo || rateLimitMessageText || ((limitSeen || claudeSkipped) && fbOn()))) {
         // **캡처에 남긴다 — 이유를 안 가리는 그 자국이다.** 아래 한도 큐는
         // 이유별 장치라 실제로 어긋났다(08/24 의 서버 과부하를 5시간짜리 한도로
         // 잡아 이레를 들고 있었다). 정본은 캡처 큐 한 곳으로 간다.
@@ -1993,9 +2138,9 @@ export class SlackHandler {
       if (event.outcomeSink) {
         Object.assign(event.outcomeSink, {
           outcome: outcomeFrom(turnBlock, cliError || turnThrew),
-          engine: 'claude',
-          steps: stepLog.steps,
-          writeRan: stepLog.writeRan || (event.heldSteps?.length ?? 0) > 0,
+          engine: turnEngine,
+          steps: [...stepLog.steps, ...fallbackSteps],
+          writeRan: stepLog.writeRan || fallbackWrote || (event.heldSteps?.length ?? 0) > 0,
           sessionId: session?.sessionId,
           captureId,
         } satisfies TurnOutcome);
@@ -2018,7 +2163,8 @@ export class SlackHandler {
       // ⚠️ **터져도 아무 일이 없어야 한다** — 빠르게 하는 장치이지 반영의 일부가
       // 아니다. `prewarm` 이 통째로 `try` 로 감싸여 있다.
       // 옛 세션을 이어 간 차례(보류 v2) 뒤에는 안 띄운다 — 다음 차례는 원래 세션이라 지문이 안 맞는다.
-      if (sdkOptsForWarm && shouldUseSdk('interactive') && !event.resumeSessionId) {
+      // Claude 가 막혀 GPT 가 받은 차례(DM 폴백) 뒤에도 안 띄운다 — 다음 차례도 Claude 를 건너뛰어 그냥 남는다.
+      if (sdkOptsForWarm && shouldUseSdk('interactive') && !event.resumeSessionId && !claudeSkipped && !fallbackDone) {
         this.sdkHandler.prewarm(sdkOptsForWarm);
       }
 
@@ -2420,7 +2566,7 @@ export class SlackHandler {
    * 처리 못 한 차례의 실패 표시 — 보류 v2 면 쓰기가 돈 뒤였는지(`partial`) · 세션 · 이미 한 것 ·
    * 첨부까지 같이 적는다. **첨부 보관은 동기로** 한다 — 바로 뒤에서 임시 파일을 지운다.
    */
-  private markTurnFailed(captureId: string, why: 'limit' | 'error', steps: StepLog,
+  private markTurnFailed(captureId: string, why: 'limit' | 'error', steps: Pick<StepLog, 'steps'>,
                          sessionId: string | undefined, event: MessageEvent,
                          files: ProcessedFile[]): Promise<void> {
     if (!captureId) return Promise.resolve();
@@ -2428,6 +2574,104 @@ export class SlackHandler {
     const { extra, writeRan } = buildHoldExtra(
       captureId, steps.steps, event.heldSteps ?? [], sessionId, files.map(heldFileOf));
     return markCaptureFailed(captureId, why === 'limit' && writeRan ? 'partial' : why, extra);
+  }
+
+  // --- DM 폴백 (엔진 폴백 5단계 · `DM_FALLBACK=on`) ---
+
+  /** 엔진별 지금 막혔나 — codex 는 한도 조회(5분에 한 번 · 못 읽으면 모름)를 엔진 상태에 옮긴 뒤 본다. */
+  private async ladderBlocked(): Promise<Partial<Record<Engine, boolean>>> {
+    await codexQuota.refresh();
+    return Object.fromEntries(ENGINES.map((e) => [e, engineState.isBlocked(e)]));
+  }
+
+  /** 이 작업 디렉터리가 업무 비서 뿌리인가 — 대체 엔진의 규칙 · 쓰기 범위가 거기에 맞춰져 있다. */
+  private isWorkAssistantDir(dir: string | undefined): boolean {
+    const root = workAssistantRoot();
+    if (!root || !dir) return false;
+    const norm = (p: string) => {
+      const r = path.resolve(p).replace(/[\\/]+$/, '');
+      return process.platform === 'win32' ? r.toLowerCase() : r;
+    };
+    return norm(root) === norm(dir);
+  }
+
+  /**
+   * GPT(codex) 한 차례 — Claude 가 막힌 DM 차례를 이어 받는다.
+   *
+   * - **같은 방에서 한 줄로** — 새 차례는 문(`holdGate`)에서 기다리고 이 차례를 끊지 않는다. 다시 돌리는
+   *   차례는 드레인이 이미 문을 잡았으므로 안 잡는다(자기 문을 기다리면 15분 서 있는다)
+   * - `-stop` 이 끊을 수 있게 손잡이를 걸고, 재시작에 끊기면 「했을 수 있음」으로 모아 두게 처리 중 기록을 고친다
+   * - Claude 와 같은 안내(슬랙 · 캡처 · 번호표) + 못 본 대화방 글(새 세션처럼 12시간) + 넘겨줄 메모 + 사람 말 + 첨부 경로
+   * - 캡처 id 는 **값으로** 넘긴다(`WORK_ASSISTANT_CAPTURE`) — 방마다 하나인 가리킴 파일은 다음 차례가 갈아 끼운다
+   * - 됐으면 답 + 작은 표시 줄 · 쓰기가 없었으면 캡처를 닫음. 못 했으면 모아 두고 예전 한도 안내(한 번만)
+   *   — codex 의 오류 글은 안 올린다
+   */
+  private async runDmFallback(a: {
+    event: MessageEvent; channel: string; sessionKey: string; replyTs?: string; ts: string; thread_ts?: string;
+    captureId: string; surfaceNote: string; finalPrompt: string; files: ProcessedFile[];
+    claudeSteps: TurnStep[]; claudeModel: string; block: Block; sessionId?: string;
+    locale: Locale; say: (msg: any) => Promise<{ ts?: string }>; status: (text: string) => void;
+  }): Promise<{ result: 'ok' | 'failed' | 'stopped'; steps: TurnStep[]; writeRan: boolean; markDone?: Promise<void> }> {
+    const { event, channel, sessionKey, captureId } = a;
+    const release = event.replay ? () => { /* 드레인이 잡은 문 */ } : await this.holdGate.acquire(channel);
+    let finish!: () => void;
+    this.fallbackRuns.set(sessionKey, new Promise<void>((r) => { finish = r; }));
+    let kill: (() => void) | null = null;
+    let stopped = false;
+    const handle: TurnHandle = { interrupt: () => { stopped = true; kill?.(); } };
+    this.activeProcesses.set(sessionKey, handle);
+    patchInflight(sessionKey, { engine: 'codex', steps: [...a.claudeSteps, CODEX_INFLIGHT_STEP], sessionId: a.sessionId });
+    a.status('↪ GPT 가 이어 받는 중');
+    try {
+      const claudeWrites = a.claudeSteps.filter((s) => s.write).length;
+      const context = event.replay ? (event.replayNote ?? '') : await this.getBotUserId()
+        .then((botUserId) => readUnseen(this.app.client as any, channel, {
+          currentTs: a.ts, threadTs: a.thread_ts, isNewSession: true, botUserId, isPrivate: containsPrivate,
+        })).catch(() => '');
+      const prompt = [handoverNote(a.claudeSteps), context, a.finalPrompt + filesNote(a.files)].filter(Boolean).join('\n');
+      const model = (await sameTier(a.claudeModel, 'codex'))?.model ?? SESSION_CODEX_MODEL;
+      this.logger.warn('DM 폴백 — GPT 가 이어 받습니다', { model, claudeWrites, origin: event.replay ? 'replay' : 'dm' });
+      const r = await codexTurn(prompt, {
+        workingDirectory: workAssistantRoot() ?? process.cwd(),
+        sandbox: 'workspace-write',
+        appendSystemPrompt: a.surfaceNote,
+        timeoutMs: FALLBACK_TIMEOUT_MS,
+        effort: FALLBACK_EFFORT,
+        model,
+        env: fallbackEnv(captureId),
+        onSpawn: (k) => { kill = k; if (stopped) k(); },
+        drillScope: 'interactive',
+      });
+      const steps = codexSteps(r.steps);
+      if (stopped) {
+        appendLedger({ channel, engine: 'codex', model, captureId, outcome: 'stopped' });
+        return { result: 'stopped', steps, writeRan: r.writeRan };
+      }
+      if (r.kind === 'ok') {
+        const reply = r.text.trim();
+        if (reply) await a.say({ text: this.formatMessage(reply, true), thread_ts: a.replyTs });
+        // 판에서 온 차례가 「조용히」로 답했으면 답이 안 보이므로 표시 줄도 안 올린다.
+        if (!((event as any).pushed && isQuietReply(reply))) {
+          const marker = markerLines({ model, block: a.block, ...(claudeWrites ? { handover: claudeWrites } : {}) }).join('\n');
+          await a.say({ text: marker, blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: marker }] }], thread_ts: a.replyTs });
+        }
+        // 쓰기가 하나도 없었으면(조회 · 잡담) 캡처를 닫는다 — 쓰기가 있었으면 `tasks.py` 가 스스로 닫았다.
+        if (captureId && !r.writeRan && !claudeWrites) await dropCapture(captureId, '대체 엔진이 답함');
+        appendLedger({ channel, engine: 'codex', model, captureId, outcome: 'ok' });
+        return { result: 'ok', steps, writeRan: r.writeRan };
+      }
+      this.logger.warn(`DM 폴백 — GPT 도 못 했습니다(${r.kind}) · 모아 둡니다`, { detail: r.detail });
+      const markDone = this.markTurnFailed(captureId, 'limit', { steps: [...a.claudeSteps, ...steps] },
+        a.sessionId, event, a.files);
+      await this.handleRateLimitUI(channel, a.thread_ts || a.ts, a.finalPrompt, a.block, a.locale, a.say, a.ts, captureId);
+      appendLedger({ channel, engine: 'codex', model, captureId, outcome: r.kind });
+      return { result: 'failed', steps, writeRan: r.writeRan, markDone };
+    } finally {
+      if (this.activeProcesses.get(sessionKey) === handle) this.activeProcesses.delete(sessionKey);
+      this.fallbackRuns.delete(sessionKey);
+      finish();
+      release();
+    }
   }
 
   // --- Message content helpers ---
@@ -2727,6 +2971,10 @@ export class SlackHandler {
 
   private isStopCommand(text: string): boolean {
     return /^-(stop|cancel|중단)$/i.test(text.trim());
+  }
+
+  private isEnginesCommand(text: string): boolean {
+    return /^-(engines?|엔진)$/i.test(text.trim());
   }
 
   private isHelpCommand(text: string): boolean {

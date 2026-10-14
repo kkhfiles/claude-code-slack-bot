@@ -5,6 +5,7 @@ import { McpManager } from './mcp-manager';
 import { errorCollector } from './error-collector';
 import { withoutApiKey } from './child-env';
 import { ClaudeTap } from './engine-tap';
+import { claudeDrill, claudeDrillEvents, drillChild, limitTail, relayChild, type DrillScope } from './engine-drill';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -352,6 +353,8 @@ export class CliHandler {
     tools?: string[];
     /** 작업 폴더 밖에 읽고 쓸 폴더 — SDK 경로의 `additionalDirectories` 와 짝. */
     additionalDirectories?: string[];
+    /** 엔진 연습을 받는 차례인가 — SDK 경로와 같은 칸. */
+    drillScope?: DrillScope;
   }): CliProcess {
     // 입력도 stream-json — 메시지에 `client_composed` 를 붙여 `@경로` 펼침·슬래시 명령을 끄려고(아래 stdin).
     const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
@@ -441,7 +444,7 @@ export class CliHandler {
       cwd: opts.workingDirectory,
     });
 
-    const proc = spawn('claude', args, {
+    const spawnReal = () => spawn('claude', args, {
       cwd: opts.workingDirectory || process.cwd(),
       env: spawnEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -451,6 +454,12 @@ export class CliHandler {
       // 거치므로 특히 필요하다. 출력은 이미 파이프로 받고 있어 잃는 것이 없다.
       windowsHide: true,
     });
+    // 엔진 연습(`engine-drill.ts`) — 막힌 모양을 stream-json 줄로 재생한다(SDK 길과 같은 갈래).
+    const drill = claudeDrill(opts.drillScope);
+    const sid = opts.resumeSessionId ?? opts.session?.sessionId ?? '';
+    const proc = drill === 'usage' || drill === 'overload' ? drillChild(claudeDrillEvents(drill, sid))
+      : drill === 'usage-after-tool' ? relayChild(spawnReal, () => limitTail(sid))
+      : spawnReal();
 
     // 프롬프트를 사용자 메시지 한 줄로 쓰고 닫는다. `client_composed` = SDK 의 `verbatimPrompts` 와 같은
     // 표시 — 없으면 글 속 `@경로` 가 그 파일 내용으로 붙는다(실측 2026-09-29 · `sdk-handler.ts` 같은 칸).

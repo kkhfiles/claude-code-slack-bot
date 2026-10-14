@@ -14,6 +14,7 @@ import { errorCollector } from './error-collector';
 import { event as recordEvent } from './board-queue';
 import { withoutApiKey } from './child-env';
 import { ClaudeTap } from './engine-tap';
+import { afterFirstToolResult, claudeDrill, claudeDrillEvents, drillQuery, limitTail, type DrillScope } from './engine-drill';
 import type {
   CliEvent,
   CliInitEvent,
@@ -240,6 +241,8 @@ export interface SdkRunOptions {
    * discovered skill or a list of skill names to scope.
    */
   skills?: 'all' | string[];
+  /** 엔진 연습을 받는 차례인가 — 대화 차례는 `interactive`(생략하면 예약 일 · `engine-drill.ts`). */
+  drillScope?: DrillScope;
 }
 
 export class SdkHandler {
@@ -389,6 +392,17 @@ export class SdkHandler {
   get warmCount(): number { return this.warms.size; }
 
   runQuery(prompt: string, opts: SdkRunOptions): SdkProcess {
+    // 엔진 연습(`engine-drill.ts`) — 막힌 모양을 재생한다. 처음부터 막힌 갈래는 진짜를 안 띄우고,
+    // `usage-after-tool` 은 진짜 차례(미리 띄운 것 포함)를 첫 도구 결과까지 돌린 뒤 꼬리를 끼운다.
+    const drill = claudeDrill(opts.drillScope);
+    const sid = opts.resumeSessionId ?? opts.session?.sessionId ?? '';
+    if (drill === 'usage' || drill === 'overload') {
+      const ac = new AbortController();
+      return new SdkProcess(drillQuery(claudeDrillEvents(drill, sid), ac.signal) as unknown as Query, ac);
+    }
+    const wrap = (q: Query, ac: AbortController): SdkProcess => (drill === 'usage-after-tool'
+      ? new SdkProcess(afterFirstToolResult(q, () => ac.abort(), () => limitTail(sid)) as unknown as Query, ac)
+      : new SdkProcess(q, ac));
     const built = this.buildOptions(prompt, opts);
     const key = this.keyOf(built.sdkOptions);
 
@@ -406,7 +420,7 @@ export class SdkHandler {
         this.logger.info('미리 띄운 세션을 씀', { agedMs: Date.now() - w.bornAt });
         if (mode) recordEvent('prewarm', { hit: true, mode, aged_s: Math.round((Date.now() - w.bornAt) / 1000) });
         w.send(prompt);
-        return new SdkProcess(w.q, w.abortController);
+        return wrap(w.q, w.abortController);
       }
       this.logger.info('미리 띄운 것을 못 씀 — 새로 띄웁니다', { reason: '낡음' });
       if (mode) recordEvent('prewarm', { hit: false, mode, why: 'stale' });
@@ -425,7 +439,7 @@ export class SdkHandler {
     }
 
     const q = SdkHandler.queryFn({ prompt, options: built.sdkOptions });
-    return new SdkProcess(q, built.abortController);
+    return wrap(q, built.abortController);
   }
 
   private buildOptions(prompt: string, opts: SdkRunOptions):
