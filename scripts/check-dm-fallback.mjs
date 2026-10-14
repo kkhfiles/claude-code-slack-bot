@@ -42,6 +42,8 @@ const ENV = {
   // 한도 조회 · 등급 표는 없는 실행체로 — 빈손(모름)으로 물러난다.
   CODEX_QUOTA_PYTHON: 'python-없는-이름-2026',
   LADDER_PYTHON: 'python-없는-이름-2026',
+  // 모델 표도 없는 자리로 — 서비스 폴백 대응표가 없을 때의 옛 길(기본 모델)을 잰다. 대응표 쪽은 `check:agy`.
+  LLM_PLAYBOOK_MODELS: path.join(TMP, 'no-models.json'),
   SLACKBOT_SDK_ENABLED: 'all',
   SESSION_FALLBACK_CODEX_MODEL: 'gpt-test-sol',
 };

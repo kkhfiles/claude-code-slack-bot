@@ -419,12 +419,12 @@ try {
     const writeTable = (codexId, agyClaude, gemini) => fs.writeFileSync(process.env.LLM_PLAYBOOK_MODELS, JSON.stringify({
       claude: { aliases: { opus: 'x' } },
       codex: { models: { astra: { id: codexId }, 'astra-mini': { id: 'wrong-mini' }, sol: { id: 'wrong-sol' } } },
-      agy: { models: { 'flash-high': gemini, 'opus-thinking': agyClaude, 'flash-low': 'wrong-low' } },
+      agy: { models: { 'flash-high': gemini, 'sonnet-thinking': agyClaude, 'opus-thinking': 'wrong-opus', 'flash-low': 'wrong-low' } },
       tiers: { top: { claude: 'opus', codex: 'astra-high', agy: 'flash-high' } },
     }));
-    writeTable('gpt-T1-astra', 'Claude Opus T1 (High)', 'Gemini T1 Flash (High)');
+    writeTable('gpt-T1-astra', 'Claude Sonnet T1 (High)', 'Gemini T1 Flash (High)');
     eq('표에서 이름 셋을 읽는다', loadModelLabels(),
-       { codex: 'gpt-T1-astra', agyClaude: 'Claude Opus T1 (High)', gemini: 'Gemini T1 Flash (High)' });
+       { codex: 'gpt-T1-astra', agyClaude: 'Claude Sonnet T1 (High)', gemini: 'Gemini T1 Flash (High)' });
     eq('표를 못 읽으면 판 없는 빈 이름', loadModelLabels(path.join(TMP, 'no-table.json')),
        { codex: '', agyClaude: '', gemini: '' });
     eq('한국 시각 · 요일', formatKst(Date.UTC(2026, 9, 19, 1, 0) / 1000), '10/19(월) 10:00');
@@ -439,18 +439,22 @@ try {
        composeTransition('claude', 'codex', s.load(), L, nowSec()),
        '🔁 Claude 사용량 소진(풀림 10/19(월) 10:00) — GPT(gpt-T1-astra)로 이어 갑니다');
     s.recordBlocked('codex', { kind: 'usage', until: U + 3600 });
-    eq('Claude·GPT 소진 → agy Claude',
-       composeTransition('codex', 'agy-claude', s.load(), L, nowSec()),
-       '🔁 Claude·GPT 사용량 소진 — agy 의 Claude Opus T1 (High)로 이어 갑니다 · 업무 조회·등록·수정까지'
-       + ' · 같은 모델이라도 지시문이 달라 답이 다를 수 있습니다');
-    s.recordBlocked('agy-claude', { kind: 'usage', until: U + 7200 });
-    eq('셋 소진 → Gemini',
-       composeTransition('agy-claude', 'agy-gemini', s.load(), L, nowSec()),
-       '🔁 Claude·GPT·agy Claude 소진 — Gemini T1 Flash (High)로 이어 갑니다 · 답이 느리고 업무 조회·등록·수정까지');
-    s.recordBlocked('agy-gemini', { kind: 'unknown' }); // 지금 + 60분 = 10/14(수) 11:00 이 가장 빠르다
+    // 6단계 순서(2026-10-14 사용자 결정) — Gemini 먼저, 그다음 agy 의 Claude Sonnet. 「같은 모델」이라고 안 쓴다.
+    eq('Claude·GPT 소진 → Gemini',
+       composeTransition('codex', 'agy-gemini', s.load(), L, nowSec()),
+       '🔁 Claude·GPT 사용량 소진 — Gemini T1 Flash (High)로 이어 갑니다 · 답이 느리고 업무 조회·등록·수정까지'
+       + ' · 지시문이 달라 답이 다를 수 있습니다');
+    eq('Claude·GPT 가 막히면 Gemini 차례', dmRung(s.load(), nowSec()), 'agy-gemini');
+    s.recordBlocked('agy-gemini', { kind: 'usage', until: U + 7200 });
+    eq('Gemini 도 소진 → agy Sonnet',
+       composeTransition('agy-gemini', 'agy-claude', s.load(), L, nowSec()),
+       '🔁 Claude·GPT·Gemini 소진 — agy 의 Claude Sonnet T1 (High)로 이어 갑니다 · 업무 조회·등록·수정까지'
+       + ' · 지시문이 달라 답이 다를 수 있습니다');
+    ok('안내에 「같은 모델」이 없다', !fs.readFileSync(path.join(SRC, 'engine-notice.ts'), 'utf-8').includes('같은 모델'));
+    s.recordBlocked('agy-claude', { kind: 'unknown' }); // 지금 + 60분 = 10/14(수) 11:00 이 가장 빠르다
     eq('다 막히면 없음', dmRung(s.load(), nowSec()), 'none');
     eq('모두 소진 → 모아 두기',
-       composeTransition('agy-gemini', 'none', s.load(), L, nowSec()),
+       composeTransition('agy-claude', 'none', s.load(), L, nowSec()),
        '⏸ 모든 엔진 소진 — 받은 말은 모아 두고 가장 빠른 회복(10/14(수) 11:00)에 차례대로 처리합니다'
        + ' · 다시 보내지 않으셔도 됩니다');
     eq('Claude 회복', composeTransition('none', 'claude', s.load(), L, nowSec()), '✅ Claude 회복 — 돌아왔습니다');
@@ -463,15 +467,15 @@ try {
        '🔁 Claude 서버 과부하(다시 확인 10/14(수) 10:10) — GPT(gpt-T1-astra)로 이어 갑니다');
 
     // 표를 바꾸면 다음 안내부터 따라온다 — 글자로 박았으면 여기서 걸린다.
-    writeTable('gpt-T2-zeta', 'Claude Opus T2 (High)', 'Gemini T2 Flash (High)');
+    writeTable('gpt-T2-zeta', 'Claude Sonnet T2 (High)', 'Gemini T2 Flash (High)');
     const L2 = loadModelLabels();
     const swapped = [
       composeTransition('claude', 'codex', s.load(), L2, nowSec()),
-      composeTransition('codex', 'agy-claude', s.load(), L2, nowSec()),
-      composeTransition('agy-claude', 'agy-gemini', s.load(), L2, nowSec()),
+      composeTransition('codex', 'agy-gemini', s.load(), L2, nowSec()),
+      composeTransition('agy-gemini', 'agy-claude', s.load(), L2, nowSec()),
     ].join('\n');
     ok('표를 바꿔도 GPT 모델 이름이 안 따라온다', swapped.includes('GPT(gpt-T2-zeta)') && !swapped.includes('T1'));
-    ok('표를 바꿔도 agy Claude 이름이 안 따라온다', swapped.includes('Claude Opus T2 (High)'));
+    ok('표를 바꿔도 agy Claude 이름이 안 따라온다', swapped.includes('Claude Sonnet T2 (High)'));
     ok('표를 바꿔도 Gemini 이름이 안 따라온다', swapped.includes('Gemini T2 Flash (High)'));
     const notice = fs.readFileSync(path.join(SRC, 'engine-notice.ts'), 'utf-8');
     ok('안내 문구에 모델 판 번호가 박혀 있다', !/gpt-\d|Opus \d|Flash \(|Gemini \d/.test(notice));
@@ -483,6 +487,8 @@ try {
     const posts = [];
     const logs = [];
     const log = { info: (m, d) => logs.push(d?.line ?? m), warn: (m, d) => logs.push(`WARN ${m} ${JSON.stringify(d)}`) };
+    // `.env` 에 켜 두었으면 dist 를 부를 때 dotenv 가 다시 채운다 — 재기 직전에 지운다.
+    delete process.env.ENGINE_NOTICE;
     eq('기본은 꺼짐', new EngineNotice({ store: st }).enabled, false);
     process.env.ENGINE_NOTICE = 'on';
     eq('ENGINE_NOTICE=on 이면 켜짐', new EngineNotice({ store: st }).enabled, true);

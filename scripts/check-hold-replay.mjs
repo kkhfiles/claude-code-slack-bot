@@ -42,6 +42,8 @@ const to = require(path.join(ROOT, 'dist', 'turn-outcome.js'));
 const { engineState } = require(path.join(ROOT, 'dist', 'engine-state.js'));
 const wa = require(path.join(ROOT, 'dist', 'work-assistant.js'));
 const { config } = require(path.join(ROOT, 'dist', 'config.js'));
+// `.env` 에 DM 폴백을 켜 두었으면 dotenv 가 다시 채운다 — 이 검사는 폴백이 꺼진 드레인을 잰다(사다리는 `check:agy`).
+for (const k of ['DM_FALLBACK', 'DM_FALLBACK_AGY']) delete process.env[k];
 const { SlackHandler } = require(path.join(ROOT, 'dist', 'slack-handler.js'));
 const { AssistantScheduler } = require(path.join(ROOT, 'dist', 'assistant-scheduler.js'));
 

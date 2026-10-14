@@ -51,6 +51,8 @@ export interface HoldExtra {
   done_steps?: string[];
   files?: HeldFile[];
   hold_note?: string;
+  /** agy 칸이 「Claude·GPT 몫」으로 남긴 차례(6단계 · `needs_full`) — agy 만 남았을 때는 다시 안 돌린다. */
+  needs?: 'full';
 }
 
 /** `tasks.py inbox pending` 의 한 건. 칸은 새 파이썬만 싣는다 — 옛 파이썬이면 비어 있다. */
@@ -69,6 +71,8 @@ export interface HeldItem {
   done_steps?: string[];
   files?: HeldFile[];
   told_at?: string;
+  /** agy 칸이 「Claude·GPT 몫」으로 남긴 것(6단계). */
+  needs?: 'full';
   /** `tell` 쪽에만 — 사람에게 내는 까닭 · 7일 지남인가. */
   why?: string;
   old?: boolean;
@@ -162,12 +166,15 @@ export interface DrainReport {
   /** 안 돌리고 남긴 건수(다시 막힌 것 포함). */
   left: number;
   stopped: '' | 'blocked' | 'canary' | 'relimit';
+  /** 지금 맡을 엔진이 없어 건너뛴 건수(6단계 — 첨부 · 개인 글 · Claude·GPT 몫). 시도는 안 셈. */
+  skipped?: number;
 }
 
 /** 다 돌고 한 줄 — 「▶ 밀린 N건 처리 — 완료 a · 확인 필요 b」. */
 export function summaryLine(r: DrainReport): string {
   const tail = r.left && r.stopped ? ` · 다시 막혀 ${r.left}건은 회복 뒤에` : '';
-  return `▶ 밀린 ${r.ran}건 처리 — 완료 ${r.done} · 확인 필요 ${r.check}${tail}`;
+  const skip = r.skipped ? ` · ${r.skipped}건은 맡을 엔진이 돌아온 뒤에` : '';
+  return `▶ 밀린 ${r.ran}건 처리 — 완료 ${r.done} · 확인 필요 ${r.check}${tail}${skip}`;
 }
 
 /** 7일 지난 것 — 건마다 [실행]·[버림]. */
@@ -281,8 +288,13 @@ export class ChannelGate {
 // ---------------------------------------------------------------- 드레인
 
 export interface DrainDeps {
-  /** Claude 가 지금 막혀 있나(엔진 상태). */
+  /** 다시 돌릴 엔진이 하나도 없나 — DM 폴백이 꺼져 있으면 Claude 막힘, 켜져 있으면 사다리 전부 막힘. */
   blocked(): boolean;
+  /**
+   * 이 건을 지금 맡을 엔진이 없나(6단계) — 시도도 안 세고 남긴다. 첨부 · 개인 글 · 「Claude·GPT 몫」은
+   * agy 칸이 못 맡는다. 없으면 다 돌린다(예전 그대로).
+   */
+  skip?(item: HeldItem): boolean;
   /** 막힌 뒤 된 적이 없나 — 그러면 작은 호출로 먼저 떠 본다. */
   needsCanary(): boolean;
   /** 작은 호출 하나 — 결과는 전송 탭이 엔진 상태에 적는다. */
@@ -314,7 +326,7 @@ export async function drainHeld(deps: DrainDeps, limit: number): Promise<DrainRe
   const log = deps.log ?? (() => { /* 조용히 */ });
   if (deps.blocked()) {
     rep.stopped = 'blocked';
-    log('Claude 가 막혀 있어 밀린 것을 안 돌립니다');
+    log('맡을 엔진이 다 막혀 있어 밀린 것을 안 돌립니다');
     return rep;
   }
   const { run, tell } = await deps.pending(limit);
@@ -349,6 +361,13 @@ export async function drainHeld(deps: DrainDeps, limit: number): Promise<DrainRe
         rep.stopped = 'blocked';
         rep.left = run.length - i;
         break;
+      }
+      // **맡을 엔진이 없는 건은 시도를 안 세고 남긴다**(6단계) — 세면 agy 만 남은 동안 판마다 상한이 차서
+      // 사람 손으로 넘어간다. 뒤의 것은 계속 본다(이 건이 못 맡는 까닭은 그 건의 것이다).
+      if (deps.skip?.(it)) {
+        rep.skipped = (rep.skipped ?? 0) + 1;
+        log('맡을 엔진이 없어 남깁니다', { id: it.id });
+        continue;
       }
       await deps.tried(it.id);
       let out: TurnOutcome | void | undefined;

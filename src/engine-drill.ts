@@ -4,6 +4,7 @@
  *
  *   { "claude": "usage" | "usage-after-tool" | "overload",
  *     "codex": "usage" | "fail",
+ *     "agyClaude": "usage" | "fail", "agyGemini": "usage" | "fail",   (6단계 · agy 두 칸 — codex 와 같은 규칙)
  *     "expiresAt": <epoch 초>, "scope": "all"(생략 = 대화 차례만) }
  *
  * - **대화 차례만** — 예약 일(브리핑 · 분석 · 좁은 길)은 `scope: "all"` 일 때만 받는다
@@ -34,6 +35,9 @@ export type DrillScope = 'interactive' | 'scheduled';
 export interface Drill {
   claude?: ClaudeDrill;
   codex?: CodexDrill;
+  /** agy 두 칸(6단계) — codex 와 같은 갈래 둘. */
+  agyClaude?: CodexDrill;
+  agyGemini?: CodexDrill;
   expiresAt: number;
   scope?: 'all';
 }
@@ -85,8 +89,10 @@ export function readDrill(nowSec: number = Math.floor(Date.now() / 1000), file: 
   const d: Drill = { expiresAt: raw.expiresAt };
   if (CLAUDE_MODES.includes(raw.claude)) d.claude = raw.claude;
   if (CODEX_MODES.includes(raw.codex)) d.codex = raw.codex;
+  if (CODEX_MODES.includes(raw.agyClaude)) d.agyClaude = raw.agyClaude;
+  if (CODEX_MODES.includes(raw.agyGemini)) d.agyGemini = raw.agyGemini;
   if (raw.scope === 'all') d.scope = 'all';
-  return d.claude || d.codex ? d : null;
+  return d.claude || d.codex || d.agyClaude || d.agyGemini ? d : null;
 }
 
 function active(scope: DrillScope | undefined, nowSec: number): Drill | null {
@@ -110,6 +116,15 @@ export function claudeDrill(scope?: DrillScope, nowSec: number = Math.floor(Date
 export function codexDrill(scope?: DrillScope, nowSec: number = Math.floor(Date.now() / 1000)): CodexDrill | null {
   const mode = active(scope, nowSec)?.codex ?? null;
   if (mode) logger.warn(`엔진 연습 — codex 에 「${mode}」 주입(실제 호출 대신)`, { scope: scope ?? 'scheduled' });
+  return mode;
+}
+
+/** 이 차례에 agy 칸 연습을 넣나 — 넣으면 WARN 한 줄. 연습이 막은 호출은 Gemini 상한에도 안 센다. */
+export function agyDrill(rung: 'agy-claude' | 'agy-gemini', scope?: DrillScope,
+                         nowSec: number = Math.floor(Date.now() / 1000)): CodexDrill | null {
+  const d = active(scope, nowSec);
+  const mode = (rung === 'agy-claude' ? d?.agyClaude : d?.agyGemini) ?? null;
+  if (mode) logger.warn(`엔진 연습 — ${rung} 에 「${mode}」 주입(실제 호출 대신)`, { scope: scope ?? 'scheduled' });
   return mode;
 }
 

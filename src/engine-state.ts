@@ -2,7 +2,7 @@
  * 엔진 상태 — 어느 엔진이 언제까지 막혔나 · 마지막으로 된 때 · 얼마나 썼나. **정본은 이 모듈 하나다.**
  *
  * 스탠리는 Claude 사용량이 바닥나도 멈추면 안 된다(2026-10-14 사용자 결정). 다음 단계의 사다리
- * (Claude → GPT → agy Claude → agy Gemini → 모아 두고 회복 때 처리)가 「지금 누구에게 맡기나」를
+ * (Claude → GPT → agy Gemini → agy Claude(Sonnet) → 모아 두고 회복 때 처리)가 「지금 누구에게 맡기나」를
  * 여기서 읽는다. 이번 단계는 바탕만 깐다 — 적기(`engine-tap.ts`) · 회복 타이머(`engine-recovery.ts`) ·
  * 안내 한 곳(`engine-notice.ts`).
  *
@@ -23,8 +23,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 export type Engine = 'claude' | 'codex' | 'agy-claude' | 'agy-gemini';
-/** DM 을 맡는 차례 — 앞이 막히면 다음으로 내려간다(다음 단계에서 씀). */
-export const ENGINES: readonly Engine[] = ['claude', 'codex', 'agy-claude', 'agy-gemini'];
+/** DM 을 맡는 차례 — 앞이 막히면 다음으로 내려간다. 6단계부터 Gemini 가 agy 의 Claude(Sonnet)보다 앞이다. */
+export const ENGINES: readonly Engine[] = ['claude', 'codex', 'agy-gemini', 'agy-claude'];
 export type BlockKind = 'usage' | 'overload' | 'auth' | 'unknown';
 
 export interface Block {

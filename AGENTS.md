@@ -144,7 +144,7 @@ npm test        # 빌드 + check:* 전부
 
 ### 엔진 상태 — 막힘과 회복 시각의 정본 (2026-10-14)
 
-Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(Claude → GPT → agy Claude → agy Gemini → 모아 두고 회복 때 처리)의 바탕이다. DM 을 넘기는 것은 아래 「DM 폴백」.
+Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(Claude → GPT → agy Gemini → agy Claude Sonnet → 모아 두고 회복 때 처리)의 바탕이다. DM 을 넘기는 것은 아래 「DM 폴백」.
 
 - **정본은 `src/engine-state.ts` 하나** — `.engine-state.json`(임시 파일에 쓰고 바꿔 끼움) · 엔진별 막힘 · 마지막 성공 · 사용률 · 최근 5시간 사용 시각 · 한도 안내 키 · 엔진 안내 차례. `rate-limit-until.ts` 는 옛 이름을 두는 얇은 층(Claude 칸) · 옛 `.rate-limit-until.json` 은 처음 뜰 때 한 번 옮겨 옴
 - **갈래별 다시 볼 시각** — 사용량 소진은 서버가 준 `resetsAt`(같은 갈래 안에서 앞당기지 않음) · 과부하(529)는 10 → 20 → 40 → 60분, 한 번 되면 처음으로 · auth · unknown 은 60분. **과부하에 5시간을 걸지 않는다**(2026-08-24 에 과부하 한 번으로 큐를 다섯 시간 세웠다)
@@ -178,11 +178,10 @@ Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(
 - **첨부는 `.held-files/<캡처>/` 에 보관**(Git 추적 제외) — 못 옮기면 자동으로 안 돌리고 사람에게 넘김
 - 검사 `npm run check:hold` · `npm run check:capfail`
 
-### DM 폴백 — Claude 가 막히면 GPT 가 이어 받음 (2026-10-14 · 5단계 · `DM_FALLBACK=on`)
+### DM 폴백 — Claude 가 막히면 GPT → agy Gemini → agy Claude Sonnet (2026-10-14 · 5·6단계)
 
-- 고르기는 `src/engine-ladder.ts` 하나 · 채널 · 계획 · `-r` · 개인 글 · 업무 비서 밖 디렉터리는 안 넘김
-- 쓰기 뒤 끊김도 넘김(「이미 한 것」) · 한도 글 안 올림 · 같은 방은 한 줄로 · 답 뒤 「↪ GPT(모델) 가 답함」
-- 장부 · 연습 파일 · `-engines` 는 `docs/engine-fallback.md` · 검사 `check:dmfallback`
+- 켜는 문 `DM_FALLBACK=on`(GPT) · `DM_FALLBACK_AGY=on`(agy 두 칸 · 예약 일 넷 포함) · 고르기는 `src/engine-ladder.ts` · 폴백 모델은 llm-playbook `service_fallback`(`src/model-ladder.ts`)
+- **agy 는 JSON 계획만** — 봇이 허용 목록 명령만 셸 없이 돌림(`src/agy-actions.ts`) · 상세는 `docs/engine-fallback.md` · 검사 `check:dmfallback` · `check:agy`
 
 ### CLI Integration
 - `child_process.spawn('claude', ['-p', '--output-format', 'stream-json', ...])` 방식

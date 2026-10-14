@@ -1,6 +1,7 @@
 /**
  * DM 폴백 — Claude 가 막히면 같은 DM 차례를 GPT(codex)가 이어 받는다(2026-10-14 · 엔진 폴백 5단계).
  * 켜는 문은 `DM_FALLBACK=on` 하나 · 꺼져 있으면 예전 그대로(막히면 모아 두고 회복 때 다시 돌림).
+ * `DM_FALLBACK_AGY=on` 이면 GPT 뒤에 agy Claude · agy Gemini 두 칸이 붙는다(6단계 · `agy-turn.ts` · `agy-actions.ts`).
  *
  * 누구에게 맡기나는 `engine-ladder.ts`(`pickEngine`), 차례를 돌리는 것은 대화 처리기(`slack-handler.ts`)
  * 이고 여기는 그 사이의 글과 기록이다 — 표시 줄 · 넘겨줄 메모 · 기록 장부 · `-engines` 표.
@@ -11,9 +12,10 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { ENGINES, type Block, type Engine, type EngineStateData } from './engine-state';
-import { DM_LADDER } from './engine-ladder';
+import { ENGINES, engineState, type Block, type Engine, type EngineState, type EngineStateData } from './engine-state';
+import { DM_LADDER, DM_LADDER_AGY } from './engine-ladder';
 import { formatKst } from './engine-notice';
+import { agyRungsOn } from './agy-turn';
 import type { Drill } from './engine-drill';
 import type { TurnStep } from './turn-outcome';
 import type { CodexStep } from './work-assistant';
@@ -23,9 +25,20 @@ export function dmFallbackOn(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.DM_FALLBACK === 'on';
 }
 
-/** 지금 DM 을 맡는 칸 — 폴백이 꺼져 있으면 Claude 하나(막히면 곧 모아 둠). */
+/**
+ * 지금 DM 을 맡는 칸 — 폴백이 꺼져 있으면 Claude 하나(막히면 곧 모아 둠) · `DM_FALLBACK_AGY=on` 이면
+ * GPT 뒤에 agy 두 칸(6단계). 엔진 안내 · `-engines` · 드레인이 다 이것을 본다.
+ */
 export function dmLadder(env: NodeJS.ProcessEnv = process.env): readonly Engine[] {
-  return dmFallbackOn(env) ? DM_LADDER : ['claude'];
+  if (!dmFallbackOn(env)) return ['claude'];
+  return agyRungsOn(env) ? DM_LADDER_AGY : DM_LADDER;
+}
+
+/**
+ * 엔진별 「지금 못 맡나」 — 엔진 상태의 막힘(진짜 · 연습)뿐. codex 는 부르는 쪽이 한도 조회를 먼저 옮겨 둔다.
+ */
+export function ladderBlockedMap(store: EngineState = engineState): Partial<Record<Engine, boolean>> {
+  return Object.fromEntries(ENGINES.map((e) => [e, store.isBlocked(e)])) as Record<Engine, boolean>;
 }
 
 /** 대체 차례 하나의 상한 — 실측 16초 안팎(2026-10-14) · 넘으면 트리째 죽이고 모아 둔다. */
@@ -66,6 +79,35 @@ export function markerLines(o: { model: string; block: Block | null; handover?: 
   return lines;
 }
 
+/** GPT 는 막힘이 아니라 실패로 끝났을 수 있다 — 그때는 「응답 실패」. */
+function engineWhy(e: Engine, b: Block | null, nowSec: number): string {
+  if (!b || b.until === null || b.until <= nowSec) return `${SHORT[e]} 응답 실패`;
+  if (b.kind === 'overload') return `${SHORT[e]} 과부하`;
+  const when = b.untilKnown ? `(풀림 ${formatKst(b.until)})` : `(다시 확인 ${formatKst(b.until)})`;
+  return `${SHORT[e]} ${b.kind === 'usage' ? '사용량 소진' : b.kind === 'auth' ? '인증 오류' : '응답 오류'}${when}`;
+}
+
+/**
+ * agy 칸이 답했다는 작은 줄(6단계) — 「↪ agy 의 <표시 이름> 가 답함 · <무엇이 막혔나>」. 표시 이름은
+ * `models.json` 에서(`agyDisplay`). 앞 엔진이 쓰기를 하다 끊겼으면 그 줄이 먼저.
+ * `above` 는 이 칸 앞의 엔진들(Claude 는 이 차례의 막힘 `claudeBlock` 으로 말한다).
+ */
+export function agyMarkerLines(o: {
+  display: string; claudeBlock: Block | null; above: readonly Engine[]; st: EngineStateData; nowSec: number;
+  handover?: number;
+}): string[] {
+  const lines: string[] = [];
+  if (o.handover !== undefined) {
+    lines.push(`↪ 앞 엔진이 하다 끊겨 ${o.display} 가 이어서 마무리했습니다(이미 한 것: ${o.handover}건)`);
+  }
+  const why = o.above.map((e) => (e === 'claude' ? claudeWhy(o.claudeBlock) : engineWhy(e, o.st.engines[e].blocked, o.nowSec)));
+  lines.push(`↪ ${o.display} 가 답함 · ${why.join(' · ')}`);
+  return lines;
+}
+
+/** Claude·GPT 가 돌아오면 이어서 처리할 몫이 남았다는 줄(`needs_full`). */
+export const NEEDS_FULL_LINE = '⏸ 이 부분은 Claude·GPT 가 돌아오면 이어서 처리합니다';
+
 /** 판에서 온 차례가 「조용히」로 답했나 — 그러면 표시 줄도 안 올린다(답이 안 보이는데 줄만 뜬다). */
 export function isQuietReply(text: string): boolean {
   return /^\s*\[조용히\]\s*$/.test((text.split('\n')[0] ?? ''));
@@ -77,11 +119,11 @@ export function isQuietReply(text: string): boolean {
  * 쓰기 도구가 돈 뒤 끊긴 차례를 넘길 때 앞에 붙이는 메모 — 이미 한 것(다시 하지 말 것)과
  * 결과를 못 받은 것(먼저 확인). 쓰기가 없으면 빈 글자.
  */
-export function handoverNote(steps: readonly TurnStep[]): string {
+export function handoverNote(steps: readonly TurnStep[], from = 'Claude'): string {
   const writes = steps.filter((s) => s.write);
   if (!writes.length) return '';
   return [
-    '[앞 엔진(Claude)이 이 요청을 처리하다 한도 · 과부하로 끊겼다 — 이어서 마무리한다]',
+    `[앞 엔진(${from})이 이 요청을 처리하다 한도 · 과부하로 끊겼다 — 이어서 마무리한다]`,
     '이미 한 것 — 다시 하지 말 것 · 결과를 못 받은 것은 확인부터:',
     ...writes.map((s) => `- ${s.done ? '완료' : '결과 모름 — 먼저 확인'} · ${[s.name, s.input].filter(Boolean).join(' · ')}`),
     '',
@@ -103,6 +145,14 @@ export function codexSteps(steps: readonly CodexStep[]): TurnStep[] {
 export const CODEX_INFLIGHT_STEP: TurnStep = {
   id: 'codex-inflight', name: 'GPT 명령', input: '(GPT 가 이어 받던 차례 — 무엇을 했는지 모름)', done: false, write: true,
 };
+
+/**
+ * agy 칸이 명령을 실행하는 동안의 자리표 — agy 를 부르는 동안은 아무것도 안 쓰므로 안 붙이고, 명령을
+ * 띄우기 직전에만 붙인다(재시작에 끊기면 그 명령은 「결과 모름」).
+ */
+export function agyRunningStep(rung: string, summary: string): TurnStep {
+  return { id: `${rung}-running`, name: `${rung} 명령`, input: `(실행 중 — 결과 모름) ${summary}`.slice(0, 120), done: false, write: true };
+}
 
 // ---------------------------------------------------------------- 장부
 
@@ -175,16 +225,17 @@ export function ledgerNote(n: number): string {
 const KIND: Record<string, string> = { usage: '사용량 소진', overload: '과부하', auth: '인증 오류', unknown: '응답 오류' };
 
 function drillLabel(d: Drill): string {
-  const parts = [d.claude ? `Claude ${d.claude}` : '', d.codex ? `GPT ${d.codex}` : ''].filter(Boolean);
+  const parts = [d.claude ? `Claude ${d.claude}` : '', d.codex ? `GPT ${d.codex}` : '',
+    d.agyClaude ? `agy Claude ${d.agyClaude}` : '', d.agyGemini ? `Gemini ${d.agyGemini}` : ''].filter(Boolean);
   return `연습 중(${parts.join(' · ')}${d.scope === 'all' ? ' · 예약 일 포함' : ''} · ${formatKst(d.expiresAt)}까지)`;
 }
 
 /** `-engines` 의 답 — 머리 한 줄 + 엔진 넷(막힘 · 풀리는 시각 · 마지막 성공 · 사용률). */
 export function engineStatusText(st: EngineStateData, nowSec: number, o: {
-  fallback: boolean; notice: boolean; drill: Drill | null; ladder: readonly Engine[];
+  fallback: boolean; notice: boolean; drill: Drill | null; ladder: readonly Engine[]; agy?: boolean;
 }): string {
-  const head = `🔧 엔진 상태 — DM 폴백 ${o.fallback ? '켜짐' : '꺼짐'} · 엔진 안내 ${o.notice ? '켜짐' : '꺼짐'}`
-    + ` · ${o.drill ? drillLabel(o.drill) : '연습 없음'}`;
+  const head = `🔧 엔진 상태 — DM 폴백 ${o.fallback ? '켜짐' : '꺼짐'} · agy 칸 ${o.agy ? '켜짐' : '꺼짐'}`
+    + ` · 엔진 안내 ${o.notice ? '켜짐' : '꺼짐'} · ${o.drill ? drillLabel(o.drill) : '연습 없음'}`;
   const lines = ENGINES.map((e) => {
     const r = st.engines[e];
     const b = r.blocked;

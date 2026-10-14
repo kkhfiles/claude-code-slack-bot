@@ -1,7 +1,7 @@
 /**
  * 엔진 안내 — DM 을 어느 엔진이 맡는지가 바뀌면 **한 줄로 한 번** 알린다. 안내는 여기 한 곳에서만 짓는다.
  *
- * DM 을 맡는 차례는 Claude → GPT(codex) → agy 의 Claude → agy 의 Gemini → 없음(모아 두고 회복 때
+ * DM 을 맡는 차례는 Claude → GPT(codex) → agy 의 Gemini → agy 의 Claude(Sonnet) → 없음(모아 두고 회복 때
  * 처리)이다. 앞이 막히면 다음으로 내려가고, 풀리면 올라온다. 받는 사람이 알아야 하는 것은 「지금
  * 누가 답하나 · 무엇이 달라지나 · 다시 보내야 하나」 셋이라 그것만 쓴다.
  *
@@ -9,7 +9,8 @@
  * 적으면 새 모델이 나올 때 안내만 낡는다. 표를 못 읽으면 판 없이 「GPT」·「Gemini」로만 쓴다.
  *
  * **기본은 꺼짐**(`ENGINE_NOTICE=on` 일 때만 보냄) — 꺼져 있으면 보낼 줄을 로그에만 남긴다. 봇은 실제로
- * 붙은 칸만 사다리로 넘긴다(5단계: `DM_FALLBACK=on` 이면 Claude · GPT, 꺼져 있으면 Claude 하나) —
+ * 붙은 칸만 사다리로 넘긴다(`DM_FALLBACK=on` 이면 Claude · GPT, `DM_FALLBACK_AGY=on` 이면 agy 두 칸까지,
+ * 꺼져 있으면 Claude 하나) —
  * 안 붙은 엔진을 「이어 갑니다」로 알리면 사실이 아니다.
  * 마지막으로 알린 차례는 엔진 상태에 적어 재시작해도 같은 안내를 되풀이하지 않는다.
  */
@@ -47,22 +48,35 @@ export function modelsFile(): string {
 
 /**
  * 표에서 이름 셋을 읽는다 — codex 는 `tiers.top.codex` 별칭(`<별칭>-<깊이>`)의 `codex.models[별칭].id`,
- * Gemini 는 `tiers.top.agy` 별칭의 `agy.models` 값, agy Claude 는 `agy.models['opus-thinking']`.
+ * Gemini 와 agy Claude 는 `service_fallback.agy` 의 앞 · 뒤 별칭의 `agy.models` 값(6단계 · 표에 없으면
+ * `flash-high` · `sonnet-thinking` · agy 의 Opus 는 안 씀).
  * **부를 때마다 읽는다** — 표를 고치면 다음 안내부터 바로 따라온다.
  */
-export function loadModelLabels(file: string = modelsFile()): ModelLabels {
+export function loadModelLabels(file: string = modelsFile(), primary?: string): ModelLabels {
   try {
     const t = JSON.parse(fs.readFileSync(file, 'utf-8'));
     const top = String(t?.tiers?.top?.codex ?? '');
     const codexModels: Record<string, { id?: string }> = t?.codex?.models ?? {};
-    const alias = Object.keys(codexModels)
+    let alias = Object.keys(codexModels)
       .filter((k) => top === k || top.startsWith(`${k}-`))
       .sort((a, b) => b.length - a.length)[0];
+    // 서비스 폴백 대응표가 있으면 1차(Claude) 모델에 맞춘 codex 칸 — DM 폴백이 실제로 부르는 모델과 같게
+    // (`model-ladder.ts` `serviceCodex` 와 같은 규칙 · 별칭 · id · 집안 이름으로 맞춘다).
+    const svc: Record<string, unknown> = t?.service_fallback?.codex ?? {};
+    const aliases: Record<string, string> = t?.claude?.aliases ?? {};
+    const p = (primary ?? '').toLowerCase().replace(/\[.*\]$/, '');
+    const fam = p ? Object.keys(svc).find((k) => {
+      const id = String(aliases[k] ?? '').toLowerCase();
+      return p === k || (id !== '' && (p === id || p.startsWith(id))) || p.includes(k);
+    }) : undefined;
+    if (fam && typeof svc[fam] === 'string' && codexModels[svc[fam] as string]) alias = svc[fam] as string;
     const agy: Record<string, string> = t?.agy?.models ?? {};
+    const sf: unknown[] = Array.isArray(t?.service_fallback?.agy) ? t.service_fallback.agy : [];
+    const at = (i: number, dflt: string) => (typeof sf[i] === 'string' && sf[i] ? String(sf[i]) : dflt);
     return {
       codex: (alias && codexModels[alias]?.id) || '',
-      agyClaude: agy['opus-thinking'] || '',
-      gemini: agy[String(t?.tiers?.top?.agy ?? '')] || '',
+      agyClaude: agy[at(1, 'sonnet-thinking')] || '',
+      gemini: agy[at(0, 'flash-high')] || '',
     };
   } catch {
     return { codex: '', agyClaude: '', gemini: '' };
@@ -145,7 +159,8 @@ export function composeTransition(
     const allUsage = above.every((e) => activeBlock(st, e, nowSec)?.kind === 'usage');
     what = `${above.map((e) => SHORT[e]).join('·')} ${above.length === 2 && allUsage ? '사용량 소진' : '소진'}`;
   }
-  const tail = to === 'agy-claude' ? ' · 같은 모델이라도 지시문이 달라 답이 다를 수 있습니다' : '';
+  // agy 칸은 지시문이 Claude 세션과 달라 답이 다를 수 있다 — 모델이 같다고 단정하지 않는다(사용자 지적).
+  const tail = to === 'agy-claude' || to === 'agy-gemini' ? ' · 지시문이 달라 답이 다를 수 있습니다' : '';
   return `🔁 ${what} — ${target(to, labels)}${tail}`;
 }
 

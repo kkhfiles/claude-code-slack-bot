@@ -25,6 +25,7 @@ import { classifyCodexErrorText } from './rate-limit-utils';
 import { STEP_INPUT_MAX, STEP_MAX } from './turn-outcome';
 import type { HeldItem, HoldExtra } from './hold-replay';
 import { codexDrill, drillBlockUntil, type DrillScope } from './engine-drill';
+import { serviceCodex } from './model-ladder';
 
 export type { HoldExtra };
 
@@ -1051,8 +1052,21 @@ export async function narrowApply(json: string, task: string,
 //    아니라 **터지면 전부 멈추기 때문에** 둔다.
 
 /** 좁은 길 폴백 엔진. 값을 바꾸려면 여기 한 줄 — 잰 것은 `sol` · `low` 다. */
-const NARROW_CODEX_MODEL = process.env.BOARD_NARROW_CODEX_MODEL || 'gpt-6.1-sol';   // 2026-09-23 5.6 → 6 · 09-30 → 6.1 (위 측정은 5.6 때 것)
-const NARROW_CODEX_EFFORT = process.env.BOARD_NARROW_CODEX_EFFORT || 'low';
+const NARROW_CODEX_MODEL = 'gpt-6.1-sol';   // 2026-09-23 5.6 → 6 · 09-30 → 6.1 (위 측정은 5.6 때 것)
+
+/**
+ * 좁은 길 폴백 모델 — 환경 변수(`BOARD_NARROW_CODEX_MODEL`)가 이기고, 없으면 서비스 폴백 대응표
+ * (`service_fallback` · 1차 Claude 모델에 맞춘 칸), 표가 없으면 위 기본값(2026-10-14).
+ */
+export function narrowCodexModel(claudeModel?: string): string {
+  return process.env.BOARD_NARROW_CODEX_MODEL || serviceCodex(claudeModel)?.model || NARROW_CODEX_MODEL;
+}
+const NARROW_CODEX_EFFORT = 'low';
+
+/** 좁은 길 폴백 깊이 — 환경 변수가 이기고, 없으면 1차 깊이(low)를 대응표대로(luna 면 한 단계 위). */
+export function narrowCodexEffort(claudeModel?: string): string {
+  return process.env.BOARD_NARROW_CODEX_EFFORT || serviceCodex(claudeModel, NARROW_CODEX_EFFORT)?.effort || NARROW_CODEX_EFFORT;
+}
 
 /**
  * 주 작업 폴백 엔진 — **좁은 길과 상수를 나눠 둔다.**
@@ -1094,7 +1108,7 @@ const NARROW_SCHEMA = {
  * `BOARD_NARROW_FALLBACK=off` 로 끈다.
  */
 export async function narrowCodex(
-  system: string, user: string, timeoutMs = 90_000,
+  system: string, user: string, timeoutMs = 90_000, claudeModel?: string,
 ): Promise<string> {
   if (process.env.BOARD_NARROW_FALLBACK === 'off') return '';
   try {
@@ -1107,8 +1121,8 @@ export async function narrowCodex(
       // 이 저장소를 작업 뿌리로 주지 않는다 — 규칙은 위 `system` 이 다 들고 있고,
       // 주면 `CLAUDE.md` 가 따라 들어와 좁은 길이 아니게 된다.
       workingDirectory: os.tmpdir(),
-      model: NARROW_CODEX_MODEL,
-      effort: NARROW_CODEX_EFFORT,
+      model: narrowCodexModel(claudeModel),
+      effort: narrowCodexEffort(claudeModel),
       outputSchema: NARROW_SCHEMA,
       timeoutMs,
     });

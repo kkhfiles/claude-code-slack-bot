@@ -22,6 +22,7 @@ import type { SpawnOpts, SessionResult } from './assistant-scheduler';
 import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
 import { shouldUseSdk } from './sdk-handler';
 import { ladderText } from './model-ladder';
+import { agyRungsOn, agyText } from './agy-turn';
 
 /** 회의 알림 판단 모델 — 별칭(하위 등급). 같은 등급 폴백(codex·agy)도 이 이름으로 찾는다. */
 const CALENDAR_MODEL = 'haiku';
@@ -790,9 +791,16 @@ export class CalendarPoller {
   private async judgeByLadder(
     prompt: string, diff: CalendarDiff, beforeMinutes: number, why: string,
   ): Promise<CalendarNotification[] | null> {
-    const got = await ladderText('회의 알림 판단', prompt, {
-      model: CALENDAR_MODEL, system: JUDGE_SYSTEM, timeoutMs: 180_000,
+    // 6단계(`DM_FALLBACK_AGY=on`) — 사다리에서 agy 를 빼고 codex 뒤에 agy 두 칸(agy Claude → Gemini ·
+    // 엔진 상태 · Gemini 5시간 상한)을 거친다. 꺼져 있으면 예전 사다리(codex → agy) 그대로.
+    const agy = agyRungsOn();
+    let got = await ladderText('회의 알림 판단', prompt, {
+      model: CALENDAR_MODEL, system: JUDGE_SYSTEM, timeoutMs: 180_000, ...(agy ? { vendors: ['codex'] } : {}),
     });
+    if (!got && agy) {
+      const a = await agyText('회의 알림 판단', prompt, { system: JUDGE_SYSTEM });
+      if (a) got = { text: a.text, backend: 'agy', model: a.model.label || a.model.alias };
+    }
     if (!got) {
       // 실패가 이어지는 동안 한 줄만 — 폴링마다 다시 판단하므로 매번 적으면 「시스템 이슈」 칸(최근 50개)을 덮는다.
       if (!this.judgeFailNoted) {

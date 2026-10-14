@@ -15,7 +15,9 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   offsitePush, commitHarvest, remindDue, remindDone,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell, dropCapture,
   offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexTurn, codexWritableDirs,
-  improveGather, improveAccept, improveShow, improvePosted, improveDecide } from './work-assistant';
+  improveGather, improveAccept, improveShow, improvePosted, improveDecide, runTasks } from './work-assistant';
+import { agyRungsOn, agyText } from './agy-turn';
+import { AGY_BRIEF_NOTE, AGY_FOCUS_NOTE, parseTaskList, parseFocusReply, runActions, validateActions } from './agy-actions';
 import type { QuickOutcome } from './work-assistant';
 import { engineState } from './engine-state';
 import { codexQuota } from './codex-quota';
@@ -26,7 +28,7 @@ import { boardLabel, boardPushAuthBroken, boardPushTarget, boardQueueEnabled, dr
 import { BoardPush } from './board-push';
 import type { ContactItem } from './board-queue';
 import { config } from './config';
-import { ladderEventLines, ladderTable, ladderText, sameTier } from './model-ladder';
+import { ladderEventLines, ladderTable, ladderText, sameTier, serviceCodex } from './model-ladder';
 import { ActionPipeline, parseWindow, reportLogAvailable, reportLogState, runReportLog } from './action-pipeline';
 import type { ThreadApi } from './action-pipeline';
 
@@ -692,6 +694,13 @@ export interface SpawnOpts {
   /** Codex 폴백이 쓸 수 있는 곳. 주면 **기본 폴더 목록(비서 · 볼트 · 판) 대신 이것만** 연다 —
    *  폴백이 1차보다 넓게 쓰지 않게(2026-09-29 사용자 결정). `null` 이면 폴백을 안 한다. */
   fallbackScope?: { cwd: string; writable: string[] } | null;
+  /**
+   * codex 뒤에 agy 두 칸(agy Claude → Gemini · 상한 5시간 15회)을 받는 일인가 — 6단계 · 켜는 문
+   * `DM_FALLBACK_AGY=on`. `text` 글만 주고받는 일(카드 요약) · `focus` 지금 집중할 것(한 줄을 받아 봇이
+   * `tasks.py focus` 를 돌림) · `briefing` 아침 브리핑(`tasks.py brief` 출력을 재료로 · 읽기만).
+   * 무거운 분석은 안 받는다(제 재시도 · 미룸이 따로 있다).
+   */
+  agyRung?: 'text' | 'focus' | 'briefing';
 }
 
 export interface SessionUsage {
@@ -1752,6 +1761,8 @@ export class AssistantScheduler {
       // 12건이 161초였다 — 상한(10건)에 닿아도 두 배 넘게 남는다.
       maxDurationMs: 6 * 60_000,
       useSdk: true,
+      // codex 뒤에 agy 두 칸(6단계 · `DM_FALLBACK_AGY=on`) — 글만 주고받는 일이다.
+      agyRung: 'text',
     });
     this.recordSessionCost('summary', result);
 
@@ -2224,6 +2235,8 @@ export class AssistantScheduler {
       noSessionPersistence: true,
       maxDurationMs: 3 * 60_000,
       useSdk: true,
+      // codex 뒤에 agy 두 칸(6단계) — 한 줄만 받고 `tasks.py focus` 는 봇이 돌린다.
+      agyRung: 'focus',
     });
     this.recordSessionCost('focus', result);
     this.logger.info('Board focus updated', {
@@ -2926,7 +2939,7 @@ export class AssistantScheduler {
     // 되돌리기 문이 따로 필요하다(도구를 여러 번 돌려 중간에 죽을 수 있다).
     if (!said) {
       const fb0 = Date.now();
-      said = await narrowCodex(rulesText, user);
+      said = await narrowCodex(rulesText, user, undefined, NARROW_MODEL);
       // **센다.** 얼마나 도는지를 로그로만 알 수 있으면 아무도 안 센다 —
       // 이 레포에서 무시되는지·도는지를 세는 것은 `tasks.py events` 다.
       recordEvent('narrow-fallback', { why, ok: !!said, ms: Date.now() - fb0 });
@@ -3016,22 +3029,39 @@ export class AssistantScheduler {
     // Sonnet → Sol · Haiku → Luna). 예전에는 1차 등급과 무관하게 늘 같은 codex 모델로 갔다.
     const primary = opts.model || config.defaultModel;
     const toolFree = Array.isArray(opts.tools) && opts.tools.length === 0;
+    // 6단계 — codex 뒤에 agy 두 칸을 받는 일(켜는 문 `DM_FALLBACK_AGY=on` · `SpawnOpts.agyRung`).
+    const agyKind = agyRungsOn() ? opts.agyRung : undefined;
     let said = '';
     let via = '';
     let servedBy: Backend = 'codex';
     const fb0 = Date.now();
+    const done = (text: string, by: Backend, how: string): SessionResult => {
+      recordEvent('session-fallback', { label, why, ok: true, via: how });
+      this.logger.warn(`${label} 1차가 못 해서(${why}) ${how} 로 처리했습니다`);
+      // agy 칸은 사다리 기록 파일을 안 거친다 — 브리핑 「시스템 이슈」로 직접 알린다.
+      errorCollector.add('폴백', `${label} — Claude ${why} → ${how} 가 받음`);
+      return { text, costUsd: 0, sessionId: '', subtype: 'success', isError: false, toolCalls: 0, servedBy: by,
+               timing: { resultMs: Date.now() - fb0 } };
+    };
     if (toolFree) {
       // **도구 없는 회차는 사다리로**(읽기 전용 codex → agy) — 글만 주고받는 일이다. codex 세션으로
       // 넘기면 작업 폴더 쓰기 권한까지 붙어 1차보다 권한이 넓어진다(2026-09-23 점검).
+      // agy 칸을 받는 일은 사다리에서 agy 를 빼고 아래 두 칸으로 간다 — 엔진 상태 · Gemini 상한을 거치게.
       const got = await ladderText(label, prompt, {
         model: primary,
         system: opts.systemPrompt ?? opts.appendSystemPrompt,
         timeoutMs: opts.maxDurationMs,
+        // codex 칸의 깊이는 1차의 것(서비스 폴백 대응표 · 표의 깊이가 아니다).
+        effort: opts.effort,
+        ...(agyKind ? { vendors: ['codex'] } : {}),
       });
       if (got) {
         said = got.text;
         via = `${got.backend} ${got.model}`;
         servedBy = got.backend === 'agy' ? 'agy' : 'codex';
+      } else if (agyKind) {
+        const a = await this.agyScheduled(agyKind, label, prompt, opts);
+        if (a) return done(a.text, 'agy', a.via);
       }
     } else {
       // **codex 가 막혔으면 안 부른다** — 한도 조회(5분에 한 번 · 못 읽으면 모름)를 엔진 상태에 옮긴 뒤
@@ -3041,11 +3071,18 @@ export class AssistantScheduler {
       if (off || engineState.isBlocked('codex')) {
         const skipped = off ? 'env-off' : 'codex-blocked';
         this.logger.warn(`${label} 폴백 안 함 — ${off ? 'SESSION_FALLBACK=off' : 'codex 도 막혀 있음(엔진 상태)'}`);
+        // 6단계 — codex 가 막혔어도 agy 칸을 받는 일이면 거기로(끄는 문 `SESSION_FALLBACK=off` 는 그대로 존중).
+        if (!off && agyKind) {
+          const a = await this.agyScheduled(agyKind, label, prompt, opts);
+          if (a) return done(a.text, 'agy', a.via);
+        }
         recordEvent('session-fallback', { label, why, skipped });
         if (!off) errorCollector.add('폴백', `${label} — Claude ${why} · codex 도 한도라 폴백 안 함`);
         return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
       }
-      const cell = await sameTier(primary, 'codex');
+      // 모델은 서비스 폴백 대응표(`service_fallback` · 한 급 낮게) — 표가 없으면 예전처럼 같은 등급.
+      const svc = serviceCodex(primary, opts.effort);
+      const cell = svc ? { model: svc.model } : await sameTier(primary, 'codex');
       const scope = opts.fallbackScope;
       // **1차보다 넓게 쓰지 않는다** — 1차가 읽기 도구뿐이면 읽기 전용 모래상자(쓰기 폴더도 안 엶).
       const sandbox = primaryReadOnly(opts) ? 'read-only' : 'workspace-write';
@@ -3057,8 +3094,8 @@ export class AssistantScheduler {
         appendSystemPrompt: opts.appendSystemPrompt,
         timeoutMs: opts.maxDurationMs,
         // **1차와 같은 깊이로 돈다** — 폴백이 얕게 돌면 「돌긴 돌았는데 쓸 게 없는」
-        // 산출물이 나오고, 그건 실패보다 알아채기 어렵다(2026-09-08).
-        effort: opts.effort,
+        // 산출물이 나오고, 그건 실패보다 알아채기 어렵다(2026-09-08). 대응표가 luna 면 한 단계 위(`effort_up`).
+        effort: svc?.effort ?? opts.effort,
         model: cell?.model,
         // 1차에 주던 환경 변수 그대로 — 전에는 codex 쪽에서 `CLAUDE_SCHEDULED` 등이 사라졌다.
         env: opts.env,
@@ -3068,6 +3105,12 @@ export class AssistantScheduler {
       // 사다리를 안 거친 폴백은 기록 파일에 안 남으므로 브리핑 「시스템 이슈」로 직접 알린다.
       errorCollector.add('폴백', `${label} — Claude ${why} → ${said ? `${via} 가 받음`
         : turn.kind === 'usage' ? 'codex 도 한도(엔진 상태에 적음)' : '폴백도 실패'}`);
+      // 6단계 — codex 도 못 했으면 agy 두 칸. 받는 일 셋(글 · 집중 한 줄 · 브리핑)은 읽기만 하거나 한 줄을
+      // 덮어써서 codex 가 쓰다 끊겼어도 두 번 해 생기는 일이 없다.
+      if (!said && agyKind) {
+        const a = await this.agyScheduled(agyKind, label, prompt, opts);
+        if (a) return done(a.text, 'agy', a.via);
+      }
       if (!said) {
         recordEvent('session-fallback', { label, why, ok: false, via, codex: turn.kind,
           steps: turn.steps.length, writeRan: turn.writeRan });
@@ -3084,6 +3127,65 @@ export class AssistantScheduler {
     }
     this.logger.warn(`${label} 1차·폴백 둘 다 못 했습니다(${why})`);
     return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
+  }
+
+  /**
+   * 예약 일의 agy 칸(6단계) — agy Claude → Gemini(막힘 · 상한이면 건너뜀). agy 는 도구가 없어 재료를 봇이 대신
+   * 읽어 넘긴다. 못 하면 `null` — 부르는 쪽이 예전처럼 실패로 처리한다(브리핑은 회복 뒤 다시 · 한도 글 안 올림).
+   *
+   * - `text` 받은 글 그대로(카드 요약 · 회의 알림 판단과 같은 길)
+   * - `focus` `tasks.py json --slim` 을 재료로 한 줄(JSON)을 받아 허용 목록 문을 거쳐 봇이 `tasks.py focus` 를 돌린다
+   * - `briefing` `tasks.py brief` 출력을 재료로 브리핑 본문만 받는다(읽기만)
+   */
+  private async agyScheduled(kind: NonNullable<SpawnOpts['agyRung']>, label: string, prompt: string,
+                             opts: SpawnOpts): Promise<{ text: string; via: string } | null> {
+    try {
+      const system = opts.systemPrompt ?? opts.appendSystemPrompt;
+      if (kind === 'text') {
+        const a = await agyText(label, prompt, { system });
+        return a ? { text: a.text, via: `agy ${a.model.label || a.model.alias}` } : null;
+      }
+      const root = workAssistantRoot();
+      if (!root) return null;
+      if (kind === 'briefing') {
+        const brief = await runTasks(['brief'], 60_000);
+        if (brief.code !== 0 || !brief.stdout.trim()) {
+          this.logger.warn(`${label} — agy 칸 재료(tasks.py brief)를 못 읽어 건너뜀`);
+          return null;
+        }
+        const a = await agyText(label, `${AGY_BRIEF_NOTE}\n\n${prompt}\n\n[재료 — tasks.py brief 출력]\n${brief.stdout.trim()}`, { system });
+        return a ? { text: a.text, via: `agy ${a.model.label || a.model.alias}` } : null;
+      }
+      // focus — 한 줄을 받아 봇이 쓴다. 쓰는 길은 DM 칸과 같은 허용 목록 문 · 셸 없이.
+      const slim = await runTasks(['json', '--slim'], 30_000);
+      const list = slim.code === 0 ? parseTaskList(slim.stdout) : null;
+      if (!list) {
+        this.logger.warn(`${label} — agy 칸 재료(tasks.py json --slim)를 못 읽어 건너뜀`);
+        return null;
+      }
+      const a = await agyText(label, `${prompt}\n\n${AGY_FOCUS_NOTE}\n\n[재료 — tasks.py json --slim 출력]\n${slim.stdout.trim()}`, { system });
+      const got = a ? parseFocusReply(a.text) : null;
+      if (!a || !got) {
+        if (a) this.logger.warn(`${label} — agy 답이 한 줄(JSON)이 아님`);
+        return null;
+      }
+      const { ok, rejected } = validateActions([{ op: 'focus', ...got }], { tasks: list.tasks });
+      if (!ok.length) {
+        this.logger.warn(`${label} — agy 한 줄이 문을 못 지남(${rejected.map((r) => r.why).join(' · ')})`);
+        return null;
+      }
+      // 자동이 쓴 줄로 남긴다(`by: auto`) — 아침에 사람과 정한 줄을 덮지 않는 규칙이 이것을 본다.
+      ok[0].env = { ...(opts.env ?? {}), ASSISTANT_MODE: 'focus', CLAUDE_SCHEDULED: '1' };
+      const ran = await runActions(ok, { root, captureId: '' });
+      if (!ran.runs[0]?.ok) {
+        this.logger.warn(`${label} — tasks.py focus 실패(${ran.runs[0]?.error ?? '모름'})`);
+        return null;
+      }
+      return { text: `집중 표시: ${got.note}`, via: `agy ${a.model.label || a.model.alias}` };
+    } catch (err) {
+      this.logger.warn(`${label} — agy 칸이 터졌습니다`, err);
+      return null;
+    }
   }
 
   private async executeBriefing(): Promise<SessionResult> {
@@ -3142,6 +3244,8 @@ export class AssistantScheduler {
       skipMcp: true,
       env: { CLAUDE_SCHEDULED: '1' },
       useSdk,
+      // codex 뒤에 agy 두 칸(6단계) — `tasks.py brief` 출력을 재료로 본문만(읽기만).
+      agyRung: 'briefing',
     });
 
     // Extract only the final briefing output (starts with ☀️), dropping intermediate explanation text

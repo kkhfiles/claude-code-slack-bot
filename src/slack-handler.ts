@@ -19,10 +19,10 @@ import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n }
 import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
 import { stillBlocked } from './rate-limit-until';
-import { ENGINES, engineState, type Block, type Engine } from './engine-state';
+import { engineState, type Block, type Engine } from './engine-state';
 import { currentClaudeBlock, thrownClaudeBlock } from './engine-tap';
 import { EngineRecovery } from './engine-recovery';
-import { EngineNotice } from './engine-notice';
+import { EngineNotice, loadModelLabels } from './engine-notice';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 import { SdkUpdate, RUN_ACTION as SDK_UPDATE_RUN, SKIP_ACTION as SDK_UPDATE_SKIP } from './sdk-update';
 import { DaouLoginNotifier, ACTION_ID as DAOU_LOGIN_ACTION } from './daou-login';
@@ -51,13 +51,15 @@ import { ChannelGate, HOLD_SWEEP_MS, REPLAY_FRAME, buildHoldExtra, drainHeld, dr
   leadText, markChoice, needsCanary, oldListMessage, receivedSec, replayNote, replayTarget,
   type HeldFile, type HeldItem } from './hold-replay';
 import { StepLog, isHeldOutcome, outcomeFrom, type TurnOutcome, type TurnStep } from './turn-outcome';
-import { fallbackEligible, pickEngine, type DmOrigin, type LadderPick } from './engine-ladder';
-import { CODEX_INFLIGHT_STEP, FALLBACK_EFFORT, FALLBACK_TIMEOUT_MS, appendLedger, codexSteps, dmFallbackOn, fallbackEnv,
-  dmLadder, engineStatusText, filesNote, handoverNote, isQuietReply, ledgerNote, ledgerServedSince,
-  markerLines } from './dm-fallback';
+import { fallbackEligible, isAgyRung, pickAfter, pickEngine, type DmOrigin, type LadderPick, type PickInput } from './engine-ladder';
+import { CODEX_INFLIGHT_STEP, FALLBACK_TIMEOUT_MS, NEEDS_FULL_LINE, agyMarkerLines, agyRunningStep,
+  appendLedger, codexSteps, dmFallbackOn, fallbackEnv, dmLadder, engineStatusText, filesNote, handoverNote, isQuietReply,
+  ladderBlockedMap, ledgerNote, ledgerServedSince, markerLines } from './dm-fallback';
 import { codexQuota } from './codex-quota';
-import { sameTier } from './model-ladder';
+import { sameTier, serviceCodex } from './model-ladder';
 import { readDrill } from './engine-drill';
+import { agyDisplay, agyModel, agyRungsOn, agyTurn, type AgyRung } from './agy-turn';
+import { AGY_DM_RULES, actionReport, actionSteps, agyDmPrompt, fetchTaskList, runActions, validateActions } from './agy-actions';
 
 /**
  * 슬랙 대화 세션의 사고 깊이. SDK 기본값은 `'high'` 다.
@@ -130,14 +132,34 @@ interface InflightRecord { channel: string; threadTs?: string; text: string;
   heldSteps?: string[];
   /** 첨부(임시 파일) — 끊기면 보관 폴더로 옮긴다. */
   files?: HeldFile[];
-  /** 지금 맡은 엔진 — GPT 가 이어 받는 중이면 `codex`(DM 폴백). */
-  engine?: 'claude' | 'codex'; }
+  /** 지금 맡은 엔진 — GPT 가 이어 받는 중이면 `codex`(DM 폴백) · agy 칸이면 그 칸(6단계). */
+  engine?: Engine; }
 
 /**
  * 대화 차례가 들고 있는 것 — Claude 프로세스 또는 GPT 대체 차례의 손잡이. `-stop` 과 새 차례가 끊고,
  * 메모리 감시기가 pid 로 찾는다.
  */
 interface TurnHandle { interrupt(): void; readonly pid?: number }
+
+/** 대체 칸 한 차례(GPT · agy 두 칸)에 넘기는 것 — 대화 처리기가 모은 그대로. */
+interface FallbackArgs {
+  event: MessageEvent; channel: string; sessionKey: string; replyTs?: string; ts: string; thread_ts?: string;
+  captureId: string; surfaceNote: string; slotMap: string; finalPrompt: string; files: ProcessedFile[];
+  /** 앞 칸들이 돌린 것(Claude 도구 · GPT 명령) — 넘겨줄 메모와 보류 칸이 된다. */
+  claudeSteps: TurnStep[]; claudeModel: string; block: Block; sessionId?: string;
+  locale: Locale; say: (msg: any) => Promise<{ ts?: string }>; status: (text: string) => void;
+  /** 이 칸이 못 했을 때 그다음 칸 — `hold` 면 이 칸이 모아 두고 한도 안내를 낸다. */
+  nextAfter: (failed: Engine) => Promise<LadderPick>;
+}
+
+/**
+ * 대체 칸 한 차례의 끝 — `ok` 답함 · `held` 답했지만 「Claude·GPT 몫」을 모아 둠 · `failed` 못 해서 모아 둠 ·
+ * `stopped` 사람이 끊음 · `next` 다음 칸(`next`)으로.
+ */
+interface FallbackResult {
+  result: 'ok' | 'held' | 'failed' | 'stopped' | 'next';
+  steps: TurnStep[]; writeRan: boolean; markDone?: Promise<void>; next?: LadderPick;
+}
 
 /** Claude 를 건너뛴 차례(DM 폴백 · 엔진 상태가 막혔다고 함)의 빈 흐름 — 스트림 고리가 그냥 지나간다. */
 function skippedTurn(): AsyncIterable<CliEvent> & TurnHandle {
@@ -268,6 +290,8 @@ interface MessageEvent {
   resumeSessionId?: string;
   heldSteps?: string[];
   heldFiles?: HeldFile[];
+  /** agy 칸이 「Claude·GPT 몫」으로 남긴 것을 다시 돌림(6단계) — agy 칸을 건너뛴다. */
+  needsFull?: boolean;
   files?: Array<{
     id: string;
     name: string;
@@ -347,6 +371,8 @@ export class SlackHandler {
   private engineNotice = new EngineNotice({
     // 실제로 붙은 칸만 — DM 폴백이 꺼져 있으면 Claude 하나(막히면 곧 모아 둠).
     ladder: () => dmLadder(),
+    // GPT 이름은 실제로 부르는 모델 — 서비스 폴백 대응표에서 기본 모델에 맞춘 칸(`service_fallback`).
+    labels: () => loadModelLabels(undefined, SlackHandler.resolveModelAlias(config.defaultModel)),
     post: async (text) => {
       if (!config.assistant.dmChannel) return;
       await this.app.client.chat.postMessage({ channel: config.assistant.dmChannel, text });
@@ -1190,6 +1216,7 @@ export class SlackHandler {
       await say({
         text: engineStatusText(engineState.load(), engineState.nowSec(), {
           fallback: dmFallbackOn(), notice: process.env.ENGINE_NOTICE === 'on', drill: readDrill(), ladder: dmLadder(),
+          agy: agyRungsOn(),
         }),
         thread_ts: thread_ts,
       });
@@ -1571,9 +1598,15 @@ export class SlackHandler {
     let limitSeen = false;
     /** 폴백이 끝을 맡았나(답 · 실패 표시 · 한도 안내) — 그러면 아래 예전 한도 길은 건너뛴다. */
     let fallbackDone = false;
-    let turnEngine: 'claude' | 'codex' = 'claude';
+    let turnEngine: Engine = 'claude';
     let fallbackSteps: TurnStep[] = [];
     let fallbackWrote = false;
+    /** 고르는 함수에 넘길 것 — 막힘은 부를 때마다 새로 읽는다(codex 한도 조회 포함). */
+    const pickInput = async (o: Pick<PickInput, 'claudeOutcome' | 'writeRan'> = {}): Promise<PickInput> => ({
+      origin, planMode: isPlanMode, resumeCmd: !!resumeData, hasFiles: processedFiles.length > 0,
+      needsFull: !!event.needsFull, isPrivate: isPrivateTurn(), cwdIsWorkAssistant: this.isWorkAssistantDir(workingDirectory),
+      blocked: await this.ladderBlocked(), ...o,
+    });
 
     try {
       this.logger.info('Spawning Claude CLI process', {
@@ -1717,11 +1750,7 @@ export class SlackHandler {
       // 다음 칸(GPT)이 비었으면 스트림 뒤에서 그리로 넘기고, 다 막혔으면 예전 한도 길로 모아 둔다.
       let pick: LadderPick = 'claude';
       if (engineState.isBlocked('claude') && fbOn()) {
-        pick = pickEngine({
-          origin, planMode: isPlanMode, resumeCmd: !!resumeData, hasFiles: processedFiles.length > 0,
-          isPrivate: isPrivateTurn(), cwdIsWorkAssistant: this.isWorkAssistantDir(workingDirectory),
-          blocked: await this.ladderBlocked(),
-        });
+        pick = pickEngine(await pickInput(), dmLadder());
         claudeSkipped = pick !== 'claude';
         if (claudeSkipped) this.logger.warn('Claude 가 막혀 있어 띄우지 않습니다(DM 폴백)', { next: pick });
       }
@@ -1937,33 +1966,63 @@ export class SlackHandler {
       const claudeLimited = !!(rateLimitInfo || rateLimitMessageText || limitSeen);
       if ((claudeSkipped || claudeLimited) && fbOn()) {
         const claudeBlock = currentClaudeBlock(rateLimitInfo?.resetsAt, rateLimitMessageText);
+        const ladder = dmLadder();
         if (!claudeSkipped) {
-          pick = pickEngine({
-            origin, planMode: isPlanMode, resumeCmd: !!resumeData, hasFiles: processedFiles.length > 0,
-            isPrivate: isPrivateTurn(), cwdIsWorkAssistant: this.isWorkAssistantDir(workingDirectory),
-            blocked: await this.ladderBlocked(),
+          pick = pickEngine(await pickInput({
             claudeOutcome: claudeBlock.kind === 'overload' ? 'overload' : 'limited', writeRan: stepLog.writeRan,
-          });
+          }), ladder);
         }
-        if (pick === 'codex') {
-          const fb = await this.runDmFallback({
-            event, channel, sessionKey, replyTs, ts, thread_ts, captureId, surfaceNote, finalPrompt,
-            files: processedFiles, claudeSteps: stepLog.steps, claudeModel: channelModel, block: claudeBlock,
-            sessionId: session?.sessionId, locale, say,
-            status: (s) => { if (statusMessageTs) this.queueStatus(sessionKey, channel, statusMessageTs, s); },
-          });
-          fallbackDone = true;
-          fallbackSteps = fb.steps;
-          fallbackWrote = fb.writeRan;
-          if (fb.result === 'ok') {
-            turnEngine = 'codex';
-            cliError = false;
-          } else {
-            cliError = true;
-            if (fb.result === 'failed') {
-              turnBlock = claudeBlock;
-              markDone = fb.markDone ?? null;
+        if (pick === 'codex' || isAgyRung(pick)) {
+          // **같은 방은 한 줄로 — 사다리 전체를 한 번 잡는다**(칸을 옮기는 사이에 새 차례가 끼어들지 않게).
+          // 새 차례는 문에서 기다리고 이 차례를 끊지 않는다. 다시 돌리는 차례는 드레인이 이미 문을 잡았다.
+          const release = event.replay ? () => { /* 드레인이 잡은 문 */ } : await this.holdGate.acquire(channel);
+          let finish!: () => void;
+          this.fallbackRuns.set(sessionKey, new Promise<void>((r) => { finish = r; }));
+          try {
+            // 칸이 못 하면 그다음 칸으로(6단계 · `pickAfter`) — 마지막 칸이 못 하면 그 칸이 모아 둔다.
+            const nextAfter = async (failed: Engine) => pickAfter(await pickInput(), failed, ladder);
+            let prior: TurnStep[] = stepLog.steps;
+            while (pick === 'codex' || isAgyRung(pick)) {
+              const rung: Engine = pick;
+              const common = {
+                event, channel, sessionKey, replyTs, ts, thread_ts, captureId, surfaceNote, slotMap, finalPrompt,
+                files: processedFiles, claudeSteps: prior, claudeModel: channelModel, block: claudeBlock,
+                sessionId: session?.sessionId, locale, say, nextAfter,
+                status: (s: string) => { if (statusMessageTs) this.queueStatus(sessionKey, channel, statusMessageTs, s); },
+              };
+              const fb: FallbackResult = isAgyRung(rung)
+                ? await this.runAgyFallback({ ...common, rung, ladder })
+                : await this.runDmFallback(common);
+              fallbackDone = true;
+              fallbackSteps = [...fallbackSteps, ...fb.steps];
+              fallbackWrote = fallbackWrote || fb.writeRan;
+              if (fb.result === 'next' && fb.next) {
+                // 이 칸이 돌린 것(GPT 명령)은 다음 칸에 「이미 한 것」으로 넘긴다.
+                prior = [...prior, ...fb.steps];
+                pick = fb.next;
+                continue;
+              }
+              if (fb.result === 'ok' || fb.result === 'held') {
+                turnEngine = rung;
+                cliError = false;
+                // 「Claude·GPT 몫」이 남았으면 모아 두었다 — 결과는 막힘(드레인이 멈추고 회복 때 다시).
+                if (fb.result === 'held') {
+                  turnBlock = claudeBlock;
+                  markDone = fb.markDone ?? null;
+                }
+              } else {
+                cliError = true;
+                if (fb.result === 'failed') {
+                  turnBlock = claudeBlock;
+                  markDone = fb.markDone ?? null;
+                }
+              }
+              break;
             }
+          } finally {
+            this.fallbackRuns.delete(sessionKey);
+            finish();
+            release();
           }
         } else {
           // 다 막혔다 — 아래 예전 한도 길이 모아 둔다(띄우기 전에 건너뛰었어도 ❌ 로 끝을 보인다).
@@ -2424,6 +2483,9 @@ export class SlackHandler {
    * - 막혀 있으면 아무것도 안 한다(시도도 안 셈) · 막힌 뒤 된 적이 없으면 작은 호출로 먼저 떠 봄
    * - 오래된 것부터 받은 자리에서 · 도는 동안 그 방의 새 차례는 기다림 · 다시 막히면 멈춤
    * - 끝까지 간 것은 실패 자국 · 보관 첨부를 걷음 · 한 건 이상 돌았으면 한 줄 요약
+   * - **DM 폴백이 켜져 있으면 사다리의 어느 칸이든 비면 돈다**(6단계) — 다시 돌린 차례는 대화 처리기가 골라
+   *   맡긴다. 떠 보기는 Claude 가 맡을 칸일 때만 · 지금 맡을 칸이 없는 건(첨부 · 개인 글 · 「Claude·GPT 몫」)은
+   *   시도를 안 세고 남긴다(`drainSkip`)
    */
   private async drainStuckV2(why: string): Promise<void> {
     this.draining = true;
@@ -2431,9 +2493,12 @@ export class SlackHandler {
     this.drainRun = new Promise<void>((r) => { finish = r; });
     try {
       const dm = config.assistant.dmChannel;
+      // codex 한도 조회(5분 캐시)를 엔진 상태에 옮겨 둔다 — 아래 막힘 판정이 같은 값을 본다.
+      if (dmFallbackOn()) await codexQuota.refresh();
       const rep = await drainHeld({
-        blocked: () => stillBlocked(),
-        needsCanary: () => needsCanary(engineState),
+        blocked: () => this.drainBlocked(),
+        needsCanary: () => !engineState.isBlocked('claude') && needsCanary(engineState),
+        skip: (it) => this.drainSkip(it),
         canary: () => this.canaryClaude(),
         pending: (n) => pendingHeld(n),
         tried: (id) => markCaptureTried(id),
@@ -2458,6 +2523,35 @@ export class SlackHandler {
       this.drainRun = null;
       finish();
     }
+  }
+
+  /**
+   * 드레인 — 다시 돌릴 엔진이 하나도 없나. DM 폴백이 꺼져 있으면 예전 그대로 Claude 만 본다 · 켜져 있으면
+   * 사다리(`dmLadder`)가 다 막혔을 때만. 「⏸ … 가장 빠른 회복에 처리」가 그래야 참이다.
+   */
+  private drainBlocked(): boolean {
+    if (!dmFallbackOn()) return stillBlocked();
+    const b = ladderBlockedMap(engineState);
+    return dmLadder().every((e) => b[e]);
+  }
+
+  /**
+   * 이 건을 지금 맡을 엔진이 없나(6단계) — 대화 처리기가 그 차례에 고를 것을 미리 본다. Claude 가 비었으면
+   * 무엇이든 맡는다. 아니면 넘기지 않는 차례(개인 글 · 채널 · 다른 작업 디렉터리)는 Claude 몫이고, 첨부 ·
+   * 「Claude·GPT 몫」은 agy 칸이 못 맡는다 — 그런 건은 시도를 안 세고 남긴다.
+   */
+  private drainSkip(it: HeldItem): boolean {
+    if (!dmFallbackOn()) return false;
+    const b = ladderBlockedMap(engineState);
+    if (!b.claude) return false;
+    const target = replayTarget(it, config.assistant.dmChannel);
+    const cwd = this.workingDirManager.getWorkingDirectory(target.channel, target.thread, config.bot.allowUsers[0]);
+    const pick = pickEngine({
+      origin: target.channel.startsWith('D') ? 'replay' : 'channel', planMode: false, resumeCmd: false,
+      hasFiles: !!it.files?.length, needsFull: it.needs === 'full', isPrivate: containsPrivate(it.text),
+      cwdIsWorkAssistant: this.isWorkAssistantDir(cwd), blocked: b,
+    }, dmLadder());
+    return pick === 'hold' || pick === 'claude';
   }
 
   /**
@@ -2520,6 +2614,7 @@ export class SlackHandler {
       replayNote: replayNote(item, unseen),
       ...(item.session_id ? { resumeSessionId: item.session_id, heldSteps: item.done_steps ?? [] } : {}),
       ...(item.files?.length ? { heldFiles: item.files } : {}),
+      ...(item.needs === 'full' ? { needsFull: true } : {}),
     } as unknown as MessageEvent, this.pushedSay(target.channel));
     return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink };
   }
@@ -2538,12 +2633,15 @@ export class SlackHandler {
    * 한 줄과 버튼을 걷을지를 돌려준다(다시 막혔으면 버튼을 남겨 나중에 다시 누르게).
    */
   private async runHeldNow(id: string): Promise<{ text: string; settle: boolean }> {
-    if (stillBlocked()) return { text: '⏳ 아직 사용량 한도에 막혀 있습니다 — 풀린 뒤 다시 눌러 주세요', settle: false };
+    if (dmFallbackOn()) await codexQuota.refresh();
+    if (this.drainBlocked()) return { text: '⏳ 아직 사용량 한도에 막혀 있습니다 — 풀린 뒤 다시 눌러 주세요', settle: false };
     if (this.drainRun) await this.drainRun;
     if (this.draining) return { text: '밀린 요청을 처리하는 중입니다 — 끝난 뒤 다시 눌러 주세요', settle: false };
     const { run, tell } = await pendingHeld(50);
     const item = [...tell, ...run].find((x) => x.id === id);
     if (!item) return { text: '이미 처리했거나 버린 요청입니다', settle: true };
+    // 지금 남은 칸이 이 건을 못 맡으면(첨부 · 개인 글 · 「Claude·GPT 몫」) 돌리지 않는다 — 6단계.
+    if (this.drainSkip(item)) return { text: '⏳ 이 요청을 맡을 엔진이 아직 막혀 있습니다 — 풀린 뒤 다시 눌러 주세요', settle: false };
     this.draining = true;
     const release = this.holdGate.hold([replayTarget(item, config.assistant.dmChannel).channel]);
     try {
@@ -2568,20 +2666,25 @@ export class SlackHandler {
    */
   private markTurnFailed(captureId: string, why: 'limit' | 'error', steps: Pick<StepLog, 'steps'>,
                          sessionId: string | undefined, event: MessageEvent,
-                         files: ProcessedFile[]): Promise<void> {
+                         files: ProcessedFile[], needs?: 'full'): Promise<void> {
     if (!captureId) return Promise.resolve();
     if (!holdV2On()) return markCaptureFailed(captureId, why);
     const { extra, writeRan } = buildHoldExtra(
       captureId, steps.steps, event.heldSteps ?? [], sessionId, files.map(heldFileOf));
+    // agy 칸이 「Claude·GPT 몫」으로 남긴 것 — agy 만 남은 동안에는 드레인이 안 집는다(6단계).
+    if (needs || event.needsFull) extra.needs = 'full';
     return markCaptureFailed(captureId, why === 'limit' && writeRan ? 'partial' : why, extra);
   }
 
-  // --- DM 폴백 (엔진 폴백 5단계 · `DM_FALLBACK=on`) ---
+  // --- DM 폴백 (엔진 폴백 5단계 · `DM_FALLBACK=on` · 6단계 agy 칸 `DM_FALLBACK_AGY=on`) ---
 
-  /** 엔진별 지금 막혔나 — codex 는 한도 조회(5분에 한 번 · 못 읽으면 모름)를 엔진 상태에 옮긴 뒤 본다. */
+  /**
+   * 엔진별 지금 못 맡나 — codex 는 한도 조회(5분에 한 번 · 못 읽으면 모름)를 엔진 상태에 옮긴 뒤 본다
+   * (`ladderBlockedMap`).
+   */
   private async ladderBlocked(): Promise<Partial<Record<Engine, boolean>>> {
     await codexQuota.refresh();
-    return Object.fromEntries(ENGINES.map((e) => [e, engineState.isBlocked(e)]));
+    return ladderBlockedMap(engineState);
   }
 
   /** 이 작업 디렉터리가 업무 비서 뿌리인가 — 대체 엔진의 규칙 · 쓰기 범위가 거기에 맞춰져 있다. */
@@ -2598,24 +2701,15 @@ export class SlackHandler {
   /**
    * GPT(codex) 한 차례 — Claude 가 막힌 DM 차례를 이어 받는다.
    *
-   * - **같은 방에서 한 줄로** — 새 차례는 문(`holdGate`)에서 기다리고 이 차례를 끊지 않는다. 다시 돌리는
-   *   차례는 드레인이 이미 문을 잡았으므로 안 잡는다(자기 문을 기다리면 15분 서 있는다)
+   * - **같은 방에서 한 줄로** — 문(`holdGate`)은 부르는 쪽이 사다리 전체에 한 번 잡는다
    * - `-stop` 이 끊을 수 있게 손잡이를 걸고, 재시작에 끊기면 「했을 수 있음」으로 모아 두게 처리 중 기록을 고친다
    * - Claude 와 같은 안내(슬랙 · 캡처 · 번호표) + 못 본 대화방 글(새 세션처럼 12시간) + 넘겨줄 메모 + 사람 말 + 첨부 경로
    * - 캡처 id 는 **값으로** 넘긴다(`WORK_ASSISTANT_CAPTURE`) — 방마다 하나인 가리킴 파일은 다음 차례가 갈아 끼운다
-   * - 됐으면 답 + 작은 표시 줄 · 쓰기가 없었으면 캡처를 닫음. 못 했으면 모아 두고 예전 한도 안내(한 번만)
-   *   — codex 의 오류 글은 안 올린다
+   * - 됐으면 답 + 작은 표시 줄 · 쓰기가 없었으면 캡처를 닫음. 못 했으면 다음 칸(6단계 agy)이 있으면 그리로,
+   *   없으면 모아 두고 예전 한도 안내(한 번만) — codex 의 오류 글은 안 올린다
    */
-  private async runDmFallback(a: {
-    event: MessageEvent; channel: string; sessionKey: string; replyTs?: string; ts: string; thread_ts?: string;
-    captureId: string; surfaceNote: string; finalPrompt: string; files: ProcessedFile[];
-    claudeSteps: TurnStep[]; claudeModel: string; block: Block; sessionId?: string;
-    locale: Locale; say: (msg: any) => Promise<{ ts?: string }>; status: (text: string) => void;
-  }): Promise<{ result: 'ok' | 'failed' | 'stopped'; steps: TurnStep[]; writeRan: boolean; markDone?: Promise<void> }> {
+  private async runDmFallback(a: FallbackArgs): Promise<FallbackResult> {
     const { event, channel, sessionKey, captureId } = a;
-    const release = event.replay ? () => { /* 드레인이 잡은 문 */ } : await this.holdGate.acquire(channel);
-    let finish!: () => void;
-    this.fallbackRuns.set(sessionKey, new Promise<void>((r) => { finish = r; }));
     let kill: (() => void) | null = null;
     let stopped = false;
     const handle: TurnHandle = { interrupt: () => { stopped = true; kill?.(); } };
@@ -2629,14 +2723,18 @@ export class SlackHandler {
           currentTs: a.ts, threadTs: a.thread_ts, isNewSession: true, botUserId, isPrivate: containsPrivate,
         })).catch(() => '');
       const prompt = [handoverNote(a.claudeSteps), context, a.finalPrompt + filesNote(a.files)].filter(Boolean).join('\n');
-      const model = (await sameTier(a.claudeModel, 'codex'))?.model ?? SESSION_CODEX_MODEL;
+      // 모델은 서비스 폴백 대응표(`service_fallback` · 한 급 낮게) — 표가 없으면 예전처럼 같은 등급 · 기본 모델.
+      const svc = serviceCodex(a.claudeModel, INTERACTIVE_EFFORT);
+      const model = svc?.model
+        ?? (await sameTier(a.claudeModel, 'codex'))?.model ?? SESSION_CODEX_MODEL;
       this.logger.warn('DM 폴백 — GPT 가 이어 받습니다', { model, claudeWrites, origin: event.replay ? 'replay' : 'dm' });
       const r = await codexTurn(prompt, {
         workingDirectory: workAssistantRoot() ?? process.cwd(),
         sandbox: 'workspace-write',
         appendSystemPrompt: a.surfaceNote,
         timeoutMs: FALLBACK_TIMEOUT_MS,
-        effort: FALLBACK_EFFORT,
+        // 깊이는 1차(Claude 대화 차례)의 것 — 대응표가 luna 면 한 단계 위(`effort_up`). 표의 등급 깊이가 아니다.
+        effort: svc?.effort ?? INTERACTIVE_EFFORT,
         model,
         env: fallbackEnv(captureId),
         onSpawn: (k) => { kill = k; if (stopped) k(); },
@@ -2660,17 +2758,127 @@ export class SlackHandler {
         appendLedger({ channel, engine: 'codex', model, captureId, outcome: 'ok' });
         return { result: 'ok', steps, writeRan: r.writeRan };
       }
+      appendLedger({ channel, engine: 'codex', model, captureId, outcome: r.kind });
+      // 다음 칸(6단계 agy)이 있으면 그리로 — GPT 가 돌린 명령은 「이미 한 것」으로 넘어간다.
+      const next = await a.nextAfter('codex');
+      if (next !== 'hold' && next !== 'claude') {
+        this.logger.warn(`DM 폴백 — GPT 도 못 했습니다(${r.kind}) · ${next} 로 넘깁니다`, { detail: r.detail });
+        return { result: 'next', steps, writeRan: r.writeRan, next };
+      }
       this.logger.warn(`DM 폴백 — GPT 도 못 했습니다(${r.kind}) · 모아 둡니다`, { detail: r.detail });
       const markDone = this.markTurnFailed(captureId, 'limit', { steps: [...a.claudeSteps, ...steps] },
         a.sessionId, event, a.files);
       await this.handleRateLimitUI(channel, a.thread_ts || a.ts, a.finalPrompt, a.block, a.locale, a.say, a.ts, captureId);
-      appendLedger({ channel, engine: 'codex', model, captureId, outcome: r.kind });
       return { result: 'failed', steps, writeRan: r.writeRan, markDone };
     } finally {
       if (this.activeProcesses.get(sessionKey) === handle) this.activeProcesses.delete(sessionKey);
-      this.fallbackRuns.delete(sessionKey);
-      finish();
-      release();
+    }
+  }
+
+  /**
+   * agy 칸 한 차례(6단계 · `DM_FALLBACK_AGY=on`) — Claude · GPT 가 못 한 DM 차례를 agy 의 Claude 또는 Gemini 가
+   * 이어 받는다. agy 는 도구가 없어 **JSON 계획만** 내고, 봇이 허용 목록 명령만 셸 없이 돌린다(`agy-actions.ts`).
+   *
+   * - 프롬프트 — 이 칸의 규칙(`AGY_DM_RULES`) + 지금 시각 + **열린 업무 전부**(일부만 주면 엉뚱한 업무를 골랐다) +
+   *   체크인 번호표 + 넘겨줄 메모(앞 칸이 한 것 · 결과 모름 표시) + 못 본 대화방 글 + 사람 말
+   * - 답 뒤에 「실행한 것」(명령마다 한 줄) · 「실행하지 않은 명령」 · 표시 줄 「↪ <표시 이름> 가 답함 · <무엇이 막혔나>」
+   * - `needs_full` — 답과 「⏸ 이 부분은 Claude·GPT 가 돌아오면 …」을 올리고 캡처에 실패 표시(`limit` · 명령이
+   *   돌았으면 `partial`)와 `needs: full` 을 남긴다 — 보류 v2 가 Claude·GPT 가 돌아오면 다시 돌린다
+   * - 못 했으면(한도 · 실패 · 계획 아님 · 업무 목록을 못 읽음) 다음 칸으로 · 없으면 모아 둔다(예전 한도 안내)
+   */
+  private async runAgyFallback(a: FallbackArgs & { rung: AgyRung; ladder: readonly Engine[] }): Promise<FallbackResult> {
+    const { event, channel, sessionKey, captureId, rung } = a;
+    let kill: (() => void) | null = null;
+    let stopped = false;
+    const handle: TurnHandle = { interrupt: () => { stopped = true; kill?.(); } };
+    this.activeProcesses.set(sessionKey, handle);
+    // agy 를 부르는 동안은 아무것도 안 쓴다 — 명령을 띄우기 직전에만 「결과 모름」 자리표를 붙인다.
+    patchInflight(sessionKey, { engine: rung, steps: [...a.claudeSteps], sessionId: a.sessionId });
+    const model = agyModel(rung);
+    const display = agyDisplay(rung, model.label);
+    a.status(`↪ ${display} 가 이어 받는 중${rung === 'agy-gemini' ? '(답이 느립니다)' : ''}`);
+    const fail = async (kind: string, detail?: string): Promise<FallbackResult> => {
+      appendLedger({ channel, engine: rung, model: display, captureId, outcome: kind });
+      const next = await a.nextAfter(rung);
+      if (next !== 'hold' && next !== 'claude') {
+        this.logger.warn(`DM 폴백 — ${rung} 못 함(${kind}) · ${next} 로 넘깁니다`, { detail });
+        return { result: 'next', steps: [], writeRan: false, next };
+      }
+      this.logger.warn(`DM 폴백 — ${rung} 못 함(${kind}) · 모아 둡니다`, { detail });
+      const markDone = this.markTurnFailed(captureId, 'limit', { steps: a.claudeSteps }, a.sessionId, event, a.files);
+      await this.handleRateLimitUI(channel, a.thread_ts || a.ts, a.finalPrompt, a.block, a.locale, a.say, a.ts, captureId);
+      return { result: 'failed', steps: [], writeRan: false, markDone };
+    };
+    try {
+      const root = workAssistantRoot();
+      const list = root ? await fetchTaskList() : null;
+      if (!root || !list) return await fail('fail', '업무 목록을 못 읽음');
+      const priorWrites = a.claudeSteps.filter((s) => s.write).length;
+      const context = event.replay ? (event.replayNote ?? '') : await this.getBotUserId()
+        .then((botUserId) => readUnseen(this.app.client as any, channel, {
+          currentTs: a.ts, threadTs: a.thread_ts, isNewSession: true, botUserId, isPrivate: containsPrivate,
+        })).catch(() => '');
+      const prompt = agyDmPrompt({
+        list, slotMap: a.slotMap, handover: handoverNote(a.claudeSteps, 'Claude·GPT'), context, text: a.finalPrompt,
+      });
+      this.logger.warn(`DM 폴백 — ${rung} 가 이어 받습니다`, { model: model.alias, priorWrites, origin: event.replay ? 'replay' : 'dm' });
+      const r = await agyTurn(prompt, {
+        rung, system: AGY_DM_RULES, drillScope: 'interactive', env: fallbackEnv(captureId),
+        onSpawn: (k) => { kill = k; if (stopped) k(); },
+      });
+      if (stopped) {
+        appendLedger({ channel, engine: rung, model: display, captureId, outcome: 'stopped' });
+        return { result: 'stopped', steps: [], writeRan: false };
+      }
+      if (r.kind !== 'ok' || !r.plan) return await fail(r.kind, r.detail);
+      const plan = r.plan;
+
+      // 허용 목록 → 셸 없이 차례로. 앞이 실패하면 뒤는 안 돌린다.
+      const { ok: valid, rejected } = validateActions(plan.actions, { tasks: list.tasks });
+      const done: TurnStep[] = [];
+      const ran = await runActions(valid, {
+        root, captureId,
+        onStart: (i) => patchInflight(sessionKey, {
+          steps: [...a.claudeSteps, ...done, agyRunningStep(rung, valid[i].summary)],
+        }),
+        stop: () => stopped,
+      });
+      const steps = actionSteps(ran.runs, rung);
+      done.push(...steps);
+      const wrote = ran.runs.length > 0;
+      if (rejected.length) this.logger.warn(`DM 폴백 — ${rung} 명령 ${rejected.length}건을 안 돌림`, { why: rejected.map((x) => x.why) });
+
+      // 사람에게 — 답 · 실행한 것 · 실행하지 않은 명령 · (남긴 몫) · 표시 줄. 판에서 온 「조용히」는 다 그대로
+      // 됐을 때만 조용하다(안 된 것은 반드시 말한다).
+      const report = actionReport(ran.runs, ran.skipped, rejected);
+      const quiet = isQuietReply(plan.reply);
+      const trouble = rejected.length > 0 || ran.skipped.length > 0 || ran.runs.some((x) => !x.ok || x.notes.length);
+      const silent = !!(event as any).pushed && quiet && !trouble && !plan.needsFull;
+      if (!silent) {
+        const held = plan.needsFull
+          ? `${NEEDS_FULL_LINE}${plan.needsFullReason ? ` — ${plan.needsFullReason}` : ''}` : '';
+        const body = [quiet ? '' : plan.reply, report, held].filter(Boolean).join('\n\n');
+        if (body) await a.say({ text: this.formatMessage(body, true), thread_ts: a.replyTs });
+        const marker = agyMarkerLines({
+          display, claudeBlock: a.block, above: a.ladder.slice(0, Math.max(0, a.ladder.indexOf(rung))),
+          st: engineState.load(), nowSec: engineState.nowSec(), ...(priorWrites ? { handover: priorWrites } : {}),
+        }).join('\n');
+        await a.say({ text: marker, blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: marker }] }], thread_ts: a.replyTs });
+      }
+
+      if (plan.needsFull) {
+        // 남은 몫은 모아 둔다 — 명령이 돌았으면 `partial`(이미 한 것과 함께) · agy 만 남은 동안은 안 집는다.
+        const markDone = this.markTurnFailed(captureId, 'limit', { steps: [...a.claudeSteps, ...steps] },
+          a.sessionId, event, a.files, 'full');
+        appendLedger({ channel, engine: rung, model: display, captureId, outcome: 'hold' });
+        return { result: 'held', steps, writeRan: wrote, markDone };
+      }
+      // 쓰기가 하나도 없었으면(조회 · 잡담 · 되물음) 캡처를 닫는다 — 명령이 돌았으면 `tasks.py` 가 스스로 닫았다.
+      if (captureId && !wrote && !priorWrites) await dropCapture(captureId, '대체 엔진이 답함');
+      appendLedger({ channel, engine: rung, model: display, captureId, outcome: 'ok' });
+      return { result: 'ok', steps, writeRan: wrote };
+    } finally {
+      if (this.activeProcesses.get(sessionKey) === handle) this.activeProcesses.delete(sessionKey);
     }
   }
 

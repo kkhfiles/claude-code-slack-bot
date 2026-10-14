@@ -1,10 +1,11 @@
-# DM 폴백 — Claude 가 막히면 GPT 가 이어 받음
+# DM 폴백 — Claude 가 막히면 GPT → agy Gemini → agy Claude Sonnet 이 이어 받음
 
-**DM 폴백을 고치거나 켜기 전에 읽는 참고** — 엔진 폴백 5단계(2026-10-14), 켜는 문은 `DM_FALLBACK=on`, 요약은 `AGENTS.md` 「DM 폴백」
+**DM 폴백을 고치거나 켜기 전에 읽는 참고** — 엔진 폴백 5단계와 6단계(2026-10-14), 켜는 문은 `DM_FALLBACK=on`(GPT)과 `DM_FALLBACK_AGY=on`(agy 두 칸), 요약은 `AGENTS.md` 「DM 폴백」
 
 - **원칙**(사용자 결정 2026-10-14) — 멈추는 것보다 품질이 조금 떨어져도 이어 가는 쪽
-- **사다리** — Claude → GPT(codex) → 모아 두고 회복 때 처리
-  - 6단계가 agy Claude 와 agy Gemini 를 `DM_LADDER`(`src/engine-ladder.ts`)의 GPT 뒤에 넣음
+- **사다리** — Claude → GPT(codex) → agy Gemini → agy Claude Sonnet → 모아 두고 회복 때 처리
+  - agy 두 칸은 `DM_FALLBACK_AGY=on` 일 때만(`src/engine-ladder.ts` 의 `DM_LADDER_AGY`) — 「6단계 — agy 두 칸」 절
+- **폴백 모델** — llm-playbook `models.json` 의 `service_fallback`(아래 「폴백 모델 — 서비스 폴백 대응표」)
 - **꺼져 있으면** — 예전 그대로(막히면 한도 안내를 내고 모아 둠)
 
 ## 고르기 — `pickEngine`
@@ -39,8 +40,10 @@
 - **실행 조건**
   - 쓰기 모래상자(`--approve-for-me`)와 기존 쓰기 폴더
   - 작업 폴더는 업무 비서 뿌리
-  - 모델은 채널 모델과 같은 등급(`sameTier`), 표를 못 읽으면 기본 모델
-  - 깊이 low, 상한 180초
+  - 모델은 서비스 폴백 대응표(아래 「폴백 모델 — 서비스 폴백 대응표」), 표에 그 칸이 없으면 같은 등급(`sameTier`)이나 기본 모델
+  - 깊이는 대화 차례의 것(low), 대응표가 luna 면 한 단계 위(medium)
+  - 상한 180초
+  - GPT 가 못 하면 다음 칸(agy)이 있을 때 그리로 넘기고, GPT 가 돌린 명령은 「이미 한 것」으로 넘어감
 - **같은 방은 한 줄로** — `ChannelGate.acquire`
   - 새 DM 은 문에서 기다림(⏳), GPT 차례를 끊지 않음
   - 다시 돌리는 차례는 드레인이 잡은 문이라 따로 안 잡음
@@ -71,6 +74,7 @@
 
 - **첫 줄** — Claude 가 쓰기를 한 뒤 넘겼을 때만
 - **까닭** — `Claude 사용량 소진(풀림 …)`, `Claude 과부하`, 시각을 모르면 `(다시 확인 …)`
+- **agy 칸** — `↪ <표시 이름> 가 답함` 뒤에 앞 칸마다 까닭(아래 「6단계 — agy 두 칸」)
 
 ## 엔진 안내 — `ENGINE_NOTICE=on`
 
@@ -82,7 +86,7 @@
 
 - **칸 여섯** — 말은 안 적음
   - `at`(epoch 초), `channel`, `model`, `captureId`
-  - `engine` — `codex`, 다 막혀 모아 두면 `none`
+  - `engine` — `codex`, `agy-gemini`, `agy-claude`, 다 막혀 모아 두면 `none`
   - `outcome` — `ok`, `usage`, `fail`, `hold`, `stopped`
 - **돌아온 첫 Claude 차례** — 세션의 마지막 차례 뒤에 `ok` 가 있으면 앞에 한 줄
   - 「[Claude 가 막힌 동안 다른 엔진이 처리한 것 — N건 · 자세한 내용은 위 대화방 글]」
@@ -100,6 +104,7 @@
   - `overload` — 529 글을 재생
   - `usage-after-tool` — 진짜 차례를 첫 도구 결과까지 돌린 뒤 끊음
 - **`codex`** — `usage`(엔진 상태에 막힘을 적음) 또는 `fail`
+- **`agyGemini`**, **`agyClaude`**(6단계) — `codex` 와 같은 두 갈래, agy 를 안 띄움
 - **안 받는 파일** — 없음, 지남, `expiresAt` 이 2시간 넘게 남음, 깨짐
 - **범위** — 대화 차례만, `scope: "all"` 이면 예약 일까지
 - **막힘 길이** — 20분 뒤와 연습 파일의 `expiresAt` 중 이른 쪽(`drillBlockUntil`). 파일을 일찍 지우면 남은 시간만큼 엔진 상태에 남음(그동안 DM 은 Claude 를 건너뜀)
@@ -107,14 +112,102 @@
 
 ## `-engines`
 
-- **머리 한 줄** — DM 폴백, 엔진 안내, 연습 상태
-- **엔진 네 줄** — 막힘, 풀리는 시각, 마지막 성공, 5시간과 7일 사용률, 사다리 밖 표시
+- **머리 한 줄** — DM 폴백, agy 칸, 엔진 안내, 연습 상태
+- **엔진 네 줄** — 막힘, 풀리는 시각, 마지막 성공, 5시간과 7일 사용률, 사다리 밖 표시(순서는 사다리 순서)
 - 버튼 없음
 
-## 아는 빈틈 — 6단계에서
+## 폴백 모델 — 서비스 폴백 대응표
 
-- **드레인은 Claude 가 풀려야 돎** — GPT 가 먼저 회복돼도 모아 둔 것은 Claude 회복 때 다시 돎
-  - 「⏸ 모든 엔진 소진 — … 가장 빠른 회복에 처리」 안내와 어긋남
-- **agy 칸** — `DM_LADDER` 에 넣으면 `pickEngine` 의 다음 칸 고르기를 그대로 씀, 첨부(`hasFiles`)는 거기서 가름
+- **정본** — llm-playbook `models.json` 의 `service_fallback`(`src/model-ladder.ts` 의 `serviceCodex`), `tiers` 가 아님
+- **codex 칸** — 1차 Claude 모델의 집안(opus, sonnet, haiku)마다 codex 별칭 하나
+  - 별칭이나 id(`[1m]` 꼬리 포함)로 와도 맞춤
+  - 실제 모델 id 는 `codex.models[별칭].id`
+- **깊이** — 1차의 것, `effort_up` 에 적힌 별칭(luna)은 그 모델의 깊이 목록을 따라 그만큼 올림
+  - 예: sonnet low → luna medium, haiku high → luna xhigh, opus low → sol low, max 는 그대로
+- **쓰는 곳** — DM 의 GPT 칸, 예약 일 폴백(`spawnOrFallback`), 도구 없는 사다리의 codex 칸, 판의 좁은 길
+  - 좁은 길은 `BOARD_NARROW_CODEX_MODEL`, `BOARD_NARROW_CODEX_EFFORT` 가 먼저
+- **agy 칸** — `service_fallback.agy` 의 앞이 Gemini 칸, 뒤가 agy Claude 칸(1차 모델과 무관)
+- **표에 칸이 없으면** — 예전 그대로(같은 등급 `sameTier`, 기본 모델), WARN 한 번
+- **`after_agy`** — 부서 대화 봇 몫이라 이 봇은 안 읽음
 
-검사 `npm run check:dmfallback`
+## 6단계 — agy 두 칸
+
+- **켜는 문** — `DM_FALLBACK_AGY=on`(DM 은 `DM_FALLBACK=on` 도 필요)
+- **순서** — Gemini(`flash-high`) 다음 agy 의 Claude Sonnet(`sonnet-thinking`), agy 의 Opus 는 안 씀(그 사용량이 작음)
+- **건너뛰는 조건** — 엔진 상태가 막혔다고 할 때(진짜 막힘과 연습)뿐, 횟수 상한은 두지 않음(2026-10-14 사용자 결정)
+- **안 받는 차례** — 첨부가 있는 차례, 「Claude·GPT 몫」으로 남긴 것을 다시 돌리는 차례(`needsFull`), 넘기지 않는 차례(위 표)
+- **부르는 길** — `src/agy-turn.ts`
+  - `python -m llm_playbook.backends.agy --model <별칭> --no-fallback --tools none`, 셸 없이 인자 배열
+  - 상한은 agy Claude 90초, Gemini 150초
+  - 한도는 백엔드 stderr 끝 줄의 `attempts=[(…, 'quota/limit')]` 로 가름(쿼터 글도 rc 0 으로 오기 때문), 풀리는 시각을 몰라 60분 뒤 다시 봄
+- **agy 가 내는 것** — JSON 하나: `reply`, `actions`, `needs_full`, `needs_full_reason`
+  - 코드펜스와 앞뒤 한 줄은 너그럽게 읽음, 모양이 다르면 다음 칸
+- **프롬프트** — 이 칸의 규칙(`AGY_DM_RULES`), 지금 시각, 열린 업무 전부(`tasks.py json --slim`), 체크인 번호표, 넘겨줄 메모, 못 본 대화방 글, 사람 말
+  - 열린 업무를 일부만 주면 두 엔진 다 엉뚱한 업무를 골랐음(0단계 측정)
+
+### 허용 목록 — `src/agy-actions.ts`
+
+| 명령 | 받는 칸 | 막는 것 |
+|---|---|---|
+| `add` | title, est, importance, size, hard, soft, next, remind, jira, exec_type | 제목 120자, 줄바꿈 |
+| `update` | id(TSK-n), sets(칸 이름 14개) | 글 칸 비우기, 작업 디렉터리와 순서 |
+| `log` | id(TSK-n 또는 목록의 정기 업무), text | 1500자 |
+| `defer` | id, reason, soft | 사유 없음 |
+| `quick` | text | 항목마다 TSK-n 으로 시작하지 않는 것(번호표 번호) |
+| `inbox_resolve` | task 또는 drop | 다른 캡처 id |
+| `recurring_done` | id(목록의 정기 업무), as_of, note | 목록에 없는 id |
+| `focus` | note, pick(열린 업무 3개까지) 또는 off | 목록에 없는 번호 |
+
+- **공통** — 모르는 칸, 날짜가 `YYYY-MM-DD` 가 아님, 한 줄 칸의 줄바꿈과 제어 문자, 한 번에 8개 넘음 → 「실행하지 않은 명령」
+- **실행** — `python -X utf8 bin/tasks.py <명령> --이름=값 …`, 셸 없이(값에 `&`, `|`, `$(…)` 가 있어도 글자 그대로)
+  - 환경 변수 `WORK_ASSISTANT_CAPTURE=<캡처 id>`, `CLAUDE_BOT_SESSION=1`, API 키 뺌
+  - 앞 명령이 실패하면 뒤는 안 돌림
+  - 값의 뜻(상태 낱말, 칸 이름)은 파이썬 문(`_check_sets`)이 한 번 더 봄
+
+### 답과 표시 줄
+
+```
+「보고서 초안(TSK-5)」을 진행중으로 바꾸고 진행 로그를 남겼습니다.
+
+*실행한 것*
+• 「보고서 초안」(TSK-5) — 상태 진행중 · 소프트 마감 10/20(화)
+• 「보고서 초안」(TSK-5) 진행 로그 남김
+
+*실행하지 않은 명령*
+• delete TSK-5 — 허용 목록에 없는 명령
+↪ Gemini <판> Flash (High) 가 답함 · Claude 사용량 소진(풀림 10/14(화) 16:10) · GPT 사용량 소진(다시 확인 10/14(화) 17:00)
+```
+
+- **표시 이름** — `models.json` 의 `agy.models`, agy Claude 는 「agy 의 …」
+- **판에서 온 「[조용히]」** — 다 그대로 됐을 때만 조용, 안 된 것이 있으면 그 줄들을 냄
+- **쓰기가 없었으면** — 캡처를 닫음(`대체 엔진이 답함`), 명령이 돌았으면 `tasks.py` 가 닫음
+
+### `needs_full` — Claude·GPT 몫을 남김
+
+- 답과 「⏸ 이 부분은 Claude·GPT 가 돌아오면 이어서 처리합니다 — <까닭>」
+- 캡처에 실패 표시 `limit`(명령이 돌았으면 `partial`)와 보류 칸 `needs: full`(파이썬 `_hold_extra` 가 받음)
+- 차례 결과는 막힘 — 드레인이 멈추고, agy 만 남은 동안은 그 건을 안 집음
+
+### 드레인 — 어느 칸이든 비면 돎
+
+- **`DM_FALLBACK=on` 이면** — 사다리(`dmLadder`)가 다 막혔을 때만 안 돎(`drainBlocked`), 꺼져 있으면 예전대로 Claude 만 봄
+- **떠 보기** — Claude 가 맡을 칸일 때만 실행
+- **맡을 칸이 없는 건은 남김**(`drainSkip`) — 첨부, 개인 글, 「Claude·GPT 몫」은 agy 만 남은 동안 시도를 안 세고 남김
+- **⏸ 안내의 「가장 빠른 회복에 처리」** — 이제 참(어느 칸이 풀려도 회복 타이머가 드레인을 부름)
+- **옛 드레인(`HOLD_V2` 꺼짐)** — 그대로 Claude 만 봄
+
+### 예약 일 — 넷만
+
+- **받는 일** — 카드 요약(글), 회의 알림 판단(글), 지금 집중할 것, 아침 브리핑(`SpawnOpts.agyRung`)
+  - 무거운 분석은 안 받음(제 재시도와 미룸이 있음)
+- **순서** — codex(대응표 모델) 다음 Gemini 다음 agy Claude, 켜는 문이 꺼져 있으면 예전 사다리 그대로
+- **지금 집중할 것** — `tasks.py json --slim` 을 재료로 한 줄(JSON)을 받고, 허용 목록 문을 지나 봇이 `tasks.py focus` 를 셸 없이 돌림(`ASSISTANT_MODE=focus` 라 자동 표시)
+- **아침 브리핑** — `tasks.py brief` 출력을 재료로 본문만(읽기만), 한도와 오류 글은 예전처럼 브리핑으로 안 올림
+
+### 연습 — D2, D3, D5
+
+- **D2(Claude, GPT 막힘 → Gemini)** — `{"claude":"usage","codex":"usage","expiresAt":<지금+600>}` 를 놓고 DM 한 줄
+- **D3(Gemini 도 막힘 → agy Claude)** — 위에 `"agyGemini":"usage"` 를 더함, 다 막힘은 `"agyClaude":"usage"` 까지
+- **D5(회복과 드레인)** — 연습 파일을 지우면 남은 막힘은 `drillBlockUntil` 까지, 그때 회복 타이머가 드레인을 부름
+
+검사 `npm run check:dmfallback`, `npm run check:agy`

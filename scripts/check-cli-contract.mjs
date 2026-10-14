@@ -79,7 +79,8 @@ function findCalls(known, files) {
   for (const f of files) {
     const text = fs.readFileSync(path.join(srcDir, f), 'utf-8');
     for (const m of text.matchAll(/\[([^[\]\n]*)\]/g)) {
-      const toks = [...m[1].matchAll(/'([^']*)'/g)].map((x) => x[1]);
+      // 글자 틀(`--이름=${값}`)도 낱말로 센다 — 이름은 아래에서 `=` 앞만 견준다.
+      const toks = [...m[1].matchAll(/'([^']*)'|`([^`]*)`/g)].map((x) => x[1] ?? x[2]);
       if (toks.length && known.has(toks[0])) out.push({ file: f, toks });
     }
   }
@@ -130,7 +131,8 @@ for (const { file, toks } of calls) {
   const two = toks.length > 1 && !toks[1].startsWith('--') && allowed.has(toks[1]);
   const name = two ? `${toks[0]} ${toks[1]}` : toks[0];
   const ok = allowed.get(two ? toks[1] : toks[0]);
-  const miss = toks.slice(two ? 2 : 1).filter((x) => x.startsWith('--') && !ok.has(x));
+  // `--이름=값` 한 덩어리(agy 칸 · `agy-actions.ts`)도 이름만 떼어 견준다.
+  const miss = toks.slice(two ? 2 : 1).filter((x) => x.startsWith('--') && !ok.has(x.split('=')[0]));
   if (miss.length) {
     fails.push(`${file}: \`${key}\` — «${name}» 에 없는 플래그 ${miss.join(' ')}`
       + `\n    쓸 수 있는 것: ${[...ok].sort().join(' ') || '(없음)'}`);

@@ -28,8 +28,8 @@ export interface TurnStep {
 
 export interface TurnOutcome {
   outcome: TurnResult;
-  /** 답을 낸 엔진 — Claude 가 막혀 DM 폴백이 받았으면 `codex`(엔진 폴백 5단계). */
-  engine: 'claude' | 'codex';
+  /** 답을 낸 엔진 — Claude 가 막혀 DM 폴백이 받았으면 `codex`(5단계) · agy 칸이면 `agy-claude` · `agy-gemini`(6단계). */
+  engine: 'claude' | 'codex' | 'agy-claude' | 'agy-gemini';
   steps: TurnStep[];
   /** 쓰기를 할 수 있는 도구가 하나라도 **시작했나** — 결과가 안 왔어도 셈(했을 수 있다). */
   writeRan: boolean;
