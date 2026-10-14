@@ -52,7 +52,7 @@ export function modelsFile(): string {
  * `flash-high` · `sonnet-thinking` · agy 의 Opus 는 안 씀).
  * **부를 때마다 읽는다** — 표를 고치면 다음 안내부터 바로 따라온다.
  */
-export function loadModelLabels(file: string = modelsFile(), primary?: string): ModelLabels {
+export function loadModelLabels(file: string = modelsFile(), primary?: string, effort?: string): ModelLabels {
   try {
     const t = JSON.parse(fs.readFileSync(file, 'utf-8'));
     const top = String(t?.tiers?.top?.codex ?? '');
@@ -69,7 +69,16 @@ export function loadModelLabels(file: string = modelsFile(), primary?: string): 
       const id = String(aliases[k] ?? '').toLowerCase();
       return p === k || (id !== '' && (p === id || p.startsWith(id))) || p.includes(k);
     }) : undefined;
-    if (fam && typeof svc[fam] === 'string' && codexModels[svc[fam] as string]) alias = svc[fam] as string;
+    const cell = fam ? svc[fam] : undefined;
+    if (typeof cell === 'string' && codexModels[cell]) alias = cell;
+    // 대응표 모양(깊이마다 「별칭-깊이」) — 1차 깊이의 칸 · 모르면 high 줄(`model-ladder.ts` `serviceCodex` 와 같은 규칙)
+    if (cell && typeof cell === 'object') {
+      const row = cell as Record<string, unknown>;
+      const spec = String(row[effort && row[effort] ? effort : 'high'] ?? '');
+      const hit = Object.keys(codexModels).filter((k) => spec === k || spec.startsWith(`${k}-`))
+        .sort((a, b) => b.length - a.length)[0];
+      if (hit) alias = hit;
+    }
     const agy: Record<string, string> = t?.agy?.models ?? {};
     const sf: unknown[] = Array.isArray(t?.service_fallback?.agy) ? t.service_fallback.agy : [];
     const at = (i: number, dflt: string) => (typeof sf[i] === 'string' && sf[i] ? String(sf[i]) : dflt);

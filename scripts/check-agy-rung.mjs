@@ -703,11 +703,17 @@ try {
     // 실제 표(있으면) — 사용자 결정의 대응이 그대로 앉았나
     const real = path.resolve(ROOT, '..', 'llm-playbook', 'llm_playbook', 'models.json');
     if (fs.existsSync(real) && JSON.parse(fs.readFileSync(real, 'utf-8')).service_fallback) {
-      eq('실제 표 — opus → sol · sonnet/haiku → luna',
-        [ml.serviceCodex('opus', 'low', real), ml.serviceCodex('sonnet', 'low', real)?.effort, ml.serviceCodex('haiku', 'high', real)?.effort],
-        [{ alias: 'sol', model: 'gpt-6.1-sol', effort: 'low' }, 'medium', 'xhigh']);
-      eq('실제 표 — sonnet/haiku 는 luna', [ml.serviceCodex('sonnet', undefined, real)?.model, ml.serviceCodex('haiku', undefined, real)?.model],
-        ['gpt-6-luna', 'gpt-6-luna']);
+      // 사용자 대응표(2026-10-14 정본) 15칸 — 1차 모델 · 깊이마다 GPT 「별칭 깊이」
+      const WANT = {
+        opus: { low: 'sol low', medium: 'sol high', high: 'sol high', xhigh: 'sol xhigh', max: 'sol max' },
+        sonnet: { low: 'sol low', medium: 'sol low', high: 'sol medium', xhigh: 'sol high', max: 'sol xhigh' },
+        haiku: { low: 'luna medium', medium: 'luna high', high: 'luna xhigh', xhigh: 'sol low', max: 'sol low' },
+      };
+      const got = Object.fromEntries(Object.entries(WANT).map(([f, row]) => [f, Object.fromEntries(Object.keys(row)
+        .map((e) => { const r = ml.serviceCodex(f, e, real); return [e, r ? `${r.alias} ${r.effort}` : null]; }))]));
+      eq('실제 표 — 대응표 15칸', got, WANT);
+      eq('실제 표 — 깊이를 모르면 high 줄 · 전체 id 도', [ml.serviceCodex('sonnet', undefined, real)?.effort,
+        ml.serviceCodex('claude-opus-5-5', 'medium', real)?.model], ['medium', 'gpt-6.1-sol']);
     }
   }
 

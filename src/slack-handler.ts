@@ -372,7 +372,7 @@ export class SlackHandler {
     // 실제로 붙은 칸만 — DM 폴백이 꺼져 있으면 Claude 하나(막히면 곧 모아 둠).
     ladder: () => dmLadder(),
     // GPT 이름은 실제로 부르는 모델 — 서비스 폴백 대응표에서 기본 모델에 맞춘 칸(`service_fallback`).
-    labels: () => loadModelLabels(undefined, SlackHandler.resolveModelAlias(config.defaultModel)),
+    labels: () => loadModelLabels(undefined, SlackHandler.resolveModelAlias(config.defaultModel), INTERACTIVE_EFFORT),
     post: async (text) => {
       if (!config.assistant.dmChannel) return;
       await this.app.client.chat.postMessage({ channel: config.assistant.dmChannel, text });

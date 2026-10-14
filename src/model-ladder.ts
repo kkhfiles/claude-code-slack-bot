@@ -28,16 +28,16 @@ const logger = new Logger('ModelLadder');
 
 /**
  * 서비스(스탠리 · Dispatch 판)의 폴백 모델 — `models.json` 의 `service_fallback`(2026-10-14 사용자 결정).
- * `tiers` 와 별개다: 멈추지 않는 것이 기준이라 **한 급 낮은** codex 모델로 대응한다(opus → sol · sonnet → luna ·
- * haiku → luna). 사고 깊이는 1차(Claude)의 것을 쓰되, `effort_up` 에 적힌 별칭(luna)은 그 모델의 깊이 목록
- * (`codex.models[별칭].efforts`)을 따라 그만큼 올린다(low → medium · max 는 그대로) — 표의 등급 깊이가 아니다.
- * `after_agy` 칸은 부서 대화 봇 몫이라 여기서 안 읽는다.
+ * `tiers` 와 별개다. **정본은 사용자가 정한 대응표** — 1차 Claude 의 모델과 사고 깊이마다 GPT 「별칭-깊이」
+ * 한 칸(예: opus medium → sol-high · haiku xhigh → sol-low). 1차 깊이를 모르면 high 줄(Claude 기본 깊이).
+ * 옛 모양(모델마다 별칭 하나 + `effort_up`)도 읽는다. `after_agy` 칸은 부서 대화 봇 몫이라 여기서 안 읽는다.
  *
  * 표에 그 칸이 없거나 못 읽으면 `null` — 부르는 쪽이 옛 길(`sameTier` · 기본 모델)로 물러난다(한 번 WARN).
  * 파일이 바뀌었을 때만 다시 읽는다(고친 시각으로 견줌).
  */
 export interface ServiceTable {
-  codex: Record<string, string>;
+  /** 모델마다 별칭 하나(옛 모양) 또는 깊이마다 「별칭-깊이」. */
+  codex: Record<string, string | Record<string, string>>;
   agy: string[];
   codexIds: Record<string, string>;
   /** 별칭마다 받는 깊이 — 낮은 것부터. */
@@ -70,7 +70,8 @@ export function serviceFallbackTable(file: string = modelsFile()): ServiceTable 
         if (Number.isInteger(v) && (v as number) > 0) effortUp[k] = v as number;
       }
       table = {
-        codex: Object.fromEntries(Object.entries(sf.codex).filter(([, v]) => typeof v === 'string')) as Record<string, string>,
+        codex: Object.fromEntries(Object.entries(sf.codex).filter(([k, v]) => !k.startsWith('_')
+          && (typeof v === 'string' || (!!v && typeof v === 'object' && !Array.isArray(v))))) as ServiceTable['codex'],
         agy: Array.isArray(sf.agy) ? sf.agy.filter((x: unknown) => typeof x === 'string') : [],
         codexIds,
         codexEfforts,
@@ -102,17 +103,35 @@ export function claudeFamily(name: string | undefined, t: ServiceTable): string 
 
 /**
  * 이 Claude 모델이 막혔을 때 쓸 codex 모델 — 별칭 · 실제 id · 깊이. 표가 없거나 모르는 모델이면 `null`.
- * 깊이는 1차의 것(`effort`)을 `effort_up` 만큼 올린 값 — 1차 깊이가 없거나 그 모델 목록에 없으면 그대로 둔다.
+ * 대응표 모양이면 1차 깊이(`effort` · 없으면 high)의 칸을 그대로. 옛 모양이면 1차 깊이를 `effort_up` 만큼 올린다.
  */
 export function serviceCodex(claudeModel: string | undefined, effort?: string, file?: string):
   { alias: string; model: string; effort?: string } | null {
   const t = serviceFallbackTable(file);
   if (!t) return null;
   const fam = claudeFamily(claudeModel, t);
-  const alias = fam ? t.codex[fam] : undefined;
+  const cell = fam ? t.codex[fam] : undefined;
+  if (cell && typeof cell === 'object') {
+    const spec = cell[effort && cell[effort] ? effort : PRIMARY_DEFAULT_EFFORT];
+    const hit = typeof spec === 'string' ? splitCodexSpec(spec, t) : null;
+    return hit ? { alias: hit.alias, model: t.codexIds[hit.alias], ...(hit.effort ? { effort: hit.effort } : {}) } : null;
+  }
+  const alias = typeof cell === 'string' ? cell : undefined;
   const model = alias ? t.codexIds[alias] : undefined;
   if (!alias || !model) return null;
   return { alias, model, ...(effort ? { effort: raiseEffort(effort, t.effortUp[alias] ?? 0, t.codexEfforts[alias] ?? []) } : {}) };
+}
+
+/** 1차 깊이를 모를 때 쓰는 대응표 줄 — Claude 의 기본 사고 깊이. */
+export const PRIMARY_DEFAULT_EFFORT = 'high';
+
+/** 「sol-high」 → 별칭 sol · 깊이 high. 별칭은 `codex.models` 에 있는 것 중 가장 긴 앞머리 · 없으면 null. */
+export function splitCodexSpec(spec: string, t: Pick<ServiceTable, 'codexIds'>): { alias: string; effort?: string } | null {
+  const alias = Object.keys(t.codexIds).filter((k) => spec === k || spec.startsWith(`${k}-`))
+    .sort((a, b) => b.length - a.length)[0];
+  if (!alias) return null;
+  const effort = spec.slice(alias.length + 1);
+  return effort ? { alias, effort } : { alias };
 }
 
 /** 깊이를 목록을 따라 `up` 단계 올린다 — 끝(max)에서 멈춤 · 목록에 없는 깊이는 그대로. */
