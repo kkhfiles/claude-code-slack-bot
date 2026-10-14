@@ -135,8 +135,11 @@ try {
   // 한도 큐가 들던 몫 중 **남은 것은 이것 하나**다 — 언제 다시 해 볼지.
   // 목록은 캡처 큐가 든다. 두 목록이 어긋난 것이 이번 결함의 뿌리였다.
   {
+    // 값의 정본은 엔진 상태(`engine-state.ts`)로 옮겼고 `rate-limit-until.ts` 는 옛 이름을 그대로
+    // 두는 층이다(2026-10-14). 뜻은 같아야 하므로 아래 단정은 그대로 둔다 — 파일 자리만 둘 다 옮긴다.
     const UNTIL = path.join(HOME, 'until.json');
     process.env.RATE_LIMIT_UNTIL_FILE = UNTIL;
+    process.env.ENGINE_STATE_FILE = path.join(HOME, 'engine-state.json');
     // ⚠️ `require` 는 한 번 읽은 모듈을 다시 안 읽는다 — 환경변수를 세운 뒤에
     // 불러야 그 경로가 잡힌다.
     const { getUntil, setUntil, stillBlocked, clearUntil } =
@@ -177,11 +180,16 @@ try {
                         'replayQueued', 'rlq_run_all']) {
       eq(`${name} 이 안 남았다`, h.includes(name), false);
     }
-    // 회복 시각에 하는 일은 **드레인 하나**여야 한다.
-    const arm = h.slice(h.indexOf('private armRateLimitRecovery'));
-    const body = arm.slice(0, arm.indexOf('\n  }'));
+    // 회복 시각에 하는 일은 **드레인**이다(엔진 안내는 꺼져 있으면 로그만). 2026-10-14 부터 타이머는
+    // `engine-recovery.ts` 가 들고, 대화 처리기는 깨어났을 때 할 일만 준다(`onRecover`).
+    const from = h.indexOf('new EngineRecovery(');
+    const body = from < 0 ? '' : h.slice(from, h.indexOf('\n  });', from));
+    eq('회복 타이머를 대화 처리기가 만든다', from >= 0, true);
     eq('회복 시각에 드레인을 부른다', /drainStuck\('한도 회복'\)/.test(body), true);
     eq('회복 시각에 사람에게 안 묻는다', /postMessage|button/.test(body), false);
+    const rec = fs.readFileSync(path.join(ROOT, 'src', 'engine-recovery.ts'), 'utf-8');
+    eq('회복 타이머 자체도 사람에게 안 묻는다', /postMessage|button|chat\./.test(rec), false);
+    eq('옛 메모리 타이머가 안 남았다', /armRateLimitRecovery|limitTimer/.test(h), false);
     // 아직 안 풀렸으면 안 돈다 — 안 그러면 기동마다 시도 횟수만 탄다.
     eq('막혀 있으면 드레인이 쉰다', /if \(stillBlocked\(\)\)/.test(h), true);
     // 취소를 누르면 캡처를 버린다 — 안 버리면 회복 시각에 다시 돌아온다.

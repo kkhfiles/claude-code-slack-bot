@@ -18,7 +18,12 @@
 | `src/account-manager.ts` | OAuth 토큰 하나의 저장, 갱신, 터미널(`.credentials.json`)과의 양방향 동기화 |
 | `src/child-env.ts` | 봇이 띄우는 세션의 환경 변수에서 API 키를 뺌 (`withoutApiKey()`, SDK와 CLI 두 길 공통) |
 | `src/version.ts` | 버전 정보 + 업데이트 체크 (`getVersionInfo()`, `checkForUpdates()`) |
-| `src/rate-limit-utils.ts` | 공유 rate limit 감지 유틸 (`isRateLimitText()`, `isRateLimitError()`) |
+| `src/rate-limit-utils.ts` | 공유 rate limit 감지 유틸 (`isRateLimitText()`, `isRateLimitError()`), 엔진 상태에 적을 막힘 판정 (`classifyClaudeEvent()`, `classifyClaudeErrorText()`) |
+| `src/engine-state.ts` | 엔진 상태의 정본: 엔진별 막힘, 회복 시각, 사용률, 안내 키 (`.engine-state.json`) |
+| `src/engine-tap.ts` | 전송 탭: SDK와 CLI 이벤트에서 엔진 상태를 기록하는 단일 지점 (`ClaudeTap`) |
+| `src/engine-recovery.ts` | 회복 타이머: 가장 이른 회복 시각 1분 뒤에 드레인, 기동 시 파일에서 다시 설정 |
+| `src/engine-notice.ts` | DM 담당 엔진이 바뀔 때 보내는 한 줄 안내 (기본 꺼짐, `ENGINE_NOTICE=on`일 때만 전송) |
+| `src/rate-limit-until.ts` | 옛 함수 이름을 유지하는 호환 계층 (엔진 상태의 Claude 항목을 읽고 씀) |
 | `src/process-memory-watchdog.ts` | 시스템 메모리 워치독 — 커밋 메모리 감시, 프로세스 kill, Slack 확인 UI |
 | `src/report-server.ts` | 로컬 HTTP 서버 — 업무 칸반 · 수동 분석 실행, 127.0.0.1, 토큰 인증 |
 | `src/config.ts` | 환경변수 로드 |

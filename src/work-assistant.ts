@@ -62,6 +62,58 @@ function randomId(): string {
 }
 
 /**
+ * 캡처 큐 파일. **파이썬과 같은 규칙** — `WORK_ASSISTANT_HOME` 이 있으면 그 아래, 없으면 레포 루트
+ * (`tasks.py` 의 `HOME = WORK_ASSISTANT_HOME or ROOT`). 둘이 다른 파일을 보면 잠금도 다른 파일을 잡는다.
+ */
+export function inboxFile(root: string): string {
+  return path.join(process.env.WORK_ASSISTANT_HOME || root, 'inbox.jsonl');
+}
+
+// 캡처 큐 잠금 (2026-10-14) — 파이썬(`tasks.py` `_inbox_lock`)과 **같은 파일 · 같은 규칙**이다.
+// 파이썬은 `inbox.jsonl` 을 통째로 다시 쓰는데, 그 사이에 여기서 덧붙인 줄은 **사라진다**(받은 말을
+// 잃는다). 이름·묵은 기준을 바꾸면 둘을 같이 바꾼다.
+/** 이보다 오래된 잠금은 죽은 프로세스가 남긴 것으로 보고 지운다 — `INBOX_LOCK_STALE_S`. */
+export const INBOX_LOCK_STALE_MS = 30_000;
+/** 덧붙이기는 이만큼만 기다리고 못 잡아도 붙인다 — `INBOX_ADD_WAIT_S`. */
+export const INBOX_ADD_WAIT_MS = 2_000;
+/** 다시 해 보는 간격 — `time.sleep(0.02)`. */
+const INBOX_LOCK_POLL_MS = 20;
+
+/** 동기로 잠깐 잔다 — 캡처는 동기 함수라(부르는 쪽이 기다리지 않는다) 이벤트 루프를 짧게 세운다. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * 잠금 파일을 만들어 잡는다(`O_CREAT|O_EXCL` = `'wx'`, 안에 pid). 못 잡으면 `false`.
+ * 묵은 잠금은 지우고 바로 다시 해 본다.
+ */
+function takeInboxLock(lock: string, waitMs: number): boolean {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      const fd = fs.openSync(lock, 'wx');
+      try { fs.writeSync(fd, `${process.pid}\n`); } finally { fs.closeSync(fd); }
+      return true;
+    } catch (err: any) {
+      // 있다(EEXIST) · 윈도에서 지우는 중인 파일(EPERM) — 기다릴 일이다. 그 밖(폴더가 없음 등)은
+      // 기다려도 안 풀리므로 바로 손을 뗀다.
+      if (err?.code !== 'EEXIST' && err?.code !== 'EPERM') return false;
+    }
+    try {
+      if (Date.now() - fs.statSync(lock).mtimeMs > INBOX_LOCK_STALE_MS) {
+        fs.rmSync(lock, { force: true });
+        continue;
+      }
+    } catch {
+      /* 그 사이에 풀렸다 — 아래에서 다시 해 본다 */
+    }
+    if (Date.now() >= deadline) return false;
+    sleepSync(INBOX_LOCK_POLL_MS);
+  }
+}
+
+/**
  * 슬랙에서 받은 원문을 캡처 큐에 적는다. **해석하지 않는다.**
  *
  * 순서가 규칙이다 — 원문 저장(결정론) → 해석(세션) → 닫기. 해석이 실패해도
@@ -70,6 +122,9 @@ function randomId(): string {
  * 슬랙 원문에는 따옴표·줄바꿈·한글이 섞이는데, 이걸 CLI 인자로 넘기면
  * win32 `shell:true` spawn 에서 깨지거나 주입 위험이 생긴다. 파일에 직접
  * 쓰면 그 문제 자체가 없어진다.
+ *
+ * **덧붙일 때 파이썬과 같은 잠금을 잡는다**(`<inbox>.lock`) — 파이썬이 파일을 통째로 다시 쓰는
+ * 사이에 덧붙인 줄은 덮여 사라진다. 2초 안에 못 잡으면 경고를 남기고 그대로 덧붙인다.
  */
 export function captureToInbox(text: string, source = 'slack', thread?: string): InboxRecord | null {
   const root = workAssistantRoot();
@@ -84,13 +139,21 @@ export function captureToInbox(text: string, source = 'slack', thread?: string):
     task: null,
     note: null,
   };
+  const file = inboxFile(root);
+  const lock = `${file}.lock`;
+  // 잠금을 짧게 기다리되 **못 잡아도 덧붙인다** — 받은 말을 잃지 않는 것이 먼저다.
+  const locked = takeInboxLock(lock, INBOX_ADD_WAIT_MS);
+  if (!locked) logger.warn('캡처 큐 잠금을 못 잡아 그대로 덧붙입니다', { waitedMs: INBOX_ADD_WAIT_MS });
   try {
-    fs.appendFileSync(path.join(root, 'inbox.jsonl'),
-      JSON.stringify(rec) + '\n', { encoding: 'utf-8' });
+    fs.appendFileSync(file, JSON.stringify(rec) + '\n', { encoding: 'utf-8' });
     return rec;
   } catch (err) {
     logger.error('inbox capture failed', err);
     return null;
+  } finally {
+    if (locked) {
+      try { fs.rmSync(lock, { force: true }); } catch { /* 다음 잡는 쪽이 묵은 것으로 지운다 */ }
+    }
   }
 }
 
@@ -102,8 +165,8 @@ export function captureToInbox(text: string, source = 'slack', thread?: string):
  * 어긋났다: 한도 큐가 08/24 의 서버 과부하(529)를 5시간짜리 한도로 잡아
  * 이레를 들고 있는 동안, 캡처 큐는 같은 건을 그날 안에 제대로 닫았다.
  *
- * ⚠️ **캡처를 붙일 때와 달리 파이썬을 거친다.** 붙이기는 이어 쓰기라 봇이 직접
- * 해도 안전한데, 이것은 **파일 전체를 다시 쓰는 일**이라 소유자가 하나여야 한다.
+ * ⚠️ **캡처를 붙일 때와 달리 파이썬을 거친다.** 붙이기는 이어 쓰기라 잠금만 같이 잡으면
+ * 봇이 직접 해도 되는데, 이것은 **파일 전체를 다시 쓰는 일**이라 소유자가 하나여야 한다.
  * 느리지만(0.4초) 이 길은 드물게 돈다 — 로그 전체에서 실제로 막힌 것이 1건이다.
  *
  * ⚠️ **닫힌 캡처에도 적는다.** 「닫힘」은 「다 했다」가 아니라 「무언가 썼다」라서
@@ -183,7 +246,7 @@ export async function dropCapture(id: string, why: string): Promise<void> {
 export function openCaptureCount(): number {
   const root = workAssistantRoot();
   if (!root) return 0;
-  const file = path.join(root, 'inbox.jsonl');
+  const file = inboxFile(root);
   if (!fs.existsSync(file)) return 0;
   try {
     return fs.readFileSync(file, 'utf-8').split('\n')

@@ -142,6 +142,7 @@ const messages: Record<string, Record<Locale, string>> = {
 
   // --- Rate limit ---
   'rateLimit.reached': { en: '*Rate limit reached.*', ko: '*Rate limit에 도달했습니다.*' },
+  'rateLimit.overloaded': { en: '*Claude servers are overloaded.*', ko: '*Claude 서버가 과부하 상태입니다.*' },
   'rateLimit.retryEstimate': { en: 'Estimated retry: *{{time}}* ({{minutes}} min later)', ko: '예상 재시도 시간: *{{time}}* ({{minutes}}분 후)' },
   'rateLimit.prompt': { en: '_Prompt: {{prompt}}_', ko: '_프롬프트: {{prompt}}_' },
   'rateLimit.cancel': { en: 'Cancel', ko: '취소' },

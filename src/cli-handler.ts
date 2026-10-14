@@ -4,6 +4,7 @@ import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
 import { errorCollector } from './error-collector';
 import { withoutApiKey } from './child-env';
+import { ClaudeTap } from './engine-tap';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -168,10 +169,14 @@ export class CliProcess {
   }
 
   async *[Symbol.asyncIterator](): AsyncIterableIterator<CliEvent> {
+    // 엔진 상태를 적는 곳 — 내보내는 이벤트를 하나도 빼지 않고 본다(`engine-tap.ts`).
+    const tap = new ClaudeTap();
     while (true) {
       // Drain buffered events first
       if (this.events.length > 0) {
-        yield this.events.shift()!;
+        const event = this.events.shift()!;
+        tap.see(event);
+        yield event;
         continue;
       }
 
@@ -189,6 +194,7 @@ export class CliProcess {
         return;
       }
 
+      tap.see(result.value);
       yield result.value;
     }
   }

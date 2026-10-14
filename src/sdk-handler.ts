@@ -13,6 +13,7 @@ import { McpManager } from './mcp-manager';
 import { errorCollector } from './error-collector';
 import { event as recordEvent } from './board-queue';
 import { withoutApiKey } from './child-env';
+import { ClaudeTap } from './engine-tap';
 import type {
   CliEvent,
   CliInitEvent,
@@ -137,10 +138,15 @@ export class SdkProcess {
   }
 
   async *[Symbol.asyncIterator](): AsyncIterableIterator<CliEvent> {
+    // 엔진 상태를 적는 곳 — 내보내는 이벤트를 하나도 빼지 않고 본다(`engine-tap.ts`).
+    const tap = new ClaudeTap();
     try {
       for await (const sdkMsg of this.query) {
         const event = interpretSdkMessage(sdkMsg);
-        if (event) yield event;
+        if (event) {
+          tap.see(event);
+          yield event;
+        }
       }
     } catch (err: any) {
       const isAbort = err?.name === 'AbortError' || /abort/i.test(String(err?.message || ''));
@@ -148,7 +154,7 @@ export class SdkProcess {
         this.logger.error('SDK query threw', err);
         errorCollector.add('SdkHandler', `SDK query 실패: ${err?.message || err}`);
       }
-      yield {
+      const failed = {
         type: 'result',
         subtype: isAbort ? 'error_timeout' : 'error',
         session_id: '',
@@ -158,6 +164,8 @@ export class SdkProcess {
         is_error: true,
         result: isAbort ? 'aborted' : String(err?.message || err),
       } as CliResultEvent;
+      tap.see(failed);
+      yield failed;
     } finally {
       this.done = true;
     }

@@ -35,7 +35,7 @@ const DIGEST_MAX_ITEMS = 18;
 /** `-report <이름 일부>` 가 여러 종류에 맞을 때 링크를 몇 개까지 — 한 줄 context 블록에 들어가게. */
 const REPORT_LINKS_MAX = 8;
 /** 한도 회복 시각 정각이 아니라 1분 뒤에 이어 간다 — 딱 맞춰 부르면 아직 안 풀린 채 또 막힌다
- *  (`slack-handler.ts` `armRateLimitRecovery` 와 같은 까닭). */
+ *  (`engine-recovery.ts` `RECOVERY_SLACK_MS` 와 같은 까닭). */
 const RESUME_SLACK_MS = 60_000;
 /** 세션이 회복 시각을 안 알려 줬을 때 다시 해 보는 간격 — 이어 가기 타이머와 같은 한 시간. */
 const RESUME_UNKNOWN_MS = 60 * 60_000;

@@ -66,6 +66,10 @@ coverage/
 .inflight-sessions.json
 # 한도에 막혀 밀린 요청 — 사용자가 보낸 원문이 들어간다
 .rate-limit-until.json
+# 엔진 상태(막힘 · 회복 시각 · 사용률 · 안내 키) — 쓰는 중 임시 파일 `.engine-state.json.<pid>.tmp` 포함
+.engine-state.json*
+# 엔진 폴백 연습용 상태(다음 단계)
+.engine-drill.json*
 # 한도로 미룬 처리 제안 검토 (런타임 상태)
 .actions-resume*.json
 # 처리 제안 ↔ 슬랙 스레드 대응 (런타임 상태 · DM 메시지 ts · 쓰는 중 임시 파일 `.tmp` 포함)

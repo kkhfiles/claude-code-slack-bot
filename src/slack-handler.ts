@@ -18,7 +18,11 @@ import { config } from './config';
 import { Locale, t, formatTime, formatDateTime, getHelpText as getHelpTextI18n } from './messages';
 import { getVersionInfo, checkForUpdates } from './version';
 import { isRateLimitText as isRateLimitTextUtil, isRateLimitError as isRateLimitErrorUtil } from './rate-limit-utils';
-import { setUntil, stillBlocked, clearUntil } from './rate-limit-until';
+import { stillBlocked } from './rate-limit-until';
+import { engineState, type Block } from './engine-state';
+import { currentClaudeBlock, thrownClaudeBlock } from './engine-tap';
+import { EngineRecovery } from './engine-recovery';
+import { EngineNotice } from './engine-notice';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 import { SdkUpdate, RUN_ACTION as SDK_UPDATE_RUN, SKIP_ACTION as SDK_UPDATE_SKIP } from './sdk-update';
 import { DaouLoginNotifier, ACTION_ID as DAOU_LOGIN_ACTION } from './daou-login';
@@ -257,8 +261,21 @@ export class SlackHandler {
   // One-time approved tools (consumed on next handleMessage call)
   private pendingOneTimeTools: Map<string, string[]> = new Map();
 
-  // 한도 회복 시각에 깨어나는 타이머. 큐가 파일이라 재시작해도 다시 걸 수 있다.
-  private limitTimer?: ReturnType<typeof setTimeout>;
+  // 한도 회복 시각에 깨어나는 타이머 하나 — 시각은 엔진 상태 파일에 있어 재시작 뒤에도 다시 건다
+  // (`engine-recovery.ts`). 깨어나면 밀린 것을 드레인하고 엔진 안내를 다시 본다.
+  private engineRecovery = new EngineRecovery({
+    onRecover: async () => {
+      await this.engineNotice.check();
+      await this.drainStuck('한도 회복');
+    },
+  });
+  // DM 을 맡는 엔진이 바뀔 때 한 줄 안내 — 기본 꺼짐(`ENGINE_NOTICE=on`) · 꺼져 있으면 로그만.
+  private engineNotice = new EngineNotice({
+    post: async (text) => {
+      if (!config.assistant.dmChannel) return;
+      await this.app.client.chat.postMessage({ channel: config.assistant.dmChannel, text });
+    },
+  });
 
   // Plan mode: store session info for "Execute" button
   private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string | undefined; user: string }> = new Map();
@@ -1799,11 +1816,11 @@ export class SlackHandler {
         // 이유별 장치라 실제로 어긋났다(08/24 의 서버 과부하를 5시간짜리 한도로
         // 잡아 이레를 들고 있었다). 정본은 캡처 큐 한 곳으로 간다.
         void markCaptureFailed(captureId, 'limit');
-        const retryAfter = rateLimitInfo
-          ? rateLimitInfo.retryAfterSec
-          : this.parseRetryAfterSeconds({ message: rateLimitMessageText });
+        // **언제 다시 할지는 엔진 상태가 정한다** — 사용량 소진은 서버가 준 시각, 과부하는 10분부터.
+        // 전에는 시각을 못 읽으면 5시간으로 잡아 529 한 번에 큐를 다섯 시간 세웠다.
+        const block = currentClaudeBlock(rateLimitInfo?.resetsAt, rateLimitMessageText);
 
-        await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, retryAfter, locale, say, ts, captureId);
+        await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, block, locale, say, ts, captureId);
       }
 
       // Clean up temp files
@@ -1820,20 +1837,18 @@ export class SlackHandler {
       await this.removeAnchorReaction(sessionKey);
 
       // Rate limit detection from error
-      const rateLimitSource = rateLimitMessageText
-        ? { message: rateLimitMessageText }
-        : this.isRateLimitError(error) ? error : null;
+      // 스트림에서 본 한도 글이면 Claude 의 것이 확실하다. 던진 오류는 슬랙 같은 남의 실패일 수 있어
+      // Claude 한도·과부하 글로 읽힐 때만 막힘으로 적는다(`thrownClaudeBlock`).
+      const block = rateLimitMessageText
+        ? currentClaudeBlock(rateLimitInfo?.resetsAt, rateLimitMessageText)
+        : this.isRateLimitError(error) ? thrownClaudeBlock(error) : null;
 
       // **터진 것도 같은 자국을 남긴다.** 한도인지 아닌지는 재시도 *시점*만
       // 가르고, 「처리 못 했다」는 사실은 둘이 같다.
-      void markCaptureFailed(captureId, rateLimitSource ? 'limit' : 'error');
+      void markCaptureFailed(captureId, block ? 'limit' : 'error');
 
-      if (rateLimitSource) {
-        const retryAfter = rateLimitInfo
-          ? rateLimitInfo.retryAfterSec
-          : this.parseRetryAfterSeconds(rateLimitSource);
-
-        await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, retryAfter, locale, say, ts, captureId);
+      if (block) {
+        await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, block, locale, say, ts, captureId);
       } else {
         await say({ text: t('error.generic', locale, { message: error.message || t('error.somethingWrong', locale) }), thread_ts: thread_ts || ts });
       }
@@ -1976,30 +1991,32 @@ export class SlackHandler {
 
   // --- Rate limit UI helper ---
 
-  /** 이번 한도 구간에서 안내를 이미 올렸나 — 두 번째부터는 ✋ 만 붙인다. */
-  private limitNoticed = false;
-
   private async handleRateLimitUI(
     channel: string, threadTs: string,
-    prompt: string, retryAfterSec: number, locale: Locale, say: any,
+    prompt: string, block: Block, locale: Locale, say: any,
     messageTs?: string, captureId?: string
   ): Promise<void> {
-    const postAt = Math.floor(Date.now() / 1000) + retryAfterSec;
+    const now = Math.floor(Date.now() / 1000);
+    const postAt = block.until ?? now + 60;
+    const retryAfterSec = Math.max(60, postAt - now);
     const retryTimeStr = formatTime(new Date(postAt * 1000), locale);
 
     // **원문은 캡처 큐가 든다** — 이유를 안 가리고 쌓이며 처리되면 스스로 닫힌다
     // (`markCaptureFailed` 가 이미 자국을 남겼다). 여기서 또 목록을 들면 두
     // 목록이 어긋난다 — 2026-08/24 의 서버 과부하를 5시간짜리 한도로 잡아
-    // 이레를 들고 있던 것이 그 어긋남이었다. 남기는 것은 **풀리는 시각 하나**다.
-    setUntil(postAt);
-    this.armRateLimitRecovery(postAt);
+    // 이레를 들고 있던 것이 그 어긋남이었다. 풀리는 시각은 엔진 상태가 들고,
+    // 회복 타이머는 그 상태가 바뀔 때 스스로 다시 걸린다(`engine-recovery.ts`).
 
     // 두 번째부터는 같은 안내를 올리지 않는다 — 한도가 걸린 동안 보낸 메시지마다
     // 버튼 뭉치가 하나씩 쌓이면 그 자체가 도배다. 회복 시각에 한 번에 보여 준다.
+    // **「이미 올렸나」는 엔진 상태에 적는다** — 막힘 하나(갈래 · 다시 볼 시각)마다 한 번이고,
+    // 재시작해도 남는다. 전에는 메모리 깃발이었는데 아무도 세우지 않아 매번 안내가 나갔다.
     //
     // **대신 ✋ 를 붙인다.** 아무 신호도 안 주면 이미 달린 ❌ 만 남아 실패로 읽히고,
     // 실패로 읽힌 요청은 사람이 다시 보낸다 — 그러면 같은 것이 두 번 처리된다.
-    if (this.limitNoticed) {
+    // 열쇠는 **막힘이 시작된 시각**이다 — 풀리는 시각으로 잡으면 과부하가 이어질 때마다(10 → 20 → 40분)
+    // 시각이 늘어 안내가 다시 나갔다. 같은 구간이면 한 번 · 풀렸다 다시 막히면 그때 한 번.
+    if (!engineState.noticeOnce(`claude:${block.kind}:${block.since}`)) {
       this.logger.info('한도 안내는 이미 올렸습니다 — 손만 듭니다');
       if (messageTs) {
         await this.app.client.reactions.add({ channel, timestamp: messageTs, name: 'raised_hand' })
@@ -2021,11 +2038,14 @@ export class SlackHandler {
       { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: JSON.stringify({ captureId }) },
     ];
 
+    // 과부하는 한도가 아니다 — 같은 「한도에 도달」로 쓰면 사람이 사용량을 다 쓴 줄 안다.
+    const head = t(block.kind === 'overload' ? 'rateLimit.overloaded' : 'rateLimit.reached', locale);
+    const eta = t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfterSec / 60) });
     await say({
       thread_ts: threadTs,
-      text: `⏳ ${t('rateLimit.reached', locale)} ${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfterSec / 60) })}`,
+      text: `⏳ ${head} ${eta}`,
       blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: `⏳ ${t('rateLimit.reached', locale)}\n${t('rateLimit.retryEstimate', locale, { time: retryTimeStr, minutes: Math.round(retryAfterSec / 60) })}` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `⏳ ${head}\n${eta}` } },
         { type: 'context', elements: [{ type: 'mrkdwn', text: t('rateLimit.prompt', locale, { prompt: promptPreview }) }] },
         { type: 'actions', elements: buttons },
       ],
@@ -2035,22 +2055,14 @@ export class SlackHandler {
   // --- 한도에 막혀 밀린 요청 ---
 
   /**
-   * 회복 시각에 깨어나 사람에게 묻도록 예약한다.
+   * 엔진 감시를 켠다 — **기동 드레인 뒤에** 부른다.
    *
-   * **정각이 아니라 1분 뒤에 깨운다** — 회복 시각에 딱 맞춰 부르면 아직 안 풀린
-   * 채로 또 막혀 한 판을 헛돈다(기존 자동 재실행도 같은 이유로 60초를 더한다).
+   * 회복 타이머를 파일에서 다시 걸고(재시작이 메모리 타이머를 지운다 — 전에는 다시 거는 곳이
+   * 없어 회복 시각이 와도 아무도 안 깨웠다) 엔진 안내가 막힘 변화를 듣게 한다.
    */
-  private armRateLimitRecovery(resetsAt: number | null): void {
-    if (!resetsAt) return;
-    if (this.limitTimer) clearTimeout(this.limitTimer);
-    const delay = Math.max(60_000, resetsAt * 1000 + 60_000 - Date.now());
-    this.limitTimer = setTimeout(() => {
-      this.limitTimer = undefined;
-      this.limitNoticed = false;
-      clearUntil();
-      this.drainStuck('한도 회복').catch((e) => this.logger.error('drain failed', e));
-    }, delay);
-    this.logger.info('Rate-limit recovery armed', { resetsAt, inMinutes: Math.round(delay / 60_000) });
+  private startEngineWatch(): void {
+    this.engineRecovery.init();
+    this.engineNotice.init();
   }
 
   /**
@@ -2776,6 +2788,7 @@ export class SlackHandler {
     // **리미트는 산문이 아니라 이벤트로 온다.** 여기서 안 받으면 부르는 쪽은
     // 모델이 쓴 본문을 정규식으로 훑는 수밖에 없고, 그러면 「429를 분석한
     // 보고서」가 「429에 걸린 세션」으로 둔갑한다(2026-05~08 오탐 13회).
+    // 엔진 상태에 적는 것은 전송 탭(`engine-tap.ts`)이 이미 했다 — 여기서는 부른 쪽에 돌려주기만 한다.
     let rateLimited = false;
     let rateLimitResetsAt: number | undefined;
     let isError = false;
@@ -2888,30 +2901,6 @@ export class SlackHandler {
 
   private isRateLimitText(text: string): boolean {
     return isRateLimitTextUtil(text);
-  }
-
-  // Extra buffer after reset time to avoid hitting limit again immediately
-  private readonly RETRY_BUFFER_SECONDS = 3 * 60; // 3 minutes
-
-  private parseRetryAfterSeconds(error: any): number {
-    const msg = error?.message || '';
-    const match = msg.match(/retry.?after[:\s]+(\d+)/i);
-    if (match) return parseInt(match[1], 10) + this.RETRY_BUFFER_SECONDS;
-    const minMatch = msg.match(/(\d+)\s*minutes?/i);
-    if (minMatch) return parseInt(minMatch[1], 10) * 60 + this.RETRY_BUFFER_SECONDS;
-    // "Spending cap reached resets 1pm" / "resets 2am" format
-    const resetsMatch = msg.match(/resets\s+(\d{1,2})\s*(am|pm)/i);
-    if (resetsMatch) {
-      let hour = parseInt(resetsMatch[1], 10);
-      if (resetsMatch[2].toLowerCase() === 'pm' && hour < 12) hour += 12;
-      if (resetsMatch[2].toLowerCase() === 'am' && hour === 12) hour = 0;
-      const now = new Date();
-      const resetTime = new Date(now);
-      resetTime.setHours(hour, 0, 0, 0);
-      if (resetTime <= now) resetTime.setDate(resetTime.getDate() + 1);
-      return Math.max(60, Math.floor((resetTime.getTime() - now.getTime()) / 1000) + this.RETRY_BUFFER_SECONDS);
-    }
-    return 5 * 60 * 60;
   }
 
   private isMcpInfoCommand(text: string): boolean {
@@ -3578,11 +3567,14 @@ export class SlackHandler {
     });
 
     // 재시작에 끊긴 대화 알리기. 기동 직후는 슬랙 연결이 아직이라 잠깐 미룬다.
+    // 드레인 뒤에 회복 타이머를 엔진 상태 파일에서 다시 건다(`startEngineWatch`) — 안 풀린
+    // 막힘이면 기동 드레인은 쉬고, 그 막힘이 풀리는 시각에 이 타이머가 깨운다.
     setTimeout(() => this.reportInterruptedSessions()
       // **알리고 나서 돌린다** — 순서가 규칙이다. 먼저 돌리면 끊긴 차례의
       // 자국(`interrupted`)이 아직 안 찍혀 그 건이 목록에서 빠진다.
       .then(() => this.drainStuck('기동'))
-      .catch(() => { }), 12_000);
+      .catch(() => { })
+      .then(() => this.startEngineWatch()), 12_000);
 
     // Cleanup inactive sessions periodically
     setInterval(() => {

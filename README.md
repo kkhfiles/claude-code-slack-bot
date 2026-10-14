@@ -523,7 +523,11 @@ src/
 ├── mcp-manager.ts               # MCP server management
 ├── calendar-poller.ts           # Google Calendar direct HTTP polling
 ├── error-collector.ts           # Error collection for briefing reports
-├── rate-limit-utils.ts          # Shared rate limit detection
+├── rate-limit-utils.ts          # Shared rate limit detection + usage/overload classification
+├── engine-state.ts              # Engine state (blocks, recovery times, utilization) — .engine-state.json
+├── engine-tap.ts                # Records engine state from SDK/CLI events (one place)
+├── engine-recovery.ts           # Single recovery timer, re-armed from file at boot
+├── engine-notice.ts             # One-line engine-switch notices (off unless ENGINE_NOTICE=on)
 ├── process-memory-watchdog.ts   # System memory watchdog (Windows)
 ├── report-server.ts             # Local HTTP server — work board + manual analysis trigger (127.0.0.1, token auth)
 ├── version.ts                   # Version info and update checker
