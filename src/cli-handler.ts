@@ -3,6 +3,7 @@ import { ConversationSession } from './types';
 import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
 import { errorCollector } from './error-collector';
+import { withoutApiKey } from './child-env';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -416,12 +417,12 @@ export class CliHandler {
     // Prompt is passed via stdin (not positional arg)
     // because --allowedTools is variadic and consumes all remaining args
 
-    // Environment
-    const spawnEnv: Record<string, string> = {
-      ...process.env as Record<string, string>,
+    // Environment — API 키는 늘 뺀다(PC 에 남은 키로 과금되지 않게 · `child-env.ts`)
+    const spawnEnv = withoutApiKey({
+      ...process.env,
       CLAUDECODE: '', // prevent nesting
-    };
-    if (opts.env) Object.assign(spawnEnv, opts.env);
+      ...opts.env,
+    });
 
     this.logger.info('Spawning CLI process', {
       prompt: prompt.substring(0, 200) + (prompt.length > 200 ? '...' : ''),

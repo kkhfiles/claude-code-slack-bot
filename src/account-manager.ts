@@ -4,13 +4,8 @@ import * as os from 'os';
 import { Logger } from './logger';
 import { errorCollector } from './error-collector';
 
-export type AccountId = 'account-1' | 'account-2' | 'account-3';
-
-export interface AccountInfo {
-  id: AccountId;
-  exists: boolean;
-  email?: string;
-}
+// 계정 하나의 OAuth 토큰만 든다. 여러 계정 사이 전환은 2026-10-14 사용자 결정으로 걷었다 —
+// 한도 소진은 엔진 폴백 · 보류 재실행이 대신한다. 파일 모양(`currentAccount` · `accounts`)은 그대로 둔다.
 
 interface OAuthTokenData {
   accessToken: string;
@@ -20,15 +15,16 @@ interface OAuthTokenData {
   subscriptionType?: string;
   rateLimitTier?: string;
   email?: string;
-  oauthAccount?: Record<string, unknown>; // Full ~/.claude.json oauthAccount for terminal sync
+  oauthAccount?: Record<string, unknown>; // Full ~/.claude.json oauthAccount (kept as stored)
 }
 
 interface AccountsFileData {
-  currentAccount: AccountId;
-  accounts: Partial<Record<AccountId, OAuthTokenData>>;
+  currentAccount: string;
+  accounts: Partial<Record<string, OAuthTokenData>>;
 }
 
-const ACCOUNT_CHAIN: AccountId[] = ['account-1', 'account-2', 'account-3'];
+/** 토큰이 들어 있는 자리. 옛 파일과 같은 이름이라 지금 파일이 그대로 읽힌다. */
+const SLOT = 'account-1';
 const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const TOKEN_EXPIRY_BUFFER_MS = 90 * 60 * 1000; // Refresh 90 minutes before expiry (> 1h health check interval)
@@ -39,13 +35,11 @@ export class AccountManager {
   private readonly credentialsFile: string;
   private readonly accountsFile: string;
 
-  private currentAccount: AccountId = 'account-1';
   private watchDebounceTimer?: ReturnType<typeof setTimeout>;
 
   constructor() {
     this.credentialsFile = path.join(this.claudeDir, '.credentials.json');
     this.accountsFile = path.join(this.claudeDir, '.bot-accounts.json');
-    this.loadAccounts();
     this.startCredentialsWatcher();
   }
 
@@ -74,15 +68,12 @@ export class AccountManager {
     try {
       if (fs.existsSync(this.accountsFile)) {
         const data: AccountsFileData = JSON.parse(fs.readFileSync(this.accountsFile, 'utf-8'));
-        if (ACCOUNT_CHAIN.includes(data.currentAccount)) {
-          this.currentAccount = data.currentAccount;
-        }
+        if (!data.accounts) data.accounts = {};
+        data.currentAccount = SLOT;
         return data;
       }
-    } catch {
-      this.currentAccount = 'account-1';
-    }
-    return { currentAccount: this.currentAccount, accounts: {} };
+    } catch { /* 깨진 파일 — 빈 것으로 본다 */ }
+    return { currentAccount: SLOT, accounts: {} };
   }
 
   private saveAccounts(data: AccountsFileData): void {
@@ -128,65 +119,25 @@ export class AccountManager {
 
   // --- Public API ---
 
-  getCurrentAccount(): AccountId {
-    return this.currentAccount;
-  }
-
-  /** Update the tracked active account without any file operations. */
-  setCurrentAccount(id: AccountId): void {
-    const data = this.loadAccounts();
-    this.currentAccount = id;
-    data.currentAccount = id;
-    this.saveAccounts(data);
-  }
-
-  getAccountList(): AccountInfo[] {
-    const data = this.loadAccounts();
-    return ACCOUNT_CHAIN.map(id => ({
-      id,
-      exists: !!data.accounts[id]?.accessToken,
-      email: data.accounts[id]?.email,
-    }));
-  }
-
-  /** Returns the next account in the chain that has credentials, or null if exhausted. */
-  getNextAccount(): AccountId | null {
-    const data = this.loadAccounts();
-    const current = ACCOUNT_CHAIN.indexOf(this.currentAccount);
-    for (let i = current + 1; i < ACCOUNT_CHAIN.length; i++) {
-      const candidate = ACCOUNT_CHAIN[i];
-      if (data.accounts[candidate]?.accessToken) {
-        return candidate;
-      }
-    }
-    return null;
-  }
-
   /**
-   * After refreshing a token, sync it to .credentials.json if this account
-   * is currently active on the terminal (matched by email from ~/.claude.json).
+   * After refreshing a token, sync it to .credentials.json if the stored account
+   * is the one active on the terminal (matched by email from ~/.claude.json).
    * Ensures any refresh — health check, CLI spawn, etc. — propagates to all consumers.
    */
-  private syncToCredentialsIfActive(accountId: AccountId, data: AccountsFileData): void {
+  private syncToCredentialsIfActive(data: AccountsFileData): void {
     try {
-      const tokenData = data.accounts[accountId];
+      const tokenData = data.accounts[SLOT];
       if (!tokenData?.email) return;
-
-      const claudeJsonPath = path.join(os.homedir(), '.claude.json');
-      const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'));
-      const terminalEmail = claudeJson.oauthAccount?.emailAddress as string | undefined;
-
-      if (tokenData.email === terminalEmail) {
-        this.syncToCredentialsFile(accountId, data);
+      if (tokenData.email === this.getTerminalActiveEmail()) {
+        this.syncToCredentialsFile(data);
       }
     } catch { /* non-fatal */ }
   }
 
-  /** Get a valid access token for the given account (or current account). Refreshes if expired. */
-  async getAccessToken(id?: AccountId): Promise<string | null> {
-    const accountId = id || this.currentAccount;
+  /** Get a valid access token for the stored account. Refreshes if expired. */
+  async getAccessToken(): Promise<string | null> {
     const data = this.loadAccounts();
-    const tokenData = data.accounts[accountId];
+    const tokenData = data.accounts[SLOT];
     if (!tokenData?.accessToken) return null;
 
     // Check expiry (with proactive buffer)
@@ -195,24 +146,24 @@ export class AccountManager {
       // our refresh would invalidate the terminal's in-memory refresh token via OAuth rotation
       const terminalEmail = this.getTerminalActiveEmail();
       if (tokenData.email && tokenData.email === terminalEmail && tokenData.expiresAt > Date.now()) {
-        this.logger.debug('Skipping proactive refresh for terminal active account', { accountId });
+        this.logger.debug('Skipping proactive refresh for terminal active account');
         return tokenData.accessToken;
       }
 
       if (!tokenData.refreshToken) {
-        this.logger.warn('Token expired but no refresh token available', { accountId });
+        this.logger.warn('Token expired but no refresh token available');
         return null;
       }
-      this.logger.info('Token expired, refreshing', { accountId });
+      this.logger.info('Token expired, refreshing');
       const refreshed = await this.refreshOAuthToken(tokenData.refreshToken);
       if (refreshed) {
-        data.accounts[accountId] = { ...tokenData, ...refreshed };
+        data.accounts[SLOT] = { ...tokenData, ...refreshed };
         this.saveAccounts(data);
-        this.syncToCredentialsIfActive(accountId, data);
-        this.logger.info('Token refreshed successfully', { accountId });
+        this.syncToCredentialsIfActive(data);
+        this.logger.info('Token refreshed successfully');
         return refreshed.accessToken;
       }
-      this.logger.warn('Token refresh failed, token is unusable', { accountId });
+      this.logger.warn('Token refresh failed, token is unusable');
       return null;
     }
 
@@ -220,88 +171,54 @@ export class AccountManager {
   }
 
   /**
-   * Check all configured accounts' token health by attempting refresh if expired.
+   * Check the stored account's token health by attempting refresh if expired.
    * Syncs from .credentials.json first to pick up any external token updates.
-   * Returns list of accounts whose tokens are invalid (refresh failed).
+   * Returns the account if its token is invalid (refresh failed), else an empty list.
    */
-  async checkTokenHealth(): Promise<Array<{ id: AccountId; email?: string }>> {
+  async checkTokenHealth(): Promise<Array<{ id: string; email?: string }>> {
     this.syncFromCredentialsFile();
 
     const data = this.loadAccounts();
-    const unhealthy: Array<{ id: AccountId; email?: string }> = [];
+    const tokenData = data.accounts[SLOT];
+    if (!tokenData?.accessToken) return []; // Not configured, skip
 
-    // Don't proactively refresh terminal's active account — terminal manages its own refresh,
-    // and our refresh would invalidate its in-memory refresh token via OAuth rotation
+    // Don't proactively refresh terminal's active account if its token is still valid —
+    // terminal manages its own refresh, and our refresh would invalidate its in-memory
+    // refresh token via OAuth rotation
     const terminalEmail = this.getTerminalActiveEmail();
+    if (tokenData.email && tokenData.email === terminalEmail
+        && tokenData.expiresAt && tokenData.expiresAt > Date.now()) {
+      this.logger.debug('Health check: skipping terminal active account');
+      return [];
+    }
 
-    for (const id of ACCOUNT_CHAIN) {
-      const tokenData = data.accounts[id];
-      if (!tokenData?.accessToken) continue; // Not configured, skip
-
-      // Skip proactive refresh for terminal's active account if token is still valid
-      if (tokenData.email && tokenData.email === terminalEmail
-          && tokenData.expiresAt && tokenData.expiresAt > Date.now()) {
-        this.logger.debug('Health check: skipping terminal active account', { accountId: id });
-        continue;
-      }
-
-      // Check if token is expired or about to expire
-      if (tokenData.expiresAt && tokenData.expiresAt - TOKEN_EXPIRY_BUFFER_MS < Date.now()) {
-        if (!tokenData.refreshToken) {
-          unhealthy.push({ id, email: tokenData.email });
-          continue;
-        }
-        const refreshed = await this.refreshOAuthToken(tokenData.refreshToken);
-        if (refreshed) {
-          data.accounts[id] = { ...tokenData, ...refreshed };
-          this.saveAccounts(data);
-          this.syncToCredentialsIfActive(id, data);
-          this.logger.info('Token health check: refreshed successfully', { accountId: id });
-        } else {
-          unhealthy.push({ id, email: tokenData.email });
-          this.logger.warn('Token health check: refresh failed', { accountId: id, email: tokenData.email });
-        }
+    // Check if token is expired or about to expire
+    if (tokenData.expiresAt && tokenData.expiresAt - TOKEN_EXPIRY_BUFFER_MS < Date.now()) {
+      if (!tokenData.refreshToken) return [{ id: SLOT, email: tokenData.email }];
+      const refreshed = await this.refreshOAuthToken(tokenData.refreshToken);
+      if (refreshed) {
+        data.accounts[SLOT] = { ...tokenData, ...refreshed };
+        this.saveAccounts(data);
+        this.syncToCredentialsIfActive(data);
+        this.logger.info('Token health check: refreshed successfully');
+      } else {
+        this.logger.warn('Token health check: refresh failed', { email: tokenData.email });
+        return [{ id: SLOT, email: tokenData.email }];
       }
     }
 
-    return unhealthy;
+    return [];
   }
 
   /**
-   * Switch to a specific account. Syncs token to .credentials.json and
-   * oauthAccount to ~/.claude.json for terminal CLI.
-   * No refresh here — bot and terminal share the same token to avoid
-   * token rotation invalidating either side.
-   */
-  async switchTo(accountId: AccountId): Promise<boolean> {
-    const data = this.loadAccounts();
-    const tokenData = data.accounts[accountId];
-    if (!tokenData?.accessToken) {
-      this.logger.warn('Account not configured', { accountId });
-      return false;
-    }
-    const prev = this.currentAccount;
-    this.currentAccount = accountId;
-    data.currentAccount = accountId;
-    this.saveAccounts(data);
-
-    // Sync token to .credentials.json + oauthAccount to ~/.claude.json
-    this.syncToCredentialsFile(accountId, data);
-    this.syncClaudeJson(tokenData);
-    this.logger.info('Account switched', { from: prev, to: accountId });
-
-    return true;
-  }
-
-  /**
-   * Sync the given account's OAuth token to ~/.claude/.credentials.json
-   * so that terminal CLI also uses the switched account.
+   * Write the stored account's OAuth token to ~/.claude/.credentials.json
+   * so that terminal CLI picks up the bot's refresh.
    * Preserves other fields (e.g. mcpOAuth) in the credentials file.
    */
-  private syncToCredentialsFile(accountId: AccountId, accountsData?: AccountsFileData): void {
+  private syncToCredentialsFile(accountsData?: AccountsFileData): void {
     try {
       const data = accountsData || this.loadAccounts();
-      const tokenData = data.accounts[accountId];
+      const tokenData = data.accounts[SLOT];
       if (!tokenData?.accessToken) return;
 
       // Read existing credentials file to preserve other fields (e.g. mcpOAuth)
@@ -326,28 +243,10 @@ export class AccountManager {
       const tmpFile = this.credentialsFile + '.tmp';
       fs.writeFileSync(tmpFile, JSON.stringify(credData, null, 2), 'utf-8');
       fs.renameSync(tmpFile, this.credentialsFile);
-      this.logger.info('Synced credentials file', { accountId });
+      this.logger.info('Synced credentials file');
     } catch (error) {
       errorCollector.add('AccountManager', `자격 증명 파일 동기화 실패: ${(error as Error).message}`);
       this.logger.error('Failed to sync credentials file (non-fatal)', error);
-    }
-  }
-
-  /** Sync oauthAccount to ~/.claude.json so terminal shows the correct account info. */
-  private syncClaudeJson(tokenData: OAuthTokenData): void {
-    if (!tokenData.oauthAccount) return;
-    try {
-      const claudeJsonPath = path.join(os.homedir(), '.claude.json');
-      let claudeJson: Record<string, unknown> = {};
-      try {
-        claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'));
-      } catch { /* start fresh */ }
-      claudeJson.oauthAccount = tokenData.oauthAccount;
-      const tmpFile = claudeJsonPath + '.tmp';
-      fs.writeFileSync(tmpFile, JSON.stringify(claudeJson, null, 2), 'utf-8');
-      fs.renameSync(tmpFile, claudeJsonPath);
-    } catch (error) {
-      this.logger.error('Failed to sync claude.json (non-fatal)', error);
     }
   }
 
@@ -362,17 +261,9 @@ export class AccountManager {
     }
   }
 
-  /** Read the accessToken from the current credentials file (for Set wizard login detection). */
-  readCurrentToken(): string | null {
-    try {
-      const data = JSON.parse(fs.readFileSync(this.credentialsFile, 'utf-8'));
-      return data.claudeAiOauth?.accessToken || null;
-    } catch { return null; }
-  }
-
   /**
    * Sync tokens FROM .credentials.json into .bot-accounts.json (terminal→bot).
-   * Reads email from ~/.claude.json to identify which account was refreshed.
+   * Reads email from ~/.claude.json and only absorbs tokens of the same account.
    * Call before CLI spawn to pick up terminal's token refreshes.
    */
   syncFromCredentialsFile(): void {
@@ -390,24 +281,22 @@ export class AccountManager {
       } catch { return; } // Can't identify account without email
       if (!email) return;
 
-      // Find matching account by email
       const data = this.loadAccounts();
-      const matchingId = ACCOUNT_CHAIN.find(id => data.accounts[id]?.email === email);
-      if (!matchingId) return; // No matching account
+      const stored = data.accounts[SLOT];
+      if (!stored || stored.email !== email) return; // Terminal is on another account
 
-      const stored = data.accounts[matchingId]!;
       // Skip if tokens are already the same
       if (stored.accessToken === oauth.accessToken && stored.refreshToken === oauth.refreshToken) return;
 
       // Absorb the newer tokens from .credentials.json
-      data.accounts[matchingId] = {
+      data.accounts[SLOT] = {
         ...stored,
         accessToken: oauth.accessToken,
         refreshToken: oauth.refreshToken,
         expiresAt: oauth.expiresAt,
       };
       this.saveAccounts(data);
-      this.logger.info('Synced tokens from credentials file (terminal→bot)', { accountId: matchingId, email });
+      this.logger.info('Synced tokens from credentials file (terminal→bot)');
     } catch (error) {
       const msg = (error as Error).message || '';
       if (msg.includes('ENOENT')) {
@@ -416,76 +305,6 @@ export class AccountManager {
         errorCollector.add('AccountManager', `자격 증명 역동기화 실패: ${msg}`);
         this.logger.error('Failed to sync from credentials file (non-fatal)', error);
       }
-    }
-  }
-
-  /**
-   * Capture current .credentials.json token data into the given account slot.
-   * Shares token chain with terminal — the file watcher keeps tokens in sync
-   * when either side refreshes.
-   */
-  async captureForSlot(slot: AccountId): Promise<boolean> {
-    try {
-      const credData = JSON.parse(fs.readFileSync(this.credentialsFile, 'utf-8'));
-      const oauth = credData.claudeAiOauth;
-      if (!oauth?.accessToken) {
-        this.logger.error('No OAuth data in credentials file');
-        return false;
-      }
-      // Read full oauthAccount from ~/.claude.json (updated by Claude on login)
-      let oauthAccount: Record<string, unknown> | undefined;
-      let email: string | undefined;
-      try {
-        const claudeJsonPath = path.join(os.homedir(), '.claude.json');
-        const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'));
-        oauthAccount = claudeJson.oauthAccount;
-        email = oauthAccount?.emailAddress as string | undefined;
-      } catch { /* ignore */ }
-
-      const data = this.loadAccounts();
-      data.accounts[slot] = {
-        accessToken: oauth.accessToken,
-        refreshToken: oauth.refreshToken,
-        expiresAt: oauth.expiresAt,
-        scopes: oauth.scopes,
-        subscriptionType: oauth.subscriptionType,
-        rateLimitTier: oauth.rateLimitTier,
-        email,
-        oauthAccount,
-      };
-      this.saveAccounts(data);
-      this.logger.info('Captured credentials for slot', { slot, email });
-
-      return true;
-    } catch (error) {
-      errorCollector.add('AccountManager', `계정 슬롯 캡처 실패: ${(error as Error).message}`);
-      this.logger.error('Failed to capture slot credentials', error);
-      return false;
-    }
-  }
-
-  /** Switch to the next available account. Returns the new AccountId, or null if exhausted. */
-  async switchToNext(): Promise<AccountId | null> {
-    const next = this.getNextAccount();
-    if (!next) return null;
-    return (await this.switchTo(next)) ? next : null;
-  }
-
-  /** Remove credentials for a slot. */
-  unsetAccount(id: AccountId): boolean {
-    try {
-      const data = this.loadAccounts();
-      delete data.accounts[id];
-      if (this.currentAccount === id) {
-        this.currentAccount = 'account-1';
-        data.currentAccount = 'account-1';
-      }
-      this.saveAccounts(data);
-      this.logger.info('Account unset', { id });
-      return true;
-    } catch (error) {
-      this.logger.error('Failed to unset account', error);
-      return false;
     }
   }
 

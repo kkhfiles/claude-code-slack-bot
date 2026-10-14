@@ -8,7 +8,6 @@
 | `src/cli-handler.ts` | CLI 프로세스 스폰 (`claude -p`), 세션 관리 |
 | `src/sdk-handler.ts` | Agent SDK in-process 호출 (`@anthropic-ai/claude-agent-sdk`), `shouldUseSdk(scope)` 게이트 |
 | `src/working-directory-manager.ts` | 작업 디렉터리 설정/조회/영속화 |
-| `src/schedule-manager.ts` | 세션 자동 시작 스케줄 관리 (`.schedule-config.json` 영속화) |
 | `src/assistant-scheduler.ts` | 개인비서 스케줄러 — 브리핑/캘린더 리마인더/주간 분석 자동화 |
 | `src/calendar-poller.ts` | 캘린더 직접 HTTP 폴링, diff, AI 판단, 알림 발송 |
 | `src/error-collector.ts` | 봇 전체 에러 수집 싱글턴 — 브리핑에서 일괄 보고 |
@@ -16,7 +15,8 @@
 | `src/session-scanner.ts` | 전체 프로젝트 세션 스캔/피커 데이터 |
 | `src/messages.ts` | i18n 번역 카탈로그 (`t()` 함수, `Locale` 타입) |
 | `src/mcp-manager.ts` | MCP 서버 설정 로드/관리 |
-| `src/account-manager.ts` | 다중 계정 관리 — OAuth 토큰 저장/갱신, env var 주입 방식 전환 |
+| `src/account-manager.ts` | OAuth 토큰 하나의 저장, 갱신, 터미널(`.credentials.json`)과의 양방향 동기화 |
+| `src/child-env.ts` | 봇이 띄우는 세션의 환경 변수에서 API 키를 뺌 (`withoutApiKey()`, SDK와 CLI 두 길 공통) |
 | `src/version.ts` | 버전 정보 + 업데이트 체크 (`getVersionInfo()`, `checkForUpdates()`) |
 | `src/rate-limit-utils.ts` | 공유 rate limit 감지 유틸 (`isRateLimitText()`, `isRateLimitError()`) |
 | `src/process-memory-watchdog.ts` | 시스템 메모리 워치독 — 커밋 메모리 감시, 프로세스 kill, Slack 확인 UI |

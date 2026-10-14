@@ -117,8 +117,9 @@ npm test        # 빌드 + check:* 전부
 - **명령별 동작 · 설정 · 저장 파일은 `docs/commands.md`** — 명령을 고치거나 새로 만들기 전에 그 문서의 해당 항목을 먼저 읽는다
 - **건드리기 전에 알아야 할 것** — 명령 상세에 묻혀 있던 교훈(원문 그대로 · 맥락은 `docs/commands.md`):
   - 토큰 만료 90분 전 자동 갱신 (OAuth refresh), 갱신 실패 시 `null` 반환 (만료 토큰 사용 방지)
-  - **토큰 공유**: `captureForSlot()`은 캡처만 수행 (독립 refresh 삭제 — 토큰 체인 파괴 원인이었음)
-  - **터미널 보호**: 터미널 활성 계정은 선제적 갱신 건너뜀 (OAuth rotation이 터미널 인메모리 refresh token 무효화 방지), 토큰 실제 만료 시에만 갱신
+  - **토큰 공유**: 봇은 터미널과 같은 토큰 사슬을 씀 — 터미널 토큰을 옮겨 받기만 하고 따로 새 사슬을 만들지 않음 (독립 refresh 가 토큰 체인 파괴 원인이었음)
+  - **터미널 보호**: 터미널이 같은 계정으로 로그인해 있으면 선제적 갱신 건너뜀 (OAuth rotation이 터미널 인메모리 refresh token 무효화 방지), 토큰 실제 만료 시에만 갱신
+  - **계정은 하나** — 계정 전환 · API 키 전환은 2026-10-14 사용자 결정으로 걷음(한도 소진은 엔진 폴백 · 보류 재실행이 대신함) · 봇이 띄우는 세션 환경에서 `ANTHROPIC_API_KEY` 는 늘 뺌(`src/child-env.ts`) · 검사 `npm run check:noaccounts`
   - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
   - 분석 회차와 보고서 저장 — report-log 5단계(쓰는 쪽). **저장 주체는 스탠리 하나** · 설계 정본은 report-log `docs/stage5-plan.md` 「쓰는 흐름」 · 검사 `npm run check:reportrun`
   - 처리 백엔드: `SessionResult.servedBy`(`spawnOrFallback` 이 붙임) · agy 위임 경로(`ANALYSIS_AGY_TYPES`)는 없앰 — agy 는 도구 없는 회차의 폴백 사다리에서만 씀
@@ -132,15 +133,9 @@ npm test        # 빌드 + check:* 전부
 ### Error Handling
 - CLI 프로세스 에러는 `try/catch`로 감싸고, Slack 메시지로 사용자에게 전달
 - Rate limit 감지: CLI `rate_limit_event` 이벤트 + `isRateLimitText()` 공유 유틸 (`src/rate-limit-utils.ts`)
-  - 사용자 세션: 4단계 UI (계정 전환 → API 키 → 자동 재실행 → 취소)
+  - 사용자 세션: 풀리는 예상 시각 안내 + 「취소」 버튼 하나 · 원문은 캡처 큐가 들고 회복 시각(+1분)에 `drainStuck()` 이 다시 돌림 · 「취소」는 그 캡처를 버림(`dropCapture`)
   - 스케줄 세션: rate limit 감지 시 안내 메시지 전송 (브리핑), 분석 전체 중단
   - 캘린더 판단: rate limit 시 다음 정시까지 AI 판단 일시 중지 (`pauseAiJudgment()`)
-- 자동 재실행 (`pendingRetries` + `pendingAutoRetries` + `pendingRetryCleanup`):
-  - "자동 재실행" 버튼 → reset 시각 +60초 버퍼에 `setTimeout` 큐잉 → 동일 thread에 원본 prompt로 `handleMessage()` 재진입
-  - "취소" 버튼 또는 10분 무클릭 → `clearRetryTimers()`로 모든 타이머/엔트리 정리
-  - 메모리 전용, 영속화 X (pm2 재시작 시 자연 소멸 — rate limit 정보 자체가 시한성)
-- API 키 fallback: rate limit 시 등록된 API 키로 전환 → 리셋 시간 후 구독 방식으로 자동 복귀
-- 다중 계정 fallback: rate limit 시 `AccountManager.switchToNext()` → account-1 → account-2 → account-3 → API 키 버튼 순으로 전환
 - 읽기 전용 도구 (Grep, Read, Glob 등)는 상태 메시지에서만 표시 (`STATUS_ONLY_TOOLS`)
 - CLI `is_error` 감지: `cliError` 플래그 추적 → 에러 시 ❌ 리액션 + `status.errorOccurred` 표시
 - 완료 시 도구 사용 요약 표시 (`toolUsageCounts` → `✅ Task completed (Grep ×5, Read ×2)`)
@@ -185,7 +180,7 @@ npm test        # 빌드 + check:* 전부
 | `analysis:${type}` | `assistant-scheduler.ts:922` | 12종 분석 (타입별 detail) |
 
 **SDK 핸들러 운영 컨벤션** (2026-05-26 phase2 fix에서 정합화):
-- **env 머지**: `opts.env` 전달 시 `{...process.env, ...opts.env}`로 머지. SDK는 `env` 옵션을 받으면 `process.env` 디폴트를 통째로 치환하므로 PATH·HOME·TZ 같은 표준 env 손실 방지.
+- **env 머지**: `{...process.env, ...opts.env}`로 머지하고 `withoutApiKey()`로 API 키를 뺀 것을 **늘** 넘김(`opts.env` 가 없어도 — 안 넘기면 SDK 가 `process.env` 를 그대로 씀). SDK는 `env` 옵션을 받으면 `process.env` 디폴트를 통째로 치환하므로 PATH·HOME·TZ 같은 표준 env 손실 방지.
 - **appendSystemPrompt → preset.append**: SDK public Options에 `appendSystemPrompt` 키 없음. `systemPrompt: { type: 'preset', preset: 'claude_code', append: <text> }` 형태로 넘겨야 모델에 전달됨.
 - **`tools` vs `allowedTools` 분리**: SDK는 두 개념을 별도 옵션으로 받음 — `tools`는 가용 도구 제한 (`[]`이면 모든 built-in 비활성), `allowedTools`는 auto-approve 리스트. CLI의 한 플래그(`--tools` variadic)와 다름.
 - **`persistSession` 호출자 제어**: SDK 디폴트 `true`, `opts.noSessionPersistence: true`일 때만 `false`. CLI 디폴트(`--no-session-persistence` 미사용 시 persist)와 동등.
@@ -253,10 +248,8 @@ git checkout -b feature/<name>
 | File | Location | Contains Secrets |
 |------|----------|-----------------|
 | `.bot-accounts.json` | `~/.claude/` | ✅ OAuth 토큰 |
-| `.bot-api-keys.json` | `~/.claude/` | ✅ API 키 |
 | `.working-dirs.json` | 프로젝트 루트 | ❌ |
 | `.session-state.json` | 프로젝트 루트 | ❌ |
-| `.schedule-config.json` | 프로젝트 루트 | ❌ |
 | `.assistant-costs.json` | 프로젝트 루트 | ❌ |
 | `.calendar-cache.json` | 프로젝트 루트 | ❌ |
 | `.calendar-notifications.json` | 프로젝트 루트 | ❌ |

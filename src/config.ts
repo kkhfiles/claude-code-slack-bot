@@ -19,9 +19,6 @@ export const config = {
     appToken: process.env.SLACK_APP_TOKEN!,
     signingSecret: process.env.SLACK_SIGNING_SECRET!,
   },
-  anthropic: {
-    apiKey: process.env.ANTHROPIC_API_KEY!,
-  },
   claude: {
     useBedrock: process.env.CLAUDE_CODE_USE_BEDROCK === '1',
     useVertex: process.env.CLAUDE_CODE_USE_VERTEX === '1',
@@ -79,11 +76,6 @@ export const config = {
       enabled: process.env.REPORTS_SERVER_ENABLED !== '0',
       port: parseInt(process.env.REPORTS_SERVER_PORT || '8765', 10),
     },
-  },
-  // Scheduled greeting: at configured times, auto-spawn a haiku session via a
-  // trivial greeting message (.schedule-config.json + ScheduleManager).
-  scheduledGreeting: {
-    enabled: process.env.SCHEDULED_GREETING_ENABLED !== '0',
   },
   memoryWatchdog: {
     enabled: process.env.MEMORY_WATCHDOG_ENABLED !== '0',

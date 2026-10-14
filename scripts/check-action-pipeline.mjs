@@ -306,10 +306,11 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
 // ── ⑤c 다른 버튼의 ephemeral 답 — 원래 메시지를 남겨야 하는 곳은 noticeReply 로(2026-10-07 검토 W5) ──
 // `replace_original: false` 없이 response_url 로 보낸 ephemeral 답은 원래 메시지를 바꿔 쓴다. NAS 컨펌 큐의
 // [보류] 한 번이 큐 전체를, 도구 하나 허용이 남은 허용 버튼을 지웠다. 바꿔 써도 되는 곳은 이름으로만 둔다 —
-// 버튼만 있던 메시지라 잃는 것이 없고 그 버튼은 이미 죽었다(계획 만료 · 계획 취소 · 계정 설정 만료).
+// 버튼만 있던 메시지라 잃는 것이 없고 그 버튼은 이미 죽었다(계획 만료 · 계획 취소).
+// 「계정 설정 만료」는 계정 설정 버튼과 함께 걷었다(2026-10-14).
 {
   const src = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
-  const REPLACE_OK = ["t('plan.expired'", "t('plan.cancelled'", "t('account.setup.expired'"];
+  const REPLACE_OK = ["t('plan.expired'", "t('plan.cancelled'"];
   const raw = [...src.matchAll(/respond\(\{[^}]*?response_type:\s*'ephemeral'/g)]
     .map((m) => src.slice(m.index, src.indexOf(');', m.index) + 2))
     .filter((call) => !/replace_original/.test(call));
@@ -487,9 +488,7 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   for (const text of ['-actions', '-actions review', '-actions run', '`-actions` review']) {
     eq(`「${text}」은 처리 제안 명령 하나만 받는다`, who(text), ['isActionsCommand']);
   }
-  for (const text of ['-ac', '-ac 1', '-account', '-account setup', '`-ac`']) {
-    eq(`「${text}」은 여전히 계정 명령`, who(text), ['isAccountCommand']);
-  }
+  // 계정 명령(`-ac` · `-account`)은 2026-10-14 에 걷었다 — 걷힌 쪽은 `check:noaccounts` 가 본다.
 }
 
 // ── ⑦ 밤 검토 시간대 ──────────────────────────────────────────────────

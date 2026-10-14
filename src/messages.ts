@@ -144,51 +144,7 @@ const messages: Record<string, Record<Locale, string>> = {
   'rateLimit.reached': { en: '*Rate limit reached.*', ko: '*Rate limit에 도달했습니다.*' },
   'rateLimit.retryEstimate': { en: 'Estimated retry: *{{time}}* ({{minutes}} min later)', ko: '예상 재시도 시간: *{{time}}* ({{minutes}}분 후)' },
   'rateLimit.prompt': { en: '_Prompt: {{prompt}}_', ko: '_프롬프트: {{prompt}}_' },
-  'rateLimit.schedule': { en: '🔁 Auto-retry ({{time}})', ko: '🔁 자동 재실행 ({{time}})' },
   'rateLimit.cancel': { en: 'Cancel', ko: '취소' },
-  'rateLimit.autoNotify': { en: "_Click 'Auto-retry' to re-run your prompt automatically when the limit resets._", ko: "_'자동 재실행'을 누르면 리셋 시간에 자동으로 같은 프롬프트가 다시 실행됩니다._" },
-  'rateLimit.scheduled': { en: '🔁 Auto-retry scheduled at *{{time}}*. The original prompt will run automatically.', ko: '🔁 *{{time}}*에 자동 재실행이 예약되었습니다. 같은 프롬프트로 자동 실행됩니다.' },
-  'rateLimit.autoRetryFiring': { en: '🔁 Auto-retry firing now…', ko: '🔁 자동 재실행을 시작합니다…' },
-  'rateLimit.retryExpired': { en: 'Retry info expired. Please resend your message manually.', ko: '재시도 정보가 만료되었습니다. 수동으로 메시지를 재전송해주세요.' },
-
-  'rateLimit.continueWithApiKey': { en: 'Continue with API key', ko: 'API 키로 계속' },
-  'rateLimit.switchAccount': { en: '🔄 Switch to {{account}}', ko: '🔄 {{account}}으로 전환' },
-
-  // API key
-  'apiKey.modalTitle': { en: 'API Key', ko: 'API 키' },
-  'apiKey.modalSubmit': { en: 'Save', ko: '저장' },
-  'apiKey.modalClose': { en: 'Cancel', ko: '취소' },
-  'apiKey.modalBody': { en: 'Enter your Anthropic API key. It will be stored locally and used when the subscription rate limit is reached.', ko: 'Anthropic API 키를 입력하세요. 로컬에 저장되며 구독 rate limit 초과 시 사용됩니다.' },
-  'apiKey.modalLabel': { en: 'API Key', ko: 'API 키' },
-
-  'apiKey.limitLabel': { en: 'Spending Limit (optional)', ko: '사용 한도 (선택)' },
-  'apiKey.limitPlaceholder': { en: 'e.g. 2.00 (leave blank for no limit)', ko: '예: 2.00 (비우면 한도 없음)' },
-  'apiKey.saved': { en: 'API key saved.', ko: 'API 키가 저장되었습니다.' },
-  'apiKey.savedAndRetrying': { en: 'API key saved. Retrying with API key...', ko: 'API 키 저장됨. API 키로 재시도 중...' },
-  'apiKey.switchingToApiKey': { en: 'Switching to API key. Retrying...', ko: 'API 키로 전환합니다. 재시도 중...' },
-  'apiKey.switchingToSubscription': { en: 'Rate limit reset. Switching back to subscription auth.', ko: 'Rate limit이 해제되었습니다. 구독 인증 방식으로 전환합니다.' },
-  'apiKey.noKey': { en: 'No API key registered. Enter one to continue.', ko: '등록된 API 키가 없습니다. 입력해주세요.' },
-
-  // --- Schedule ---
-  'schedule.sessionStart': { en: '🌅 Starting new Claude session...', ko: '🌅 새 Claude 세션을 시작합니다...' },
-  'schedule.noConfig': { en: '_No schedules configured. Use the buttons below to add._', ko: '_설정된 스케줄이 없습니다. 아래 버튼으로 추가하세요._' },
-  'schedule.status.header': { en: '*Session Auto-Start*', ko: '*세션 자동 시작*' },
-  'schedule.conflictWithExisting': { en: '`{{time}}` is within the 5-hour window of `{{existing}}` — the follow-up at ~`{{existing}}+5h` already covers this slot. Remove `{{existing}}` first with `-schedule remove {{existingHour}}` if you want to change the base time.', ko: '`{{time}}`은 `{{existing}}`의 5시간 세션 범위 안에 있습니다 — `{{existing}}+5h` 자동 팔로우업이 이미 해당 시간대를 커버합니다. 기준 시간을 변경하려면 먼저 `-schedule remove {{existingHour}}`로 제거하세요.' },
-  'schedule.invalidTime': { en: 'Invalid time. Use an hour (e.g., `6`, `16`).', ko: '잘못된 시간. 시(hour)를 입력하세요 (예: `6`, `16`).' },
-  'schedule.clearBtn': { en: '🗑 Clear all', ko: '🗑 전체 삭제' },
-  'schedule.noAccounts': { en: '_No accounts configured. Use `-account` to set up accounts first._', ko: '_설정된 계정이 없습니다. `-account`로 먼저 계정을 설정하세요._' },
-  'schedule.modal.title': { en: 'Add Schedule', ko: '스케줄 추가' },
-  'schedule.modal.submit': { en: 'Add', ko: '추가' },
-  'schedule.modal.close': { en: 'Cancel', ko: '취소' },
-  'schedule.modal.body': { en: 'Add a scheduled time for *{{account}}*.\nA greeting will be sent at the specified time (+0~10min jitter), then again ~5h later.', ko: '*{{account}}*에 스케줄을 추가합니다.\n지정 시간(+0~10분 지터)에 인사 메시지 전송 후, ~5시간 뒤 재전송됩니다.' },
-  'schedule.modal.label': { en: 'Time (hour or HH:MM)', ko: '시간 (시 또는 HH:MM)' },
-  'schedule.rotation.status': { en: '🔄 Daily rotation: *ON* (today = {{status}})', ko: '🔄 일일 로테이션: *ON* (오늘 = {{status}})' },
-  'schedule.rotation.normal': { en: 'as configured', ko: '기본 순서' },
-  'schedule.rotation.swapped': { en: 'swapped', ko: '교대 순서' },
-  'schedule.rotation.effective': { en: '_→ {{pattern}}_', ko: '_→ {{pattern}}_' },
-  'schedule.rotation.enableBtn': { en: '🔄 Enable rotation', ko: '🔄 로테이션 켜기' },
-  'schedule.rotation.disableBtn': { en: '🔄 Disable rotation', ko: '🔄 로테이션 끄기' },
-  'schedule.accountNotSet': { en: 'Scheduled session skipped: {{account}} is not configured. Use `-account` to set it up, or remove the {{time}} schedule.', ko: '스케줄 세션 건너뜀: {{account}}가 설정되지 않았습니다. `-account`로 설정하거나, {{time}} 스케줄을 제거해 주세요.' },
 
   // --- Version ---
   'cmd.version.title': { en: '*Bot Version*', ko: '*봇 버전*' },
@@ -199,50 +155,8 @@ const messages: Record<string, Record<Locale, string>> = {
   'cmd.version.updateAvailable': { en: '⬆️ Update available: {{count}} commit(s) behind (latest: `{{hash}}`)\nRun `update.sh` or `update.bat` to update.', ko: '⬆️ 업데이트 있음: {{count}}개 커밋 뒤처짐 (최신: `{{hash}}`)\n`update.sh` 또는 `update.bat`으로 업데이트하세요.' },
   'cmd.version.checkFailed': { en: '_Could not check for updates._', ko: '_업데이트 확인에 실패했습니다._' },
 
-  // API key cost suffix (appended to completion status when API key mode is active)
-  'apiKey.costSuffix': { en: ' | 🔑 ${{queryCost}} (total: ${{totalCost}})', ko: ' | 🔑 ${{queryCost}} (누계: ${{totalCost}})' },
-
-  // Limit command
-  'cmd.limit.set': { en: '✅ Spending limit set: ${{amount}}', ko: '✅ 사용 한도 설정: ${{amount}}' },
-  'cmd.limit.cleared': { en: '✅ Spending limit cleared.', ko: '✅ 사용 한도가 초기화되었습니다.' },
-  'cmd.limit.exceeded': { en: '⚠️ Spending limit (${{limit}}) reached (spent: ${{cost}}). Switched back to subscription auth.', ko: '⚠️ 사용 한도 ${{limit}}에 도달했습니다 (사용: ${{cost}}). 구독 인증으로 전환됩니다.' },
-  'cmd.limit.invalidAmount': { en: 'Invalid amount. Use a number like `2.00`.', ko: '잘못된 금액. `2.00` 같이 숫자로 입력하세요.' },
-  'cmd.limit.none': { en: 'No spending limit configured. Use `-limit <amount>` to set one (e.g., `-limit 2.00`).', ko: '사용 한도가 설정되지 않았습니다. `-limit <금액>`으로 설정하세요 (예: `-limit 2.00`).' },
-
-  // Account management
-  'account.current': { en: '🔑 Current account: `{{account}}`', ko: '🔑 현재 계정: `{{account}}`' },
-  'account.list': { en: 'Available accounts:', ko: '사용 가능한 계정:' },
-  'account.entryActive': { en: '• ✅ `{{id}}` _(active)_', ko: '• ✅ `{{id}}` _(활성)_' },
-  'account.entryAvailable': { en: '• ✅ `{{id}}`', ko: '• ✅ `{{id}}`' },
-  'account.entryMissing': { en: '• ❌ `{{id}}` _(not configured)_', ko: '• ❌ `{{id}}` _(미설정)_' },
-  'account.useBtn': { en: '▶ Use', ko: '▶ 사용' },
-  'account.setBtn': { en: '✎ Set', ko: '✎ 설정' },
-  'account.unsetBtn': { en: '✕ Unset', ko: '✕ 해제' },
-  'account.unset.done': { en: '✅ `{{id}}` unset.', ko: '✅ `{{id}}` 해제됨.' },
-  'account.switchedTo': { en: '✅ Switched to `{{account}}`', ko: '✅ `{{account}}`(으)로 전환했습니다' },
-  'account.notFound': { en: '❌ Credentials file not found for `{{account}}`', ko: '❌ `{{account}}` 자격증명 파일을 찾을 수 없습니다' },
-  'account.alreadyCurrent': { en: 'Already on `{{account}}`', ko: '이미 `{{account}}`을(를) 사용 중입니다' },
-  'account.rateLimitSwitch': { en: 'Rate limit reached. Switching to `{{account}}` and retrying...', ko: 'Rate limit 도달. `{{account}}`으로 전환하여 재시도합니다...' },
-  'account.switchedTerminalGuide': { en: '✅ Switched to `{{account}}`.\n_Terminal: `/exit` → `claude -c` or `claude -r` to apply._', ko: '✅ `{{account}}`(으)로 전환했습니다.\n_터미널: `/exit` 후 `claude -c` 또는 `claude -r`로 재시작하면 적용됩니다._' },
-  'account.hint': { en: '_Use `-account <id>` to switch (e.g., `-account 1`, `-account 2`)_', ko: '_`-account <id>`로 전환 (예: `-account 1`, `-account 2`)_' },
-  'account.tokenExpired': { en: '⚠️ *Token expired* for {{accounts}}. Please re-login with `-account` → `Set`.', ko: '⚠️ {{accounts}}의 *토큰이 만료*되었습니다. `-account` → `설정`으로 다시 로그인해주세요.' },
-
-  // Setup wizard
-  'account.setup.title': { en: '🔑 *Multi-Account Setup*', ko: '🔑 *다중 계정 설정*' },
-  'account.setup.intro': {
-    en: 'Add backup Claude accounts for automatic rate limit failover.\nWhen your primary account hits a rate limit, the bot switches to the next account automatically — no action needed.',
-    ko: '보조 Claude 계정을 추가하면 rate limit 시 자동으로 전환됩니다.\n기본 계정이 rate limit에 걸리면 다음 계정으로 자동 전환 — 별도 조치 불필요.',
-  },
-  'account.setup.chooseSlot': { en: 'Choose which slot to configure:', ko: '설정할 슬롯을 선택하세요:' },
-  'account.setup.slotAvailable': { en: '{{id}}', ko: '{{id}}' },
-  'account.setup.slotTaken': { en: '{{id}} (overwrite)', ko: '{{id}} (덮어쓰기)' },
-  'account.setup.cancelBtn': { en: 'Cancel', ko: '취소' },
-  'account.setup.cancelled': { en: 'Setup cancelled.', ko: '설정이 취소됐습니다.' },
-  'account.setup.expired': { en: '⚠️ Setup session expired. Run `-account setup` again.', ko: '⚠️ 설정 세션이 만료됐습니다. `-account setup`을 다시 실행하세요.' },
-  'account.setup.captureNew.title': { en: '🔑 *Setup `{{slot}}`*\nIn your terminal:\n1. Type `/logout` and press Enter\n2. Run `claude` and login with your *`{{slot}}`* account\n\nClick ✅ Done when login is complete:', ko: '🔑 *`{{slot}}` 설정*\n터미널에서:\n1. `/logout` 입력 후 엔터\n2. `claude` 실행 후 *`{{slot}}`* 계정으로 로그인\n\n로그인 완료 후 ✅ 완료를 클릭하세요:' },
-  'account.setup.captureNew.doneBtn': { en: '✅ Done', ko: '✅ 완료' },
-  'account.setup.captureNew.notChanged': { en: '❌ Credentials haven\'t changed yet. Please complete the login first, then click Done again.', ko: '❌ 아직 크리덴셜이 변경되지 않았습니다. 로그인을 완료한 후 다시 클릭하세요.' },
-  'account.setup.done': { en: '✅ *`{{slot}}` setup complete!*\nThis account will be used automatically on rate limit failover.\n_Terminal: `/exit` → `claude -c` or `claude -r` to resume with the original account._', ko: '✅ *`{{slot}}` 설정 완료!*\nRate limit 시 자동으로 이 계정으로 전환됩니다.\n_터미널: `/exit` 후 `claude -c` 또는 `claude -r`로 재시작하면 원래 계정으로 복원됩니다._' },
+  // OAuth token health (계정 전환 · API 키 명령은 2026-10-14 에 걷었다)
+  'account.tokenExpired': { en: '⚠️ *Token expired* for {{accounts}}. Log in again from the terminal: run `claude`, then `/login`.', ko: '⚠️ {{accounts}}의 *토큰이 만료*되었습니다. 터미널에서 다시 로그인해 주세요 — `claude` 실행 후 `/login`.' },
 
   // --- Error ---
   'error.generic': { en: 'Error: {{message}}', ko: '오류: {{message}}' },
@@ -478,14 +392,7 @@ export function getHelpText(locale: Locale): string {
     help += `\`-v\` / \`-version\` / \`버전\` — 봇 버전 및 업데이트 확인\n\n`;
     help += `*MCP*\n`;
     help += `\`-mcp\` — MCP 서버 상태 표시\n`;
-    help += `\`-mcp reload\` — MCP 설정 리로드\n`;
-    help += `\`-key\` / \`-apikey\` / \`키\` — API 키 등록/수정 (rate limit 시 자동 전환용)\n`;
-    help += `\`-limit [금액]\` / \`한도\` — API 키 사용 한도 조회/설정 (예: \`-limit 2.00\`)\n`;
-    help += `\`-limit clear\` / \`한도 초기화\` — 사용 한도 초기화\n`;
-    help += `\`-sc\` / \`-schedule\` / \`스케줄\` — 세션 자동 시작 스케줄 관리 (계정별 추가/삭제)\n`;
-    help += `\`-ac\` / \`-account\` / \`계정\` — 현재 계정 및 등록된 계정 목록\n`;
-    help += `\`-ac setup\` — 계정 설정 마법사 (대화형 안내)\n`;
-    help += `\`-ac <id>\` — 계정 전환 (예: \`-ac 1\`, \`-ac 2\`)\n\n`;
+    help += `\`-mcp reload\` — MCP 설정 리로드\n\n`;
 
     help += `*어시스턴트*\n`;
     help += `\`-br\` / \`-briefing\` / \`브리핑\` — 브리핑 즉시 실행\n`;
@@ -498,7 +405,7 @@ export function getHelpText(locale: Locale): string {
     help += `*팁*\n`;
     help += `• 같은 쓰레드 = 세션 자동 연속 (명령어 불필요)\n`;
     help += `• 파일 드래그 앤 드롭으로 업로드 및 분석\n`;
-    help += `• Rate limit → API 키 전환 또는 예약 재시도\n`;
+    help += `• Rate limit → 풀리는 시각 안내 · 업무 비서가 연결돼 있으면 밀린 요청을 그때 다시 실행\n`;
     help += `• \`help\` 또는 \`-help\` — 이 메시지 표시\n`;
     return help;
   }
@@ -529,14 +436,7 @@ export function getHelpText(locale: Locale): string {
   help += `\`-v\` / \`-version\` — Show bot version and check for updates\n\n`;
   help += `*MCP*\n`;
   help += `\`-mcp\` — Show MCP server status\n`;
-  help += `\`-mcp reload\` — Reload MCP configuration\n`;
-  help += `\`-key\` / \`-apikey\` — Register/update API key (auto-switch on rate limit)\n`;
-  help += `\`-limit [amount]\` — View/set API key spending limit (e.g., \`-limit 2.00\`)\n`;
-  help += `\`-limit clear\` — Remove spending limit\n`;
-  help += `\`-sc\` / \`-schedule\` — Manage session auto-start schedules (per-account add/remove)\n`;
-  help += `\`-ac\` / \`-account\` — Show current account and registered accounts\n`;
-  help += `\`-ac setup\` — Interactive wizard to configure accounts\n`;
-  help += `\`-ac <id>\` — Switch account (e.g., \`-ac 1\`, \`-ac 2\`)\n\n`;
+  help += `\`-mcp reload\` — Reload MCP configuration\n\n`;
 
   help += `*Assistant*\n`;
   help += `\`-br\` / \`-briefing\` — Run briefing now\n`;
@@ -550,7 +450,7 @@ export function getHelpText(locale: Locale): string {
   help += `*Tips*\n`;
   help += `• Same thread = session auto-continues (no command needed)\n`;
   help += `• Drag & drop files to upload and analyze\n`;
-  help += `• Rate limit → switch to API key or scheduled retry\n`;
+  help += `• Rate limit → shows the reset time; with the work assistant connected, held requests re-run then\n`;
   help += `• \`help\` or \`-help\` — Show this message\n`;
   return help;
 }

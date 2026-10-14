@@ -12,6 +12,7 @@ import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
 import { errorCollector } from './error-collector';
 import { event as recordEvent } from './board-queue';
+import { withoutApiKey } from './child-env';
 import type {
   CliEvent,
   CliInitEvent,
@@ -472,7 +473,9 @@ export class SdkHandler {
     // SDK destructures Options as `env: H = {...process.env}` — passing opts.env REPLACES
     // process.env entirely, dropping PATH/HOME/TZ/USERPROFILE etc. Merge instead so the
     // subprocess keeps standard env and only opts.env overrides on top.
-    if (opts.env) sdkOptions.env = { ...process.env, ...opts.env };
+    // **`opts.env` 가 없어도 늘 넘긴다** — 안 넘기면 SDK 가 `process.env` 를 그대로 써서
+    // PC 에 남은 API 키가 세션으로 샌다(`child-env.ts`).
+    sdkOptions.env = withoutApiKey({ ...process.env, ...opts.env });
     if (opts.canUseTool) sdkOptions.canUseTool = opts.canUseTool;
 
     if (opts.effort) sdkOptions.effort = opts.effort;

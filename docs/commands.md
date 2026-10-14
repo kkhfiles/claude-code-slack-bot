@@ -13,31 +13,21 @@
 - `-r`/`-resume`: 전체 프로젝트 세션 피커 (버튼 선택 → cwd 자동 전환 + 세션 재개)
 - `-sessions all`: 전체 프로젝트 세션 목록 (세션 피커와 동일)
 - `-version`: 봇 버전 + git hash + 업데이트 확인 (`src/version.ts`)
-- `-apikey`: API 키 등록/수정 모달 (rate limit 시 자동 전환용, `~/.claude/.bot-api-keys.json` 영속화)
-- `-account`: 다중 계정 상태 조회 및 수동 전환 (`AccountManager`, `~/.claude/.bot-accounts.json` 영속화)
-  - `-account` — 통합 상태 뷰 (Set/Use/Unset 버튼)
-  - `-account 1` / `-account 2` / `-account 3` — 수동 전환
-  - 토큰 저장: `~/.claude/.bot-accounts.json` (accessToken, refreshToken, expiresAt, email, oauthAccount)
-  - 전환: `CLAUDE_CODE_OAUTH_TOKEN` env var 주입 + `~/.claude/.credentials.json` + `~/.claude.json` 자동 동기화 (터미널 CLI도 전환 반영)
+- OAuth 토큰 (명령 없음, `AccountManager`, `~/.claude/.bot-accounts.json` 영속화)
+  - 토큰 저장: `~/.claude/.bot-accounts.json` 의 `account-1` 자리 하나 (accessToken, refreshToken, expiresAt, email, oauthAccount)
+  - 주입: 대화 세션과 비서 세션 모두, 띄울 때마다 `syncFromCredentialsFile()` 후 `CLAUDE_CODE_OAUTH_TOKEN` env var 주입
   - 토큰 만료 90분 전 자동 갱신 (OAuth refresh), 갱신 실패 시 `null` 반환 (만료 토큰 사용 방지)
-  - **토큰 자동 동기화**: `fs.watchFile`로 `.credentials.json` 10초 간격 감시 → email 매칭으로 `.bot-accounts.json` 자동 갱신
-  - 봇→터미널: refresh 시 `syncToCredentialsIfActive()` — email 매칭으로 터미널 활성 계정이면 `.credentials.json` 갱신
+  - **토큰 자동 동기화**: `fs.watchFile`로 `.credentials.json` 10초 간격 감시 → email 이 같은 로그인이면 `.bot-accounts.json` 자동 갱신
+  - 봇→터미널: refresh 시 `syncToCredentialsIfActive()` — email 매칭으로 터미널이 같은 계정이면 `.credentials.json` 갱신
   - 터미널→봇: 파일 워처 + CLI 스폰 전 동기화
-  - **토큰 공유**: `captureForSlot()`은 캡처만 수행 (독립 refresh 삭제 — 토큰 체인 파괴 원인이었음)
-  - **토큰 건강 체크**: 1시간마다 + 시작 시 전 계정 체크, 체크 전 `syncFromCredentialsFile()` 실행, 갱신 실패 시 Slack 알림 (계정당 1회)
-  - **터미널 보호**: 터미널 활성 계정은 선제적 갱신 건너뜀 (OAuth rotation이 터미널 인메모리 refresh token 무효화 방지), 토큰 실제 만료 시에만 갱신
-  - rate limit 시 전환 체인: account-1 → account-2 → account-3 → API 키 버튼
-- `-schedule`: 세션 자동 시작 설정 관리 (`ScheduleManager`, `.schedule-config.json` 영속화)
-  - 블록 UI: 계정별 `[+ email]` 추가 버튼(모달) + 시간별 `[✕]` 삭제 버튼 + `[🗑 Clear all]`
-  - 각 스케줄 엔트리는 특정 계정에 연결 (`ScheduleEntry: { time, account }`)
-  - 같은 계정 내에서만 5시간 윈도우 충돌 검사 (다른 계정끼리는 겹쳐도 OK)
-  - 모달 제출 후 원래 메시지를 `chat.update`로 즉시 갱신
-  - 예약 시간 +0~10분 랜덤 지터로 자동화 감지 방지
-  - **자동 팔로우업**: 첫 발송 후 5시간 뒤 두 번째 메시지 자동 발송 (다음 세션 윈도우 커버)
-  - **비업무일 스킵**: 주말 + 한국 공휴일(음력 포함) 자동 스킵 (`date-holidays` 패키지, 오프라인)
-  - 팔로우업 타이머 디스크 영속화 (`pendingFollowUps`) — pm2 재시작 후에도 복원, 만료분은 즉시 발사
-  - 랜덤 인사 메시지 (`say "hi"`, `3+7` 등) + haiku 모델로 새 세션 시작
-  - **일일 로테이션**: 2계정 교차 스케줄 시 짝수/홀수 dayOfYear로 계정 스왑 → 2주 합산 균형 (토글 버튼으로 ON/OFF)
+  - **토큰 공유**: 봇은 터미널과 같은 토큰 사슬을 씀 — 터미널 토큰을 옮겨 받기만 하고 따로 새 사슬을 만들지 않음 (독립 refresh 가 토큰 체인 파괴 원인이었음)
+  - **토큰 건강 체크**: 1시간마다 + 시작 시, 체크 전 `syncFromCredentialsFile()` 실행, 갱신 실패 시 비서 DM(`ASSISTANT_DM_CHANNEL`)에 한 번 알림 — 터미널에서 `claude` 실행 후 `/login` 으로 다시 로그인하라는 안내
+  - **터미널 보호**: 터미널이 같은 계정으로 로그인해 있으면 선제적 갱신 건너뜀 (OAuth rotation이 터미널 인메모리 refresh token 무효화 방지), 토큰 실제 만료 시에만 갱신
+  - **걷은 명령** (2026-10-14 사용자 결정) — 한도 소진은 엔진 폴백과 보류 재실행이 대신함
+    - `-account`: 계정 전환
+    - `-apikey`, `-limit`: API 키 전환과 사용 한도
+    - `-schedule`: 세션 자동 시작(인사 예약)
+  - **API 키 차단**: 봇이 띄우는 세션 환경에서 `ANTHROPIC_API_KEY` 는 늘 뺌 (`src/child-env.ts`, 검사 `npm run check:noaccounts`)
 - `-briefing`/`-br`/`브리핑`: 모닝 브리핑 즉시 실행 (`AssistantScheduler.runBriefing()`)
   - 캐시된 캘린더 데이터 사용 (MCP 미호출), 캐시 날짜가 오늘이 아니면 `refreshCache()` 호출 후 사용, 실패 시 MCP fallback
   - `ErrorCollector`에 수집된 봇 에러를 `⚠️ 시스템 이슈` 섹션으로 일괄 보고

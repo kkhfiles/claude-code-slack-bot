@@ -11,8 +11,7 @@ import { FileHandler, ProcessedFile } from './file-handler';
 import { TodoManager, Todo } from './todo-manager';
 import { McpManager } from './mcp-manager';
 import { SessionScanner, SessionInfo, formatRelativeTime } from './session-scanner';
-import { ScheduleManager } from './schedule-manager';
-import { AccountManager, AccountId } from './account-manager';
+import { AccountManager } from './account-manager';
 import { AssistantScheduler, SpawnOpts, SessionResult, SessionUsage } from './assistant-scheduler';
 import { CalendarPoller } from './calendar-poller';
 import { config } from './config';
@@ -192,7 +191,6 @@ interface MessageEvent {
   thread_ts?: string;
   ts: string;
   text?: string;
-  accountId?: string; // Override account for token injection (used by scheduled sessions)
   /**
    * 다시 돌릴 때 **원래 캡처를 그대로 쓴다.**
    *
@@ -214,17 +212,8 @@ interface MessageEvent {
 // result 이벤트 후 스트림이 닫히기를 기다리는 한계 (자식 프로세스/훅 hang 대비)
 const RESULT_GRACE_MS = 120_000;
 
-// 밀린 요청을 **다시 알리는** 굴레. 자동 실행이 아니라 사람이 눌러야 끝나는 구조라,
-// 알림이 한 번뿐이면 자리를 비운 사이 그대로 묻힌다(2026-08-24: 한 번 알리고 22시간).
-// 0 을 주면 다시 알리지 않는다.
 /** 한 회차에 다시 돌릴 상한. 실측 최대가 2건이라 넉넉하다(2026-08-31). */
 const DRAIN_MAX = Number(process.env.DRAIN_MAX ?? 5);
-const RLQ_NUDGE_MIN = Number(process.env.RLQ_NUDGE_MINUTES ?? 120);
-const RLQ_NUDGE_FROM_HOUR = Number(process.env.RLQ_NUDGE_FROM_HOUR ?? 8);
-const RLQ_NUDGE_TO_HOUR = Number(process.env.RLQ_NUDGE_TO_HOUR ?? 20);
-// **끝없이 두드리지 않는다.** 그러면 사람이 그 알림 자체를 안 보게 되고, 다시 알리는
-// 뜻이 사라진다. 여기까지 왔는데도 안 눌렀으면 그건 안 급한 것이다.
-const RLQ_NUDGE_MAX = Number(process.env.RLQ_NUDGE_MAX ?? 5);
 
 export class SlackHandler {
   private app: App;
@@ -268,17 +257,8 @@ export class SlackHandler {
   // One-time approved tools (consumed on next handleMessage call)
   private pendingOneTimeTools: Map<string, string[]> = new Map();
 
-  // Rate limit retry
-  private pendingRetries: Map<string, { prompt: string; channel: string; threadTs: string; user: string }> = new Map();
-  private pendingRetryCleanup: Map<string, ReturnType<typeof setTimeout>> = new Map();
-  private pendingAutoRetries: Map<string, ReturnType<typeof setTimeout>> = new Map();
   // 한도 회복 시각에 깨어나는 타이머. 큐가 파일이라 재시작해도 다시 걸 수 있다.
   private limitTimer?: ReturnType<typeof setTimeout>;
-  /**
-   * 다시 알리기 타이머. **횟수와 앞 알림은 여기 안 둔다** — 큐 파일에 둔다.
-   * 메모리에 뒀더니 재시작마다 0 으로 돌아가 알림이 쌓이고 상한이 안 걸렸다
-   * (2026-08-25 실측: 저녁 재시작 네 번에 같은 알림 넉 장).
-   */
 
   // Plan mode: store session info for "Execute" button
   private pendingPlans: Map<string, { sessionId: string; prompt: string; channel: string; threadTs: string | undefined; user: string }> = new Map();
@@ -299,21 +279,12 @@ export class SlackHandler {
   private botUserId: string | null = null;
   private userLocales: Map<string, Locale> = new Map();
 
-  // API key management
-  private userApiKeys: Map<string, string> = new Map();
-  private apiKeyActive: Map<string, { userId: string; resetTimerId: ReturnType<typeof setTimeout>; totalCost: number; limit?: number }> = new Map();
-  private channelApiKeyLimits: Map<string, number> = new Map();
-  private readonly API_KEYS_FILE = path.join(os.homedir(), '.claude', '.bot-api-keys.json');
-
-  // Session schedule
-  private scheduleManager = new ScheduleManager();
-
   // Assistant scheduler
   private assistantScheduler: AssistantScheduler | null = null;
 
-  // Multi-account management
+  // OAuth 토큰 하나를 터미널과 맞춰 세션에 넣는다. 계정 전환 · API 키 전환은 2026-10-14
+  // 사용자 결정으로 걷었다 — 한도 소진은 엔진 폴백 · 보류 재실행(`drainStuck`)이 대신한다.
   private accountManager = new AccountManager();
-  private pendingAccountSetups: Map<string, { slot: AccountId; originalToken: string | null; locale: Locale }> = new Map();
   private notifiedUnhealthyAccounts = new Set<string>(); // Prevent repeated token expiry notifications
 
   // System memory watchdog
@@ -341,7 +312,6 @@ export class SlackHandler {
     this.workingDirManager = new WorkingDirectoryManager();
     this.fileHandler = new FileHandler();
     this.todoManager = new TodoManager();
-    this.loadApiKeys();
 
     // Initialize assistant scheduler if configured
     if (config.assistant.dmChannel && config.assistant.configDir) {
@@ -1006,45 +976,6 @@ export class SlackHandler {
       return;
     }
 
-    // API key command — show button to open modal
-    if (text && this.isApiKeyCommand(text)) {
-      await say({
-        thread_ts: thread_ts,
-        text: t('apiKey.modalBody', locale),
-        blocks: [
-          { type: 'section', text: { type: 'mrkdwn', text: `🔑 ${t('apiKey.modalBody', locale)}` } },
-          {
-            type: 'actions',
-            elements: [
-              { type: 'button', text: { type: 'plain_text', text: t('apiKey.modalSubmit', locale) }, action_id: 'open_apikey_modal', value: JSON.stringify({}), style: 'primary' },
-            ],
-          },
-        ],
-      });
-      return;
-    }
-
-    // Limit command
-    if (text) {
-      const limitParsed = this.parseLimitCommand(text);
-      if (limitParsed) {
-        await this.handleLimitCommand(limitParsed, channel, thread_ts, locale, say);
-        return;
-      }
-    }
-
-    // Account command
-    if (text && this.isAccountCommand(text)) {
-      await this.handleAccountCommand(text, channel, thread_ts, locale, say);
-      return;
-    }
-
-    // Schedule command
-    if (text && this.isScheduleCommand(text)) {
-      await this.handleScheduleCommand(channel, thread_ts, user, locale, say);
-      return;
-    }
-
     // Briefing command
     if (text && this.isBriefingCommand(text)) {
       if (!this.assistantScheduler) {
@@ -1334,7 +1265,7 @@ export class SlackHandler {
     // 없는 요청이라 그 값을 치를 이유가 없다 — tasks.py 가 0.7 초에 끝낸다.
     // **문구가 딱 이것뿐일 때만** 잡는다. 「체크인 어떻게 하지?」 같은 질문은
     // 세션이 받아야 한다.
-    if (isDM && !event.accountId && isWorkAssistantEnabled() &&
+    if (isDM && isWorkAssistantEnabled() &&
       /^(체크인|checkin|check-?in|중간\s*점검)\s*(해줘|해주세요|하자|좀)?[.!]?$/i.test((text || '').trim())) {
       await say({ text: await checkinNow(), thread_ts: replyTs });
       return;
@@ -1349,7 +1280,7 @@ export class SlackHandler {
     //
     // 문법 판정은 tasks.py 가 한다 — 문법이 아니면 rc 2 로 나오고 아래 평소
     // 경로로 그대로 흘러간다. **틀려도 잃는 것이 없다.**
-    if (isDM && !event.accountId && text?.trim() && isWorkAssistantEnabled()) {
+    if (isDM && text?.trim() && isWorkAssistantEnabled()) {
       const quick = await quickUpdate(text);
       if (quick.kind === 'ok') {
         await this.app.client.reactions.add({
@@ -1436,7 +1367,6 @@ export class SlackHandler {
     let statusRepeatCount = 0;
     const toolUsageCounts = new Map<string, number>();
     const channelModel = SlackHandler.resolveModelAlias(this.channelModels.get(channel) || config.defaultModel);
-    let apiKeyCostInfo: { queryCost: number; totalCost: number } | null = null;
     let cliError = false;
     // **띄우기 전 준비가 얼마나 먹나** (2026-08-29). 판 한 건 23.1초 중 이 구간이
     // 1.12초인데(75건 중앙값) **안에 로그가 하나도 없어 무엇이 도는지 몰랐다.**
@@ -1467,7 +1397,7 @@ export class SlackHandler {
       });
 
       // **번호표를 먼저 걸어 둔다** — 파이썬을 한 번 띄우는 일이라 0.17초 걸리는데,
-      // 그동안 아래의 토큰 동기화·계정 조회가 어차피 돈다. 쓰는 곳은 저 아래
+      // 그동안 아래의 토큰 동기화·조회가 어차피 돈다. 쓰는 곳은 저 아래
       // `surfaceNote` 한 곳뿐이라 거기서 받으면 된다.
       const slotMapPending: Promise<string> = isDM ? checkinMap() : Promise.resolve('');
 
@@ -1505,29 +1435,12 @@ export class SlackHandler {
         }).catch(() => {});
       }
 
-      // Check if API key mode is active for this channel
-      const apiKeyState = this.apiKeyActive.get(channel);
+      // Sync tokens from terminal CLI before spawning (terminal→bot), then inject the OAuth token
+      this.accountManager.syncFromCredentialsFile();
       let queryEnv: Record<string, string> | undefined;
-      if (apiKeyState) {
-        const apiKey = this.userApiKeys.get(apiKeyState.userId);
-        if (apiKey) {
-          queryEnv = { ANTHROPIC_API_KEY: apiKey };
-        }
-      }
-
-      // Sync tokens from terminal CLI before spawning (terminal→bot)
-      if (!queryEnv) {
-        this.accountManager.syncFromCredentialsFile();
-      }
-
-      // Inject OAuth token (when not in API key mode)
-      // Use event.accountId if specified (scheduled sessions), otherwise current account
-      if (!queryEnv) {
-        const targetAccount = event.accountId || undefined;
-        const oauthToken = await this.accountManager.getAccessToken(targetAccount as any);
-        if (oauthToken) {
-          queryEnv = { CLAUDE_CODE_OAUTH_TOKEN: oauthToken };
-        }
+      const oauthToken = await this.accountManager.getAccessToken();
+      if (oauthToken) {
+        queryEnv = { CLAUDE_CODE_OAUTH_TOKEN: oauthToken };
       }
 
       const resumeSessionId = resumeData?.mode === 'uuid' ? resumeData.resumeOptions.resumeSessionId : undefined;
@@ -1756,22 +1669,6 @@ export class SlackHandler {
             });
           }
 
-          // API key cost accumulation
-          const apiKeyStateForCost = this.apiKeyActive.get(channel);
-          if (apiKeyStateForCost && resultEvent.total_cost_usd !== undefined) {
-            apiKeyStateForCost.totalCost += resultEvent.total_cost_usd;
-            apiKeyCostInfo = { queryCost: resultEvent.total_cost_usd, totalCost: apiKeyStateForCost.totalCost };
-            // Check spending limit
-            if (apiKeyStateForCost.limit !== undefined && apiKeyStateForCost.totalCost >= apiKeyStateForCost.limit) {
-              clearTimeout(apiKeyStateForCost.resetTimerId);
-              this.apiKeyActive.delete(channel);
-              await say({
-                text: `⚠️ ${t('cmd.limit.exceeded', locale, { limit: apiKeyStateForCost.limit.toFixed(2), cost: apiKeyStateForCost.totalCost.toFixed(4) })}`,
-                thread_ts: replyTs,
-              });
-            }
-          }
-
           // Handle permission denials — show approval buttons (skip in plan mode)
           const denials = resultEvent.permission_denials || [];
           if (!isPlanMode && denials.length > 0 && (resultEvent.session_id || session?.sessionId)) {
@@ -1820,9 +1717,6 @@ export class SlackHandler {
       const toolSummary = (!isDM && toolUsageCounts.size > 0)
         ? ' (' + Array.from(toolUsageCounts.entries()).map(([name, count]) => count > 1 ? `${name} ×${count}` : name).join(', ') + ')'
         : '';
-      const costSuffix = apiKeyCostInfo
-        ? t('apiKey.costSuffix', locale, { queryCost: apiKeyCostInfo.queryCost.toFixed(4), totalCost: apiKeyCostInfo.totalCost.toFixed(4) })
-        : '';
       if (statusMessageTs) {
         // **봇이 스스로 띄운 세션은 「작업 완료」를 안 남긴다** (2026-08-19 사용자 결정).
         // 사람이 물어본 것이면 그 줄이 「받았고 끝났다」를 알리지만, 판에서 누른 것과
@@ -1843,7 +1737,7 @@ export class SlackHandler {
         // ⚠️ **스트림 안의 고치기와 같은 줄에 세운다** — 따로 두면 이 「지우기」가
         // 아직 안 나간 「고치기」를 앞질러, 지운 메시지를 고치려 드는 순서가 나온다.
         this.queueStatus(sessionKey, channel, statusMessageTs,
-          `${doneEmoji} ${doneLabel}${toolSummary}${costSuffix}`,
+          `${doneEmoji} ${doneLabel}${toolSummary}`,
           (pushed || (isDM && !isPlanMode)) && !cliError);
       }
       await this.updateMessageReaction(sessionKey, doneEmoji);
@@ -1909,8 +1803,7 @@ export class SlackHandler {
           ? rateLimitInfo.retryAfterSec
           : this.parseRetryAfterSeconds({ message: rateLimitMessageText });
 
-        const nextAccount = this.accountManager.getNextAccount();
-        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccount ?? undefined, ts, captureId);
+        await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, retryAfter, locale, say, ts, captureId);
       }
 
       // Clean up temp files
@@ -1940,8 +1833,7 @@ export class SlackHandler {
           ? rateLimitInfo.retryAfterSec
           : this.parseRetryAfterSeconds(rateLimitSource);
 
-        const nextAccountOnError = this.accountManager.getNextAccount();
-        await this.handleRateLimitUI(channel, thread_ts || ts, user, finalPrompt, retryAfter, locale, say, nextAccountOnError ?? undefined, ts, captureId);
+        await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, retryAfter, locale, say, ts, captureId);
       } else {
         await say({ text: t('error.generic', locale, { message: error.message || t('error.somethingWrong', locale) }), thread_ts: thread_ts || ts });
       }
@@ -2084,26 +1976,13 @@ export class SlackHandler {
 
   // --- Rate limit UI helper ---
 
-  private clearRetryTimers(retryId: string): void {
-    const cleanup = this.pendingRetryCleanup.get(retryId);
-    if (cleanup) {
-      clearTimeout(cleanup);
-      this.pendingRetryCleanup.delete(retryId);
-    }
-    const auto = this.pendingAutoRetries.get(retryId);
-    if (auto) {
-      clearTimeout(auto);
-      this.pendingAutoRetries.delete(retryId);
-    }
-  }
-
   /** 이번 한도 구간에서 안내를 이미 올렸나 — 두 번째부터는 ✋ 만 붙인다. */
   private limitNoticed = false;
 
   private async handleRateLimitUI(
-    channel: string, threadTs: string, user: string,
+    channel: string, threadTs: string,
     prompt: string, retryAfterSec: number, locale: Locale, say: any,
-    nextAccount?: AccountId, messageTs?: string, captureId?: string
+    messageTs?: string, captureId?: string
   ): Promise<void> {
     const postAt = Math.floor(Date.now() / 1000) + retryAfterSec;
     const retryTimeStr = formatTime(new Date(postAt * 1000), locale);
@@ -2129,37 +2008,18 @@ export class SlackHandler {
       return;
     }
 
-    const retryId = `retry-${Date.now()}`;
-
-    this.pendingRetries.set(retryId, { prompt, channel, threadTs, user });
-    // Cleanup if user never clicks any button within 10 min (auto-retry button clears this timer)
-    const cleanupTimer = setTimeout(() => {
-      this.pendingRetries.delete(retryId);
-      this.pendingRetryCleanup.delete(retryId);
-    }, 10 * 60 * 1000);
-    this.pendingRetryCleanup.set(retryId, cleanupTimer);
-
     const promptPreview = prompt.length > 200
       ? prompt.substring(0, 200) + '...'
       : prompt;
 
-    const buttons: any[] = [];
-    if (nextAccount) {
-      buttons.push({
-        type: 'button',
-        text: { type: 'plain_text', text: t('rateLimit.switchAccount', locale, { account: nextAccount }) },
-        action_id: 'switch_account_retry',
-        value: JSON.stringify({ retryId, account: nextAccount }),
-        style: 'primary',
-      });
-    }
+    // 버튼은 「취소」 하나다. 계정 전환 · API 키 전환 버튼은 2026-10-14 사용자 결정으로 걷었다 —
+    // 회복 시각에 드레인이 캡처를 다시 돌린다(보류 재실행).
     // **「자동 재실행」 버튼을 두지 않는다.** 큐가 회복 시각에 이미 묻는데 이 버튼도
     // 자기 타이머를 걸어서, 누르면 같은 프롬프트가 두 번 돈다. 두 번 도는 것이
     // 조회면 낭비로 끝나지만 등록·상태 변경이면 노션에 두 벌이 들어간다.
-    buttons.push(
-      { type: 'button', text: { type: 'plain_text', text: t('rateLimit.continueWithApiKey', locale) }, action_id: 'continue_with_apikey', value: JSON.stringify({ retryId, retryAfter: retryAfterSec }), style: nextAccount ? undefined : 'primary' },
-      { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: JSON.stringify({ retryId, captureId }) },
-    );
+    const buttons: any[] = [
+      { type: 'button', text: { type: 'plain_text', text: t('rateLimit.cancel', locale) }, action_id: 'cancel_retry', value: JSON.stringify({ captureId }) },
+    ];
 
     await say({
       thread_ts: threadTs,
@@ -2643,12 +2503,6 @@ export class SlackHandler {
     return null;
   }
 
-  // --- Schedule command ---
-
-  private isScheduleCommand(text: string): boolean {
-    return /^`?-(?:schedule|sc)`?(?:\s|$)|^스케줄/i.test(text.trim());
-  }
-
   // --- Assistant commands ---
 
   private isBriefingCommand(text: string): boolean {
@@ -2764,17 +2618,6 @@ export class SlackHandler {
     return { subcommand: match[1].toLowerCase(), args: match[2]?.trim() };
   }
 
-  private async handleScheduleCommand(
-    channel: string,
-    threadTs: string | undefined,
-    userId: string,
-    locale: Locale,
-    say: any,
-  ): Promise<void> {
-    const { text, blocks } = this.buildScheduleBlocks(locale, channel, userId);
-    await say({ text, blocks, thread_ts: threadTs });
-  }
-
   /**
    * `-report [종류]` — 처리 제안 요약과 desk 보고서 링크 (report-log 4단계 · 읽는 쪽 전환).
    *
@@ -2835,181 +2678,6 @@ export class SlackHandler {
       }
       default:
         await say({ text: 'Unknown subcommand. Use: `config`, `briefing`, `reminder`', thread_ts: threadTs });
-    }
-  }
-
-  private buildScheduleBlocks(locale: Locale, channel?: string, userId?: string, note?: string): { text: string; blocks: any[] } {
-    const entries = this.scheduleManager.getEntries();
-    const accounts = this.accountManager.getAccountList();
-    const configuredAccounts = accounts.filter(a => a.exists);
-    const blocks: any[] = [];
-
-    if (note) {
-      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: note } });
-      blocks.push({ type: 'divider' });
-    }
-
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `📅 ${t('schedule.status.header', locale)}` } });
-
-    if (entries.length === 0) {
-      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: t('schedule.noConfig', locale) } });
-    } else {
-      const nextFires = this.scheduleManager.getNextFireTimes();
-      for (const entry of entries) {
-        const email = accounts.find(a => a.id === entry.account)?.email;
-        const label = email ? `${entry.account} (${email})` : entry.account;
-        const nf = nextFires.find(f => f.time === entry.time && f.account === entry.account);
-        const minsUntil = nf ? Math.round((nf.nextFire.getTime() - Date.now()) / 60000) : 0;
-        const timeInfo = nf ? ` _(${minsUntil}m)_` : '';
-        blocks.push({
-          type: 'section',
-          text: { type: 'mrkdwn', text: `• \`${entry.time}\` → ${label}${timeInfo}` },
-          accessory: {
-            type: 'button',
-            text: { type: 'plain_text', text: '✕' },
-            action_id: `schedule_remove_btn_${entry.time.replace(':', '')}_${entry.account}`,
-            value: JSON.stringify({ time: entry.time, account: entry.account }),
-            style: 'danger',
-          },
-        });
-      }
-    }
-
-    // Rotation status (only when 2 accounts in schedule and rotation enabled)
-    const uniqueAccountsInEntries = [...new Set(entries.map(e => e.account))];
-    const showRotation = uniqueAccountsInEntries.length === 2;
-
-    if (showRotation && this.scheduleManager.isRotationEnabled()) {
-      const isSwapped = this.scheduleManager.isSwapDay();
-      const status = isSwapped ? t('schedule.rotation.swapped', locale) : t('schedule.rotation.normal', locale);
-      blocks.push({
-        type: 'context',
-        elements: [{ type: 'mrkdwn', text: t('schedule.rotation.status', locale, { status }) }],
-      });
-      // Show today's effective pattern
-      const effectiveEntries = this.scheduleManager.getEffectiveEntries();
-      const pattern = effectiveEntries.map(e => {
-        const email = accounts.find(a => a.id === e.account)?.email || e.account;
-        return `\`${e.time}\` ${email}`;
-      }).join(', ');
-      blocks.push({
-        type: 'context',
-        elements: [{ type: 'mrkdwn', text: t('schedule.rotation.effective', locale, { pattern }) }],
-      });
-    }
-
-    // Add buttons: one per configured account
-    if (configuredAccounts.length > 0) {
-      blocks.push({ type: 'divider' });
-      const addButtons = configuredAccounts.map(acc => {
-        const label = acc.email ? `+ ${acc.email}` : `+ ${acc.id}`;
-        return {
-          type: 'button',
-          text: { type: 'plain_text', text: label },
-          action_id: `schedule_add_btn_${acc.id}`,
-          value: JSON.stringify({ account: acc.id, channel, userId }),
-        };
-      });
-      // Rotation toggle button (only when 2 accounts in entries)
-      if (showRotation) {
-        const rotLabel = this.scheduleManager.isRotationEnabled()
-          ? t('schedule.rotation.disableBtn', locale)
-          : t('schedule.rotation.enableBtn', locale);
-        addButtons.push({
-          type: 'button',
-          text: { type: 'plain_text', text: rotLabel },
-          action_id: 'schedule_rotation_btn',
-          value: this.scheduleManager.isRotationEnabled() ? 'disable' : 'enable',
-        } as any);
-      }
-      // Clear all button (only when entries exist)
-      if (entries.length > 0) {
-        addButtons.push({
-          type: 'button',
-          text: { type: 'plain_text', text: t('schedule.clearBtn', locale) },
-          action_id: 'schedule_clear_btn',
-          value: 'clear',
-        } as any);
-      }
-      blocks.push({ type: 'actions', elements: addButtons });
-    } else {
-      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: t('schedule.noAccounts', locale) }] });
-    }
-
-    return { text: `📅 ${t('schedule.status.header', locale)}`, blocks };
-  }
-
-  private restartScheduler(): void {
-    if (!config.scheduledGreeting.enabled) {
-      // Feature disabled via SCHEDULED_GREETING_ENABLED=0. Cancel any timers and
-      // skip scheduling (and follow-up restore) so no greeting sessions fire.
-      this.scheduleManager.cancelAll();
-      this.logger.info('Scheduled greeting disabled (SCHEDULED_GREETING_ENABLED=0) — no sessions scheduled');
-      return;
-    }
-    this.scheduleManager.scheduleAll((ch, uid, time, account) => {
-      this.runScheduledGreeting(ch, uid, time, account).catch(err =>
-        this.logger.error('Scheduled greeting failed', err),
-      );
-    });
-  }
-
-  private async runScheduledGreeting(channel: string, userId: string, time: string, account: string): Promise<void> {
-    const locale = await this.getUserLocale(userId).catch(() => 'ko' as Locale);
-
-    // Skip if account is not configured (unset)
-    const accountInfo = this.accountManager.getAccountList().find(a => a.id === account);
-    if (!accountInfo?.email) {
-      this.logger.warn(`Skipping scheduled session: account ${account} not configured`);
-      await this.app.client.chat.postMessage({
-        channel,
-        text: `⚠️ ${t('schedule.accountNotSet', locale, { account, time })}`,
-      }).catch(() => {});
-      return;
-    }
-
-    // Post session start notification as top-level message
-    const accountEmail = accountInfo.email;
-    const accountLabel = accountEmail ? `${account} (${accountEmail})` : account;
-    const postResult = await this.app.client.chat.postMessage({
-      channel,
-      text: `🌅 ${t('schedule.sessionStart', locale)} (${time}) — ${accountLabel}`,
-    });
-
-    if (!postResult.ok || !postResult.ts) {
-      this.logger.error('Failed to post scheduled greeting message');
-      return;
-    }
-
-    const ts = postResult.ts as string;
-
-    // Suppress thread hint for automated messages
-    this.hintShownThreads.add(`${channel}:${ts}`);
-
-    // Create say callback for this thread
-    const say = async (args: any) => {
-      if (typeof args === 'string') {
-        return this.app.client.chat.postMessage({ channel, thread_ts: ts, text: args });
-      }
-      return this.app.client.chat.postMessage({ channel, ...args });
-    };
-
-    // Build synthetic event with randomized greeting
-    const greeting = ScheduleManager.getRandomGreeting();
-    this.logger.debug('Scheduled greeting message', { time, greeting });
-    const event: MessageEvent = { user: userId, channel, ts, text: greeting, accountId: account };
-
-    // Force haiku model for minimal token usage, restore after
-    const prevModel = this.channelModels.get(channel);
-    this.channelModels.set(channel, config.models.haiku);
-    try {
-      await this.handleMessage(event, say);
-    } finally {
-      if (prevModel !== undefined) {
-        this.channelModels.set(channel, prevModel);
-      } else {
-        this.channelModels.delete(channel);
-      }
     }
   }
 
@@ -3244,241 +2912,6 @@ export class SlackHandler {
       return Math.max(60, Math.floor((resetTime.getTime() - now.getTime()) / 1000) + this.RETRY_BUFFER_SECONDS);
     }
     return 5 * 60 * 60;
-  }
-
-  // --- API key management ---
-
-  private loadApiKeys(): void {
-    try {
-      if (!fs.existsSync(this.API_KEYS_FILE)) return;
-      const raw = fs.readFileSync(this.API_KEYS_FILE, 'utf-8');
-      const data: Record<string, { apiKey: string; savedAt: string }> = JSON.parse(raw);
-      for (const [userId, entry] of Object.entries(data)) {
-        this.userApiKeys.set(userId, entry.apiKey);
-      }
-      this.logger.info(`Loaded ${this.userApiKeys.size} API key(s) from disk`);
-    } catch (error) {
-      this.logger.error('Failed to load API keys from disk', error);
-    }
-  }
-
-  private saveApiKeys(): void {
-    try {
-      const data: Record<string, { apiKey: string; savedAt: string }> = {};
-      for (const [userId, apiKey] of this.userApiKeys.entries()) {
-        data[userId] = { apiKey, savedAt: new Date().toISOString() };
-      }
-      fs.writeFileSync(this.API_KEYS_FILE, JSON.stringify(data, null, 2), 'utf-8');
-    } catch (error) {
-      this.logger.error('Failed to save API keys to disk', error);
-    }
-  }
-
-  private isApiKeyCommand(text: string): boolean {
-    return /^`?-(?:apikey|key)`?$|^키$/i.test(text.trim());
-  }
-
-  private parseLimitCommand(text: string): { action: 'status' } | { action: 'set'; amount: number } | { action: 'clear' } | null {
-    const trimmed = text.trim();
-    if (/^`?-limit`?$|^한도$/i.test(trimmed)) return { action: 'status' };
-    if (/^`?-limit`?\s+(clear|off|reset)`?$|^한도\s+(?:clear|초기화)$/i.test(trimmed)) return { action: 'clear' };
-    const setMatch = trimmed.match(/^`?-limit`?\s+([\d.]+)`?$|^한도\s+([\d.]+)$/i);
-    if (setMatch) {
-      const amount = parseFloat(setMatch[1] || setMatch[2]);
-      if (!isNaN(amount) && amount > 0) return { action: 'set', amount };
-    }
-    return null;
-  }
-
-  private async handleLimitCommand(
-    parsed: { action: 'status' } | { action: 'set'; amount: number } | { action: 'clear' },
-    channel: string,
-    threadTs: string | undefined,
-    locale: Locale,
-    say: any,
-  ): Promise<void> {
-    if (parsed.action === 'set') {
-      this.channelApiKeyLimits.set(channel, parsed.amount);
-      // Update active session limit if running
-      const active = this.apiKeyActive.get(channel);
-      if (active) active.limit = parsed.amount;
-      await say({ text: `✅ ${t('cmd.limit.set', locale, { amount: parsed.amount.toFixed(2) })}`, thread_ts: threadTs });
-      return;
-    }
-
-    if (parsed.action === 'clear') {
-      this.channelApiKeyLimits.delete(channel);
-      const active = this.apiKeyActive.get(channel);
-      if (active) active.limit = undefined;
-      await say({ text: `✅ ${t('cmd.limit.cleared', locale)}`, thread_ts: threadTs });
-      return;
-    }
-
-    // Status
-    const active = this.apiKeyActive.get(channel);
-    const configuredLimit = this.channelApiKeyLimits.get(channel);
-    if (active) {
-      const limitStr = active.limit !== undefined ? `$${active.limit.toFixed(2)}` : (locale === 'ko' ? '없음' : 'none');
-      let msg = `💰 *${locale === 'ko' ? 'API 키 모드 활성 중' : 'API key mode active'}*\n`;
-      msg += `• ${locale === 'ko' ? '이번 세션 사용' : 'Spent'}: $${active.totalCost.toFixed(4)}\n`;
-      msg += `• ${locale === 'ko' ? '한도' : 'Limit'}: ${limitStr}\n`;
-      msg += locale === 'ko'
-        ? '_`-limit <금액>`으로 변경, `-limit clear`로 초기화_'
-        : '_Use `-limit <amount>` to change, `-limit clear` to remove_';
-      await say({ text: msg, thread_ts: threadTs });
-    } else if (configuredLimit !== undefined) {
-      let msg = `ℹ️ ${locale === 'ko' ? 'API 키 모드 비활성.' : 'API key mode not active.'}\n`;
-      msg += `• ${locale === 'ko' ? '설정된 한도' : 'Configured limit'}: $${configuredLimit.toFixed(2)}\n`;
-      msg += locale === 'ko'
-        ? '_Rate limit 시 API 키 모드 전환 시 자동 적용됩니다._'
-        : '_Will apply automatically when API key mode is activated._';
-      await say({ text: msg, thread_ts: threadTs });
-    } else {
-      await say({ text: `ℹ️ ${t('cmd.limit.none', locale)}`, thread_ts: threadTs });
-    }
-  }
-
-  private activateApiKey(channel: string, threadTs: string, userId: string, retryAfterSec: number, locale: Locale): void {
-    // Clear any existing timer for this channel
-    const existing = this.apiKeyActive.get(channel);
-    if (existing?.resetTimerId) clearTimeout(existing.resetTimerId);
-
-    const resetTimerId = setTimeout(async () => {
-      this.apiKeyActive.delete(channel);
-      try {
-        await this.app.client.chat.postMessage({
-          channel,
-          thread_ts: threadTs,
-          text: `🔄 ${t('apiKey.switchingToSubscription', locale)}`,
-        });
-      } catch (err) {
-        this.logger.error('Failed to post subscription switch message', err);
-      }
-    }, retryAfterSec * 1000);
-
-    this.apiKeyActive.set(channel, {
-      userId,
-      resetTimerId,
-      totalCost: 0,
-      limit: this.channelApiKeyLimits.get(channel),
-    });
-  }
-
-  // --- Account management commands ---
-
-  private isAccountCommand(text: string): boolean {
-    // `-ac` 뒤에는 공백이나 끝만 — 전에는 무엇이 붙든 받아서 `-actions` 가 계정 명령으로 먹혔다(2026-09-29).
-    return /^`?-(?:account|ac)`?(?:\s.*)?$|^계정(\s.*)?$/i.test(text.trim());
-  }
-
-  private async handleAccountCommand(text: string, _channel: string, threadTs: string | undefined, locale: Locale, say: any): Promise<void> {
-    const trimmed = text.trim().replace(/^`|`$/g, '');
-    const argMatch = trimmed.match(/^-(?:account|ac)\s+(.+)$/i) || trimmed.match(/^계정\s+(.+)$/);
-    const raw = argMatch ? argMatch[1].trim().toLowerCase() : '';
-
-    // -account <id> — direct switch (always run switchTo to re-sync .credentials.json)
-    const targetId = raw ? this.parseAccountId(raw) : null;
-    if (targetId) {
-      const ok = await this.accountManager.switchTo(targetId);
-      if (!ok) {
-        const { text: statusText, blocks } = this.buildAccountStatusBlocks(locale);
-        await say({ text: statusText, blocks, thread_ts: threadTs });
-        return;
-      }
-      const note = t('account.switchedTerminalGuide', locale, { account: targetId });
-      const { text: statusText, blocks } = this.buildAccountStatusBlocks(locale, note);
-      await say({ text: statusText, blocks, thread_ts: threadTs });
-      return;
-    }
-
-    // No args (or unrecognized) — show unified status + buttons
-    const { text: statusText, blocks } = this.buildAccountStatusBlocks(locale);
-    await say({ text: statusText, blocks, thread_ts: threadTs });
-  }
-
-  private parseAccountId(raw: string): AccountId | null {
-    if (raw === '1' || raw === 'account-1') return 'account-1';
-    if (raw === '2' || raw === 'account-2') return 'account-2';
-    if (raw === '3' || raw === 'account-3') return 'account-3';
-    return null;
-  }
-
-  private buildAccountStatusBlocks(locale: Locale, note?: string): { text: string; blocks: any[] } {
-    const current = this.accountManager.getCurrentAccount();
-    const accounts = this.accountManager.getAccountList();
-    const blocks: any[] = [];
-
-    if (note) {
-      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: note } });
-      blocks.push({ type: 'divider' });
-    }
-
-    const currentEmail = accounts.find(a => a.id === current)?.email;
-    const currentLabel = currentEmail ? `${current} (${currentEmail})` : current;
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: t('account.current', locale, { account: currentLabel }) } });
-
-    for (const acc of accounts) {
-      const emailSuffix = acc.email ? ` — ${acc.email}` : '';
-      if (acc.exists) {
-        // Configured account: Use / Set / Unset (Use re-syncs .credentials.json even if already active)
-        const statusText = acc.id === current
-          ? t('account.entryActive', locale, { id: acc.id }) + emailSuffix
-          : t('account.entryAvailable', locale, { id: acc.id }) + emailSuffix;
-        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: statusText } });
-        blocks.push({
-          type: 'actions',
-          elements: [
-            { type: 'button', text: { type: 'plain_text', text: t('account.useBtn', locale) }, action_id: 'account_use_btn', value: acc.id, style: 'primary' },
-            { type: 'button', text: { type: 'plain_text', text: t('account.setBtn', locale) }, action_id: 'account_set_btn', value: acc.id },
-            { type: 'button', text: { type: 'plain_text', text: t('account.unsetBtn', locale) }, action_id: 'account_unset_btn', value: acc.id, style: 'danger' },
-          ],
-        });
-      } else {
-        // Not configured: Set only
-        blocks.push({
-          type: 'section',
-          text: { type: 'mrkdwn', text: t('account.entryMissing', locale, { id: acc.id }) },
-          accessory: {
-            type: 'button',
-            text: { type: 'plain_text', text: t('account.setBtn', locale) },
-            action_id: 'account_set_btn',
-            value: acc.id,
-          },
-        });
-      }
-    }
-
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: t('account.hint', locale) }] });
-
-    return { text: t('account.current', locale, { account: current }), blocks };
-  }
-
-  private buildCaptureNewBlocks(setupId: string, slot: AccountId, locale: Locale): { text: string; blocks: any[] } {
-    const text = t('account.setup.captureNew.title', locale, { slot });
-    return {
-      text,
-      blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text } },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: { type: 'plain_text', text: t('account.setup.captureNew.doneBtn', locale) },
-              action_id: 'account_setup_next',
-              value: setupId,
-              style: 'primary',
-            },
-            {
-              type: 'button',
-              text: { type: 'plain_text', text: t('account.setup.cancelBtn', locale) },
-              action_id: 'account_setup_cancel',
-              value: setupId,
-            },
-          ],
-        },
-      ],
-    };
   }
 
   private isMcpInfoCommand(text: string): boolean {
@@ -3757,9 +3190,6 @@ export class SlackHandler {
       this.logger.warn('Failed to cancel orphaned scheduled messages', err),
     );
 
-    // Start session scheduler
-    this.restartScheduler();
-
     // Start assistant scheduler (briefing, reminders, analysis)
     this.assistantScheduler?.start();
 
@@ -4016,225 +3446,6 @@ export class SlackHandler {
       await respond({ response_type: 'ephemeral', text: t('plan.cancelled', actionLocale) });
     });
 
-    // Account status view: "Switch" button
-    this.action('account_switch_btn', async ({ ack, body, respond }) => {
-      await ack();
-      const actionLocale = await this.getUserLocale((body as any).user.id);
-      const accountId = (body as any).actions[0].value as AccountId;
-      const ok = await this.accountManager.switchTo(accountId);
-      const note = ok
-        ? t('account.switchedTerminalGuide', actionLocale, { account: accountId })
-        : t('account.notFound', actionLocale, { account: accountId });
-      const { text, blocks } = this.buildAccountStatusBlocks(actionLocale, note);
-      await respond({ replace_original: true, text, blocks });
-    });
-
-    // Account status view: "Use" button → switch account
-    this.action('account_use_btn', async ({ ack, body, respond }) => {
-      await ack();
-      const actionLocale = await this.getUserLocale((body as any).user.id);
-      const accountId = (body as any).actions[0].value as AccountId;
-      const ok = await this.accountManager.switchTo(accountId);
-      const note = ok
-        ? t('account.switchedTerminalGuide', actionLocale, { account: accountId })
-        : t('account.notFound', actionLocale, { account: accountId });
-      const { text, blocks } = this.buildAccountStatusBlocks(actionLocale, note);
-      await respond({ replace_original: true, text, blocks });
-    });
-
-    // Account status view: "Set" button → guide user to login with target account
-    this.action('account_set_btn', async ({ ack, body, respond }) => {
-      await ack();
-      const actionLocale = await this.getUserLocale((body as any).user.id);
-      const slot = (body as any).actions[0].value as AccountId;
-
-      const originalToken = this.accountManager.readCurrentToken();
-      const setupId = `setup-${Date.now()}`;
-      this.pendingAccountSetups.set(setupId, { slot, originalToken, locale: actionLocale });
-      setTimeout(() => {
-        const s = this.pendingAccountSetups.get(setupId);
-        if (s) { this.pendingAccountSetups.delete(setupId); }
-      }, 30 * 60 * 1000);
-
-      const { text, blocks } = this.buildCaptureNewBlocks(setupId, slot, actionLocale);
-      await respond({ replace_original: true, text, blocks });
-    });
-
-    // Account status view: "Unset" button → remove credentials backup
-    this.action('account_unset_btn', async ({ ack, body, respond }) => {
-      await ack();
-      const actionLocale = await this.getUserLocale((body as any).user.id);
-      const accountId = (body as any).actions[0].value as AccountId;
-      this.accountManager.unsetAccount(accountId);
-      const { text, blocks } = this.buildAccountStatusBlocks(actionLocale, t('account.unset.done', actionLocale, { id: accountId }));
-      await respond({ replace_original: true, text, blocks });
-    });
-
-    // Account setup: "Done" button — capture token for the target slot
-    this.action('account_setup_next', async ({ ack, body, respond }) => {
-      await ack();
-      const actionLocale = await this.getUserLocale((body as any).user.id);
-      try {
-        const setupId = (body as any).actions[0].value as string;
-        const setup = this.pendingAccountSetups.get(setupId);
-        if (!setup) {
-          // 만료된 설정 안내를 바꿔 쓴다 — 그 안내 · 버튼은 이미 쓸 데가 없다(`check:actions` ⑤c).
-          await respond({ response_type: 'ephemeral', text: t('account.setup.expired', actionLocale) });
-          return;
-        }
-
-        const currentToken = this.accountManager.readCurrentToken();
-        if (currentToken === setup.originalToken) {
-          await respond(noticeReply(t('account.setup.captureNew.notChanged', actionLocale)));
-          return;
-        }
-
-        await this.accountManager.captureForSlot(setup.slot);
-        this.pendingAccountSetups.delete(setupId);
-        const doneBlocks = this.buildAccountStatusBlocks(actionLocale, t('account.setup.done', actionLocale, { slot: setup.slot }));
-        await respond({ replace_original: true, ...doneBlocks });
-      } catch (error) {
-        this.logger.error('Error in account_setup_next', error);
-        await respond(noticeReply('❌ An error occurred. Please try again.'));
-      }
-    });
-
-    // Account setup: "Cancel" button
-    this.action('account_setup_cancel', async ({ ack, body, respond }) => {
-      await ack();
-      const actionLocale = await this.getUserLocale((body as any).user.id);
-      const setupId = (body as any).actions[0].value;
-      const setup = this.pendingAccountSetups.get(setupId);
-      if (setup) {
-        this.pendingAccountSetups.delete(setupId);
-        // No cleanup needed — watcher removed
-      }
-      // Return to status view with cancel note
-      const { text, blocks } = this.buildAccountStatusBlocks(actionLocale, t('account.setup.cancelled', actionLocale));
-      await respond({ replace_original: true, text, blocks });
-    });
-
-    // Schedule: "Add" button → open modal for time input
-    this.action(/^schedule_add_btn_/, async ({ ack, body }) => {
-      await ack();
-      try {
-        const actionLocale = await this.getUserLocale((body as any).user.id);
-        const value = JSON.parse((body as any).actions[0].value);
-        const { account, channel: ch, userId: uid } = value;
-        const messageTs = (body as any).message?.ts;
-        const accInfo = this.accountManager.getAccountList().find(a => a.id === account);
-        const label = accInfo?.email ? `${account} (${accInfo.email})` : account;
-
-        await this.app.client.views.open({
-          trigger_id: (body as any).trigger_id,
-          view: {
-            type: 'modal',
-            callback_id: 'schedule_add_modal',
-            private_metadata: JSON.stringify({ account, channel: ch, userId: uid, messageTs }),
-            title: { type: 'plain_text', text: t('schedule.modal.title', actionLocale) },
-            submit: { type: 'plain_text', text: t('schedule.modal.submit', actionLocale) },
-            close: { type: 'plain_text', text: t('schedule.modal.close', actionLocale) },
-            blocks: [
-              { type: 'section', text: { type: 'mrkdwn', text: t('schedule.modal.body', actionLocale, { account: label }) } },
-              {
-                type: 'input',
-                block_id: 'schedule_time_block',
-                label: { type: 'plain_text', text: t('schedule.modal.label', actionLocale) },
-                element: {
-                  type: 'plain_text_input',
-                  action_id: 'schedule_time_input',
-                  placeholder: { type: 'plain_text', text: '5, 11, 16:30' },
-                },
-              },
-            ],
-          },
-        });
-      } catch (error) {
-        this.logger.error('Failed to open schedule add modal', error);
-      }
-    });
-
-    // Schedule: modal submission → add time
-    this.app.view('schedule_add_modal', async ({ ack, view, body }) => {
-      const metadata = JSON.parse(view.private_metadata);
-      const timeInput = view.state.values.schedule_time_block.schedule_time_input.value || '';
-      const viewLocale = await this.getUserLocale(body.user.id);
-
-      // Validate
-      const normalized = this.scheduleManager.normalizeTime(timeInput);
-      if (!normalized) {
-        await ack({ response_action: 'errors', errors: { schedule_time_block: t('schedule.invalidTime', viewLocale) } });
-        return;
-      }
-      const conflict = this.scheduleManager.findConflictingTime(normalized, metadata.account);
-      if (conflict) {
-        const existingHour = conflict.split(':')[0];
-        await ack({ response_action: 'errors', errors: { schedule_time_block: t('schedule.conflictWithExisting', viewLocale, { time: normalized, existing: conflict, existingHour }) } });
-        return;
-      }
-
-      await ack();
-      this.scheduleManager.addTime(normalized, metadata.channel, metadata.userId, metadata.account);
-      this.restartScheduler();
-
-      // Update original schedule message in-place
-      try {
-        const { text, blocks } = this.buildScheduleBlocks(viewLocale, metadata.channel, metadata.userId);
-        if (metadata.messageTs) {
-          await this.app.client.chat.update({
-            channel: metadata.channel,
-            ts: metadata.messageTs,
-            text,
-            blocks,
-          });
-        } else {
-          await this.app.client.chat.postMessage({
-            channel: metadata.channel,
-            text,
-            blocks,
-          });
-        }
-      } catch (err) {
-        this.logger.error('Failed to update schedule view after add', err);
-      }
-    });
-
-    // Schedule: "Remove" button
-    this.action(/^schedule_remove_btn_/, async ({ ack, body, respond }) => {
-      await ack();
-      const actionLocale = await this.getUserLocale((body as any).user.id);
-      const ch = (body as any).channel?.id;
-      const uid = (body as any).user.id;
-      const { time, account } = JSON.parse((body as any).actions[0].value);
-      this.scheduleManager.removeTime(time, account);
-      this.restartScheduler();
-      const { text, blocks } = this.buildScheduleBlocks(actionLocale, ch, uid);
-      await respond({ replace_original: true, text, blocks });
-    });
-
-    // Schedule: "Clear all" button
-    this.action('schedule_clear_btn', async ({ ack, body, respond }) => {
-      await ack();
-      const actionLocale = await this.getUserLocale((body as any).user.id);
-      const ch = (body as any).channel?.id;
-      const uid = (body as any).user.id;
-      this.scheduleManager.clearTimes();
-      const { text, blocks } = this.buildScheduleBlocks(actionLocale, ch, uid);
-      await respond({ replace_original: true, text, blocks });
-    });
-
-    // Schedule: "Rotation" toggle button
-    this.action('schedule_rotation_btn', async ({ ack, body, respond }) => {
-      await ack();
-      const actionLocale = await this.getUserLocale((body as any).user.id);
-      const ch = (body as any).channel?.id;
-      const uid = (body as any).user.id;
-      const value = (body as any).actions[0].value;
-      this.scheduleManager.setRotation(value === 'enable');
-      const { text, blocks } = this.buildScheduleBlocks(actionLocale, ch, uid);
-      await respond({ replace_original: true, text, blocks });
-    });
-
     // Session picker "Show more" button
     this.action('picker_show_more', async ({ ack, body }) => {
       await ack();
@@ -4323,328 +3534,21 @@ export class SlackHandler {
     });
 
 
-    // Rate limit retry — auto-execute the original prompt at reset time
-    this.action('schedule_retry', async ({ ack, body, respond }) => {
-      await ack();
-      try {
-        const userId = (body as any).user.id;
-        const actionLocale = await this.getUserLocale(userId);
-        const actionValue = JSON.parse((body as any).actions[0].value);
-        const { retryId, postAt, retryTimeStr } = actionValue;
-        const retryInfo = this.pendingRetries.get(retryId);
-        if (!retryInfo) {
-          await respond(noticeReply(`⚠️ ${t('rateLimit.retryExpired', actionLocale)}`));
-          return;
-        }
-
-        // Auto-retry will own pendingRetries until fire — clear cleanup timer
-        const cleanupTimer = this.pendingRetryCleanup.get(retryId);
-        if (cleanupTimer) {
-          clearTimeout(cleanupTimer);
-          this.pendingRetryCleanup.delete(retryId);
-        }
-
-        // Schedule auto-execution: postAt + 60s buffer for Anthropic clock skew
-        const fireMs = postAt * 1000 + 60_000;
-        const delay = Math.max(60_000, fireMs - Date.now());
-        const autoRetryTimer = setTimeout(async () => {
-          this.pendingAutoRetries.delete(retryId);
-          const info = this.pendingRetries.get(retryId);
-          if (!info) return;
-          this.pendingRetries.delete(retryId);
-          try {
-            const fireLocale = await this.getUserLocale(info.user);
-            await this.app.client.chat.postMessage({
-              channel: info.channel,
-              thread_ts: info.threadTs,
-              text: t('rateLimit.autoRetryFiring', fireLocale),
-            }).catch(() => {});
-            const event: MessageEvent = {
-              user: info.user,
-              channel: info.channel,
-              thread_ts: info.threadTs,
-              ts: info.threadTs,
-              text: info.prompt,
-            };
-            const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel: info.channel, ...msg });
-            await this.handleMessage(event, sayCb);
-          } catch (error) {
-            this.logger.error('Auto-retry execution failed', error);
-          }
-        }, delay);
-        this.pendingAutoRetries.set(retryId, autoRetryTimer);
-
-        await respond({
-          replace_original: true,
-          text: t('rateLimit.scheduled', actionLocale, { time: retryTimeStr }),
-        });
-      } catch (error) {
-        this.logger.error('Failed to schedule auto-retry', error);
-      }
-    });
-
+    // 한도 안내의 「취소」 — 캡처를 버려 회복 시각의 드레인이 다시 안 돌린다.
+    // 값의 `retryId` · `rlqId` 는 예전 버튼 모양이다(지금 버튼은 `captureId` 만 싣는다).
     this.action('cancel_retry', async ({ ack, body, respond }) => {
       await ack();
       const actionLocale = await this.getUserLocale((body as any).user.id);
       const raw = (body as any).actions[0].value;
       // 예전 형식(문자열 그대로)도 받는다 — 봇을 올리기 전에 뿌려진 버튼이 살아 있다.
-      let retryId = raw;
       let captureId: string | undefined;
       try {
         const parsed = JSON.parse(raw);
-        retryId = parsed.retryId; captureId = parsed.captureId ?? parsed.rlqId;
-      } catch { /* 예전 형식 */ }
-      this.clearRetryTimers(retryId);
-      this.pendingRetries.delete(retryId);
+        captureId = parsed.captureId ?? parsed.rlqId;
+      } catch { /* 예전 형식 — 버릴 캡처가 없다 */ }
       // **캡처도 버린다.** 안 버리면 취소해 놓고도 회복 시각에 드레인이 다시 돌린다.
       if (captureId) await dropCapture(captureId, '사람이 취소함');
       await respond(noticeReply(t('misc.cancelled', actionLocale)));
-    });
-
-    // Switch account on rate limit
-    this.action('switch_account_retry', async ({ ack, body, respond }) => {
-      await ack();
-      try {
-        const userId = (body as any).user.id;
-        const actionLocale = await this.getUserLocale(userId);
-        const { retryId, account } = JSON.parse((body as any).actions[0].value) as { retryId: string; account: AccountId };
-        const retryInfo = this.pendingRetries.get(retryId);
-        if (!retryInfo) {
-          await respond(noticeReply(`⚠️ ${t('rateLimit.retryExpired', actionLocale)}`));
-          return;
-        }
-
-        this.clearRetryTimers(retryId);
-
-        const ok = await this.accountManager.switchTo(account);
-        if (!ok) {
-          await respond(noticeReply(t('account.notFound', actionLocale, { account })));
-          return;
-        }
-
-        // Replace rate limit message (remove buttons) + show switch confirmation
-        await respond({
-          replace_original: true,
-          text: t('account.switchedTerminalGuide', actionLocale, { account }),
-        });
-
-        // Retry original query with new account
-        const { channel, threadTs, user: retryUser, prompt } = retryInfo;
-        this.pendingRetries.delete(retryId);
-        const event: MessageEvent = { user: retryUser, channel, thread_ts: threadTs, ts: threadTs, text: prompt };
-        const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel, ...msg });
-        await this.handleMessage(event, sayCb);
-      } catch (error) {
-        this.logger.error('Error handling switch_account_retry', error);
-      }
-    });
-
-    // Continue with API key on rate limit
-    this.action('continue_with_apikey', async ({ ack, body }) => {
-      await ack();
-      try {
-        const userId = (body as any).user.id;
-        const actionLocale = await this.getUserLocale(userId);
-        const actionValue = JSON.parse((body as any).actions[0].value);
-        const { retryId, retryAfter } = actionValue;
-        const retryInfo = this.pendingRetries.get(retryId);
-        if (!retryInfo) {
-          await this.app.client.chat.postEphemeral({
-            channel: (body as any).channel?.id || '',
-            user: userId,
-            text: `⚠️ ${t('rateLimit.retryExpired', actionLocale)}`,
-          }).catch(() => {});
-          return;
-        }
-
-        const apiKey = this.userApiKeys.get(userId);
-        if (apiKey) {
-          this.clearRetryTimers(retryId);
-
-          // Activate API key mode for this channel
-          this.activateApiKey(retryInfo.channel, retryInfo.threadTs, userId, retryAfter, actionLocale);
-
-          await this.app.client.chat.postMessage({
-            channel: retryInfo.channel,
-            thread_ts: retryInfo.threadTs,
-            text: `🔑 ${t('apiKey.switchingToApiKey', actionLocale)}`,
-          });
-
-          // Retry with API key
-          const { channel, threadTs, user, prompt } = retryInfo;
-          this.pendingRetries.delete(retryId);
-          const event: MessageEvent = { user, channel, thread_ts: threadTs, ts: threadTs, text: prompt };
-          const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel, ...msg });
-          await this.handleMessage(event, sayCb);
-        } else {
-          // No key registered — open modal to enter one
-          await this.app.client.views.open({
-            trigger_id: (body as any).trigger_id,
-            view: {
-              type: 'modal',
-              callback_id: 'apikey_modal',
-              private_metadata: JSON.stringify({ retryId, retryAfter, channel: retryInfo.channel }),
-              title: { type: 'plain_text', text: t('apiKey.modalTitle', actionLocale) },
-              submit: { type: 'plain_text', text: t('apiKey.modalSubmit', actionLocale) },
-              close: { type: 'plain_text', text: t('apiKey.modalClose', actionLocale) },
-              blocks: [
-                { type: 'section', text: { type: 'mrkdwn', text: t('apiKey.modalBody', actionLocale) } },
-                {
-                  type: 'input',
-                  block_id: 'apikey_block',
-                  label: { type: 'plain_text', text: t('apiKey.modalLabel', actionLocale) },
-                  element: {
-                    type: 'plain_text_input',
-                    action_id: 'apikey_input',
-                    placeholder: { type: 'plain_text', text: 'sk-ant-...' },
-                  },
-                },
-                {
-                  type: 'input',
-                  block_id: 'limit_block',
-                  optional: true,
-                  label: { type: 'plain_text', text: t('apiKey.limitLabel', actionLocale) },
-                  element: {
-                    type: 'plain_text_input',
-                    action_id: 'limit_input',
-                    placeholder: { type: 'plain_text', text: t('apiKey.limitPlaceholder', actionLocale) },
-                    initial_value: this.channelApiKeyLimits.has(retryInfo.channel) ? String(this.channelApiKeyLimits.get(retryInfo.channel)) : undefined,
-                  },
-                },
-              ],
-            },
-          });
-        }
-      } catch (error) {
-        this.logger.error('Error handling continue_with_apikey', error);
-      }
-    });
-
-    // Open API key modal (from -apikey command button)
-    this.action('open_apikey_modal', async ({ ack, body }) => {
-      await ack();
-      try {
-        const userId = (body as any).user.id;
-        const actionLocale = await this.getUserLocale(userId);
-        const existingKey = this.userApiKeys.get(userId);
-        const modalChannel = (body as any).channel?.id || (body as any).container?.channel_id || '';
-
-        await this.app.client.views.open({
-          trigger_id: (body as any).trigger_id,
-          view: {
-            type: 'modal',
-            callback_id: 'apikey_modal',
-            private_metadata: JSON.stringify({ channel: modalChannel }),
-            title: { type: 'plain_text', text: t('apiKey.modalTitle', actionLocale) },
-            submit: { type: 'plain_text', text: t('apiKey.modalSubmit', actionLocale) },
-            close: { type: 'plain_text', text: t('apiKey.modalClose', actionLocale) },
-            blocks: [
-              { type: 'section', text: { type: 'mrkdwn', text: t('apiKey.modalBody', actionLocale) } },
-              {
-                type: 'input',
-                block_id: 'apikey_block',
-                label: { type: 'plain_text', text: t('apiKey.modalLabel', actionLocale) },
-                element: {
-                  type: 'plain_text_input',
-                  action_id: 'apikey_input',
-                  placeholder: { type: 'plain_text', text: existingKey ? `Already set (...${existingKey.slice(-4)})` : 'sk-ant-...' },
-                },
-              },
-              {
-                type: 'input',
-                block_id: 'limit_block',
-                optional: true,
-                label: { type: 'plain_text', text: t('apiKey.limitLabel', actionLocale) },
-                element: {
-                  type: 'plain_text_input',
-                  action_id: 'limit_input',
-                  placeholder: { type: 'plain_text', text: t('apiKey.limitPlaceholder', actionLocale) },
-                  initial_value: modalChannel && this.channelApiKeyLimits.has(modalChannel) ? String(this.channelApiKeyLimits.get(modalChannel)) : undefined,
-                },
-              },
-            ],
-          },
-        });
-      } catch (error) {
-        this.logger.error('Failed to open API key modal', error);
-      }
-    });
-
-    // API key modal submission
-    this.app.view('apikey_modal', async ({ ack, view, body }) => {
-      await ack();
-      try {
-        const userId = body.user.id;
-        if (!userId) return;
-        const viewLocale = await this.getUserLocale(userId);
-        const apiKey = view.state.values.apikey_block.apikey_input.value?.trim();
-        if (!apiKey) return;
-
-        // Save key
-        this.userApiKeys.set(userId, apiKey);
-        this.saveApiKeys();
-
-        const metadata = JSON.parse(view.private_metadata || '{}');
-
-        // Save spending limit if provided
-        const limitValue = view.state.values.limit_block?.limit_input?.value?.trim();
-        const metaChannel = metadata.channel as string | undefined;
-        if (metaChannel) {
-          if (limitValue) {
-            const limitAmount = parseFloat(limitValue);
-            if (!isNaN(limitAmount) && limitAmount > 0) {
-              this.channelApiKeyLimits.set(metaChannel, limitAmount);
-              const active = this.apiKeyActive.get(metaChannel);
-              if (active) active.limit = limitAmount;
-            }
-          } else {
-            // Blank = clear limit
-            this.channelApiKeyLimits.delete(metaChannel);
-            const active = this.apiKeyActive.get(metaChannel);
-            if (active) active.limit = undefined;
-          }
-        }
-
-        if (metadata.retryId) {
-          // Called from rate limit flow — activate API key and retry
-          const retryInfo = this.pendingRetries.get(metadata.retryId);
-          if (retryInfo) {
-            this.clearRetryTimers(metadata.retryId);
-
-            this.activateApiKey(retryInfo.channel, retryInfo.threadTs, userId, metadata.retryAfter, viewLocale);
-
-            await this.app.client.chat.postMessage({
-              channel: retryInfo.channel,
-              thread_ts: retryInfo.threadTs,
-              text: `🔑 ${t('apiKey.savedAndRetrying', viewLocale)}`,
-            });
-
-            // Retry
-            const { channel, threadTs, user, prompt } = retryInfo;
-            this.pendingRetries.delete(metadata.retryId);
-            const event: MessageEvent = { user, channel, thread_ts: threadTs, ts: threadTs, text: prompt };
-            const sayCb = async (msg: any) => this.app.client.chat.postMessage({ channel, ...msg });
-            await this.handleMessage(event, sayCb);
-          }
-        } else {
-          // Called from -apikey command — just confirm save
-          // Post DM to the user
-          try {
-            const dm = await this.app.client.conversations.open({ users: userId });
-            if (dm.channel?.id) {
-              await this.app.client.chat.postMessage({
-                channel: dm.channel.id,
-                text: `✅ ${t('apiKey.saved', viewLocale)}`,
-              });
-            }
-          } catch {
-            // Can't DM, just log
-            this.logger.debug('Could not DM user after API key save');
-          }
-        }
-      } catch (error) {
-        this.logger.error('Error handling API key modal submission', error);
-      }
     });
 
     // Calendar notification mute button
@@ -4789,18 +3693,15 @@ export class SlackHandler {
     const newUnhealthy = unhealthy.filter(a => !this.notifiedUnhealthyAccounts.has(a.id));
     if (newUnhealthy.length === 0) return;
 
-    // Find a channel/user to send the notification to
-    const scheduleConfig = this.scheduleManager.getConfig();
-    if (!scheduleConfig) return; // No schedule = no one to notify
-
-    const locale = await this.getUserLocale(scheduleConfig.userId).catch(() => 'ko' as Locale);
-    const accountLabels = newUnhealthy.map(a => `\`${a.id}\` (${a.email || '?'})`).join(', ');
+    // 비서 DM 으로 알린다 — 전에는 인사 예약(2026-10-14 걷음)이 든 방을 빌려 썼다.
+    const channel = config.assistant.dmChannel;
+    if (!channel) return; // 알릴 곳이 없으면 표시도 안 남긴다 — 설정되면 다음 점검에서 알린다
+    const user = config.bot.allowUsers[0];
+    const locale: Locale = user ? await this.getUserLocale(user).catch(() => 'ko' as Locale) : 'ko';
+    const accountLabels = newUnhealthy.map(a => `\`${a.email || a.id}\``).join(', ');
     const message = t('account.tokenExpired', locale, { accounts: accountLabels });
 
-    await this.app.client.chat.postMessage({
-      channel: scheduleConfig.channel,
-      text: message,
-    });
+    await this.app.client.chat.postMessage({ channel, text: message });
 
     for (const a of newUnhealthy) {
       this.notifiedUnhealthyAccounts.add(a.id);

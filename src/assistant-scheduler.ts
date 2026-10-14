@@ -2284,7 +2284,7 @@ export class AssistantScheduler {
 
   // --- Briefing ---
 
-  /** Schedule next briefing on next working day (schedule-manager.ts:289-324 pattern). */
+  /** Schedule next briefing on next working day. */
   private scheduleBriefing(): void {
     if (!this.config) return;
     const nextFire = this.getNextWorkingDay(this.config.briefing.time);
@@ -3862,7 +3862,7 @@ export class AssistantScheduler {
   }
 
   /**
-   * 오늘이 내가 일하지 않는 날인가 (schedule-manager.ts:231-241 pattern).
+   * 오늘이 내가 일하지 않는 날인가.
    *
    * 달력 **둘을 합친다.** `date-holidays` 는 해마다 바뀌는 한국 공휴일을 알고,
    * `config.json` 의 `holidays` 는 **개인 휴가·건강검진**을 안다 — 후자는 파이썬
@@ -3881,7 +3881,7 @@ export class AssistantScheduler {
     return { skip: false };
   }
 
-  /** Get next occurrence of HH:MM on a working day (schedule-manager.ts:243-252 pattern). */
+  /** Get next occurrence of HH:MM on a working day. */
   private getNextWorkingDay(time: string): Date {
     const [h, m] = time.split(':').map(Number);
     const now = new Date();

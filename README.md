@@ -38,43 +38,17 @@ When a tool is denied, a Slack button appears to approve it individually or allo
 
 `-plan <prompt>` generates a read-only plan without modifying any files. Review it, then click **Execute** to proceed or **Cancel** to discard.
 
-### Multi-Account Support
+### Login Token
 
-Register up to 3 Claude accounts and switch between them. Each query uses `CLAUDE_CODE_OAUTH_TOKEN` env var injection, and `~/.claude/.credentials.json` is automatically synced so your terminal CLI also picks up the active account.
+Sessions run on your local Claude Code login (`claude login`). If `~/.claude/.bot-accounts.json` holds a token (a single `account-1` entry), the bot injects it into each session via the `CLAUDE_CODE_OAUTH_TOKEN` env var and keeps it in sync with the terminal's `~/.claude/.credentials.json` in both directions, as long as the terminal is logged in to the same account (matched by email).
 
-- `-account` — View all accounts with Set/Use/Unset buttons
-- Tokens are auto-refreshed on expiry (OAuth refresh flow)
-- Rate limit triggers automatic account rotation: account-1 → account-2 → account-3 → API key fallback
+- Tokens are auto-refreshed before expiry (OAuth refresh flow); if a refresh fails, the bot DMs the assistant channel asking you to log in again from the terminal (`claude`, then `/login`)
+- `ANTHROPIC_API_KEY` is always removed from the environment of sessions the bot starts, so a key set on the machine never bills
+- Multi-account switching (`-account`), the API key fallback (`-apikey`, `-limit`) and the scheduled session greeting (`-schedule`) were removed on 2026-10-14
 
-### Rate Limit Handling & API Key Fallback
+### Rate Limit Handling
 
-When Claude subscription limits are reached:
-
-1. **Auto account switch** — If multiple accounts are registered, the bot tries the next account automatically
-2. **Continue with API key** — Switch to your registered API key
-3. **Auto-retry** — Bot automatically re-runs your original prompt when the rate limit resets (in-memory; expires after 10 min if no button is clicked)
-4. **Cancel** — Discard the pending message
-
-Pre-register your API key with `-apikey` so it's ready when needed. The modal also lets you set an optional **spending limit** — the bot auto-deactivates API key mode when the limit is reached. The bot automatically reverts to subscription auth when the rate limit resets.
-
-When API key mode is active, each query's cost is tracked and shown in the completion message (`✅ Task completed (Grep ×3) | 🔑 $0.0023 (total: $0.0145)`). Use `-limit` to view or adjust the spending limit at any time.
-
-### Session Auto-Start
-
-Claude Pro/Max subscriptions have session limits with 5-hour windows. Schedule automatic session starts to keep your sessions running:
-
-```
--schedule    # Block-based UI with per-account add/remove buttons
-```
-
-**How it works:**
-- Each schedule entry is tied to a specific account — use the `[+ email]` buttons to add times per account
-- At the scheduled hour, the bot sends a minimal greeting using the assigned account's token (randomized message, +0~10 min jitter)
-- **Auto follow-up**: 5 hours later, a second greeting fires automatically to cover the next session window (persisted to disk — survives restarts)
-- Different accounts can have overlapping times; conflict checking is per-account only (5-hour window)
-- Uses the `haiku` model alias (`config.models.haiku` — Haiku 5.5 as of 2026-10-08) for minimal token cost
-- **Non-working day skip**: Weekends, Korean public holidays (including lunar calendar), and the off-day list in the work-assistant `config.json` (`holidays` — substitute holidays and personal days off) are automatically skipped
-- Schedule repeats daily, persisted in `.schedule-config.json`
+When Claude subscription limits are reached, the bot posts the estimated reset time with a **Cancel** button. With the work assistant connected (`WORK_ASSISTANT_ROOT`), the original message is kept in its capture queue and re-run one minute after the reset time; **Cancel** drops it from the queue.
 
 ### Assistant Scheduler (Optional)
 
@@ -90,8 +64,7 @@ Automate daily briefings, calendar reminders, and weekly analysis reports. Requi
 - **i18n**: Automatic Korean/English UI based on Slack user locale
 - **MCP**: Integrate MCP servers via `mcp-servers.json` (`-mcp`, `-mcp reload`)
 - **Model selection**: `-model sonnet`, `-model opus`, `-model haiku` (or short aliases `-s`, `-o`, `-h`). Prefix a single message with `!o `, `!s `, or `!h ` for a one-shot override without changing the channel default.
-- **Cost tracking**: API key mode shows per-query and cumulative cost in completion messages; `-cost` for last query details
-- **Spending limit**: Set via `-apikey` modal or `-limit <amount>`; auto-deactivates API key mode when reached
+- **Cost tracking**: `-cost` shows the last query's cost, duration, model and session ID
 - **Streaming**: Real-time response updates with tool progress display
 - **Tool summary**: Completion message shows tools used (`✅ Task completed (Grep ×5, Read ×2)`)
 
@@ -291,24 +264,9 @@ Conversations in the same thread automatically continue the session (no command 
 
 | Command | Description |
 |---------|-------------|
-| `-account` | Multi-account status (Set/Use/Unset buttons) |
-| `-account 1/2/3` | Switch to specific account |
 | `-model [name]` | Get/set model (`sonnet`, `opus`, `haiku`, or full name) |
 | `-cost` | Show last query cost and session ID |
-| `-apikey` | Register API key for rate limit fallback; optional spending limit field |
-| `-limit [amount]` | View/set API key spending limit (e.g., `-limit 2.00`) |
-| `-limit clear` | Remove spending limit |
 | `-version` | Show bot version and check for updates |
-
-### Session Auto-Start
-
-| Command | Description |
-|---------|-------------|
-| `-schedule` | Show schedule status with per-account add/remove buttons |
-
-```
--schedule               # Block-based UI: add via modal, remove via ✕ button, clear all
-```
 
 ### Assistant
 
@@ -474,21 +432,6 @@ Enables calendar event creation, reminders, and briefing with calendar data. See
 - `CalendarPoller`: 5-min polling with AI-powered reminders during working hours
 - Morning briefing includes today's calendar agenda
 
-### Multi-Account Management
-
-Register up to 3 Claude accounts for rate limit rotation and seamless switching.
-
-**Setup:**
-1. Log in to your first Claude account: `claude login`
-2. In Slack, run `-account` → click **Set** on a slot → credentials are captured from `~/.claude/.credentials.json`
-3. Repeat for additional accounts (log in via terminal, then capture in Slack)
-
-**How it works:**
-- Tokens are stored in `~/.claude/.bot-accounts.json` (auto-created, in `.gitignore`)
-- Active account is injected via `CLAUDE_CODE_OAUTH_TOKEN` environment variable
-- Token health is checked hourly with auto-refresh (OAuth rotation)
-- Terminal CLI and bot stay in sync via bidirectional file watching
-
 ### System Memory Watchdog (Windows only)
 
 Monitors system commit memory so that always-on work (the bot, its sessions, scheduled pipelines) is not taken down by memory exhaustion — and is not taken down by the watchdog itself.
@@ -531,28 +474,14 @@ SDK_UPDATE_AT=09:30                 # first workday of the week, HH:MM
 
 Manual: `node scripts/sdk-update.mjs --check` (compare only) · `--run --dry-run` (checks only) · `--run`.
 
-### Session Auto-Start
-
-Schedule automatic session starts to maximize Claude Pro/Max session windows.
-
-**Setup:** Use `-schedule` in Slack — no environment variables needed. The block-based UI lets you add/remove times per account.
-
-**Behavior:**
-- Randomized jitter (+0~10 min) to avoid automation detection
-- Auto follow-up 5 hours later for the next session window
-- Non-working day skip (weekends + public holidays + the work-assistant off-day list, which includes personal days off)
-- Daily rotation (toggle button): for 2-account cross-schedules, swap accounts on alternating days (by day-of-year) to balance usage over 2 weeks
-- Persisted in `.schedule-config.json`
-
 ## Known Limitations & Customization Notes
 
 ### Holiday Calendar
 
-Public holiday detection is currently hardcoded to **South Korea** (`Holidays('KR')`) in `assistant-scheduler.ts` and `schedule-manager.ts`. To use a different country:
+Public holiday detection is currently hardcoded to **South Korea** (`Holidays('KR')`) in `assistant-scheduler.ts`. To use a different country:
 
 1. Edit `src/assistant-scheduler.ts` line 121: `new Holidays('KR')` → `new Holidays('US')` (or your [ISO 3166-1 country code](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2))
-2. Edit `src/schedule-manager.ts` line 37: same change
-3. Rebuild: `npm run build && pm2 restart claude-slack-bot`
+2. Rebuild: `npm run build && pm2 restart claude-slack-bot`
 
 > **Future improvement**: This should be configurable via environment variable (e.g., `HOLIDAYS_COUNTRY=US`). Contributions welcome.
 
@@ -584,8 +513,8 @@ src/
 ├── cli-handler.ts               # Claude CLI process management (stream-json)
 ├── slack-handler.ts             # Slack event handling, command parsing
 ├── working-directory-manager.ts # Working directory management (persistence)
-├── account-manager.ts           # Multi-account OAuth token management
-├── schedule-manager.ts          # Session auto-start scheduler
+├── account-manager.ts           # OAuth token storage, refresh and terminal sync (single account)
+├── child-env.ts                 # Strips ANTHROPIC_API_KEY from session environments
 ├── assistant-scheduler.ts       # Assistant scheduler (briefing, reminders, analysis)
 ├── file-handler.ts              # File upload handling
 ├── session-scanner.ts           # Cross-project session scanning
