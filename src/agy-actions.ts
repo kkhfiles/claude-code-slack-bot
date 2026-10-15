@@ -517,11 +517,13 @@ function runOne(root: string, a: ValidAction, captureId: string, timeoutMs: numb
 
 /**
  * 통과한 명령을 차례로 돌린다. **앞이 실패하면 뒤는 안 돌린다**(돌리지 않은 것은 `skipped` 로 돌려준다).
- * `onStart` 는 명령마다 띄우기 직전에 부른다(처리 중 기록) · `stop` 이 참이면 다음 명령을 안 띄운다(`-stop`).
+ * `onStart` 는 명령마다 띄우기 직전에 부른다(처리 중 기록) · `onDone` 은 명령 하나가 끝나면 **다음 명령을 띄우기
+ * 전에** 지금까지 끝난 것 전부를 넘긴다(재시작에 끊겨도 앞서 끝난 명령이 「이미 한 것」에 남게 · 2026-10-15 검토) ·
+ * `stop` 이 참이면 다음 명령을 안 띄운다(`-stop`).
  */
 export async function runActions(actions: readonly ValidAction[], o: {
   root: string; captureId: string; timeoutMs?: number;
-  onStart?: (i: number) => void; stop?: () => boolean;
+  onStart?: (i: number) => void; onDone?: (runs: readonly ActionRun[]) => void; stop?: () => boolean;
 }): Promise<{ runs: ActionRun[]; skipped: ValidAction[] }> {
   const runs: ActionRun[] = [];
   for (const [i, a] of actions.entries()) {
@@ -531,10 +533,12 @@ export async function runActions(actions: readonly ValidAction[], o: {
     const notes = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^[⚠⛔]/.test(l)).slice(0, 2);
     if (r.code === 0) {
       runs.push({ action: a, ok: true, notes });
+      o.onDone?.(runs);
       continue;
     }
     const tail = (r.stderr || r.stdout).trim().split('\n').filter(Boolean).slice(-1)[0] ?? `rc ${r.code}`;
     runs.push({ action: a, ok: false, notes, error: tail.length > 160 ? `${tail.slice(0, 159)}…` : tail });
+    o.onDone?.(runs);
     return { runs, skipped: actions.slice(i + 1) };
   }
   return { runs, skipped: [] };
@@ -564,10 +568,11 @@ export function actionReport(runs: readonly ActionRun[], skipped: readonly Valid
   return out.join('\n');
 }
 
-/** 실행한 명령을 보류 칸의 도구 줄로 — 다 쓰기로 본다(실패한 것도 했을 수 있다). */
-export function actionSteps(runs: readonly ActionRun[], rung: string): { id: string; name: string; input: string; done: boolean; write: boolean }[] {
+/** 실행한 명령을 보류 칸의 도구 줄로 — 다 쓰기로 본다(실패한 것도 했을 수 있다 · 「실패」로 갈라 넘긴다). */
+export function actionSteps(runs: readonly ActionRun[], rung: string):
+  { id: string; name: string; input: string; done: boolean; write: boolean; failed?: boolean }[] {
   return runs.map((r, i) => ({
     id: `${rung}-${i}`, name: `${rung} 명령`, input: `tasks.py ${r.action.argv[0]} · ${r.action.summary}`.slice(0, 120),
-    done: r.ok, write: true,
+    done: r.ok, write: true, ...(r.ok ? {} : { failed: true }),
   }));
 }

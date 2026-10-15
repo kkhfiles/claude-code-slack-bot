@@ -34,6 +34,11 @@ export const HOLD_SWEEP_MS = 30 * 60_000;
 export const GATE_MAX_WAIT_MS = 15 * 60_000;
 /** 7일 지난 것을 한 번에 묻는 건수 상한 — 블록 50개 제한 안. */
 export const OLD_LIST_MAX = 15;
+/**
+ * 드레인이 한 번에 읽어 오는 후보 수 — 돌리는 상한(`DRAIN_MAX`)과 따로 둔다. 앞의 건들이 지금 맡을 엔진이
+ * 없어 남겨져도 뒤의 돌릴 수 있는 건이 목록에 들게(2026-10-15 검토).
+ */
+export const PENDING_WINDOW = 50;
 
 export interface HeldFile {
   path: string;
@@ -121,6 +126,8 @@ export function resumeNote(steps: readonly string[]): string {
     '이 요청은 앞에서 하다 끊겼습니다. 이미 한 것(다시 하지 말 것):',
     ...(steps.length ? steps.map((s) => `- ${s}`) : ['- (적힌 것 없음)']),
     '결과를 못 받은 것(「결과 모름」)은 됐는지 먼저 확인하고, 안 됐을 때만 다시 한다.',
+    '오류로 끝난 것(「실패」)은 결과를 확인하고 필요하면 다시 해도 된다.',
+    '「안 함」은 앞 엔진이 못 돌린 것이다 — 필요하면 한다.',
   ].join('\n');
 }
 
@@ -142,7 +149,8 @@ export function replayNote(item: HeldItem, unseen: string): string {
     unseen.trim() || '받은 뒤 이 대화방에 올라온 글은 없다.',
     '받은 뒤 올라온 글에서 이 요청이 뒤집혔거나 이미 처리됐으면 다시 하지 말고 그렇다고 한 줄로 알린다.',
   ];
-  if (item.session_id) lines.push('', resumeNote(item.done_steps ?? []));
+  // 세션이 없어도 「이미 한 것」이 있으면 싣는다 — GPT · agy 가 쓰다 끊긴 것은 새 차례로 이어 간다(2026-10-15 검토).
+  if (item.session_id || item.done_steps?.length) lines.push('', resumeNote(item.done_steps ?? []));
   lines.push('', '[받았던 사람 말]');
   return lines.join('\n');
 }
@@ -320,6 +328,10 @@ export interface DrainDeps {
  *
  * ⚠️ **시도는 실제로 돌리기 직전에만 센다** — 막혀서 건너뛴 것까지 세면 회복 전에 상한이 차서
  * 사람 손으로 넘어간다(옛 드레인이 그랬다).
+ *
+ * ⚠️ **상한(`limit`)은 실제로 돌린 건수에 건다 — 읽어 온 건수가 아니다**(2026-10-15 검토). 목록은 넉넉히
+ * (`PENDING_WINDOW`) 읽는다 — 앞의 건들이 지금 맡을 엔진이 없어 남겨지면(`skip`) 앞에서 몇 건만 읽어서는
+ * 뒤의 돌릴 수 있는 건이 영영 목록에 안 든다.
  */
 export async function drainHeld(deps: DrainDeps, limit: number): Promise<DrainReport> {
   const rep: DrainReport = { ran: 0, done: 0, check: 0, left: 0, stopped: '' };
@@ -329,7 +341,7 @@ export async function drainHeld(deps: DrainDeps, limit: number): Promise<DrainRe
     log('맡을 엔진이 다 막혀 있어 밀린 것을 안 돌립니다');
     return rep;
   }
-  const { run, tell } = await deps.pending(limit);
+  const { run, tell } = await deps.pending(Math.max(limit, PENDING_WINDOW));
   const old = tell.filter((t) => t.old && !t.told_at).slice(0, OLD_LIST_MAX);
   if (old.length) {
     try {
@@ -355,8 +367,11 @@ export async function drainHeld(deps: DrainDeps, limit: number): Promise<DrainRe
   }
 
   const release = deps.gate.hold(run.map((it) => deps.channelOf(it)));
+  let attempts = 0;
   try {
     for (const [i, it] of run.entries()) {
+      // 상한은 돌린 건수 — 남긴 것(`skip`)은 안 센다(위 ⚠️).
+      if (attempts >= limit) break;
       if (deps.blocked()) {
         rep.stopped = 'blocked';
         rep.left = run.length - i;
@@ -369,6 +384,7 @@ export async function drainHeld(deps: DrainDeps, limit: number): Promise<DrainRe
         log('맡을 엔진이 없어 남깁니다', { id: it.id });
         continue;
       }
+      attempts += 1;
       await deps.tried(it.id);
       let out: TurnOutcome | void | undefined;
       try {
@@ -414,8 +430,10 @@ export function needsCanary(store: EngineState): boolean {
 /**
  * 실패 표시와 함께 넘길 보류 칸을 짓는다.
  *
- * - **쓰기가 돌았으면**(이번 차례의 쓰기 도구 · 앞 차례에서 이어 온 「이미 한 것」) 세션과 이미 한
- *   것을 싣는다 — 다시 돌릴 때 처음부터가 아니라 그 세션으로 이어 간다
+ * - **쓰기가 돌았으면**(이번 차례의 쓰기 도구 · 앞 차례에서 이어 온 「이미 한 것」) 이미 한 것을 싣고,
+ *   세션이 있으면 세션도 — 다시 돌릴 때 처음부터가 아니라 그 세션으로 이어 간다
+ * - **이미 한 것은 세션과 따로 싣는다**(2026-10-15 검토) — GPT · agy 가 쓰다 끊긴 것은 Claude 세션이 없다.
+ *   전에는 세션이 없으면 아무것도 안 실려 그 건이 사람에게만 갔다(파이썬 `_hold_carries` 가 이것으로 돌린다)
  * - 첨부가 있으면 보관 폴더로 옮겨 싣는다 · 못 옮기면 `hold_note`(사람에게 냄)
  */
 export function buildHoldExtra(
@@ -424,8 +442,8 @@ export function buildHoldExtra(
 ): { extra: HoldExtra; writeRan: boolean } {
   const writeRan = steps.some((s) => s.write) || prior.length > 0;
   const extra: HoldExtra = { hold: 'v2' };
-  if (writeRan && sessionId) {
-    extra.session_id = sessionId;
+  if (writeRan) {
+    if (sessionId) extra.session_id = sessionId;
     extra.done_steps = [...prior, ...doneStepLines(steps)];
   }
   if (files.length) {

@@ -103,6 +103,15 @@ const OKR = { text: '잘 됐다', costUsd: 0, sessionId: 's', subtype: 'success'
   eq('모르는 것은 null 로 남긴다', ev[0] && ev[0].toolCalls, null);
 }
 
+// ── ②-2 읽기 도구만 돌린 뒤 실패 → 넘긴다 · 쓰기 도구가 하나라도 돌았으면 안 넘긴다 (2026-10-15 검토) ──
+//   예약 일도 다음 엔진으로 넘기는 것이 사용자 결정이다. 읽기만 했으면 다시 해도 생기는 일이 없다.
+{
+  const { ev } = await run({ ...OKR, text: '', isError: true, subtype: 'error', toolCalls: 3, writeToolCalls: 0 });
+  eq('읽기 도구만 돈 뒤 실패면 폴백을 부르러 간다', ev.map((e) => [e.skipped ?? null, e.why]), [[null, 'error']]);
+  const w = await run({ ...OKR, text: '', isError: true, subtype: 'error', toolCalls: 3, writeToolCalls: 1 });
+  eq('쓰기 도구가 하나라도 돌았으면 안 넘긴다', w.ev.map((e) => [e.skipped, e.writeToolCalls]), [['tools-ran', 1]]);
+}
+
 // ── ③ 이어받는 회차 → 안 함 ───────────────────────────────────
 {
   const { ev } = await run(
@@ -411,5 +420,5 @@ if (fails.length) {
 } else {
   console.log('통과 — 주 작업 폴백 (도구 돌린 뒤 · 몇 번인지 모름 · 이어받기 셋 다 안 함 · '
     + '던짐·빈손·도구 0회는 부르러 감 · 새는 호출 없음 · codex 환경 변수 · 모래상자 · 한 일 · '
-    + '한도 → 엔진 상태 · Claude 막힘이면 1차 안 띄움 · codex 소진이면 안 부름)');
+    + '한도 → 엔진 상태 · Claude 막힘이면 1차 안 띄움 · codex 소진이면 안 부름 · 읽기 도구만 돌았으면 넘김)');
 }

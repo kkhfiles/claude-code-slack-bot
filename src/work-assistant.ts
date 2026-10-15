@@ -84,10 +84,27 @@ export function inboxFile(root: string): string {
 // 캡처 큐 잠금 (2026-10-14) — 파이썬(`tasks.py` `_inbox_lock`)과 **같은 파일 · 같은 규칙**이다.
 // 파이썬은 `inbox.jsonl` 을 통째로 다시 쓰는데, 그 사이에 여기서 덧붙인 줄은 **사라진다**(받은 말을
 // 잃는다). 이름·묵은 기준을 바꾸면 둘을 같이 바꾼다.
+// ⚠️ **못 잡으면 잠금 없이 덧붙이지 않는다**(2026-10-15 검토) — 잠금을 쥔 쪽이 이미 읽은 뒤면 그 줄은 다시
+// 쓰기에 덮인다. 대기실(`inbox.spool/<id>.json`)에 두고, 파이썬의 다음 잠긴 고치기가 합친 뒤 지운다.
 /** 이보다 오래된 잠금은 죽은 프로세스가 남긴 것으로 보고 지운다 — `INBOX_LOCK_STALE_S`. */
 export const INBOX_LOCK_STALE_MS = 30_000;
-/** 덧붙이기는 이만큼만 기다리고 못 잡아도 붙인다 — `INBOX_ADD_WAIT_S`. */
+/** 덧붙이기는 이만큼만 기다리고 못 잡으면 대기실에 둔다 — `INBOX_ADD_WAIT_S`. */
 export const INBOX_ADD_WAIT_MS = 2_000;
+
+/** 잠금을 못 잡은 캡처의 대기실 — `inbox.jsonl` 옆 `inbox.spool/`(파이썬 `_inbox_spool_dir` 와 같은 규칙). */
+export function inboxSpoolDir(file: string): string {
+  return path.join(path.dirname(file), `${path.basename(file, path.extname(file))}.spool`);
+}
+
+/** 캡처 하나를 대기실에 둔다 — 임시 파일에 다 쓰고 이름을 바꿔 읽는 쪽이 반쪽을 안 보게. */
+function spoolCapture(file: string, rec: InboxRecord): void {
+  const dir = inboxSpoolDir(file);
+  fs.mkdirSync(dir, { recursive: true });
+  const dest = path.join(dir, `${rec.id}.json`);
+  const tmp = `${dest}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(rec), 'utf-8');
+  fs.renameSync(tmp, dest);
+}
 /** 다시 해 보는 간격 — `time.sleep(0.02)`. */
 const INBOX_LOCK_POLL_MS = 20;
 
@@ -136,7 +153,8 @@ function takeInboxLock(lock: string, waitMs: number): boolean {
  * 쓰면 그 문제 자체가 없어진다.
  *
  * **덧붙일 때 파이썬과 같은 잠금을 잡는다**(`<inbox>.lock`) — 파이썬이 파일을 통째로 다시 쓰는
- * 사이에 덧붙인 줄은 덮여 사라진다. 2초 안에 못 잡으면 경고를 남기고 그대로 덧붙인다.
+ * 사이에 덧붙인 줄은 덮여 사라진다. 2초 안에 못 잡으면 경고를 남기고 대기실(`inboxSpoolDir`)에 둔다 —
+ * 파이썬이 읽을 때 같이 보고 다음 잠긴 고치기에 합친다. 대기실에도 못 두면 마지막 수단으로 덧붙인다.
  */
 export function captureToInbox(
   text: string, source = 'slack', thread?: string, where?: { channel?: string; msgTs?: string },
@@ -157,10 +175,19 @@ export function captureToInbox(
   };
   const file = inboxFile(root);
   const lock = `${file}.lock`;
-  // 잠금을 짧게 기다리되 **못 잡아도 덧붙인다** — 받은 말을 잃지 않는 것이 먼저다.
+  // 잠금을 짧게 기다리고 **못 잡으면 대기실에 둔다** — 받은 말을 잃지 않는 것이 먼저다.
   const locked = takeInboxLock(lock, INBOX_ADD_WAIT_MS);
-  if (!locked) logger.warn('캡처 큐 잠금을 못 잡아 그대로 덧붙입니다', { waitedMs: INBOX_ADD_WAIT_MS });
   try {
+    if (!locked) {
+      try {
+        spoolCapture(file, rec);
+        logger.warn('캡처 큐 잠금을 못 잡아 대기실에 둡니다', { waitedMs: INBOX_ADD_WAIT_MS });
+        return rec;
+      } catch (err) {
+        // 대기실에도 못 두면 덧붙인다 — 덮일 수 있어도 아무 데도 안 남는 것보다 낫다.
+        logger.warn('캡처 대기실에 못 둬 잠금 없이 덧붙입니다', { err: String((err as Error)?.message ?? err) });
+      }
+    }
     fs.appendFileSync(file, JSON.stringify(rec) + '\n', { encoding: 'utf-8' });
     return rec;
   } catch (err) {
@@ -319,15 +346,27 @@ export function openCaptureCount(): number {
   const root = workAssistantRoot();
   if (!root) return 0;
   const file = inboxFile(root);
-  if (!fs.existsSync(file)) return 0;
+  const ids = new Set<string>();
+  let n = 0;
+  const see = (raw: string) => {
+    try {
+      const r = JSON.parse(raw);
+      if (ids.has(r.id)) return;
+      ids.add(r.id);
+      if (r.status === 'open') n += 1;
+    } catch { /* 깨진 줄은 안 센다 */ }
+  };
   try {
-    return fs.readFileSync(file, 'utf-8').split('\n')
-      .filter(Boolean)
-      .filter(line => { try { return JSON.parse(line).status === 'open'; } catch { return false; } })
-      .length;
-  } catch {
-    return 0;
-  }
+    if (fs.existsSync(file)) fs.readFileSync(file, 'utf-8').split('\n').filter(Boolean).forEach(see);
+  } catch { /* 못 읽으면 대기실만 센다 */ }
+  // 대기실(잠금을 못 잡은 캡처) — 파이썬의 `_inbox_read` 처럼 합쳐 센다. 파일에 있는 id 는 한 번만.
+  try {
+    const dir = inboxSpoolDir(file);
+    for (const name of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
+      if (name.endsWith('.json')) see(fs.readFileSync(path.join(dir, name), 'utf-8'));
+    }
+  } catch { /* 대기실을 못 읽으면 파일 것만 */ }
+  return n;
 }
 
 // ---------------------------------------------------------------- 요약 (출력)
@@ -1201,7 +1240,13 @@ class CodexEventReader {
         this.byId.set(id, st);
         if (ev.steps.length < STEP_MAX) ev.steps.push(st);
       }
-      if (done) st.done = true;
+      // 끝났어도 실패면 「완료」가 아니다(2026-10-15 검토) — 종료 코드 · 상태(`failed` · `declined`)로 가른다.
+      if (done) {
+        const bad = it.status === 'failed' || it.status === 'declined'
+          || (typeof it.exit_code === 'number' && it.exit_code !== 0);
+        if (bad) st.failed = true;
+        else st.done = true;
+      }
     }
   }
 }
@@ -1369,7 +1414,8 @@ export interface CodexTurnOpts {
   drillScope?: DrillScope;
 }
 
-export interface CodexStep { cmd: string; done: boolean }
+/** codex 가 돌린 것 하나 — `done` 성공으로 끝남 · `failed` 실패로 끝남(종료 코드 · 상태) · 둘 다 없으면 결과 모름. */
+export interface CodexStep { cmd: string; done: boolean; failed?: boolean }
 
 export type CodexTurnKind = 'ok' | 'usage' | 'fail';
 

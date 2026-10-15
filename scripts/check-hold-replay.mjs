@@ -46,7 +46,7 @@ const wa = require(path.join(ROOT, 'dist', 'work-assistant.js'));
 const { config } = require(path.join(ROOT, 'dist', 'config.js'));
 // `.env` 에 DM 폴백을 켜 두었으면 dotenv 가 다시 채운다 — 이 검사는 폴백이 꺼진 드레인을 잰다(사다리는 `check:agy`).
 for (const k of ['DM_FALLBACK', 'DM_FALLBACK_AGY']) delete process.env[k];
-const { SlackHandler } = require(path.join(ROOT, 'dist', 'slack-handler.js'));
+const { SlackHandler, snapshotBootInflight } = require(path.join(ROOT, 'dist', 'slack-handler.js'));
 const { AssistantScheduler } = require(path.join(ROOT, 'dist', 'assistant-scheduler.js'));
 
 config.assistant.dmChannel = 'D_DM';
@@ -122,6 +122,12 @@ try {
     eq('읽기 · 쓰기 가름(모르는 이름은 쓰기)', log.steps.map((s) => [s.name, s.write]),
       [['Read', false], ['Bash', true], ['mcp__x__create', true]]);
     eq('결과가 온 것만 완료', log.steps.map((s) => s.done), [false, true, false]);
+    // 오류로 돌아온 도구는 「완료」가 아니다(2026-10-15 검토) — 다음 엔진이 건너뛰면 필요한 일을 잃는다.
+    const er = new to.StepLog();
+    er.see({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'e1', name: 'Bash', input: { command: 'tasks.py add' } }] } });
+    er.see({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'e1', is_error: true, content: 'boom' }] } });
+    eq('오류 결과 — 실패(완료 아님) · 보류 칸 머리 「실패」',
+      [er.steps[0].done, er.steps[0].failed, to.doneStepLines(er.steps)[0]?.split(' · ')[0]], [false, true, '실패']);
     ok('본문 칸은 요약에 안 싣는다', !log.steps[2].input.includes('본문'));
     eq('이어 갈 때 넘길 줄 — 쓰기만 · 결과 모름 표시',
       to.doneStepLines(log.steps).map((l) => l.split(' · ').slice(0, 2).join(' · ')),
@@ -205,6 +211,20 @@ try {
     await hr.drainHeld(t.deps, 5);
     eq('밀린 것이 없으면 떠 보지도 않음', t.calls.length, 0);
 
+    // 상한은 **돌린 건수**에 — 앞의 건들이 맡을 엔진이 없어 남겨져도(skip) 뒤의 건이 목록에 들어야 한다(2026-10-15 검토).
+    {
+      const many = Array.from({ length: 8 }, (_, i) => item(`s${i}`));
+      const t2 = mk({ run: many });
+      let asked = 0;
+      t2.deps.pending = async (n) => { asked = n; return { run: many.slice(0, n), tell: [] }; };
+      t2.deps.skip = (it) => Number(it.id.slice(1)) < 6;
+      const rep2 = await hr.drainHeld(t2.deps, 1);
+      eq('목록은 넉넉히 읽는다(상한과 따로)', asked >= hr.PENDING_WINDOW, true);
+      eq('앞의 남길 것 여섯을 지나 뒤의 것을 돌린다 · 상한 1 은 돌린 건수',
+        t2.calls.filter((c) => c[0] === 'replay').map((c) => c[1]), ['s6']);
+      eq('남긴 것은 시도 안 셈', [rep2.skipped, t2.calls.filter((c) => c[0] === 'tried').length], [6, 1]);
+    }
+
     // 터진 것 · 오류 결과는 「확인 필요」 · 나머지는 간다.
     t = mk({ run: [item('a'), item('b'), item('c')], outs: [new Error('터짐'), { ...OKO, outcome: 'error' }, OKO] });
     t.deps.replay = (orig => async (it) => { const o = await orig(it); if (o instanceof Error) throw o; return o; })(t.deps.replay);
@@ -234,6 +254,12 @@ try {
       note.includes('이 요청은 앞에서 하다 끊겼습니다. 이미 한 것(다시 하지 말 것):')
       && note.includes('- 완료 · Bash · tasks.py log --id TSK-3') && note.includes('결과를 못 받은 것'));
     ok('처음부터 도는 것은 「이미 한 것」이 없다', !hr.replayNote(item('r'), '').includes('이미 한 것'));
+    // 세션 없이 GPT · agy 가 쓰다 끊긴 것(2026-10-15 검토) — 새 차례로 돌되 「이미 한 것」을 싣는다.
+    const ns = hr.replayNote(item('ns', { done_steps: ['완료 · agy-gemini 명령 · tasks.py add', '실패 · GPT 명령 · x',
+      '안 함 · agy-gemini 명령 · y'] }), '');
+    ok('세션 없이 「이미 한 것」만 있어도 싣는다 · 실패 · 안 함 안내',
+      ns.includes('이미 한 것(다시 하지 말 것)') && ns.includes('- 실패 · GPT 명령 · x')
+      && ns.includes('오류로 끝난 것(「실패」)') && ns.includes('「안 함」'));
     eq('7일 지난 목록 — 건마다 버튼 둘',
       hr.oldListMessage([item('o1'), item('o2')]).blocks.filter((b) => b.type === 'actions')
         .map((b) => b.elements.map((e) => `${e.action_id}:${JSON.parse(e.value).id}`)),
@@ -370,6 +396,11 @@ try {
       [r.seen.resumeSessionId, r.seen.heldSteps, r.seen.heldFiles?.[0]?.name],
       ['sess-1', ['완료 · Bash · tasks.py log'], 'x.png']);
     ok('일하다 끊긴 것 — 메모에 「다시 하지 말 것」', r.seen.replayNote.includes('이미 한 것(다시 하지 말 것)'));
+    // 세션 없이 GPT · agy 가 쓰다 끊긴 것(2026-10-15 검토) — 새 차례 · 이미 한 것은 실어 넘김(또 끊기면 합쳐짐)
+    r = await run(item('p2', { channel: 'D_DM', done_steps: ['완료 · agy-gemini 명령 · tasks.py add'] }));
+    eq('세션 없이 쓰다 끊긴 것 — 새 차례 · 이미 한 것',
+      [r.seen.resumeSessionId, r.seen.heldSteps], [undefined, ['완료 · agy-gemini 명령 · tasks.py add']]);
+    ok('세션 없이 쓰다 끊긴 것 — 메모에 「다시 하지 말 것」', r.seen.replayNote.includes('이미 한 것(다시 하지 말 것)'));
     // 대화방을 모르는 옛 캡처 — 비서 DM
     r = await run(item('o'));
     eq('옛 캡처 — 비서 DM', r.posts[0].channel, 'D_DM');
@@ -395,6 +426,11 @@ try {
     eq('꺼짐 — 옛 모양(이유 하나 · 칸 없음)', b.log, [['fail', 'k1', 'limit', null]]);
 
     process.env.HOLD_V2 = 'on';
+    // 세션이 없어도(GPT · agy 가 쓰다 끊김) 이미 한 것을 싣는다 — 안 실으면 파이썬이 그 건을 사람에게만 낸다(2026-10-15 검토).
+    b = bridge();
+    await turn.call(h, 'k0', 'limit', wrote, undefined, {}, []);
+    eq('켜짐 — 세션 없이 쓰기 뒤 막힘도 이미 한 것을 싣는다',
+      [b.log[0][2], b.log[0][3].session_id ?? null, b.log[0][3].done_steps], ['partial', null, ['완료 · Bash · tasks.py add']]);
     b = bridge();
     await turn.call(h, 'k2', 'limit', wrote, 'sess', {}, pf);
     const [, , why2, ex2] = b.log[0];
@@ -476,6 +512,20 @@ try {
     eq('지난 기동 것만 끊김으로(시각을 못 읽으면 옛 것)', marked.sort(), ['i-odd', 'i-old']);
     eq('이 기동 뒤에 시작한 차례는 기록에 남김', Object.keys(JSON.parse(fs.readFileSync(file, 'utf-8'))), ['live']);
     ok('알림에 이 기동의 차례가 없다', !posts.some((p) => (p.text ?? '').includes('> 새')));
+
+    // 지난 기동의 기록은 **기동 때 떠 둔 것**으로 본다(2026-10-15 검토) — 알림(12초 뒤) 전에 같은 열쇠(DM 맨 위는
+    // `direct` 하나)의 새 차례가 기록을 덮어도 끊긴 차례를 잃지 않는다.
+    marked.length = 0;
+    fs.writeFileSync(file, JSON.stringify({
+      'U_ME-D_DM-direct': { channel: 'D_DM', text: '끊긴 옛 말', startedAt: '2026-10-01T00:00:00.000Z', captureId: 'k-old' },
+    }), 'utf-8');
+    snapshotBootInflight();
+    fs.writeFileSync(file, JSON.stringify({
+      'U_ME-D_DM-direct': { channel: 'D_DM', text: '새 말', startedAt: new Date().toISOString(), captureId: 'k-new' },
+    }), 'utf-8');
+    await h.reportInterruptedSessions();
+    eq('기동 뒤 새 차례가 덮은 옛 차례도 끊김으로', marked, ['k-old']);
+    eq('새 차례의 기록은 남김', Object.values(JSON.parse(fs.readFileSync(file, 'utf-8'))).map((r) => r.captureId), ['k-new']);
   }
 
   // ================================================================ ⑩ 메일 폴러 — 막혔으면 표시를 안 옮긴다
@@ -519,6 +569,31 @@ try {
       outcome = OKO;
       await sched.runMailPoll();
       eq('메일 — 끝까지 가면 표시를 옮김', marks.length, 2);
+
+      // DM 폴백이 켜져 있으면 사다리로 본다(2026-10-15 검토) — Claude 만 막혔으면 GPT 가 받으므로 읽고 넘긴다.
+      process.env.DM_FALLBACK = 'on';
+      process.env.CODEX_QUOTA_PYTHON = 'python-없는-이름-2026';   // 한도 조회를 안 탄다(모름 → 안 막음)
+      try {
+        clearEngine();
+        block();
+        const a0 = asked.length;
+        const m0 = marks.length;
+        await sched.runMailPoll();
+        eq('메일 — 폴백이 켜져 있으면 Claude 만 막혀도 넘기고 표시를 옮김', [asked.length - a0, marks.length - m0], [1, 1]);
+        engineState.recordBlocked('codex', { kind: 'usage', until: nowSec() + 3600 });
+        await sched.runMailPoll();
+        eq('메일 — 사다리가 다 막혔으면 안 읽음', [asked.length - a0, marks.length - m0], [1, 1]);
+        clearEngine();
+        block();
+        // agy 칸이 답하고 「Claude·GPT 몫」을 남김 — 표시를 옮기고 그 캡처는 둔다(10분마다 같은 답이 거듭 나가지 않게).
+        outcome = { ...LIM, engine: 'agy-gemini', captureId: 'm3' };
+        const d0 = drops.length;
+        await sched.runMailPoll();
+        eq('메일 — 다른 엔진이 답하고 남긴 몫은 표시를 옮기고 캡처를 둠', [marks.length - m0, drops.length - d0], [2, 0]);
+      } finally {
+        delete process.env.DM_FALLBACK;
+        delete process.env.CODEX_QUOTA_PYTHON;
+      }
     } finally {
       globalThis.Date = RealDate;
     }
@@ -552,5 +627,5 @@ if (fails.length) {
     + '시도 안 셈 · 받은 자리 · 받은 시각 머리 줄 · 그 뒤의 글 · 일하다 끊긴 것은 같은 세션과 「이미 한 것」 · '
     + '방의 문 · 7일 지난 것은 한 번만 · 꺼짐이면 옛 길 · 실패 표시와 첨부 보관 · 재시작 갈래 · [실행] · '
     + '[실행] 두 번은 한 번만 · 일찍 돌아온 다시 돌리기는 못 함 · 재시작 알림은 지난 기동 것만 · 쓸어 보기는 사다리로 · '
-    + '메일 표시 안 옮김)');
+    + '메일 표시 안 옮김 · 메일은 사다리로 · 상한은 돌린 건수 · 세션 없이도 이미 한 것 · 기동 때 떠 둔 기록)');
 }

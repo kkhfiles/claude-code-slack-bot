@@ -78,7 +78,7 @@ const { ChannelGate } = require(path.join(ROOT, 'dist', 'hold-replay.js'));
 const { SdkHandler } = require(path.join(ROOT, 'dist', 'sdk-handler.js'));
 const { CliProcess } = require(path.join(ROOT, 'dist', 'cli-handler.js'));
 const { FileHandler } = require(path.join(ROOT, 'dist', 'file-handler.js'));
-const { SlackHandler } = require(path.join(ROOT, 'dist', 'slack-handler.js'));
+const { SlackHandler, snapshotBootInflight } = require(path.join(ROOT, 'dist', 'slack-handler.js'));
 
 config.assistant.dmChannel = 'D_DM';
 config.bot.allowUsers = ['U_ME'];
@@ -114,6 +114,8 @@ const ev = {
   tool: (id, cmd) => ({ type: 'assistant', session_id: SID,
     message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input: { command: cmd } }] } }),
   res: (id) => ({ type: 'user', session_id: SID, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } }),
+  resErr: (id) => ({ type: 'user', session_id: SID,
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'rc 1', is_error: true }] } }),
   ok: (t = 'Claude 답') => ({ type: 'result', subtype: 'success', is_error: false, result: t, session_id: SID,
     total_cost_usd: 0, duration_ms: 1, permission_denials: [] }),
 };
@@ -128,6 +130,12 @@ const SCRIPTS = {
     session_id: SID, total_cost_usd: 0, duration_ms: 1, permission_denials: [] }],
   // 연습 `usage-after-tool` 이 끼우는 자리 — 도구 결과 뒤에 오는 것은 안 나가야 한다.
   'tool-then-more': () => [ev.init, ev.tool('t1', CMD1), ev.res('t1'), ev.text('끼운 뒤에 안 나가야 할 글'), ev.ok('끝')],
+  // 도구가 오류로 돌아온 뒤 한도 — 넘겨줄 메모에 「완료」가 아니라 「실패」(2026-10-15 검토)
+  'limited-after-failed-write': () => [ev.init, ev.tool('t1', CMD1), ev.resErr('t1'), ...drill.limitTail(SID)],
+  // 사람 말에는 없고 Claude 가 돌린 명령의 인자에만 개인 글 조각 — 넘겨줄 메모로 새면 안 된다(2026-10-15 검토)
+  'limited-after-private-write': () => [ev.init, ev.tool('t1', `${CMD1} 비밀조각`), ev.res('t1'), ...drill.limitTail(SID)],
+  // 오래 도는 차례 — `-stop` 으로 끊는다(끊으면 진짜 SDK 처럼 AbortError 를 던진다)
+  slow: () => [ev.init, { sleep: 4000 }, ev.text('끝까지 갔음'), ev.ok()],
 };
 let claudeScript = 'ok';
 const claudeCalls = [];
@@ -137,6 +145,15 @@ SdkHandler.queryFn = ({ prompt, options }) => {
   return (async function* () {
     for (const e of events) {
       if (options?.abortController?.signal?.aborted) return;
+      if (e.sleep) {
+        await new Promise((r) => setTimeout(r, e.sleep));
+        if (options?.abortController?.signal?.aborted) {
+          const err = new Error('aborted');
+          err.name = 'AbortError';
+          throw err;
+        }
+        continue;
+      }
       await new Promise((r) => setImmediate(r));
       yield e;
     }
@@ -377,6 +394,18 @@ try {
       && mk.split('\n')[1]?.startsWith('↪ GPT(gpt-test-sol) 가 답함'));
     eq('Claude 가 썼으면 캡처를 안 버린다(tasks.py 가 닫았다)', bridge.dropped, []);
     eq('결과 — Claude 쓰기 + GPT', [s.sink.outcome, s.sink.writeRan], ['ok', true]);
+    // 엔진 안내의 GPT 이름 — 대응표에 칸이 없으면 이 차례가 실제로 부른 모델(2026-10-15 검토)
+    eq('안내 GPT 이름 — 실제로 부른 모델', [makeHandler().h.engineNoticeLabels().codex, s.h.engineNoticeLabels().codex],
+      ['', 'gpt-test-sol']);
+
+    // 도구가 오류로 돌아온 뒤 끊김 — 「완료」가 아니라 「실패(다시 해도 됨 — 결과를 확인)」로 넘긴다(2026-10-15 검토)
+    const f = await scenario({ claude: 'limited-after-failed-write' });
+    const fp = f.codex[0]?.prompt ?? '';
+    ok(`오류로 돌아온 도구는 실패로 넘긴다\n${fp.slice(0, 400)}`,
+      fp.includes(`- 실패(다시 해도 됨 — 결과를 확인) · Bash · ${CMD1}`) && !fp.includes(`- 완료 · Bash · ${CMD1}`));
+    // GPT 명령이 실패로 끝난 뒤 한도 — 보류 칸에 「실패」(종료 코드 · 상태)
+    await scenario({ claude: 'limited', codex: 'fail-cmd-usage', hold: true });
+    eq('GPT 명령 실패 — 보류 칸 머리 「실패」', (bridge.failed[0]?.[2]?.done_steps ?? []).map((l) => l.split(' · ')[0]), ['실패']);
   }
 
   // ================================================================ ⑥ GPT 도 못 함 — 모아 두고 한도 안내(원문 안 올림)
@@ -412,6 +441,13 @@ try {
     // 넘기지 않는 차례는 폴백이 아예 안 끼어든다 — 장부도 안 적힌다. 한도 글은 안 올리고 한도 안내가 말한다.
     ok('개인 글 — 한도 글 안 올림 · 한도 안내', !LIMIT_TEXT.test(allText(s.posts)) && allText(s.posts).includes('⏳'));
     ok('개인 글 — 장부에 안 적음', !fs.existsSync(ENV.FALLBACK_LEDGER_FILE));
+    // 사람 말은 깨끗한데 넘겨줄 메모(Claude 가 돌린 명령의 인자)에 조각이 있음 — 보낼 글 전체를 다시 본다(2026-10-15 검토)
+    s = await scenario({ claude: 'limited-after-private-write', hold: true, before: () => { privateTurn = true; },
+      text: '진행 남겨 줘' });
+    eq('넘겨줄 메모에 개인 글 — GPT 안 부름 · 모아 둠(일하다 끊김)', [s.codex.length, bridge.failed.map((f) => f[1])],
+      [0, ['partial']]);
+    ok('넘겨줄 메모에 개인 글 — 한도 안내', allText(s.posts).includes('⏳'));
+    eq('넘겨줄 메모에 개인 글 — 결과는 막힘이 아니라 못 함(드레인이 뒤의 건을 본다)', s.sink.outcome, 'error');
     s = await scenario({ claude: 'ok', before: () => { privateTurn = true; blockClaude(); }, text: '비밀조각이 든 말' });
     eq('개인 글 + Claude 막힘 — GPT 안 부름(Claude 길로)', [s.codex.length, claudeCalls.length], [0, 1]);
     ok('개인 글 + Claude 막힘 — Claude 가 답하면 그 글은 올린다', allText(s.posts).includes('Claude 답'));
@@ -498,7 +534,60 @@ try {
     await run2;
     eq('다시 돌리기를 끊음 — 실패 표시 없이 캡처를 버림', [bridge.failed.length, bridge.dropped],
       [0, [['cap-r', '다시 돌리던 것을 사람이 끊음']]]);
+
+    // **Claude 가 돌던 다시 돌리기도** 끊으면 버린다(2026-10-15 검토) — 남기면 옛 실패 표시로 다음 드레인이 또 돌린다.
+    reset();
+    bridge.failed = [];
+    bridge.dropped = [];
+    claudeScript = 'slow';
+    const t3 = makeHandler();
+    const c0 = claudeCalls.length;
+    const k0 = calls().length;
+    const run3 = t3.dm('다시 돌리는 말', { replay: true, pushed: true, captureId: 'cap-c' });
+    for (let i = 0; i < 100 && claudeCalls.length === c0; i++) await sleep(50);
+    await sleep(100);
+    await t3.dm('-stop');
+    const sink3 = await run3;
+    eq('Claude 가 돌던 다시 돌리기를 끊음 — 실패 표시 없이 캡처를 버림 · GPT 로 안 넘김',
+      [bridge.failed.length, bridge.dropped, calls().length - k0, sink3.outcome],
+      [0, [['cap-c', '다시 돌리던 것을 사람이 끊음']], 0, 'error']);
+    claudeScript = 'ok';
     delete process.env.FAKE_CODEX_SLOW_MS;
+  }
+
+  // ================================================================ ⑨-1 문에서 기다리는 말 — 재시작에 끊겨도 드레인이 줍는다
+  //   원문은 캡처했는데 처리 중 기록도 실패 표시도 없으면 드레인 목록에 안 든다(2026-10-15 검토).
+  {
+    reset();
+    bridge.failed = [];
+    bridge.captures = 0;
+    process.env.DM_FALLBACK = 'on';
+    process.env.HOLD_V2 = 'on';
+    const t = makeHandler();
+    const release = t.h.holdGate.hold(['D_DM']);
+    const run = t.dm('기다리는 말');
+    const readFile = () => (fs.existsSync(ENV.INFLIGHT_SESSIONS_FILE) ? JSON.parse(fs.readFileSync(ENV.INFLIGHT_SESSIONS_FILE, 'utf-8')) : {});
+    for (let i = 0; i < 100 && !Object.keys(readFile()).some((k) => k.startsWith('wait:')); i++) await sleep(20);
+    const rec = Object.entries(readFile()).find(([k]) => k.startsWith('wait:'));
+    eq('기다리는 동안 처리 중 기록(기다림 · 캡처 id)', [rec?.[0], rec?.[1]?.state, rec?.[1]?.captureId],
+      ['wait:cap-1', 'waiting', 'cap-1']);
+    // 재시작 흉내 — 그 기록이 지난 기동의 것이 되게 시각을 앞으로 돌리고 기동 때처럼 떠 둔 뒤 알린다
+    const m = readFile();
+    if (m['wait:cap-1']) m['wait:cap-1'].startedAt = '2026-10-01T00:00:00.000Z';
+    fs.writeFileSync(ENV.INFLIGHT_SESSIONS_FILE, JSON.stringify(m), 'utf-8');
+    snapshotBootInflight();
+    const savedHeld = wa.pendingHeld;
+    wa.pendingHeld = async () => ({ run: [{ id: 'cap-1' }], tell: [] });
+    try {
+      await makeHandler().h.reportInterruptedSessions();
+    } finally {
+      wa.pendingHeld = savedHeld;
+    }
+    eq('재시작에 끊긴 기다림 — interrupted 로 적어 드레인이 줍는다', bridge.failed.map((f) => [f[0], f[1]]), [['cap-1', 'interrupted']]);
+    release();
+    await run;
+    ok('차례가 끝나면 기다림 기록이 없다', !Object.keys(readFile()).some((k) => k.startsWith('wait:')));
+    delete process.env.HOLD_V2;
   }
 
   // ================================================================ ⑨-2 세션 시각 · 세션 정리 · 짧은 갱신
@@ -738,7 +827,7 @@ if (fails.length) {
     + 'GPT 도 못 하면 모아 둠(원문 안 올림) · 개인 글 · 채널 · 계획 · 다른 디렉터리는 안 넘김 · 같은 방은 한 줄로 · '
     + '-stop · -reset 이 차례와 같은 키 · 끊은 다시 돌리기는 버림 · 기다리기 전에 캡처 · 넘기지 않는 차례도 한도 글 안 올림 · '
     + 'GPT 가 받으면 세션 시각 그대로 · 장부 차례는 세션 정리에서 남김 · 짧은 갱신은 됨 · '
-    + '조용히 · 첨부 경로 · 엔진 안내 · 장부에 말 없음 · 돌아온 첫 차례 한 줄 · 연습 파일 · -engines)');
+    + '조용히 · 첨부 경로 · 엔진 안내 · 장부에 말 없음 · 돌아온 첫 차례 한 줄 · 연습 파일 · -engines · 오류 도구는 실패로 넘김 · 넘겨줄 메모의 개인 글 · Claude 다시 돌리기 끊음도 버림 · 기다리는 말도 재시작 뒤 드레인)');
 }
 // 대화 처리기가 차례 뒤 정리를 5분 뒤로 걸어 둔다 — 기다리지 않고 끝낸다.
 process.exit(process.exitCode ?? 0);

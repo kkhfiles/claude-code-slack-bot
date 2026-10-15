@@ -21,6 +21,7 @@ import { AGY_BRIEF_NOTE, AGY_FOCUS_NOTE, parseTaskList, parseFocusReply, runActi
 import type { QuickOutcome } from './work-assistant';
 import { engineState } from './engine-state';
 import { codexQuota } from './codex-quota';
+import { dmFallbackOn, dmLadder } from './dm-fallback';
 import { isHeldOutcome, READ_ONLY_TOOLS, type TurnOutcome } from './turn-outcome';
 import { buildImproveBlocks, improveEnabled, improvePreviewText,
   IMPROVE_DECISIONS, IMPROVE_ID_RE } from './improve-message';
@@ -720,6 +721,8 @@ export interface SessionResult {
    *  회당 $45 회차의 원인(같은 명령 900회)을 원장만으로는 볼 수 없었다. */
   turns?: number;
   toolCalls?: number;
+  /** 그중 쓰기를 할 수 있는 도구(`isWriteTool`) — 못 세면 없음. 폴백이 「읽기만 돌았나」를 가른다. */
+  writeToolCalls?: number;
   /** `rate_limit_event.status === 'rejected'` — **실제로 막혔다는 구조화 신호**.
    *  이 값이 없던 동안 스케줄러는 모델이 쓴 본문을 정규식으로 훑어 리미트를
    *  추정했고, 2026-05~08 사이 13번을 오탐했다(전부 `subtype: success`, 보고서도
@@ -2028,13 +2031,19 @@ export class AssistantScheduler {
     const nonWorking = this.isNonWorkingDay();
     if (nonWorking.skip) return;
     if (this.mailPollBusy) return;
-    // **Claude 가 막혀 있으면 읽지도 않는다**(2026-10-14) — 넘겨 봐야 막힐 차례를 10분마다 띄우고,
-    // 표시를 안 옮겨야 풀린 뒤 첫 회차가 그동안 온 메일을 그대로 읽는다. 로그는 막힘마다 한 줄.
-    if (engineState.isBlocked('claude')) {
+    // **맡을 엔진이 하나도 없으면 읽지도 않는다**(2026-10-14) — 넘겨 봐야 막힐 차례를 10분마다 띄운다. 표시를 안
+    // 옮기므로 풀린 뒤 첫 회차가 다시 읽는다 — 단 **거슬러 읽는 것은 이레까지**다(`mail.py` 의 `LOOKBACK_MAX`).
+    // 쉬는 날까지 합쳐 이레 넘게 막히면 그 앞 메일은 후보로 안 나온다(메일함에는 남는다). 로그는 막힘마다 한 줄.
+    // DM 폴백이 켜져 있으면 사다리로 본다(2026-10-15 검토) — Claude 하나가 막혀도 GPT · agy 가 넘긴 차례를 받는다.
+    if (dmFallbackOn()) await codexQuota.refresh();
+    const blocked = dmFallbackOn()
+      ? dmLadder().every((e) => engineState.isBlocked(e))
+      : engineState.isBlocked('claude');
+    if (blocked) {
       const since = engineState.blocked('claude')?.since ?? 0;
       if (this.mailBlockedLogged !== since) {
         this.mailBlockedLogged = since;
-        this.logger.info('Mail poll: Claude 가 막혀 있어 건너뜁니다 — 표시는 그대로 둡니다');
+        this.logger.info('Mail poll: 맡을 엔진이 막혀 있어 건너뜁니다 — 표시는 그대로 둡니다');
       }
       return;
     }
@@ -2065,7 +2074,9 @@ export class AssistantScheduler {
       // 다시 읽는다. 그러면 이번 차례의 캡처는 **버린다** — 남겨 두면 회복 때 드레인이 옛 목록을 한 번
       // 더 넘겨 같은 후보가 두 번 나간다. 쓰기가 돈 뒤 막힌 것(일하다 끊김)은 표시를 옮기고 캡처가
       // 이어 가게 둔다 — 다시 읽으면 이미 한 쓰기를 또 한다.
-      if (out && isHeldOutcome(out) && !out.writeRan) {
+      // **다른 엔진이 답하고 「Claude·GPT 몫」을 남긴 것도 표시를 옮긴다**(agy 칸 · 2026-10-15) — 그 캡처가 남은 몫을
+      // 들고 회복 때 다시 돈다. 안 옮기면 10분 뒤 같은 후보를 또 넘겨 같은 답이 거듭 나간다.
+      if (out && isHeldOutcome(out) && !out.writeRan && out.engine === 'claude') {
         if (out.captureId) await dropCapture(out.captureId, '메일 후보 — 회복 뒤 다음 회차가 다시 읽음');
         this.logger.warn('Mail poll: 막혀 끝나 표시를 안 옮깁니다 — 회복 뒤 다시 읽습니다');
         return;
@@ -2960,13 +2971,14 @@ export class AssistantScheduler {
    * 돌리므로 중간에 죽으면 이미 쓴 것이 있을 수 있고, 같은 프롬프트를 다시
    * 돌리면 그 일이 두 번 일어난다.
    *
-   * **문은 `toolCalls` 다** — 하나라도 돌렸으면 폴백을 안 한다.
+   * **문은 `toolCalls` · `writeToolCalls` 다** — 쓰기를 할 수 있는 도구를 하나라도 돌렸으면 폴백을 안 한다.
    *   - 던졌다 → 스트림을 열기 전이라 아무것도 안 돌았다 · 안전
    *   - 도구 0회로 실패 → 부작용이 없다 · 안전
-   *   - 도구 1회 이상 뒤 실패 → **안 한다.** 무엇이 얼마나 됐는지 모른다
+   *   - 읽기 도구만 돈 뒤 실패 → 다시 읽을 뿐이다 · 안전(2026-10-15 검토)
+   *   - 쓰기 도구 1회 이상 뒤 실패 → **안 한다.** 무엇이 얼마나 됐는지 모른다
    *
-   * ⚠️ **`toolCalls` 를 못 읽는 회차는 안 한 것으로 치지 않는다** — 값이 없으면
-   * (`undefined`) 셋째 갈래로 본다. 모르는 것을 0 으로 읽으면 그 회차가 두 번 돈다.
+   * ⚠️ **`toolCalls` · `writeToolCalls` 를 못 읽는 회차는 안 한 것으로 치지 않는다** — 값이 없으면
+   * (`undefined`) 마지막 갈래로 본다. 모르는 것을 0 으로 읽으면 그 회차가 두 번 돈다.
    *
    * **Claude 가 막혀 있다고 엔진 상태가 말하면 1차를 안 띄운다**(2026-10-14) — 띄워도 한도 글만 받고
    * 끝난다. 「한도로 끝난 1차(도구 0회)」로 치고 곧장 폴백으로 간다 · 폴백도 못 하면 그 결과가
@@ -3017,13 +3029,20 @@ export class AssistantScheduler {
       return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
     }
 
+    // **읽기 도구만 돌았으면 넘긴다**(2026-10-15 검토) — 다시 읽을 뿐이라 두 번 해도 생기는 일이 없다. 사용자 결정은
+    // 「예약 일도 다음 엔진으로」인데 전에는 도구가 한 번이라도 돌면(읽기만이어도) 안 넘겨, 파일을 읽다 한도에 걸린
+    // 회차는 다음 재시도까지 멈췄다. 쓰기를 할 수 있는 도구가 하나라도 돌았거나 몇 번인지 모르면 예전 그대로 —
+    // 무엇이 얼마나 됐는지 모르는 채로 다시 돌리면 그 쓰기가 두 번 된다(제 재시도 · 미룸이 받는다).
     const ran = result ? result.toolCalls : 0;
-    if (ran !== 0) {
+    const wrote = result ? result.writeToolCalls : 0;
+    if (ran !== 0 && wrote !== 0) {
       // 모르는 것(`undefined`)도 여기로 온다 — 0 으로 읽으면 두 번 돈다.
-      this.logger.warn(`${label} 폴백 안 함 — 도구를 ${ran ?? '몇 번인지 모르게'} 돌린 뒤 실패`);
-      recordEvent('session-fallback', { label, why, skipped: 'tools-ran', toolCalls: ran ?? null });
+      this.logger.warn(`${label} 폴백 안 함 — 도구를 ${ran ?? '몇 번인지 모르게'} 돌린 뒤 실패`
+        + `(쓰기 도구 ${wrote ?? '모름'})`);
+      recordEvent('session-fallback', { label, why, skipped: 'tools-ran', toolCalls: ran ?? null, writeToolCalls: wrote ?? null });
       return result ?? { text: '', costUsd: 0, sessionId: '', subtype: why, isError: true };
     }
+    if (ran) this.logger.warn(`${label} 읽기 도구만 ${ran}번 돈 뒤 실패 — 폴백으로 넘깁니다`);
 
     // **같은 등급으로 넘긴다**(2026-09-23) — 모델은 llm-playbook 의 등급 표에서(Opus → Astra ·
     // Sonnet → Sol · Haiku → Luna). 예전에는 1차 등급과 무관하게 늘 같은 codex 모델로 갔다.

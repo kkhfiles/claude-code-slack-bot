@@ -222,6 +222,13 @@ export class EngineNotice {
       const rung = dmRung(st, now, ladder);
       const last = (st.ladder?.rung ?? 'claude') as Rung;
       if (rung === last) return null;
+      // **Claude 로 올라가는 것은 실제로 된 뒤에만 알린다**(2026-10-15 검토) — 막힘 시각이 지난 것만으로는 된 것이
+      // 아니다(떠 보기 · 밀린 것이 다시 막힐 수 있다). 막힘 기록은 성공(`recordOk`)이 지우므로, 남아 있으면 차례를
+      // 안 적고 기다린다 — 지워질 때 다시 불려(`subscribe`) 그때 한 번 낸다. 그사이 다시 막히면 아무 줄도 안 나간다.
+      if (rung === 'claude' && rank(rung) < rank(last) && st.engines.claude.blocked) {
+        this.log.info('Claude 막힘 시각이 지났지만 아직 된 차례가 없어 회복 안내를 미룹니다');
+        return null;
+      }
       const line = composeTransition(last, rung, st, (this.opts.labels ?? loadModelLabels)(), now, ladder);
       this.store.setLadder(rung, `${last}>${rung}`);
       if (!line) return null;

@@ -22,7 +22,7 @@ import { stillBlocked } from './rate-limit-until';
 import { engineState, type Block, type Engine } from './engine-state';
 import { currentClaudeBlock, thrownClaudeBlock } from './engine-tap';
 import { EngineRecovery } from './engine-recovery';
-import { EngineNotice, loadModelLabels } from './engine-notice';
+import { EngineNotice, loadModelLabels, type ModelLabels } from './engine-notice';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 import { SdkUpdate, RUN_ACTION as SDK_UPDATE_RUN, SKIP_ACTION as SDK_UPDATE_SKIP } from './sdk-update';
 import { DaouLoginNotifier, ACTION_ID as DAOU_LOGIN_ACTION } from './daou-login';
@@ -50,11 +50,11 @@ import { containsPrivate } from './privacy-guard';
 import { ChannelGate, HOLD_SWEEP_MS, REPLAY_FRAME, buildHoldExtra, drainHeld, dropHeldFiles, holdV2On,
   leadText, markChoice, needsCanary, oldListMessage, receivedSec, replayNote, replayTarget,
   type HeldFile, type HeldItem } from './hold-replay';
-import { StepLog, isHeldOutcome, outcomeFrom, type TurnOutcome, type TurnStep } from './turn-outcome';
+import { StepLog, isHeldOutcome, isWriteTool, outcomeFrom, type TurnOutcome, type TurnStep } from './turn-outcome';
 import { fallbackEligible, isAgyRung, pickAfter, pickEngine, type DmOrigin, type LadderPick, type PickInput } from './engine-ladder';
-import { CODEX_INFLIGHT_STEP, FALLBACK_TIMEOUT_MS, NEEDS_FULL_LINE, agyMarkerLines, agyRunningStep,
+import { CODEX_INFLIGHT_STEP, FALLBACK_TIMEOUT_MS, INCOMPLETE_LINE, NEEDS_FULL_LINE, agyMarkerLines, agyRunningStep,
   appendLedger, codexSteps, dmFallbackOn, fallbackEnv, dmLadder, engineStatusText, filesNote, handoverNote, isQuietReply,
-  ladderBlockedMap, ledgerActiveSince, ledgerNote, ledgerServedSince, markerLines } from './dm-fallback';
+  ladderBlockedMap, ledgerActiveSince, ledgerNote, ledgerServedSince, markerLines, notRunSteps } from './dm-fallback';
 import { codexQuota } from './codex-quota';
 import { sameTier, serviceCodex } from './model-ladder';
 import { readDrill } from './engine-drill';
@@ -133,7 +133,28 @@ interface InflightRecord { channel: string; threadTs?: string; text: string;
   /** 첨부(임시 파일) — 끊기면 보관 폴더로 옮긴다. */
   files?: HeldFile[];
   /** 지금 맡은 엔진 — GPT 가 이어 받는 중이면 `codex`(DM 폴백) · agy 칸이면 그 칸(6단계). */
-  engine?: Engine; }
+  engine?: Engine;
+  /**
+   * `waiting` — 원문은 캡처했는데 아직 차례를 안 띄움(같은 방의 문 · 대체 차례를 기다리는 중). 열쇠는
+   * `wait:<캡처 id>`(도는 차례의 열쇠와 겹치지 않게). 재시작에 끊기면 기동이 `interrupted` 로 적어 드레인이 줍는다.
+   */
+  state?: 'waiting'; }
+
+/** 기다리는 차례의 처리 중 기록 열쇠 — 같은 대화의 도는 차례(`sessionKey`)를 덮지 않게 캡처마다 따로. */
+function waitKey(captureId: string): string {
+  return `wait:${captureId}`;
+}
+
+/**
+ * 지난 기동의 처리 중 기록 — **새 차례가 파일을 고치기 전에** 떠 둔다(생성자 · 2026-10-15 검토). 기동 뒤 12초에
+ * 알리는데, 그 사이 같은 대화(DM 맨 위는 `direct` 하나)의 새 차례가 기록을 덮으면 끊긴 차례가 사라졌다.
+ */
+let bootInflight: Record<string, InflightRecord> | null = null;
+
+/** 지금 처리 중 기록을 지난 기동의 것으로 떠 둔다 — 생성자가 부른다(검사는 직접 부른다). */
+export function snapshotBootInflight(): void {
+  bootInflight = readInflight();
+}
 
 /**
  * 대화 차례가 들고 있는 것 — Claude 프로세스 또는 GPT 대체 차례의 손잡이. `-stop` 과 새 차례가 끊고,
@@ -159,6 +180,8 @@ interface FallbackArgs {
 interface FallbackResult {
   result: 'ok' | 'held' | 'failed' | 'stopped' | 'next';
   steps: TurnStep[]; writeRan: boolean; markDone?: Promise<void>; next?: LadderPick;
+  /** 넘길 글에 개인 글 조각이 있어 모아 둠 — 막힘이 아니라 「못 함」으로 끝낸다(드레인이 뒤의 건을 계속 본다). */
+  privateHold?: boolean;
 }
 
 /** Claude 를 건너뛴 차례(DM 폴백 · 엔진 상태가 막혔다고 함)의 빈 흐름 — 스트림 고리가 그냥 지나간다. */
@@ -385,13 +408,17 @@ export class SlackHandler {
   private engineNotice = new EngineNotice({
     // 실제로 붙은 칸만 — DM 폴백이 꺼져 있으면 Claude 하나(막히면 곧 모아 둠).
     ladder: () => dmLadder(),
-    // GPT 이름은 실제로 부르는 모델 — 서비스 폴백 대응표에서 기본 모델에 맞춘 칸(`service_fallback`).
-    labels: () => loadModelLabels(undefined, SlackHandler.resolveModelAlias(config.defaultModel), INTERACTIVE_EFFORT),
+    // GPT 이름은 실제로 부르는 모델(`engineNoticeLabels`) — 기본 모델이 아니라 DM 방의 모델과 차례가 고른 모델.
+    labels: () => this.engineNoticeLabels(),
     post: async (text) => {
       if (!config.assistant.dmChannel) return;
       await this.app.client.chat.postMessage({ channel: config.assistant.dmChannel, text });
     },
   });
+  /** GPT 칸이 마지막으로 실제로 부른 모델 — 대응표에 칸이 없을 때 엔진 안내가 이것을 쓴다. */
+  private lastCodexModel: string | null = null;
+  /** `-stop` 이 끊은 손잡이 — Claude 가 돌던 다시 돌리기도 GPT · agy 처럼 그 캡처를 버린다(2026-10-15 검토). */
+  private stoppedTurns?: WeakSet<TurnHandle>;
   // 보류 v2 — 밀린 것을 다시 돌리는 동안 같은 방의 새 차례는 기다린다(`hold-replay.ts`). 대화 처리기는
   // 같은 대화의 새 차례가 오면 앞 차례를 끊는데, 다시 돌리는 차례가 끊기면 반쯤 쓴 채로 남는다.
   private holdGate = new ChannelGate();
@@ -440,6 +467,8 @@ export class SlackHandler {
   private chatHosts: ChatHost[] = [];
 
   constructor(app: App, cliHandler: CliHandler, mcpManager: McpManager, reportServer?: ReportServer) {
+    // 지난 기동의 처리 중 기록을 **어떤 차례보다 먼저** 떠 둔다 — 알림(12초 뒤) 전에 새 차례가 덮을 수 있다.
+    snapshotBootInflight();
     this.app = app;
     this.cliHandler = cliHandler;
     this.sdkHandler = new SdkHandler(mcpManager);
@@ -1243,6 +1272,8 @@ export class SlackHandler {
       const sessionKey = this.cliHandler.getSessionKey(user, channel, turnThreadTs(channel, thread_ts, ts));
       const activeProcess = this.activeProcesses.get(sessionKey);
       if (activeProcess) {
+        // 사람이 끊었다는 표시 — 끊긴 차례가 다시 돌리던 것이면 그 캡처를 버린다(엔진을 안 가림 · 아래 `stoppedTurns`).
+        (this.stoppedTurns ??= new WeakSet()).add(activeProcess);
         activeProcess.interrupt();
         this.activeProcesses.delete(sessionKey);
         await say({ text: `⏹️ ${t('cmd.stop.stopped', locale)}`, thread_ts: thread_ts });
@@ -1491,6 +1522,15 @@ export class SlackHandler {
     const capture = event.captureId
       ? { id: event.captureId }
       : (text?.trim() ? captureToInbox(text, 'slack', thread_ts, { channel, msgTs: ts }) : null);
+    // **차례를 띄우기 전까지도 처리 중 기록을 둔다**(2026-10-15 검토) — 원문만 있고 기록도 실패 표시도 없으면, 문에서
+    // 기다리다 재시작에 끊긴 말은 드레인 목록에 안 든다(실패 표시가 있는 것만 다시 돈다). 차례가 뜨면 아래에서 지운다.
+    const waitRec = !event.replay && capture?.id ? waitKey(capture.id) : '';
+    if (waitRec) {
+      const m = readInflight();
+      m[waitRec] = { channel, threadTs: replyTs, text: (text || '').slice(0, 160), startedAt: new Date().toISOString(),
+        captureId: capture!.id, state: 'waiting' };
+      writeInflight(m);
+    }
 
     // **밀린 것을 다시 돌리는 중이면 이 방의 새 차례는 기다린다**(보류 v2 · `holdGate`). 아래에서
     // 같은 대화의 앞 차례를 끊는데, 다시 돌리는 차례가 끊기면 반쯤 쓴 채로 남는다. 문은 보류 v2
@@ -1622,6 +1662,8 @@ export class SlackHandler {
     const fbOn = (): boolean => fbBase && !isPrivateTurn();
     /** 띄우기 전에 Claude 를 건너뛰었나(엔진 상태가 막혔다고 함) — 그러면 아래 스트림이 비어 있다. */
     let claudeSkipped = false;
+    /** 이 차례의 손잡이 — 터졌을 때(`catch`) 사람이 끊은 것인지 가른다. */
+    let turnHandle: TurnHandle | null = null;
     /** 거절 이벤트 · 한도/과부하 표시 메시지를 봤나 — 넘길 차례면 그 뒤의 Claude 글(한도 글)을 안 올린다. */
     let limitSeen = false;
     /** 폴백이 끝을 맡았나(답 · 실패 표시 · 한도 안내) — 그러면 아래 예전 한도 길은 건너뛴다. */
@@ -1785,9 +1827,13 @@ export class SlackHandler {
       // 아래 스트림이 그 `ts` 로 상태를 고쳐 쓰므로 들어가기 전에 받아 둔다.
       await statusSent;
       this.activeProcesses.set(sessionKey, cliProcess);
+      turnHandle = cliProcess;
       { const m = readInflight(); m[sessionKey] = { channel, threadTs: replyTs, text: (text || '').slice(0, 160), startedAt: new Date().toISOString(), captureId,
         ...(event.heldSteps?.length ? { heldSteps: event.heldSteps } : {}),
-        ...(processedFiles.length ? { files: processedFiles.map(heldFileOf) } : {}) }; writeInflight(m); }
+        ...(processedFiles.length ? { files: processedFiles.map(heldFileOf) } : {}) };
+        // 기다리던 기록은 이 차례의 기록으로 넘어간다(같은 캡처 · 같은 파일 쓰기 한 번).
+        if (waitRec) delete m[waitRec];
+        writeInflight(m); }
 
       for await (const event of cliProcess) {
         // **돈 도구를 적는다**(보류 v2) — 새 도구가 시작할 때만 처리 중 기록을 고쳐 쓴다(도구 하나에
@@ -1980,11 +2026,19 @@ export class SlackHandler {
       }
       tmark('스트림 닫힘');
 
+      // **사람이 `-stop` 으로 끊은 다시 돌리기는 버린다 — Claude 가 돌던 것도**(2026-10-15 검토). GPT · agy 칸은 이미
+      // 그랬다. 남기면 옛 실패 표시가 그대로라 다음 드레인이 끊은 요청을 또 돌린다. 끊은 차례는 다음 칸으로도 안 넘긴다.
+      const claudeStopped = this.stoppedTurns?.has(cliProcess) ?? false;
+      if (claudeStopped && event.replay && captureId) {
+        await dropCapture(captureId, '다시 돌리던 것을 사람이 끊음');
+        dropHeldFiles(captureId);
+      }
+
       // **DM 폴백 — Claude 가 끝난 뒤**(엔진 폴백 5단계): 한도 · 과부하로 막혔거나 띄우기 전에 건너뛰었으면
       // 다음 칸으로 넘긴다. 쓰기가 돌았어도 넘긴다 — 「이미 한 것」을 같이 준다. 다 막혔으면(`hold`)
       // 아래 예전 한도 길이 실패 표시와 안내를 맡는다. Claude 의 보통 오류는 안 넘긴다(예전 오류 길).
       const claudeLimited = !!(rateLimitInfo || rateLimitMessageText || limitSeen);
-      if ((claudeSkipped || claudeLimited) && fbOn()) {
+      if ((claudeSkipped || claudeLimited) && fbOn() && !claudeStopped) {
         const claudeBlock = currentClaudeBlock(rateLimitInfo?.resetsAt, rateLimitMessageText);
         const ladder = dmLadder();
         if (!claudeSkipped) {
@@ -2033,7 +2087,8 @@ export class SlackHandler {
               } else {
                 cliError = true;
                 if (fb.result === 'failed') {
-                  turnBlock = claudeBlock;
+                  // 개인 글이라 모아 둔 것은 막힘이 아니다 — 드레인이 이 건에서 멈추지 않고 뒤의 건을 본다.
+                  if (!fb.privateHold) turnBlock = claudeBlock;
                   markDone = fb.markDone ?? null;
                 }
                 // **사람이 끊은 다시 돌리기는 버린다** — 옛 실패 표시가 남으면 다음 드레인이 또 돌리는데, 끊기 전에
@@ -2155,7 +2210,7 @@ export class SlackHandler {
       // Handle rate limit (from rate_limit_event or error text)
       // DM 폴백이 끝을 맡았으면 건너뛴다 · 다 막혔으면(띄우기 전에 건너뜀 · 시각 없는 거절) 여기서 모아 둔다.
       // 거절을 봤으면 넘기지 않는 차례도 여기로 온다 — 위에서 한도 글을 안 올렸으니 안내가 대신 말한다.
-      if (!fallbackDone && (rateLimitInfo || rateLimitMessageText || limitSeen || claudeSkipped)) {
+      if (!fallbackDone && !claudeStopped && (rateLimitInfo || rateLimitMessageText || limitSeen || claudeSkipped)) {
         // **캡처에 남긴다 — 이유를 안 가리는 그 자국이다.** 아래 한도 큐는
         // 이유별 장치라 실제로 어긋났다(08/24 의 서버 과부하를 5시간짜리 한도로
         // 잡아 이레를 들고 있었다). 정본은 캡처 큐 한 곳으로 간다.
@@ -2192,9 +2247,14 @@ export class SlackHandler {
       turnThrew = true;
 
       // **터진 것도 같은 자국을 남긴다.** 한도인지 아닌지는 재시도 *시점*만
-      // 가르고, 「처리 못 했다」는 사실은 둘이 같다.
-      markDone = this.markTurnFailed(captureId, block ? 'limit' : 'error', stepLog, session?.sessionId,
-        event, processedFiles);
+      // 가르고, 「처리 못 했다」는 사실은 둘이 같다. 단 사람이 끊어 터진 다시 돌리기는 버린다(위 `claudeStopped`).
+      if (turnHandle && this.stoppedTurns?.has(turnHandle) && event.replay && captureId) {
+        await dropCapture(captureId, '다시 돌리던 것을 사람이 끊음');
+        dropHeldFiles(captureId);
+      } else {
+        markDone = this.markTurnFailed(captureId, block ? 'limit' : 'error', stepLog, session?.sessionId,
+          event, processedFiles);
+      }
 
       if (block) {
         await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, block, locale, say, ts, captureId);
@@ -2207,7 +2267,7 @@ export class SlackHandler {
       }
     } finally {
       this.activeProcesses.delete(sessionKey);
-      { const m = readInflight(); delete m[sessionKey]; writeInflight(m); }
+      { const m = readInflight(); delete m[sessionKey]; if (waitRec) delete m[waitRec]; writeInflight(m); }
       // **차례가 끝나면 캡처 가리킴을 비운다.** 안 비우면 다음 쓰기가 앞 차례의
       // 캡처를 닫는다 — 파이썬의 30분 시한은 봇이 죽었을 때의 안전망이지
       // 평소에 기대는 길이 아니다.
@@ -2470,8 +2530,9 @@ export class SlackHandler {
     try {
       // 이어 가야 하는 것(보류 v2 로 적힌 세션)은 옛 드레인이 안 집는다 — 처음부터 돌리면 같은
       // 쓰기가 두 번 들어간다. `HOLD_V2` 를 다시 켜면 그쪽이 이어 간다.
+      // 「이미 한 것」만 적힌 것(세션 없이 GPT · agy 가 쓰다 끊김)도 옛 드레인은 안 집는다 — 그 메모 없이 돌리면 두 번 쓴다.
       const all = await pendingCaptures(DRAIN_MAX);
-      const items = all.filter((it) => !it.session_id);
+      const items = all.filter((it) => !it.session_id && !it.done_steps?.length);
       if (items.length < all.length) {
         this.logger.warn('이어 가야 하는 밀린 것은 보류 v2 가 켜져야 돕니다', { count: all.length - items.length });
       }
@@ -2653,7 +2714,10 @@ export class SlackHandler {
       ...(target.thread ? { thread_ts: target.thread } : {}),
       pushed: true, replay: true, captureId: item.id, outcomeSink,
       replayNote: replayNote(item, unseen),
-      ...(item.session_id ? { resumeSessionId: item.session_id, heldSteps: item.done_steps ?? [] } : {}),
+      ...(item.session_id ? { resumeSessionId: item.session_id } : {}),
+      // 세션이 없어도 「이미 한 것」은 싣는다 — GPT · agy 가 쓰다 끊긴 것을 새 차례로 이어 간다(2026-10-15 검토). 또
+      // 끊기면 이 줄들이 다음 보류 칸에 합쳐진다(`buildHoldExtra` 의 `prior`).
+      ...(item.session_id || item.done_steps?.length ? { heldSteps: item.done_steps ?? [] } : {}),
       ...(item.files?.length ? { heldFiles: item.files } : {}),
       ...(item.needs === 'full' ? { needsFull: true } : {}),
     } as unknown as MessageEvent, this.pushedSay(target.channel));
@@ -2741,6 +2805,32 @@ export class SlackHandler {
     return ladderBlockedMap(engineState);
   }
 
+  /**
+   * 엔진 안내의 이름 — GPT 는 **DM 차례가 실제로 부를 모델**(2026-10-15 검토). 예전에는 기본 모델의 대응표 칸을
+   * 따로 읽어, DM 방의 모델(`-model`)을 바꿨거나 표에 칸이 없을 때 안내와 실제가 어긋났다. 고르는 함수는
+   * `runDmFallback` 과 같은 `serviceCodex` 이고, 표에 칸이 없으면 마지막으로 실제로 부른 모델(`lastCodexModel`).
+   */
+  private engineNoticeLabels(): ModelLabels {
+    const primary = SlackHandler.resolveModelAlias(
+      this.channelModels.get(config.assistant.dmChannel) || config.defaultModel);
+    const base = loadModelLabels(undefined, primary, INTERACTIVE_EFFORT);
+    const codex = serviceCodex(primary, INTERACTIVE_EFFORT)?.model ?? this.lastCodexModel ?? base.codex;
+    return { ...base, codex };
+  }
+
+  /**
+   * 넘길 글에 개인 글 조각이 있다 — GPT · agy 로 안 보내고 모아 둔다(개인 글 차례와 같은 길: 실패 표시 · 한도 안내
+   * 한 번). 다음 칸으로도 안 넘긴다(그쪽도 밖이다). 회복 때 Claude 가 다시 돌린다.
+   * 결과는 막힘이 아니라 「못 함」(`privateHold`) — 드레인이 이 건에서 멈추면 뒤의 건까지 묶인다.
+   */
+  private async holdPrivateFallback(a: FallbackArgs, rung: Engine): Promise<FallbackResult> {
+    this.logger.warn('DM 폴백 — 넘길 글에 개인 글 조각이 있어 대체 엔진에 안 보내고 모아 둡니다', { rung });
+    appendLedger({ channel: a.channel, engine: 'none', model: '', captureId: a.captureId, outcome: 'hold' });
+    const markDone = this.markTurnFailed(a.captureId, 'limit', { steps: a.claudeSteps }, a.sessionId, a.event, a.files);
+    await this.handleRateLimitUI(a.channel, a.thread_ts || a.ts, a.finalPrompt, a.block, a.locale, a.say, a.ts, a.captureId);
+    return { result: 'failed', steps: [], writeRan: false, markDone, privateHold: true };
+  }
+
   /** 이 작업 디렉터리가 업무 비서 뿌리인가 — 대체 엔진의 규칙 · 쓰기 범위가 거기에 맞춰져 있다. */
   private isWorkAssistantDir(dir: string | undefined): boolean {
     const root = workAssistantRoot();
@@ -2777,10 +2867,15 @@ export class SlackHandler {
           currentTs: a.ts, threadTs: a.thread_ts, isNewSession: true, botUserId, isPrivate: containsPrivate,
         })).catch(() => '');
       const prompt = [handoverNote(a.claudeSteps), context, a.finalPrompt + filesNote(a.files)].filter(Boolean).join('\n');
+      // **보낼 글 전체를 개인 글 문에 한 번 더 댄다**(2026-10-15 검토) — 차례 앞에서는 사람 말만 봤다. 넘겨줄 메모
+      // (Claude 가 돌린 명령의 인자) · 못 본 대화방 글 · 밀린 요청 메모에 섞인 조각도 OpenAI 로 안 나가게 모아 둔다.
+      if (containsPrivate(prompt)) return await this.holdPrivateFallback(a, 'codex');
       // 모델은 서비스 폴백 대응표(`service_fallback` · 한 급 낮게) — 표가 없으면 예전처럼 같은 등급 · 기본 모델.
       const svc = serviceCodex(a.claudeModel, INTERACTIVE_EFFORT);
       const model = svc?.model
         ?? (await sameTier(a.claudeModel, 'codex'))?.model ?? SESSION_CODEX_MODEL;
+      // 엔진 안내가 이 이름을 쓴다(대응표에 칸이 없을 때) — 기본 모델이 아니라 실제로 부른 모델.
+      this.lastCodexModel = model;
       this.logger.warn('DM 폴백 — GPT 가 이어 받습니다', { model, claudeWrites, origin: event.replay ? 'replay' : 'dm' });
       const r = await codexTurn(prompt, {
         workingDirectory: workAssistantRoot() ?? process.cwd(),
@@ -2872,8 +2967,12 @@ export class SlackHandler {
         .then((botUserId) => readUnseen(this.app.client as any, channel, {
           currentTs: a.ts, threadTs: a.thread_ts, isNewSession: true, botUserId, isPrivate: containsPrivate,
         })).catch(() => '');
+      const handover = handoverNote(a.claudeSteps, 'Claude·GPT');
+      // **보낼 글을 개인 글 문에 한 번 더 댄다**(2026-10-15 검토) — 넘겨줄 메모 · 못 본 대화방 글 · 밀린 요청 메모 ·
+      // 사람 말. 걸리면 Google 로 안 보내고 모아 둔다(업무 목록 · 이 칸의 규칙은 봇이 짓는 글이라 안 본다).
+      if (containsPrivate([handover, context, a.finalPrompt].join('\n'))) return await this.holdPrivateFallback(a, rung);
       const prompt = agyDmPrompt({
-        list, slotMap: a.slotMap, handover: handoverNote(a.claudeSteps, 'Claude·GPT'), context, text: a.finalPrompt,
+        list, slotMap: a.slotMap, handover, context, text: a.finalPrompt,
       });
       this.logger.warn(`DM 폴백 — ${rung} 가 이어 받습니다`, { model: model.alias, priorWrites, origin: event.replay ? 'replay' : 'dm' });
       const r = await agyTurn(prompt, {
@@ -2888,29 +2987,51 @@ export class SlackHandler {
       const plan = r.plan;
 
       // 허용 목록 → 셸 없이 차례로. 앞이 실패하면 뒤는 안 돌린다.
+      // **명령 하나가 끝날 때마다 처리 중 기록에 적는다 — 다음 명령을 띄우기 전에**(2026-10-15 검토). 전에는 다 끝난
+      // 뒤에야 모았고 그사이 기록은 빈 목록으로 덮였다 — 재시작에 끊기면 앞서 끝난 등록이 「이미 한 것」에서 빠져
+      // 다음 엔진이 또 등록했다.
       const { ok: valid, rejected } = validateActions(plan.actions, { tasks: list.tasks });
-      const done: TurnStep[] = [];
+      let done: TurnStep[] = [];
       const ran = await runActions(valid, {
         root, captureId,
         onStart: (i) => patchInflight(sessionKey, {
           steps: [...a.claudeSteps, ...done, agyRunningStep(rung, valid[i].summary)],
         }),
+        onDone: (runs) => {
+          done = actionSteps(runs, rung);
+          patchInflight(sessionKey, { steps: [...a.claudeSteps, ...done] });
+        },
         stop: () => stopped,
       });
       const steps = actionSteps(ran.runs, rung);
-      done.push(...steps);
       const wrote = ran.runs.length > 0;
       if (rejected.length) this.logger.warn(`DM 폴백 — ${rung} 명령 ${rejected.length}건을 안 돌림`, { why: rejected.map((x) => x.why) });
+      // **명령 사이에 끊었으면 끊긴 것이다**(2026-10-15 검토) — 전에는 남은 명령을 「앞 명령이 실패해 멈춤」으로 적고
+      // 「됨」으로 끝냈다. 돈 것은 사람에게 보이고(무엇이 됐는지는 알아야 한다), 결과는 `stopped`.
+      if (stopped) {
+        if (ran.runs.length) {
+          await a.say({ text: this.formatMessage(actionReport(ran.runs, [], []), true), thread_ts: a.replyTs });
+        }
+        appendLedger({ channel, engine: rung, model: display, captureId, outcome: 'stopped' });
+        return { result: 'stopped', steps, writeRan: wrote };
+      }
+
+      // **하나라도 안 됐으면 「됨」이 아니다**(2026-10-15 검토) — 실패 · 허용 목록 밖 · 앞이 실패해 안 돈 명령이
+      // 있으면 남은 몫을 「Claude·GPT 몫」으로 모아 둔다(돈 것과 실패한 것은 「이미 한 것」, 안 돈 것은 「안 함」).
+      // 전에는 실패 줄을 보이고도 `ok` 로 끝내 다시 돌리던 차례가 「다시 돌림」으로 닫혔다.
+      const incomplete = rejected.length > 0 || ran.skipped.length > 0 || ran.runs.some((x) => !x.ok);
+      const holdRest = plan.needsFull || incomplete;
 
       // 사람에게 — 답 · 실행한 것 · 실행하지 않은 명령 · (남긴 몫) · 표시 줄. 판에서 온 「조용히」는 다 그대로
       // 됐을 때만 조용하다(안 된 것은 반드시 말한다).
       const report = actionReport(ran.runs, ran.skipped, rejected);
       const quiet = isQuietReply(plan.reply);
-      const trouble = rejected.length > 0 || ran.skipped.length > 0 || ran.runs.some((x) => !x.ok || x.notes.length);
+      const trouble = incomplete || ran.runs.some((x) => x.notes.length);
       const silent = !!(event as any).pushed && quiet && !trouble && !plan.needsFull;
       if (!silent) {
         const held = plan.needsFull
-          ? `${NEEDS_FULL_LINE}${plan.needsFullReason ? ` — ${plan.needsFullReason}` : ''}` : '';
+          ? `${NEEDS_FULL_LINE}${plan.needsFullReason ? ` — ${plan.needsFullReason}` : ''}`
+          : incomplete ? INCOMPLETE_LINE : '';
         const body = [quiet ? '' : plan.reply, report, held].filter(Boolean).join('\n\n');
         if (body) await a.say({ text: this.formatMessage(body, true), thread_ts: a.replyTs });
         const marker = agyMarkerLines({
@@ -2920,9 +3041,10 @@ export class SlackHandler {
         await a.say({ text: marker, blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: marker }] }], thread_ts: a.replyTs });
       }
 
-      if (plan.needsFull) {
+      if (holdRest) {
         // 남은 몫은 모아 둔다 — 명령이 돌았으면 `partial`(이미 한 것과 함께) · agy 만 남은 동안은 안 집는다.
-        const markDone = this.markTurnFailed(captureId, 'limit', { steps: [...a.claudeSteps, ...steps] },
+        const notRun = notRunSteps(rung, [...ran.skipped.map((x) => x.summary), ...rejected.map((x) => x.what)]);
+        const markDone = this.markTurnFailed(captureId, 'limit', { steps: [...a.claudeSteps, ...steps, ...notRun] },
           a.sessionId, event, a.files, 'full');
         appendLedger({ channel, engine: rung, model: display, captureId, outcome: 'hold' });
         return { result: 'held', steps, writeRan: wrote, markDone };
@@ -3608,6 +3730,8 @@ export class SlackHandler {
     // 말고는 길이 없었다. 세는 값은 여기서 같이 남긴다.
     let turns = 0;
     let toolCalls = 0;
+    // 그중 쓰기를 할 수 있는 도구 — 예약 일 폴백이 「읽기만 돌았나」를 가른다(`spawnOrFallback` · 2026-10-15 검토).
+    let writeToolCalls = 0;
     // **리미트는 산문이 아니라 이벤트로 온다.** 여기서 안 받으면 부르는 쪽은
     // 모델이 쓴 본문을 정규식으로 훑는 수밖에 없고, 그러면 「429를 분석한
     // 보고서」가 「429에 걸린 세션」으로 둔갑한다(2026-05~08 오탐 13회).
@@ -3643,7 +3767,10 @@ export class SlackHandler {
         const content = assistantEvent.message.content || [];
         turns += 1;
         for (const part of content) {
-          if ((part as any)?.type === 'tool_use') toolCalls += 1;
+          if ((part as any)?.type === 'tool_use') {
+            toolCalls += 1;
+            if (isWriteTool(String((part as any).name ?? ''))) writeToolCalls += 1;
+          }
         }
         const extracted = this.extractTextFromContent(content);
         if (extracted) text = extracted;  // Keep only last assistant turn (drop intermediate explanations)
@@ -3682,7 +3809,7 @@ export class SlackHandler {
 
     // result를 받은 뒤의 abort(grace/wall-clock)는 timeout이 아니라 정상 완료.
     if (timedOut && !resultReceived) {
-      return { text, costUsd, sessionId, subtype: 'error_timeout', usage, turns, toolCalls,
+      return { text, costUsd, sessionId, subtype: 'error_timeout', usage, turns, toolCalls, writeToolCalls,
                rateLimited, rateLimitResetsAt, isError: true, timing };
     }
 
@@ -3692,7 +3819,7 @@ export class SlackHandler {
       this.sdkHandler.prewarm(sdkOpts);
     }
 
-    return { text, costUsd, sessionId, subtype, usage, turns, toolCalls,
+    return { text, costUsd, sessionId, subtype, usage, turns, toolCalls, writeToolCalls,
              rateLimited, rateLimitResetsAt, isError, timing };
   }
 
@@ -3947,15 +4074,20 @@ export class SlackHandler {
    * 통째로 비우면 그 차례가 끊긴 것으로 알려지고 나중에 다시 돌아 같은 일을 두 번 한다. 시각을 못 읽으면 옛 것으로 본다.
    */
   private async reportInterruptedSessions(): Promise<void> {
-    const all = readInflight();
-    const pending: Record<string, InflightRecord> = {};
-    const live: Record<string, InflightRecord> = {};
-    for (const [k, r] of Object.entries(all)) {
+    // 지난 기동의 것은 기동 때 떠 둔 것에서(생성자 · `snapshotBootInflight`) — 지금 파일은 그 사이 새 차례가 같은
+    // 열쇠로 덮었을 수 있다. 떠 둔 것이 없으면(검사 껍데기) 지금 파일. 남길 것은 지금 파일의 이 기동 뒤 기록뿐.
+    const prior = bootInflight ?? readInflight();
+    bootInflight = null;
+    const isLive = (r: InflightRecord | undefined) => {
       const at = Date.parse(r?.startedAt ?? '');
-      if (Number.isFinite(at) && at >= BOOT_MS) live[k] = r; else pending[k] = r;
-    }
+      return Number.isFinite(at) && at >= BOOT_MS;
+    };
+    const pending: Record<string, InflightRecord> = {};
+    for (const [k, r] of Object.entries(prior)) if (!isLive(r)) pending[k] = r;
     const keys = Object.keys(pending);
     if (keys.length === 0) return;
+    const live: Record<string, InflightRecord> = {};
+    for (const [k, r] of Object.entries(readInflight())) if (isLive(r)) live[k] = r;
     writeInflight(live);
     this.logger.warn('Reporting interrupted sessions', { count: keys.length });
     const v2 = holdV2On();

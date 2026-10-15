@@ -507,6 +507,28 @@ try {
     await new Promise((r) => setImmediate(r));
     eq('켜짐: 회복을 한 줄 보낸다', posts, ['✅ Claude 회복 — 돌아왔습니다']);
     on.stop();
+
+    // 막힘 시각이 지난 것만으로는 「회복」을 안 보낸다(2026-10-15 검토) — 된 차례(`recordOk`)가 막힘을 지울 때 한 번.
+    {
+      const s4 = new EngineState({ file: path.join(TMP, 'notice-expiry.json'), legacyFile: path.join(TMP, 'none-x.json'), now: clock });
+      const p4 = [];
+      const n4 = new EngineNotice({ store: s4, ladder: () => ['claude', 'codex'], enabled: () => true,
+        labels: () => ({ codex: 'gpt-x', agyClaude: '', gemini: '' }), post: async (t) => { p4.push(t); },
+        log: { info() {}, warn() {} } });
+      s4.recordBlocked('claude', { kind: 'usage', until: nowSec() + 60 });
+      await n4.check();
+      nowMs += 120_000;
+      eq('막힘 시각만 지나면 회복 안내 없음', await n4.check(), null);
+      eq('막힘 시각만 지나면 차례도 안 적음(된 뒤에 다시 봄)', s4.ladderRung(), 'codex');
+      s4.recordBlocked('claude', { kind: 'usage', until: nowSec() + 600 });
+      eq('되기 전에 다시 막히면 아무 줄도 없음', await n4.check(), null);
+      nowMs += 700_000;
+      s4.recordOk('claude');
+      eq('된 뒤에 회복 한 줄', await n4.check(), '✅ Claude 회복 — 돌아왔습니다');
+      eq('같은 회복은 다시 안 냄', await n4.check(), null);
+      eq('보낸 것 — GPT 로 넘김 · 회복 하나', p4.length, 2);
+      nowMs = T0;
+    }
   }
 
   // ---------- 공개 저장소 — 상태 파일은 안 올린다 ----------
@@ -527,5 +549,5 @@ if (fails.length) {
 } else {
   console.log('통과 — 엔진 상태 (사용량 시각 · 앞당기지 않음 · 됐으면 지움 · 과부하 10→60분 · 60분 다시 봄'
     + ' · 가장 이른 회복 · 옛 파일 한 번 옮김 · 5시간 창 · 실제 문구 판정 · 탭 배선·동작 · 과부하에 5시간 없음'
-    + ' · 안내 한 번 · 기동 때 다시 걺 · 안내 문구는 표에서 · 꺼짐은 로그만)');
+    + ' · 안내 한 번 · 기동 때 다시 걺 · 안내 문구는 표에서 · 꺼짐은 로그만 · 회복 안내는 된 뒤에)');
 }

@@ -17,7 +17,7 @@ import { DM_LADDER, DM_LADDER_AGY } from './engine-ladder';
 import { formatKst } from './engine-notice';
 import { agyRungsOn } from './agy-turn';
 import type { Drill } from './engine-drill';
-import type { TurnStep } from './turn-outcome';
+import { stepState, type StepState, type TurnStep } from './turn-outcome';
 import type { CodexStep } from './work-assistant';
 
 /** 켜는 문 — 부를 때마다 읽는다(검사가 환경 변수를 바꿔 끼운다). */
@@ -107,6 +107,15 @@ export function agyMarkerLines(o: {
 
 /** Claude·GPT 가 돌아오면 이어서 처리할 몫이 남았다는 줄(`needs_full`). */
 export const NEEDS_FULL_LINE = '⏸ 이 부분은 Claude·GPT 가 돌아오면 이어서 처리합니다';
+/** agy 칸의 명령이 일부 안 됐다는 줄 — 실패 · 허용 목록 밖 · 앞이 실패해 안 돈 것이 있을 때(2026-10-15 검토). */
+export const INCOMPLETE_LINE = '⏸ 못 한 명령은 Claude·GPT 가 돌아오면 이어서 처리합니다';
+
+/** agy 칸이 안 돌린 명령을 보류 칸의 「안 함」 줄로 — 쓰기가 아니다(`write: false`). */
+export function notRunSteps(rung: string, summaries: readonly string[]): TurnStep[] {
+  return summaries.map((s, i) => ({
+    id: `${rung}-notrun-${i}`, name: `${rung} 명령`, input: s.slice(0, 120), done: false, write: false, notRun: true,
+  }));
+}
 
 /** 판에서 온 차례가 「조용히」로 답했나 — 그러면 표시 줄도 안 올린다(답이 안 보이는데 줄만 뜬다). */
 export function isQuietReply(text: string): boolean {
@@ -115,17 +124,25 @@ export function isQuietReply(text: string): boolean {
 
 // ---------------------------------------------------------------- 넘겨줄 메모
 
+/** 넘겨줄 메모의 줄 머리 — 세 갈래(2026-10-15 검토 · 오류로 돌아온 것을 「완료」로 넘기면 필요한 일을 건너뛴다). */
+const HANDOVER_HEAD: Record<StepState, string> = {
+  done: '완료',
+  failed: '실패(다시 해도 됨 — 결과를 확인)',
+  unknown: '결과 모름 — 먼저 확인',
+  notRun: '안 함 — 앞 엔진이 못 돌린 것(필요하면 한다)',
+};
+
 /**
- * 쓰기 도구가 돈 뒤 끊긴 차례를 넘길 때 앞에 붙이는 메모 — 이미 한 것(다시 하지 말 것)과
- * 결과를 못 받은 것(먼저 확인). 쓰기가 없으면 빈 글자.
+ * 쓰기 도구가 돈 뒤 끊긴 차례를 넘길 때 앞에 붙이는 메모 — 이미 한 것(다시 하지 말 것) · 오류로 끝난 것(결과를
+ * 확인하고 다시 해도 됨) · 결과를 못 받은 것(먼저 확인). 쓰기가 없으면 빈 글자.
  */
 export function handoverNote(steps: readonly TurnStep[], from = 'Claude'): string {
-  const writes = steps.filter((s) => s.write);
-  if (!writes.length) return '';
+  const writes = steps.filter((s) => s.write || s.notRun);
+  if (!writes.some((s) => s.write)) return '';
   return [
     `[앞 엔진(${from})이 이 요청을 처리하다 한도 · 과부하로 끊겼다 — 이어서 마무리한다]`,
-    '이미 한 것 — 다시 하지 말 것 · 결과를 못 받은 것은 확인부터:',
-    ...writes.map((s) => `- ${s.done ? '완료' : '결과 모름 — 먼저 확인'} · ${[s.name, s.input].filter(Boolean).join(' · ')}`),
+    '이미 한 것 — 다시 하지 말 것 · 결과를 못 받은 것은 확인부터 · 실패한 것은 결과를 확인하고 다시 해도 됨:',
+    ...writes.map((s) => `- ${HANDOVER_HEAD[stepState(s)]} · ${[s.name, s.input].filter(Boolean).join(' · ')}`),
     '',
   ].join('\n');
 }
@@ -138,7 +155,8 @@ export function filesNote(files: ReadonlyArray<{ name: string; path: string }>):
 
 /** codex 가 돌린 명령을 보류 칸의 도구 줄로 — 명령은 다 쓰기로 본다(`codexTurn` 과 같은 규칙). */
 export function codexSteps(steps: readonly CodexStep[]): TurnStep[] {
-  return steps.map((s, i) => ({ id: `codex-${i}`, name: 'GPT 명령', input: s.cmd, done: s.done, write: true }));
+  return steps.map((s, i) => ({ id: `codex-${i}`, name: 'GPT 명령', input: s.cmd, done: s.done, write: true,
+    ...(s.failed ? { failed: true } : {}) }));
 }
 
 /** 재시작으로 끊길 때를 위한 자리표 — GPT 차례는 도는 동안 무엇을 했는지 안 보이므로 「했을 수 있음」으로 둔다. */

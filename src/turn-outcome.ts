@@ -20,8 +20,18 @@ export interface TurnStep {
   name: string;
   /** 무엇에 썼나 한 줄(≤ `STEP_INPUT_MAX`) — 파일 내용은 안 싣는다. */
   input: string;
-  /** 결과가 돌아왔나. 안 돌아온 것은 「했는지 모름」이다. */
+  /** 결과가 성공으로 돌아왔나. 안 돌아온 것은 「했는지 모름」이다. */
   done: boolean;
+  /**
+   * 결과가 **오류로** 돌아왔나(Claude `tool_result.is_error` · codex 종료 코드 · 상태) — 「완료」로 넘기면
+   * 다음 엔진이 필요한 일을 건너뛴다(2026-10-15 검토). 없으면(옛 기록) 거짓으로 본다.
+   */
+  failed?: boolean;
+  /**
+   * 안 돌린 것 — agy 칸이 낸 명령 중 허용 목록 밖이거나 앞이 실패해 멈춘 것(2026-10-15 검토). 쓰기가 아니므로
+   * `write` 는 거짓이고, 보류 칸에는 「안 함」으로 실린다(다음 엔진이 남은 몫을 안다).
+   */
+  notRun?: boolean;
   /** 쓰기를 할 수 있는 도구인가(`isWriteTool`). */
   write: boolean;
 }
@@ -123,7 +133,10 @@ export class StepLog {
         for (const p of parts) {
           if (p?.type !== 'tool_result') continue;
           const step = this.byId.get(String(p.tool_use_id ?? ''));
-          if (step) step.done = true;
+          if (!step) continue;
+          // 오류로 돌아온 것은 「완료」가 아니다 — 다음 엔진이 결과를 확인하고 다시 할 수 있게 갈라 둔다.
+          if (p.is_error === true) step.failed = true;
+          else step.done = true;
         }
       }
     } catch {
@@ -137,14 +150,24 @@ export class StepLog {
   }
 }
 
-/** 쓰기 도구 한 줄 — 「완료 · Bash · …」 또는 「결과 모름 · Bash · …」. */
-export function stepLine(s: TurnStep): string {
-  return [s.done ? '완료' : '결과 모름', s.name, s.input].filter(Boolean).join(' · ');
+/** 도구 하나의 끝 — 완료 · 실패(오류로 돌아옴) · 결과 모름(안 돌아옴) · 안 함(안 돌림). */
+export type StepState = 'done' | 'failed' | 'unknown' | 'notRun';
+
+export function stepState(s: Pick<TurnStep, 'done' | 'failed' | 'notRun'>): StepState {
+  return s.notRun ? 'notRun' : s.failed ? 'failed' : s.done ? 'done' : 'unknown';
 }
 
-/** 이어 갈 때 넘길 「이미 한 것」 — 쓰기 도구만(읽기는 다시 해도 된다). */
+/** 보류 칸에 적는 머리 — 「완료」 · 「실패」 · 「결과 모름」 · 「안 함」(옛 기록의 두 낱말은 그대로 읽힌다). */
+const STEP_HEAD: Record<StepState, string> = { done: '완료', failed: '실패', unknown: '결과 모름', notRun: '안 함' };
+
+/** 쓰기 도구 한 줄 — 「완료 · Bash · …」 · 「실패 · Bash · …」 · 「결과 모름 · Bash · …」 · 「안 함 · …」. */
+export function stepLine(s: TurnStep): string {
+  return [STEP_HEAD[stepState(s)], s.name, s.input].filter(Boolean).join(' · ');
+}
+
+/** 이어 갈 때 넘길 「이미 한 것」 — 쓰기 도구와 안 돌린 것(읽기는 다시 해도 된다). */
 export function doneStepLines(steps: readonly TurnStep[]): string[] {
-  return steps.filter((s) => s.write).map(stepLine);
+  return steps.filter((s) => s.write || s.notRun).map(stepLine);
 }
 
 /** 막힘(있으면)과 오류 여부로 결과를 정한다 — 과부하는 한도와 따로 센다. */

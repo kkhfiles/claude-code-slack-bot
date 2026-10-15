@@ -6,11 +6,13 @@
  * **왜 있나.** 파이썬(`tasks.py`)은 `inbox.jsonl` 을 통째로 다시 쓰는데(실패 표시 · 시도 횟수 · 닫기),
  * 그 사이에 봇이 덧붙인 줄은 덮여 **사라진다** — 받은 말을 잃는다. 2026-10-14 에 파이썬 쪽이 잠금
  * 파일(`<inbox>.lock`)을 걸었고, 봇도 같은 파일 · 같은 규칙(30초 지나면 묵은 것 · 덧붙이기는 2초만
- * 기다리고 못 잡아도 붙임)으로 잡는다.
+ * 기다림)으로 잡는다. 못 잡으면 대기실(`inbox.spool/<id>.json`)에 둔다(2026-10-15 검토 — 잠금 없이
+ * 덧붙이면 먼저 읽은 다시 쓰기에 덮인다).
  *
  * 실제 캡처 큐를 안 건드린다 — `WORK_ASSISTANT_HOME` 을 임시 폴더로 돌린다(파이썬과 같은 규칙).
  *
- * 변이 시험 — 잠금 잡기를 빼면 ①(2초 기다림)과 ③(덧붙이는 순간 잠금이 있음)이 실패해야 한다.
+ * 변이 시험 — 잠금 잡기를 빼면 ①(2초 기다림)과 ③(덧붙이는 순간 잠금이 있음)이 실패해야 한다 ·
+ * 대기실 대신 덧붙이면 ① 이 실패해야 한다.
  */
 import './lib/fresh-dist.mjs';
 import fs from 'node:fs';
@@ -48,8 +50,11 @@ const eq = (label, got, want) => {
 };
 const ok = (label, cond) => { if (!cond) fails.push(label); };
 
-const { captureToInbox, INBOX_ADD_WAIT_MS, INBOX_LOCK_STALE_MS } =
+const { captureToInbox, inboxSpoolDir, openCaptureCount, INBOX_ADD_WAIT_MS, INBOX_LOCK_STALE_MS } =
   require(path.join(ROOT, 'dist', 'work-assistant.js'));
+const SPOOL = path.join(HOME, 'inbox.spool');
+const spoolIds = () => (fs.existsSync(SPOOL) ? fs.readdirSync(SPOOL) : [])
+  .filter((n) => n.endsWith('.json')).map((n) => JSON.parse(fs.readFileSync(path.join(SPOOL, n), 'utf-8')).id);
 
 const ids = () => fs.readFileSync(INBOX, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l).id);
 
@@ -80,9 +85,15 @@ try {
     const [rec, ms] = timed(() => captureToInbox('잠금 시험 하나'));
     ok(`① 잠금을 기다리지 않았다 — ${Math.round(ms)}ms (기대: 약 ${INBOX_ADD_WAIT_MS}ms)`, ms >= INBOX_ADD_WAIT_MS - 150);
     ok(`① 너무 오래 기다렸다 — ${Math.round(ms)}ms`, ms < INBOX_ADD_WAIT_MS + 1500);
-    ok('① 못 잡아도 덧붙인다 — 받은 말을 잃었다', rec && ids().includes(rec.id));
+    // 못 잡으면 **잠금 없이 덧붙이지 않고** 대기실에 둔다(2026-10-15 검토) — 잠금을 쥔 파이썬이 이미 읽은
+    // 뒤면 덧붙인 줄은 다시 쓰기에 덮인다. 대기실은 파이썬이 읽을 때 같이 보고 다음 잠긴 고치기에 합친다.
+    ok('① 못 잡았는데 잠금 없이 덧붙였다 — 다시 쓰기에 덮일 수 있다', rec && !ids().includes(rec.id));
+    ok('① 못 잡았는데 대기실에 안 뒀다 — 받은 말을 잃었다', rec && spoolIds().includes(rec.id));
+    ok('① 대기실에 쓰다 만 파일(.tmp)이 남았다', fs.existsSync(SPOOL) && !fs.readdirSync(SPOOL).some((n) => n.endsWith('.tmp')));
+    eq('① 대기실 자리 — 파이썬과 같은 규칙(inbox.spool)', path.basename(inboxSpoolDir(INBOX)), 'inbox.spool');
     ok('① 경고를 안 남겼다', warns.some((w) => w.includes('[WARN]') && w.includes('잠금')));
     ok('① 남의 잠금을 지웠다', fs.existsSync(LOCK));
+    eq('① 미처리 캡처 수가 대기실까지 센다', openCaptureCount(), ids().length + spoolIds().length);
     fs.rmSync(LOCK, { force: true });
   }
 
@@ -144,11 +155,34 @@ try {
     const done = await Promise.all(kids);
     eq('④ 파이썬 여덟이 다 끝났다', done.map((d) => d.code), Array(N).fill(0));
     const rows = fs.readFileSync(INBOX, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
-    const have = new Set(rows.map((r) => r.id));
+    // 잠금을 못 잡은 것은 대기실에 있다 — 파일 · 대기실 어디에든 있으면 안 잃은 것이다.
+    const have = new Set([...rows.map((r) => r.id), ...spoolIds()]);
     eq('④ 봇이 붙인 50줄이 하나도 안 사라졌다', mine.filter((id) => !have.has(id)).length, 0);
     eq('④ 봇이 50줄을 붙였다', mine.length, 50);
     eq('④ 파이썬의 다시 쓰기도 안 사라졌다(시도 8회)', rows.find((r) => r.id === X)?.tries, N);
     ok('④ 잠금이 남았다', !fs.existsSync(LOCK));
+
+    // ⑤ 대기실을 파이썬이 읽나 — 봇이 둔 모양 그대로 미처리 목록에 보이고, 다음 잠긴 고치기가 그 캡처를
+    //    고치며 파일로 합치고 대기실을 비운다. 옛 파이썬(대기실을 모름)이면 건너뛴다 — 그 판에서는 대기실
+    //    캡처가 파이썬이 고쳐질 때까지 안 보인다(잃지는 않는다).
+    if (!fs.readFileSync(TASKS, 'utf-8').includes('_inbox_spool_dir')) {
+      console.log('⑤ 건너뜀 — 이 tasks.py 는 대기실을 모름(옛 판 · WORK_ASSISTANT_DIR 로 새 판을 가리키면 본다)');
+    } else {
+      fs.writeFileSync(LOCK, 'other\n');
+      const sp = captureToInbox('대기실 시험');
+      fs.rmSync(LOCK, { force: true });
+      ok('⑤ 대기실에 뒀다', sp && spoolIds().includes(sp.id));
+      const run = (args) => spawnSync('python', ['-X', 'utf8', TASKS, 'inbox', ...args],
+        { cwd: ASSIST, env, encoding: 'utf-8', windowsHide: true });
+      const listed = run(['list', '--json']);
+      eq('⑤ 파이썬 rc(list)', listed.status, 0);
+      ok('⑤ 파이썬 미처리 목록에 대기실 캡처가 보인다', JSON.parse(listed.stdout || '[]').some((r) => r.id === sp?.id));
+      const tried = run(['tried', '--id', sp?.id ?? '']);
+      eq('⑤ 파이썬 rc(tried)', tried.status, 0);
+      const after = fs.readFileSync(INBOX, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+      eq('⑤ 잠긴 고치기가 대기실 캡처를 파일로 합치고 고쳤다', after.filter((r) => r.id === sp?.id).map((r) => r.tries), [1]);
+      eq('⑤ 합친 뒤 대기실이 비었다', spoolIds(), []);
+    }
   }
 } finally {
   console.warn = warnSaved;
@@ -161,6 +195,6 @@ if (fails.length) {
   for (const f of fails) console.error('  ✗ ' + f);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 캡처 큐 잠금 (파이썬과 같은 기준 · 남의 잠금은 2초 기다리고 붙임 + 경고 · 묵은 잠금은 지움'
-    + ' · 잠금 안에서 붙이고 놓음 · 파이썬과 동시 실행 연기 시험)');
+  console.log('통과 — 캡처 큐 잠금 (파이썬과 같은 기준 · 남의 잠금은 2초 기다리고 대기실에 둠 + 경고 · 묵은 잠금은 지움'
+    + ' · 잠금 안에서 붙이고 놓음 · 파이썬과 동시 실행 연기 시험 · 대기실을 파이썬이 읽고 합침)');
 }

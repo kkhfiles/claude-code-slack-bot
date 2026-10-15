@@ -71,6 +71,15 @@ if (mode === 'usage-after-write') {
   ev({ type: 'turn.failed', error: { message: m } });
   process.exit(1);
 }
+if (mode === 'fail-cmd-usage') {
+  // 명령이 실패(종료 코드 1)로 끝난 뒤 한도 — 보류 칸에 「완료」가 아니라 「실패」로 가야 한다(2026-10-15 검토).
+  ev({ type: 'item.started', item: { id: 'c1', type: 'command_execution', command: cmd, status: 'in_progress' } });
+  ev({ type: 'item.completed', item: { id: 'c1', type: 'command_execution', command: cmd, exit_code: 1, status: 'failed' } });
+  const m = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro) or try again in 2 hours 5 minutes.";
+  ev({ type: 'error', message: m });
+  ev({ type: 'turn.failed', error: { message: m } });
+  process.exit(1);
+}
 if (mode === 'usage-event') {
   const m = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro) or try again in 2 hours 5 minutes.";
   ev({ type: 'error', message: m });

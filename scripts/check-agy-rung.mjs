@@ -84,7 +84,12 @@ fs.writeFileSync(path.join(WA_ROOT, 'bin', 'tasks.py'), [
   'with open(os.environ["FAKE_TASKS_LOG"], "a", encoding="utf-8") as f:',
   '    f.write(json.dumps({"argv": a, "capture": os.environ.get("WORK_ASSISTANT_CAPTURE"),',
   '        "bot": os.environ.get("CLAUDE_BOT_SESSION"), "mode": os.environ.get("ASSISTANT_MODE"),',
-  '        "key": any(k.upper() == "ANTHROPIC_API_KEY" for k in os.environ), "cwd": os.getcwd()}, ensure_ascii=False) + "\\n")',
+  '        "key": any(k.upper() == "ANTHROPIC_API_KEY" for k in os.environ), "cwd": os.getcwd(),',
+  // 이 명령이 뜬 순간의 처리 중 기록 — 앞 명령이 끝난 것이 다음 명령 전에 적혔나를 본다(2026-10-15 검토)
+  '        "inflight": (open(os.environ["INFLIGHT_SESSIONS_FILE"], encoding="utf-8").read()',
+  '                     if os.path.exists(os.environ.get("INFLIGHT_SESSIONS_FILE", "")) else "")}, ensure_ascii=False) + "\\n")',
+  'if any("SLOW-ME" in x for x in a):',
+  '    import time; time.sleep(3)',
   'if a[:1] == ["json"]:',
   '    print(json.dumps(json.loads(os.environ["FAKE_SLIM"]), ensure_ascii=False))',
   '    sys.exit(0)',
@@ -459,11 +464,48 @@ try {
     ok('답에 JSON 이 없다', !/"op"|\{"/.test(body));
     const mk = markers(s.posts)[0]?.text ?? '';
     ok(`표시 줄 — ${mk}`, /^↪ Gemini T Flash \(High\) 가 답함 · Claude 사용량 소진\(풀림 .+\) · GPT 사용량 소진\(풀림 .+\)$/.test(mk));
-    eq('결과 — 됨 · Gemini', [s.sink.outcome, s.sink.engine, s.sink.writeRan], ['ok', 'agy-gemini', true]);
-    eq('명령이 돌았으면 캡처를 안 버림(tasks.py 가 닫음) · 실패 표시 없음', [bridge.dropped, bridge.failed], [[], []]);
-    eq('장부', ledgerRows().map((r) => [r.engine, r.outcome]), [['agy-gemini', 'ok']]);
+    // 허용 목록 밖 명령이 넷 — **하나라도 안 됐으면 「됨」이 아니다**(2026-10-15 검토). 남은 몫을 「Claude·GPT 몫」으로
+    // 모아 둔다(돈 둘은 완료 · 안 돈 넷은 안 함) · 캡처는 안 버린다(명령이 돌았다).
+    eq('결과 — 안 된 명령이 있으면 「됨」이 아님(모아 둠) · Gemini', [s.sink.outcome, s.sink.engine, s.sink.writeRan],
+      ['limited', 'agy-gemini', true]);
+    eq('캡처를 안 버림 · 실패 표시 partial + needs full', [bridge.dropped, bridge.failed.map((f) => [f[0], f[1], f[2]?.needs])],
+      [[], [['cap-1', 'partial', 'full']]]);
+    eq('보류 칸 — 돈 둘은 완료 · 안 돈 넷은 안 함', (bridge.failed[0]?.[2]?.done_steps ?? []).map((l) => l.split(' · ')[0]),
+      ['완료', '완료', '안 함', '안 함', '안 함', '안 함']);
+    ok('⏸ 못 한 명령 줄', body.includes('⏸ 못 한 명령은 Claude·GPT 가 돌아오면 이어서 처리합니다'));
+    eq('장부', ledgerRows().map((r) => [r.engine, r.outcome]), [['agy-gemini', 'hold']]);
     ok(`안내 — Claude·GPT 소진 → Gemini · 「같은 모델」 없음 — ${s.notices.at(-1)}`,
       (s.notices.at(-1) ?? '').includes('Gemini T Flash (High)로 이어 갑니다') && !s.notices.join('').includes('같은 모델'));
+  }
+
+  // ================================================================ ⑦-2 다 됐으면 됨 · 중간에 실패하면 못 함 · 명령마다 기록(2026-10-15 검토)
+  {
+    let s = await scenario({ replies: { 'flash-high': plan({ reply: '바꿨습니다.',
+      actions: [{ op: 'update', id: 'TSK-5', sets: { '상태': '진행중' } }, { op: 'log', id: 'TSK-5', text: '시작' }] }) } });
+    eq('다 됐으면 됨 · 실패 표시 없음 · 장부 ok', [s.sink.outcome, bridge.failed.length, ledgerRows().map((r) => r.outcome)],
+      ['ok', 0, ['ok']]);
+
+    // 다시 돌리던 차례 — 첫 명령은 되고 둘째가 실패 · 셋째는 안 돎 → 「됨」이 아니다(다시 돌림으로 안 닫힘)
+    s = await scenario({ event: { replay: true, pushed: true, captureId: 'cap-rp', replayNote: '[밀린 요청]' },
+      replies: { 'flash-high': plan({ reply: '처리했습니다.', actions: [
+        { op: 'log', id: 'TSK-5', text: '첫 명령' },
+        { op: 'update', id: 'TSK-404', sets: { '상태': '진행중' } },
+        { op: 'log', id: 'TSK-7', text: '안 돌아야 함' },
+      ] }) } });
+    const w = writes();
+    eq('실패에서 멈춤 — 둘만 돎', w.map((c) => c.argv[0]), ['log', 'update']);
+    eq('일부 실패 — 결과는 못 함(막힘) · 다시 돌림으로 안 닫힘', [s.sink.outcome, bridge.dropped], ['limited', []]);
+    eq('일부 실패 — partial · needs full · 이미 한 것 세 갈래',
+      [bridge.failed.map((f) => [f[0], f[1], f[2]?.needs]), (bridge.failed[0]?.[2]?.done_steps ?? []).map((l) => l.split(' · ')[0])],
+      [[['cap-rp', 'partial', 'full']], ['완료', '실패', '안 함']]);
+    const t = allText(s.posts);
+    ok('사람에게 실패 줄과 ⏸ 줄', t.includes('⚠️ 실패 — ') && t.includes('⏸ 못 한 명령은 Claude·GPT 가 돌아오면'));
+    // **명령 하나가 끝나면 다음 명령 전에 기록한다** — 둘째 명령이 뜬 순간의 처리 중 기록에 첫 명령이 「완료」로 있어야
+    // 재시작에 끊겨도 다음 엔진이 그것을 다시 하지 않는다.
+    const at2 = JSON.parse(w[1]?.inflight || '{}');
+    const steps2 = Object.values(at2)[0]?.steps ?? [];
+    eq('둘째 명령이 뜬 순간 — 첫 명령은 완료로 · 둘째는 실행 중',
+      steps2.map((x) => [x.id, x.done]), [['agy-gemini-0', true], ['agy-gemini-running', false]]);
   }
 
   // ================================================================ ⑧ Gemini 쿼터 → agy Sonnet · 막혀 있으면 Gemini 를 안 부름
@@ -565,6 +607,64 @@ try {
     eq('끊은 차례 — 명령 · 실패 표시 없음 · 결과 오류', [writes().length, bridge.failed.length, sink.outcome], [0, 0, 'error']);
     delete process.env.FAKE_AGY_MODE;
     delete process.env.FAKE_AGY_SLOW_MS;
+  }
+
+  // ================================================================ ⑬-2 명령 사이에 -stop — 끊김이다(「됨」 아님) · 다시 돌리던 것은 버림
+  {
+    reset();
+    for (const k of SWITCHES) delete process.env[k];
+    Object.assign(process.env, { DM_FALLBACK: 'on', DM_FALLBACK_AGY: 'on', HOLD_V2: 'on' });
+    setModes({});
+    setReplies({ 'flash-high': plan({ reply: '처리했습니다.', actions: [
+      { op: 'log', id: 'TSK-5', text: 'SLOW-ME 첫 명령' }, { op: 'log', id: 'TSK-7', text: '안 돌아야 함' }] }) });
+    blockClaude();
+    blockCodex();
+    bridge.failed = [];
+    bridge.dropped = [];
+    const t = makeHandler();
+    const run = t.dm('다시 돌리는 말', { replay: true, pushed: true, captureId: 'cap-st', replayNote: '[밀린 요청]' });
+    for (let i = 0; i < 200 && writes().length === 0; i++) await new Promise((r) => setTimeout(r, 50));
+    await t.dm('-stop');
+    const sink = await run;
+    eq('명령 사이에 끊음 — 뒤 명령은 안 돎', writes().map((c) => c.argv.slice(0, 2)), [['log', '--id=TSK-5']]);
+    eq('명령 사이에 끊음 — 다시 돌리던 것을 버림 · 실패 표시 없음 · 결과 오류',
+      [bridge.dropped, bridge.failed.length, sink.outcome], [[['cap-st', '다시 돌리던 것을 사람이 끊음']], 0, 'error']);
+    eq('명령 사이에 끊음 — 장부 끊김', ledgerRows().map((r) => r.outcome), ['stopped']);
+    ok('명령 사이에 끊음 — 돈 것은 사람에게 보임', allText(t.posts).includes('*실행한 것*'));
+  }
+
+  // ================================================================ ⑬-3 보낼 글 전체에 개인 글 조각 — GPT · agy 로 안 보내고 모아 둠
+  //   사람 말에는 없고 넘겨줄 메모(앞 엔진이 돌린 명령의 인자)에만 있는 경우(2026-10-15 검토).
+  {
+    reset();
+    for (const k of SWITCHES) delete process.env[k];
+    Object.assign(process.env, { DM_FALLBACK: 'on', DM_FALLBACK_AGY: 'on', HOLD_V2: 'on', FAKE_CODEX_MODE: 'ok-noop' });
+    setModes({});
+    setReplies({ 'flash-high': plan({ reply: '네', actions: [] }) });
+    blockClaude();
+    privateTurn = true;
+    try {
+      const priv = [{ id: 't1', name: 'Bash', input: 'tasks.py log --text 비밀조각', done: true, write: true }];
+      for (const rung of ['codex', 'agy-gemini']) {
+        bridge.failed = [];
+        const t = makeHandler();
+        const a0 = agyCalls().length;
+        const c0 = fakeCodex.calls().length;
+        const args = {
+          event: { user: 'U_ME', channel: 'D_DM', ts: '1.1', text: '진행 남겨 줘' }, channel: 'D_DM',
+          sessionKey: 'U_ME-D_DM-direct', ts: '1.1', captureId: 'cap-p', surfaceNote: '', slotMap: '', finalPrompt: '진행 남겨 줘',
+          files: [], claudeSteps: priv, claudeModel: 'claude-opus-T', block: engineState.blocked('claude'), sessionId: 's',
+          locale: 'ko', say: t.say, status: () => {}, nextAfter: async () => 'agy-claude',
+        };
+        const r = rung === 'codex' ? await t.h.runDmFallback(args)
+          : await t.h.runAgyFallback({ ...args, rung, ladder: dmf.dmLadder() });
+        eq(`개인 글 조각(${rung}) — 안 보냄 · 모아 둠 · 막힘 아님`,
+          [r.result, r.privateHold, agyCalls().length - a0, fakeCodex.calls().length - c0, bridge.failed.map((f) => f[0])],
+          ['failed', true, 0, 0, ['cap-p']]);
+      }
+    } finally {
+      privateTurn = false;
+    }
   }
 
   // ================================================================ ⑭ 드레인 — 어느 칸이든 비면 돈다 · 맡을 칸이 없는 건은 남긴다
@@ -733,6 +833,25 @@ try {
     }
   }
 
+  // ================================================================ ⑰-2 엔진 안내의 GPT 이름 — DM 방의 모델 기준(2026-10-15 검토)
+  //   전에는 기본 모델의 칸을 따로 읽어, DM 방의 모델(`-model`)이 다르면 안내와 실제로 부르는 모델이 어긋났다.
+  {
+    const ml = require(path.join(ROOT, 'dist', 'model-ladder.js'));
+    const want = (m) => ml.serviceCodex(SlackHandler.resolveModelAlias(m), 'low')?.model;
+    ok(`시험이 가를 수 있다 — opus ${want('opus')} · haiku ${want('haiku')}`, want('opus') && want('opus') !== want('haiku'));
+    const t = makeHandler();
+    const saved = config.defaultModel;
+    try {
+      config.defaultModel = 'haiku';
+      t.h.channelModels.set('D_DM', 'opus');
+      eq('안내 GPT 이름 — DM 방의 모델(opus)의 칸', t.h.engineNoticeLabels().codex, want('opus'));
+      t.h.channelModels.delete('D_DM');
+      eq('안내 GPT 이름 — 방 모델이 없으면 기본 모델(haiku)의 칸', t.h.engineNoticeLabels().codex, want('haiku'));
+    } finally {
+      config.defaultModel = saved;
+    }
+  }
+
   // ================================================================ ⑯ 판 번호를 소스에 적지 않는다
   {
     const SRC = path.join(ROOT, 'src');
@@ -773,6 +892,6 @@ if (fails.length) {
   console.log('통과 — agy 칸 (사다리 Gemini → agy Sonnet · 첨부 · Claude·GPT 몫 · 개인 글은 안 넘김 · 막힘만 건너뜀(횟수 상한 없음) · 대응표 모델 · luna 깊이 한 단계 위 · '
     + '계획 너그럽게 읽기 · 쿼터는 끝 줄로 · 허용 목록 여덟 · 셸 없이 인자 배열 · 캡처 환경 · 앞이 실패하면 멈춤 · '
     + '실행한 것 · 실행하지 않은 명령 · 표시 이름은 표에서 · needs_full 은 모아 둠(partial) · 조용히 · GPT 가 한 것을 넘김 · '
-    + '-stop · 드레인은 어느 칸이든 · 남긴 건은 시도 안 셈 · 예약 일 넷 · 판 번호 없음)');
+    + '-stop · 드레인은 어느 칸이든 · 남긴 건은 시도 안 셈 · 예약 일 넷 · 판 번호 없음 · 일부 실패는 「됨」 아님 · 명령마다 기록 · 명령 사이 끊김 · 보낼 글 전체 개인 글 검사 · 안내 GPT 이름은 DM 방 모델)');
 }
 process.exit(process.exitCode ?? 0);
