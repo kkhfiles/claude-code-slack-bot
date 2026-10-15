@@ -586,9 +586,11 @@ export async function remindDue(): Promise<RemindItem[]> {
  * ⚠️ **넘긴 뒤에 찍는다** — 먼저 찍고 보내다 실패하면 그 알림은 영영 안 울린다.
  * 반대로 두면 최악이 「한 번 더 울림」이라 값이 훨씬 싸다(메일 표시와 같은 결).
  */
-export async function remindDone(id: string): Promise<boolean> {
+export async function remindDone(id: string, at?: string): Promise<boolean> {
   try {
-    const { code } = await runTasks(['remind', '--done', id], 60_000);
+    // **그 시각 하나만 찍는다**(`--at` · 2026-10-16 업무마다 알림 여러 개) — 업무 번호만 넘기면 지금 때가 된
+    // 시각을 다 찍어, 목록을 읽은 뒤 몇 초 사이에 때가 된 다른 알림이 안 보낸 채로 찍힌다.
+    const { code } = await runTasks(['remind', '--done', id, ...(at ? ['--at', at] : [])], 60_000);
     return code === 0;
   } catch {
     return false;

@@ -2001,7 +2001,7 @@ export class AssistantScheduler {
           `⏰ ${when} — ${it.title}` + (it.next ? `\n다음 행동: ${it.next}` : ''));
         // **보낸 뒤에 찍는다** — 먼저 찍고 보내다 실패하면 영영 안 울린다.
         this.remindSent.add(key);
-        if (!await remindDone(it.id)) {
+        if (!await remindDone(it.id, it.at)) {
           this.logger.warn(
             `Remind: 표시를 못 찍었습니다 — 이 프로세스에서는 안 울립니다 (${it.id})`);
         }
