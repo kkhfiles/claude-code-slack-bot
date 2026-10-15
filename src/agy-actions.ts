@@ -300,7 +300,8 @@ const SET_FIELDS: Record<string, SetKind> = {
 };
 
 function setValue(k: string, v: unknown): string {
-  const kind = SET_FIELDS[k];
+  // **제 칸만 본다** — 평범한 객체라 `constructor` · `toString` · `__proto__` 가 원형에서 딸려 와 목록을 통과했다.
+  const kind = Object.prototype.hasOwnProperty.call(SET_FIELDS, k) ? SET_FIELDS[k] : undefined;
   if (!kind) throw new Reject(`바꿀 수 없는 칸 「${clipName(k)}」`);
   const raw = typeof v === 'number' ? String(v) : v;
   if (raw === '' || raw === null) {
@@ -323,6 +324,7 @@ function setValue(k: string, v: unknown): string {
       if (!JIRA_RE.test(s)) throw new Reject(`${k}: 이슈 키 모양이 아님`);
       return s;
     }
+    default: throw new Reject(`바꿀 수 없는 칸 「${clipName(k)}」`);
   }
 }
 

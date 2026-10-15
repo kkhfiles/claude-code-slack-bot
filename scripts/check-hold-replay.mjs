@@ -27,7 +27,9 @@ process.env.ENGINE_STATE_FILE = path.join(TMP, 'engine-state.json');
 process.env.HELD_FILES_DIR = path.join(TMP, 'held');
 process.env.WORK_ASSISTANT_HOME = path.join(TMP, 'wa-home');   // 새어 나간 호출이 있어도 운영 큐가 아니다
 process.env.WORK_EVENTS_FILE = path.join(TMP, 'events.jsonl');
+process.env.INFLIGHT_SESSIONS_FILE = path.join(TMP, 'inflight.json');   // 처리 중 기록 — 운영 파일을 안 건드린다
 fs.mkdirSync(process.env.WORK_ASSISTANT_HOME, { recursive: true });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const fails = [];
 const eq = (label, got, want) => {
@@ -331,7 +333,7 @@ try {
   {
     process.env.HOLD_V2 = 'on';
     const real = SlackHandler.prototype.replayHeld;
-    const run = async (it, history = []) => {
+    const run = async (it, history = [], handle = null) => {
       const h = Object.create(SlackHandler.prototype);
       const posts = [];
       let seen = null;
@@ -344,10 +346,12 @@ try {
         },
       } };
       h.getBotUserId = async () => 'UBOT';
-      h.handleMessage = async (ev) => { seen = ev; ev.outcomeSink.outcome = 'limited'; };
+      h.handleMessage = handle ?? (async (ev) => { seen = ev; ev.outcomeSink.outcome = 'limited'; });
       const out = await real.call(h, it);
       return { posts, seen, out };
     };
+    // 처리기가 끝까지 안 가고 일찍 돌아오면(작업 디렉터리 없음 등) 「못 함」 — 「다시 돌림」으로 닫히면 안 된다.
+    eq('처리기가 일찍 돌아오면 결과는 못 함', (await run(item('e0'), [], async () => {})).out.outcome, 'error');
     // 채널 맨 위에서 받은 것 — 그 메시지의 스레드에 · 받은 시각 머리 줄 · 그 뒤의 글을 같이
     let r = await run(item('c1', { channel: 'C_X', msg_ts: '1760400753.000100', text: '보고서 올려 줘\n둘째 줄' }),
       [{ ts: '1760401000.000100', user: 'U_ME', text: '아까 것은 취소' }]);
@@ -442,6 +446,36 @@ try {
     ({ h } = handler());
     r = await h.runHeldNow('없음');
     eq('[실행] — 이미 처리한 것', [r.settle, r.text], [true, '이미 처리했거나 버린 요청입니다']);
+    // 두 번 눌러도 한 번만 — 문을 첫 await 앞에서 잡는다
+    b = bridge({ tell: [item('o2', { old: true, channel: 'D_DM' })] });
+    ({ h, replays } = handler([OKO, OKO]));
+    const slow = h.replayHeld;
+    h.replayHeld = async (it) => { await sleep(50); return slow(it); };
+    const [r1, r2] = await Promise.all([h.runHeldNow('o2'), h.runHeldNow('o2')]);
+    eq('[실행] 두 번 — 한 번만 돌림 · 둘째는 버튼을 남김',
+      [replays.length, b.log.filter((x) => x[0] === 'tried').length, r1.settle, r2.settle], [1, 1, true, false]);
+  }
+
+  // ================================================================ ⑨-2 재시작 알림 — 이 기동 뒤에 시작한 차례는 안 건드림
+  {
+    process.env.HOLD_V2 = 'on';
+    bridge({});
+    const h = Object.create(SlackHandler.prototype);
+    const posts = [];
+    const marked = [];
+    h.logger = silent;
+    h.app = { client: { chat: { postMessage: async (m) => { posts.push(m); return {}; } } } };
+    h.markInterrupted = async (r) => { marked.push(r.captureId); };
+    const file = process.env.INFLIGHT_SESSIONS_FILE;
+    fs.writeFileSync(file, JSON.stringify({
+      old: { channel: 'D_DM', text: '옛', startedAt: '2026-10-01T00:00:00.000Z', captureId: 'i-old' },
+      live: { channel: 'D_DM', text: '새', startedAt: new Date().toISOString(), captureId: 'i-live' },
+      odd: { channel: 'D_DM', text: '모름', startedAt: '시각 아님', captureId: 'i-odd' },
+    }), 'utf-8');
+    await h.reportInterruptedSessions();
+    eq('지난 기동 것만 끊김으로(시각을 못 읽으면 옛 것)', marked.sort(), ['i-odd', 'i-old']);
+    eq('이 기동 뒤에 시작한 차례는 기록에 남김', Object.keys(JSON.parse(fs.readFileSync(file, 'utf-8'))), ['live']);
+    ok('알림에 이 기동의 차례가 없다', !posts.some((p) => (p.text ?? '').includes('> 새')));
   }
 
   // ================================================================ ⑩ 메일 폴러 — 막혔으면 표시를 안 옮긴다
@@ -494,7 +528,8 @@ try {
   {
     const src = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
     ok('30분 쓸어 보기는 켜졌을 때만', /if \(holdV2On\(\)\) \{\s*const sweep = setInterval\(/.test(src));
-    ok('쓸어 보기는 막혀 있으면 안 돈다', /if \(stillBlocked\(\)\) return;\s*void this\.drainStuck\('쓸어보기'\)/.test(src));
+    // 막힘은 사다리로 — Claude 만 보면 GPT · agy 가 비어도 Claude 가 풀릴 때까지 안 돈다.
+    ok('쓸어 보기는 사다리가 다 막혀 있을 때만 쉰다', /if \(this\.drainBlocked\(\)\) return;\s*void this\.drainStuck\('쓸어보기'\)/.test(src));
     ok('[실행] · [버림] 버튼이 걸려 있다', /this\.action\('held_run'/.test(src) && /this\.action\('held_drop'/.test(src));
     ok('[버림] 은 캡처와 보관 첨부를 버린다', /dropCapture\(id, '7일 지남 — 사람이 버림'\);\s*dropHeldFiles\(id\);/.test(src));
     ok('재시작 안내 — 자동으로 이어질 것만 「다시 보내지 않으셔도」',
@@ -516,5 +551,6 @@ if (fails.length) {
   console.log('통과 — 보류 재실행 v2 (켜는 문 · 도구 기록과 결과 · 다시 막히면 멈춤 · 막혀 있거나 떠 보니 막히면 '
     + '시도 안 셈 · 받은 자리 · 받은 시각 머리 줄 · 그 뒤의 글 · 일하다 끊긴 것은 같은 세션과 「이미 한 것」 · '
     + '방의 문 · 7일 지난 것은 한 번만 · 꺼짐이면 옛 길 · 실패 표시와 첨부 보관 · 재시작 갈래 · [실행] · '
+    + '[실행] 두 번은 한 번만 · 일찍 돌아온 다시 돌리기는 못 함 · 재시작 알림은 지난 기동 것만 · 쓸어 보기는 사다리로 · '
     + '메일 표시 안 옮김)');
 }

@@ -40,6 +40,9 @@ export function agyRungsOn(env: NodeJS.ProcessEnv = process.env): boolean {
 /** 칸 하나의 상한(밀리초). 넘으면 트리째 죽이고 `fail`. */
 export const AGY_TIMEOUT_MS: Record<AgyRung, number> = { 'agy-claude': 90_000, 'agy-gemini': 150_000 };
 
+/** 백엔드 stderr 를 들고 있는 상한 — 끝쪽만 남긴다(판정 줄이 마지막이다). */
+const STDERR_KEEP = 40_000;
+
 /**
  * 칸마다 별칭 하나 — **정본은 `models.json` 의 `service_fallback.agy`**(앞 = Gemini 칸 · 뒤 = agy Claude 칸).
  * 1차 모델 등급과 무관하다(agy 칸은 등급 대응을 안 한다). **agy 의 Opus 는 안 쓴다** — 그 풀이 너무 작다
@@ -193,7 +196,8 @@ function runBackend(argv: string[], o: { timeoutMs: number; env?: Record<string,
     let err = '';
     let timedOut = false;
     proc.stderr?.setEncoding('utf8');
-    proc.stderr?.on('data', (c: string) => { if (err.length < 40_000) err += c; });
+    // **끝을 남긴다** — 판정의 정본(`attempts=[…]`)이 마지막 줄이다. 앞을 남기면 말 많은 차례에서 그 줄을 잃는다.
+    proc.stderr?.on('data', (c: string) => { err += c; if (err.length > STDERR_KEEP) err = err.slice(-STDERR_KEEP); });
     const kill = () => {
       // 트리째 — 파이썬만 죽이면 그 아래 agy(노드)가 고아로 남는다.
       try {

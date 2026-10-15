@@ -273,6 +273,19 @@ try {
     eq('조회가 던져도 모름(안 던진다)', await codexQuota.refresh(), 'unknown');
     resetEngine();
     eq('reached 만 차 있어도 소진', applyQuota({ primary: { used_percent: 50 }, reached: 'workspace_owner_credits_depleted' }), 'exhausted');
+    // 남은 양이 있다고 읽히면 사용량 소진 막힘을 지운다 — 마지막 성공은 안 고친다 · 과부하는 그대로
+    resetEngine();
+    const later = Math.floor(Date.now() / 1000) + 3600;
+    engineState.recordBlocked('codex', { kind: 'usage', until: later });
+    eq('남은 양이 있으면 사용량 막힘을 지움', [applyQuota({ primary: { used_percent: 30 }, secondary: { used_percent: 40 } }),
+      engineState.isBlocked('codex'), engineState.load().engines.codex.lastOkAt], ['ok', false, null]);
+    engineState.recordBlocked('codex', { kind: 'usage', until: later, limitType: 'seven_day' });
+    applyQuota({ primary: { used_percent: 30 } });
+    eq('막힌 창(7일)을 이번에 못 읽었으면 그대로', engineState.isBlocked('codex'), true);
+    resetEngine();
+    engineState.recordBlocked('codex', { kind: 'overload' });
+    applyQuota({ primary: { used_percent: 30 }, secondary: { used_percent: 40 } });
+    eq('과부하는 한도 조회로 안 지움', engineState.blocked('codex')?.kind, 'overload');
     resetEngine();
     codexQuota.forget();
     codexQuota.fetch = async () => null;

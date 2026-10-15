@@ -119,6 +119,47 @@ try {
     await p.poll();
     eq('같은 일정이면 다시 안 부른다', prompts.length - n0, 1);
   }
+
+  // ④ 답은 왔는데 JSON 목록이 아님 → 「알릴 것 없음」이 아니다(null) · 같은 변경에 세 번 이어지면 받는다
+  {
+    const prose = { text: '일정을 확인했습니다. 알릴 것이 있는지 살펴보겠습니다.', costUsd: 0, sessionId: '', subtype: 'success', isError: false };
+    const diff = { added: [ev('d9', 2 * H)], removed: [], modified: [] };
+    reply = prose;
+    eq('글로만 답하면 null', await p.getAIJudgment(diff), null);
+    reply = { ...prose, text: '[{"eventId": 깨짐]' };
+    eq('JSON 이 깨졌으면 null', await p.getAIJudgment(diff), null);
+
+    events = [E1, ev('e2', 3 * H), ev('e3', 4 * H)];
+    reply = prose;
+    const n0 = prompts.length;
+    await p.poll();
+    await p.poll();
+    eq('두 번까지는 기준을 안 옮기고 다시 판단', [prompts.length - n0, (cache().baseline ?? []).map((e) => e.id)], [2, ['e1', 'e2']]);
+    errorCollector.getAndClear();
+    await p.poll();
+    eq('세 번째 — 알림 없이 받고 기준을 옮김', [prompts.length - n0, cache().baseline], [3, undefined]);
+    ok('받았다는 줄을 「시스템 이슈」에', errorCollector.getAndClear().some((e) => e.message.includes('JSON 이 아닌 답이 3번')));
+    await p.poll();
+    eq('받은 변경은 다시 안 부른다', prompts.length - n0, 3);
+  }
+
+  // ⑤ 겹쳐 돌지 않는다 — 앞 차례가 판단을 기다리는 동안 다음 폴링은 건너뜀
+  {
+    events = [E1, ev('e2', 3 * H), ev('e3', 4 * H), ev('e4', 5 * H)];
+    let open;
+    const gate = new Promise((r) => { open = r; });
+    const n0 = prompts.length;
+    const real = p.spawnSession;
+    p.spawnSession = async (prompt) => { prompts.push(prompt); await gate; return said([]); };
+    const first = p.poll();
+    await new Promise((r) => setTimeout(r, 30));
+    const second = p.poll();
+    await new Promise((r) => setTimeout(r, 30));
+    open();
+    await Promise.all([first, second]);
+    p.spawnSession = real;
+    eq('도는 중이면 다음 폴링은 판단을 안 부른다', prompts.length - n0, 1);
+  }
 } finally {
   p.stop();
   fs.rmSync(TMP, { recursive: true, force: true });
@@ -130,5 +171,6 @@ if (fails.length) {
   process.exitCode = 1;
 } else {
   console.log('통과 — 회의 알림 판단 기준 (못 함은 null · 알릴 것 없음은 [] · 못 한 차례는 기준을 안 옮겨 '
-    + '다음 차례에 다시 판단 · 캐시 새로 받기도 기준을 안 지움)');
+    + '다음 차례에 다시 판단 · 캐시 새로 받기도 기준을 안 지움 · JSON 아닌 답은 null · 같은 변경에 세 번이면 받음 · '
+    + '겹쳐 돌지 않음)');
 }

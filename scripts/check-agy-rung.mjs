@@ -353,6 +353,12 @@ try {
     eq('모르는 칸', one({ op: 'log', id: 'TSK-5', text: 'x', shell: true }).rejected[0]?.why, '모르는 칸 shell');
     eq('없는 날', one({ op: 'defer', id: 'TSK-5', reason: 'r', soft: '2026-02-30' }).rejected[0]?.why, '소프트 마감: 없는 날짜');
     eq('바꿀 수 없는 칸', one({ op: 'update', id: 'TSK-5', sets: { '작업 디렉터리': 'C:/x' } }).rejected[0]?.why, '바꿀 수 없는 칸 「작업 디렉터리」');
+    // 원형에서 딸려 오는 이름은 칸이 아니다 — 평범한 객체로 찾으면 목록을 통과한다.
+    eq('원형의 이름은 칸이 아님', ['constructor', 'toString', 'hasOwnProperty'].map((k) =>
+      one({ op: 'update', id: 'TSK-5', sets: { [k]: 'x' } }).rejected[0]?.why),
+    ['바꿀 수 없는 칸 「constructor」', '바꿀 수 없는 칸 「toString」', '바꿀 수 없는 칸 「hasOwnProperty」']);
+    eq('__proto__ 도 칸이 아님', one({ op: 'update', id: 'TSK-5', sets: JSON.parse('{"__proto__":"x"}') }).rejected[0]?.why,
+      '바꿀 수 없는 칸 「__proto__」');
     eq('글 칸은 비울 수 없음', one({ op: 'update', id: 'TSK-5', sets: { '다음 행동': '' } }).rejected[0]?.why, '다음 행동: 비울 수 없는 칸');
     eq('날짜 칸은 비울 수 있음', one({ op: 'update', id: 'TSK-5', sets: { '하드 마감': '' } }).ok[0]?.argv, ['update', '--id=TSK-5', '--set=하드 마감=']);
     eq('상태 낱말', one({ op: 'update', id: 'TSK-5', sets: { '상태': '끝' } }).rejected[0]?.why, '상태: 대기/진행중/완료/취소 중 하나만');
@@ -413,6 +419,16 @@ try {
     setReplies({ 'sonnet-thinking': '그냥 글' });
     const bad = await agy.agyTurn('말', { rung: 'agy-claude' });
     eq('계획이 아니면 실패(다음 칸으로)', bad.kind, 'fail');
+    // stderr 가 길어도 끝 줄(attempts)로 가른다 — 앞 40KB 만 들면 끝 줄을 잃고, 쿼터 글(rc 0 · `--out`)이 답으로 읽힌다.
+    reset();
+    setModes({ 'sonnet-thinking': 'noisy-quota' });
+    const noisyQ = await agy.agyCall('말', { rung: 'agy-claude' });
+    eq('말 많은 stderr — 끝 줄이 쿼터면 막힘', [noisyQ.kind, engineState.isBlocked('agy-claude')], ['usage', true]);
+    reset();
+    setModes({ 'sonnet-thinking': 'noisy-ok' });
+    setReplies({ 'sonnet-thinking': '{"reply":"네","actions":[]}' });
+    const noisy = await agy.agyTurn('말', { rung: 'agy-claude' });
+    eq('말 많은 stderr — 끝 줄이 ok 면 됨 · 막힘 안 적음', [noisy.kind, engineState.isBlocked('agy-claude')], ['ok', false]);
     reset();
     writeDrill({ agyGemini: 'usage', agyClaude: 'fail', expiresAt: nowSec() + 600 });
     a0 = agyCalls().length;

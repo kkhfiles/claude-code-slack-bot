@@ -27,6 +27,8 @@ import { agyRungsOn, agyText } from './agy-turn';
 /** 회의 알림 판단 모델 — 별칭(하위 등급). 같은 등급 폴백(codex·agy)도 이 이름으로 찾는다. */
 const CALENDAR_MODEL = 'haiku';
 const JUDGE_SYSTEM = 'You judge calendar events and output JSON. No other output.';
+/** 같은 변경에 JSON 이 아닌 답이 이만큼 이어지면 판단 끝으로 받는다(알림 없이) — 영영 다시 묻지 않게. */
+const UNPARSEABLE_ACCEPT = 3;
 
 // --- Types ---
 
@@ -126,6 +128,17 @@ export class CalendarPoller {
   private lastPollDate = '';
   /** 판단 실패를 「시스템 이슈」에 이미 적었나 — 실패가 이어지는 동안 한 줄만(판단이 되면 다시 적음). */
   private judgeFailNoted = false;
+  /** 이번 판단이 답은 받았지만 JSON 목록이 아니었나 — `poll` 이 판단 앞에서 내리고 뒤에서 본다. */
+  private judgeUnparseable = false;
+  /**
+   * 같은 변경에 「JSON 이 아닌 답」이 몇 번 이어졌나 — 셋이 되면 그 변경을 판단 끝으로 받는다(알림 없이).
+   * 안 받으면 모델이 글로만 답하는 동안 5분마다 같은 변경을 영영 다시 판단한다. 메모리에만 둔다 — 재시작하면
+   * 처음부터 세지만 그만큼(재시작마다 세 번) 더 묻는 것이 전부다.
+   */
+  private unparseable: { hash: string; n: number } | null = null;
+  /** 한 차례가 아직 도는 중 — 사다리가 길어 5분 주기를 넘기면 다음 차례가 겹친다. */
+  private polling = false;
+  private pollBusyNoted = false;
 
   constructor(
     private sendMessage: (text: string, blocks?: unknown[]) => Promise<void>,
@@ -762,8 +775,9 @@ export class CalendarPoller {
       }
 
       // Parse JSON from response
+      // 목록을 못 꺼내면 `null` — 다음 차례에 다시 판단한다(같은 변경에 세 번 이어지면 `poll` 이 받는다).
       const notifications = this.parseJudgmentResponse(result.text);
-      return this.clampNotifyAt(notifications, diff, config.reminders.beforeMinutes);
+      return notifications && this.clampNotifyAt(notifications, diff, config.reminders.beforeMinutes);
     } catch (error) {
       const msg = (error as Error).message || '';
       if (isRateLimitText(msg)) {
@@ -810,22 +824,26 @@ export class CalendarPoller {
       return null;
     }
     this.logger.warn(`회의 알림 판단: ${why} → ${got.backend} ${got.model} 가 받음`);
-    return this.clampNotifyAt(this.parseJudgmentResponse(got.text), diff, beforeMinutes);
+    const parsed = this.parseJudgmentResponse(got.text);
+    return parsed && this.clampNotifyAt(parsed, diff, beforeMinutes);
   }
 
-  private parseJudgmentResponse(text: string): CalendarNotification[] {
+  /**
+   * 판단 답에서 알림 목록을 꺼낸다. **목록을 못 꺼내면 `null`** — 글로만 답했거나 JSON 이 깨진 것은 「알릴 것
+   * 없음」이 아니다(`[]` 로 읽으면 기준이 옮겨져 그 변경의 알림이 사라진다). `[]` 는 진짜 빈 목록일 때만.
+   */
+  private parseJudgmentResponse(text: string): CalendarNotification[] | null {
     try {
       // Extract JSON array from response (may have surrounding text)
       const jsonMatch = text.match(/\[[\s\S]*\]/);
       if (!jsonMatch) {
-        // Empty array is valid (no notifications needed)
-        if (text.trim() === '[]' || text.includes('[]')) return [];
-        this.logger.warn('No JSON array found in AI judgment response', { text: text.substring(0, 200) });
-        return [];
+        this.logger.warn('No JSON array found in AI judgment response', { chars: text.length });
+        this.judgeUnparseable = true;
+        return null;
       }
 
       const parsed = JSON.parse(jsonMatch[0]) as Array<Record<string, unknown>>;
-      if (!Array.isArray(parsed)) return [];
+      if (!Array.isArray(parsed)) { this.judgeUnparseable = true; return null; }
 
       const now = new Date().toISOString();
       return parsed
@@ -847,7 +865,8 @@ export class CalendarPoller {
     } catch (error) {
       errorCollector.add('CalendarPoller', `AI 판단 응답 파싱 실패: ${(error as Error).message}`);
       this.logger.error('Failed to parse AI judgment response', error);
-      return [];
+      this.judgeUnparseable = true;
+      return null;
     }
   }
 
@@ -1058,6 +1077,23 @@ export class CalendarPoller {
   // --- Poll loop ---
 
   private async poll(): Promise<void> {
+    // **겹쳐 돌지 않는다** — 사다리(Claude → codex → agy 두 칸)가 다 돌면 한 차례가 7분까지 가서 5분 주기를 넘긴다.
+    // 겹치면 같은 변경을 두 번 판단하고 알림이 두 벌 쌓인다. 도는 중이면 건너뛴다(이어지는 동안 로그 한 줄).
+    if (this.polling) {
+      if (!this.pollBusyNoted) this.logger.info('앞 차례가 아직 돌아 이번 폴링을 건너뜁니다');
+      this.pollBusyNoted = true;
+      return;
+    }
+    this.polling = true;
+    try {
+      await this.pollOnce();
+      this.pollBusyNoted = false;
+    } finally {
+      this.polling = false;
+    }
+  }
+
+  private async pollOnce(): Promise<void> {
     if (!this.isWorkingHours()) return;
     if (this.paused) return;
 
@@ -1126,12 +1162,27 @@ export class CalendarPoller {
     });
 
     // 8. AI judgment → notification queue
+    this.judgeUnparseable = false;
     const notifications = await this.getAIJudgment(diff);
     if (notifications === null) {
+      // 답은 받았는데 JSON 목록이 아님 — 같은 변경에 세 번 이어지면 판단 끝으로 받는다(알림 없이).
+      if (this.judgeUnparseable) {
+        const n = this.unparseable?.hash === diffHash ? this.unparseable.n + 1 : 1;
+        this.unparseable = { hash: diffHash, n };
+        if (n >= UNPARSEABLE_ACCEPT) {
+          errorCollector.add('CalendarPoller', `회의 알림 판단 — 같은 변경에 JSON 이 아닌 답이 ${n}번 이어져 알림 없이 넘어감`);
+          this.logger.warn('회의 알림 판단 — JSON 이 아닌 답이 이어져 이 변경을 알림 없이 받습니다', { n });
+          this.unparseable = null;
+          this.lastDiffHash = diffHash;
+          this.saveCache(currentEvents);
+          return;
+        }
+      }
       // Claude 도 사다리도 못 했다 — 기준 · 중복 표시를 안 옮긴다(다음 차례에 다시 판단).
       this.logger.warn('회의 알림 판단 실패 — 비교 기준을 그대로 두고 다음 차례에 다시 봅니다');
       return;
     }
+    this.unparseable = null;
     // 판단이 끝났다(알릴 것 없음 포함) — 이제야 기준을 지금 일정으로 옮긴다.
     this.lastDiffHash = diffHash;
     this.judgeFailNoted = false;

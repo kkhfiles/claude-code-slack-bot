@@ -311,12 +311,13 @@ export class CliHandler {
     this.saveToDisk();
   }
 
-  cleanupInactiveSessions(maxAge: number = 0) {
+  /** `keep` 이 참이면 오래됐어도 남긴다 — 세션 시각이 모르는 활동(다른 엔진이 받은 차례)을 부른 쪽이 센다. */
+  cleanupInactiveSessions(maxAge: number = 0, keep?: (session: ConversationSession) => boolean) {
     if (maxAge <= 0) return;
     const now = Date.now();
     let cleaned = 0;
     for (const [key, session] of this.sessions.entries()) {
-      if (now - session.lastActivity.getTime() > maxAge) {
+      if (now - session.lastActivity.getTime() > maxAge && !keep?.(session)) {
         this.sessions.delete(key);
         cleaned++;
       }

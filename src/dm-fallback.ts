@@ -191,6 +191,20 @@ const LEDGER_TAIL_BYTES = 64 * 1024;
 
 /** 이 방에서 `sinceSec` 뒤에 다른 엔진이 끝까지 처리한 건수. */
 export function ledgerServedSince(channel: string, sinceSec: number, file: string = ledgerFile()): number {
+  return ledgerTail(file).filter((r) => r?.channel === channel && r.outcome === 'ok' && r.engine !== 'claude'
+    && Number(r.at) > sinceSec).length;
+}
+
+/**
+ * 이 방에서 `sinceSec` 뒤에 장부에 적힌 차례가 있나 — 결과를 안 가린다(답함 · 모아 둠 · 끊김).
+ * Claude 를 안 거친 차례는 세션 시각을 안 밀므로, 세션 정리가 이것을 「쓰는 중」으로 센다.
+ */
+export function ledgerActiveSince(channel: string, sinceSec: number, file: string = ledgerFile()): boolean {
+  return ledgerTail(file).some((r) => r?.channel === channel && Number(r.at) > sinceSec);
+}
+
+/** 장부 꼬리의 줄들 — 못 읽으면 빈 목록. */
+function ledgerTail(file: string): any[] {
   let text = '';
   try {
     const size = fs.statSync(file).size;
@@ -204,15 +218,13 @@ export function ledgerServedSince(channel: string, sinceSec: number, file: strin
       fs.closeSync(fd);
     }
   } catch {
-    return 0;
+    return [];
   }
-  let n = 0;
+  const rows: any[] = [];
   for (const l of text.split('\n')) {
-    let r: any;
-    try { r = JSON.parse(l); } catch { continue; }
-    if (r?.channel === channel && r.outcome === 'ok' && r.engine !== 'claude' && Number(r.at) > sinceSec) n += 1;
+    try { rows.push(JSON.parse(l)); } catch { /* 잘린 첫 줄 · 빈 줄 */ }
   }
-  return n;
+  return rows;
 }
 
 /** Claude 가 돌아온 첫 차례 앞에 붙이는 한 줄. */

@@ -11,7 +11,8 @@
  * 진단은 stderr 끝 줄 `[agy-client] model=… attempts=[(…, 'ok')] elapsed=… rc=… err=…`.
  * **쿼터는 진짜처럼** 쿼터 글을 `--out` 에 쓰고 rc 0 으로 끝난다(백엔드가 그렇게 한다 · attempts 가 정본).
  *
- * 갈래(별칭마다 · 없으면 `FAKE_AGY_MODE` · 기본 ok): ok · quota · fail · slow(`FAKE_AGY_SLOW_MS` 쉬었다 ok)
+ * 갈래(별칭마다 · 없으면 `FAKE_AGY_MODE` · 기본 ok): ok · quota · fail · slow(`FAKE_AGY_SLOW_MS` 쉬었다 ok) ·
+ * noisy-<갈래>(재시도 줄을 60KB 쯤 쏟은 뒤 그 갈래대로 — 봇이 stderr 의 끝 줄을 잃지 않는지 잰다)
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -24,7 +25,10 @@ const arg = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : un
 const model = arg('--model') || '';
 const modes = JSON.parse(process.env.FAKE_AGY_MODES || '{}');
 const replies = JSON.parse(process.env.FAKE_AGY_REPLIES || '{}');
-const mode = modes[model] || process.env.FAKE_AGY_MODE || 'ok';
+const given = modes[model] || process.env.FAKE_AGY_MODE || 'ok';
+// noisy-<갈래> — 재시도 줄을 먼저 쏟고 그 갈래대로 끝낸다(판정 줄은 맨 끝).
+const mode = given.startsWith('noisy-') ? given.slice(6) : given;
+if (given !== mode) process.stderr.write("[agy-client] retry after a transient error — waiting\n".repeat(1200));
 let prompt = '';
 try { prompt = fs.readFileSync(arg('--prompt-file'), 'utf-8'); } catch { /* 없다 */ }
 fs.appendFileSync(process.env.FAKE_AGY_LOG, JSON.stringify({

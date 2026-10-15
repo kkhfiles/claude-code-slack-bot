@@ -64,7 +64,8 @@ const fake = makeFakeCodex(path.join(TMP, 'fake'));
 const { config } = require(path.join(ROOT, 'dist', 'config.js'));
 setEnv();   // `.env` 가 같은 이름을 들고 와도 시험 값이 이긴다
 process.env.BOARD_NARROW_CODEX_BIN = fake.bin;
-for (const k of ['DM_FALLBACK', 'ENGINE_NOTICE', 'HOLD_V2', 'SLACKBOT_FORCE_CLI']) delete process.env[k];
+// agy 칸(6단계)은 `check:agy` 가 잰다 — `.env` 가 켜 두었어도 여기서는 끈다(안 끄면 「GPT 다음은 모아 둠」이 agy 로 간다).
+for (const k of ['DM_FALLBACK', 'DM_FALLBACK_AGY', 'ENGINE_NOTICE', 'HOLD_V2', 'SLACKBOT_FORCE_CLI']) delete process.env[k];
 
 const ladder = require(path.join(ROOT, 'dist', 'engine-ladder.js'));
 const dmf = require(path.join(ROOT, 'dist', 'dm-fallback.js'));
@@ -284,12 +285,16 @@ try {
   {
     const s = await scenario({ fallback: false, claude: 'limited' });
     eq('꺼짐 — codex 를 안 부른다', s.codex.length, 0);
-    ok('꺼짐 — Claude 의 한도 글이 예전처럼 나간다', LIMIT_TEXT.test(allText(s.posts)));
+    // 한도 글은 폴백과 무관하게 안 올린다 — 한도 안내(⏳ · 한 번만)가 대신 말한다.
+    ok('꺼짐 — Claude 의 한도 글을 안 올린다', !LIMIT_TEXT.test(allText(s.posts)));
     eq('꺼짐 — 실패 표시 limit', bridge.failed.map((f) => f[1]), ['limit']);
     ok('꺼짐 — 한도 안내', allText(s.posts).includes('⏳'));
     eq('꺼짐 — 결과는 막힘', [s.sink.outcome, s.sink.engine], ['limited', 'claude']);
     const s2 = await scenario({ fallback: false, claude: 'ok', before: blockClaude });
     eq('꺼짐 — 막혀 있어도 Claude 를 띄운다(예전 그대로)', [claudeCalls.length, s2.codex.length], [1, 0]);
+    ok('꺼짐 — 막히지 않은 차례의 Claude 글은 그대로 올린다', allText(s2.posts).includes('Claude 답'));
+    const s3 = await scenario({ fallback: false, claude: 'overload' });
+    ok('꺼짐 — 과부하 원문(529)도 안 올리고 안내', !allText(s3.posts).includes('529') && allText(s3.posts).includes('⏳'));
   }
 
   // ================================================================ ③ 띄우기 전 — Claude 가 막혀 있으면 안 띄우고 GPT
@@ -404,14 +409,15 @@ try {
     let s = await scenario({ claude: 'limited', before: () => { privateTurn = true; }, text: '비밀조각이 든 말' });
     eq('개인 글 — GPT 안 부름', s.codex.length, 0);
     eq('개인 글 — 모아 둠', bridge.failed.map((f) => f[1]), ['limit']);
-    // 넘기지 않는 차례는 폴백이 아예 안 끼어든다 — 예전처럼 한도 글이 나가고 장부도 안 적힌다.
-    ok('개인 글 — 예전 길 그대로(한도 글)', LIMIT_TEXT.test(allText(s.posts)));
+    // 넘기지 않는 차례는 폴백이 아예 안 끼어든다 — 장부도 안 적힌다. 한도 글은 안 올리고 한도 안내가 말한다.
+    ok('개인 글 — 한도 글 안 올림 · 한도 안내', !LIMIT_TEXT.test(allText(s.posts)) && allText(s.posts).includes('⏳'));
     ok('개인 글 — 장부에 안 적음', !fs.existsSync(ENV.FALLBACK_LEDGER_FILE));
     s = await scenario({ claude: 'ok', before: () => { privateTurn = true; blockClaude(); }, text: '비밀조각이 든 말' });
     eq('개인 글 + Claude 막힘 — GPT 안 부름(Claude 길로)', [s.codex.length, claudeCalls.length], [0, 1]);
+    ok('개인 글 + Claude 막힘 — Claude 가 답하면 그 글은 올린다', allText(s.posts).includes('Claude 답'));
     s = await scenario({ claude: 'limited', event: { channel: 'C_ROOM' } });
     eq('채널 — GPT 안 부름', s.codex.length, 0);
-    ok('채널 — 예전처럼 한도 글', LIMIT_TEXT.test(allText(s.posts)));
+    ok('채널 — 한도 글 안 올림 · 한도 안내', !LIMIT_TEXT.test(allText(s.posts)) && allText(s.posts).includes('⏳'));
     s = await scenario({ claude: 'limited', text: '-plan 계획만 세워 줘' });
     eq('계획 모드 — GPT 안 부름', s.codex.length, 0);
     s = await scenario({ claude: 'limited', cwd: path.join(TMP, 'other-dir') });
@@ -427,6 +433,7 @@ try {
     process.env.FAKE_CODEX_MODE = 'slow';
     process.env.FAKE_CODEX_SLOW_MS = '1500';
     claudeScript = 'ok';
+    bridge.captures = 0;
     blockClaude();
     const t = makeHandler();
     const n0 = calls().length;
@@ -434,7 +441,11 @@ try {
     const first = t.dm('첫 말');
     for (let i = 0; i < 100 && calls().length === n0; i++) await sleep(50);
     const second = t.dm('둘째 말');
+    await sleep(200);
+    // 기다리는 동안 재시작해도 말이 남게 — 문에서 기다리기 **전에** 원문을 저장한다.
+    eq('둘째가 기다리는 동안 이미 캡처됨(첫째는 아직 도는 중)', [bridge.captures, fake.ends().length - e0], [2, 0]);
     const [s1, s2] = await Promise.all([first, second]);
+    eq('말 하나에 캡처 하나', bridge.captures, 2);
     const cs = calls().slice(n0);
     const es = fake.ends().slice(e0);
     eq('두 차례 다 GPT 가 받는다', [cs.length, s1.outcome, s2.outcome], [2, 'ok', 'ok']);
@@ -459,14 +470,84 @@ try {
     for (let i = 0; i < 100 && calls().length === n0; i++) await sleep(50);
     const handle = t.h.activeProcesses.get('U_ME-D_DM-direct');
     ok('GPT 차례가 손잡이를 걸었다', !!handle);
-    handle?.interrupt();
+    // **명령 길 그대로** — DM 맨 위의 `-stop` 이 차례와 같은 키(`direct`)를 짓는지까지 본다.
+    await t.dm('-stop');
+    ok('-stop 이 끊었다고 답한다', t.posts.some((p) => (p.text ?? '').startsWith('⏹️')));
     const sink = await run;
     ok(`끊으면 바로 끝난다(${Date.now() - t0}ms)`, Date.now() - t0 < 7000);
     eq('끊은 차례 — 실패 표시 없음 · 답 없음', [bridge.failed.length, t.posts.some((p) => p.text === '☀️ codex 답')], [0, false]);
     eq('끊은 차례 — 결과 오류', sink.outcome, 'error');
     const led = fs.readFileSync(ENV.FALLBACK_LEDGER_FILE, 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
     eq('장부 — 끊김', led.map((r) => r.outcome), ['stopped']);
+    // -reset 도 같은 키로 지운다
+    const removed = [];
+    t.h.cliHandler.removeSession = (u, c, th) => { removed.push(t.h.cliHandler.getSessionKey(u, c, th)); return true; };
+    await t.dm('-reset');
+    eq('-reset — DM 맨 위는 대화 세션(direct)을 지운다', removed, ['U_ME-D_DM-direct']);
+
+    // 다시 돌리던 것을 사람이 끊으면 그 캡처를 버린다 — 남기면 다음 드레인이 「이미 한 것」 없이 또 돌린다.
+    reset();
+    bridge.failed = [];
+    bridge.dropped = [];
+    blockClaude();
+    const t2 = makeHandler();
+    const n1 = calls().length;
+    const run2 = t2.dm('다시 돌리는 말', { replay: true, pushed: true, captureId: 'cap-r' });
+    for (let i = 0; i < 100 && calls().length === n1; i++) await sleep(50);
+    await t2.dm('-stop');
+    await run2;
+    eq('다시 돌리기를 끊음 — 실패 표시 없이 캡처를 버림', [bridge.failed.length, bridge.dropped],
+      [0, [['cap-r', '다시 돌리던 것을 사람이 끊음']]]);
     delete process.env.FAKE_CODEX_SLOW_MS;
+  }
+
+  // ================================================================ ⑨-2 세션 시각 · 세션 정리 · 짧은 갱신
+  {
+    // Claude 가 띄워졌다 막혀 GPT 가 받았으면 세션 시각을 안 민다 — 돌아온 Claude 가 GPT 답을 「못 본 글」로 받게.
+    reset();
+    process.env.DM_FALLBACK = 'on';
+    process.env.FAKE_CODEX_MODE = 'ok-noop';
+    claudeScript = 'limited';
+    const t = makeHandler();
+    const s0 = t.h.cliHandler.createSession('U_ME', 'D_DM', undefined);
+    const old = new Date(Date.now() - 3600_000);
+    s0.lastActivity = old;
+    s0.sessionId = 'sess-old';
+    const sink = await t.dm('막히는 말');
+    eq('막혀 GPT 가 받음 — 세션 시각 그대로', [sink.engine, s0.lastActivity.getTime()], ['codex', old.getTime()]);
+    engineState.recordOk('claude');
+    claudeScript = 'ok';
+    await t.dm('다음 말');
+    ok('Claude 가 답하면 세션 시각을 민다', s0.lastActivity.getTime() > old.getTime());
+
+    // 세션 정리 — 장부에 그 방의 차례가 24시간 안에 있으면 쓰는 중
+    const { CliHandler } = require(path.join(ROOT, 'dist', 'cli-handler.js'));
+    const ch = Object.create(CliHandler.prototype);
+    ch.logger = silent;
+    ch.saveToDisk = () => {};
+    const stale = (c) => ({ userId: 'U_ME', channelId: c, isActive: true, lastActivity: new Date(Date.now() - 30 * 3600_000) });
+    const h = Object.create(SlackHandler.prototype);
+    h.cliHandler = ch;
+    reset();
+    ch.sessions = new Map([['U_ME-D_DM-direct', stale('D_DM')], ['U_ME-C_X-1', stale('C_X')]]);
+    dmf.appendLedger({ channel: 'D_DM', engine: 'none', model: '', captureId: 'c1', outcome: 'hold' });
+    h.sweepSessions();
+    eq('장부에 그 방 차례가 있으면 남김 · 없으면 지움', [...ch.sessions.keys()], ['U_ME-D_DM-direct']);
+    reset();
+    ch.sessions = new Map([['U_ME-D_DM-direct', stale('D_DM')]]);
+    dmf.appendLedger({ channel: 'D_DM', engine: 'codex', model: 'm', captureId: 'c2', outcome: 'ok', at: nowSec() - 30 * 3600 });
+    h.sweepSessions();
+    eq('장부의 차례도 24시간 지났으면 지움', ch.sessions.size, 0);
+    reset();
+
+    // 짧은 갱신으로 끝난 다시 돌리기는 「처리함」 — 「못 함」으로 남으면 같은 갱신이 또 들어간다.
+    const tq = makeHandler();
+    wa.quickUpdate = async () => ({ kind: 'ok', output: '반영함' });
+    const qs = { outcome: 'error' };
+    await tq.h.handleMessage({ user: 'U_ME', channel: 'D_DM', ts: `${++tsBase}.000100`, text: 'TSK-1 완료',
+      replay: true, pushed: true, captureId: 'cap-q', outcomeSink: qs }, tq.say);
+    wa.quickUpdate = async () => ({ kind: 'not-quick' });
+    eq('짧은 갱신으로 끝나면 결과는 됨', qs.outcome, 'ok');
   }
 
   // ================================================================ ⑩ 판에서 온 차례 · 조용히 · 첨부
@@ -655,7 +736,9 @@ if (fails.length) {
   console.log('통과 — DM 폴백 (고르기 전 조합 · 꺼짐이면 예전 그대로 · 막혀 있으면 Claude 안 띄움 · 거절 뒤 한도 글 안 올림 · '
     + '캡처 id 값으로 · 봇 세션 표시 · 답과 표시 줄 · 됐으면 실패 표시 없음 · 쓰기 뒤 끊김은 이미 한 것과 함께 · '
     + 'GPT 도 못 하면 모아 둠(원문 안 올림) · 개인 글 · 채널 · 계획 · 다른 디렉터리는 안 넘김 · 같은 방은 한 줄로 · '
-    + '-stop · 조용히 · 첨부 경로 · 엔진 안내 · 장부에 말 없음 · 돌아온 첫 차례 한 줄 · 연습 파일 · -engines)');
+    + '-stop · -reset 이 차례와 같은 키 · 끊은 다시 돌리기는 버림 · 기다리기 전에 캡처 · 넘기지 않는 차례도 한도 글 안 올림 · '
+    + 'GPT 가 받으면 세션 시각 그대로 · 장부 차례는 세션 정리에서 남김 · 짧은 갱신은 됨 · '
+    + '조용히 · 첨부 경로 · 엔진 안내 · 장부에 말 없음 · 돌아온 첫 차례 한 줄 · 연습 파일 · -engines)');
 }
 // 대화 처리기가 차례 뒤 정리를 5분 뒤로 걸어 둔다 — 기다리지 않고 끝낸다.
 process.exit(process.exitCode ?? 0);

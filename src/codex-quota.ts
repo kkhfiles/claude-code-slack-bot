@@ -16,7 +16,7 @@
  *
  * **못 읽으면 「모름」이다 — 막지 않는다.** 파이썬 · 패키지가 없거나 조회가 실패하면 폴백은 예전처럼
  * codex 를 불러 본다(모른다고 멈추면 조회 하나가 고장 나 폴백 전체가 선다). **절대 안 던진다.**
- * 막힘을 지우지도 않는다 — 풀어 주는 것은 실제로 된 차례(`recordOk`)와 시각이다.
+ * 못 읽었을 때는 막힘을 지우지도 않는다. 읽었고 남은 양이 있으면 사용량 소진 막힘만 지운다(`applyQuota`).
  */
 import { spawn, execSync } from 'child_process';
 import { Logger } from './logger';
@@ -55,9 +55,11 @@ export function applyQuota(q: CodexQuotaData | null, store: EngineState = engine
   const until: number[] = [];
   let full = false;
   let seen = false;
+  const read = new Set<string>();
   for (const [limitType, w] of wins) {
     if (!w || typeof w.used_percent !== 'number') continue;
     seen = true;
+    read.add(limitType);
     store.recordUtil('codex', { limitType, utilization: w.used_percent / 100 });
     if (w.used_percent >= 100) {
       full = true;
@@ -71,8 +73,19 @@ export function applyQuota(q: CodexQuotaData | null, store: EngineState = engine
     });
     return 'exhausted';
   }
-  return seen ? 'ok' : 'unknown';
+  if (!seen) return 'unknown';
+  // **남은 양이 있다고 읽혔으면 사용량 소진 막힘을 지운다** — 그 막힘은 느슨한 글 판정이나 일찍 풀린 창에서 왔을
+  // 수 있고, 안 지우면 남은 양이 있는데도 시각까지 GPT 를 건너뛴다. 막힌 창을 이번에 못 읽었으면 그대로 둔다.
+  // 틀렸으면 다음 차례가 다시 막혀 적을 뿐이다(한 번 헛걸음). 마지막 성공은 안 고친다 — 된 차례가 없었다.
+  const b = store.blocked('codex');
+  if (b?.kind === 'usage' && !(b.limitType && QUOTA_WINDOWS.has(b.limitType) && !read.has(b.limitType))) {
+    store.clearBlocked('codex', 'usage');
+  }
+  return 'ok';
 }
+
+/** 한도 조회가 읽는 창 이름 — 막힘의 `limitType` 이 이것이면 그 창을 읽었을 때만 막힘을 지운다. */
+const QUOTA_WINDOWS: ReadonlySet<string> = new Set(['five_hour', 'seven_day']);
 
 /** 파이썬 경로 — 사다리와 같은 것을 쓴다(`LADDER_PYTHON`). 한도 조회만 바꾸려면 `CODEX_QUOTA_PYTHON`. */
 function quotaPython(): string {

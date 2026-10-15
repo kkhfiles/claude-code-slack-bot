@@ -235,6 +235,19 @@ export class EngineState {
   }
 
   /**
+   * 그 갈래의 막힘만 지운다 — **마지막 성공은 안 고친다**(된 차례가 없었다). 한도 조회가 남은 양이 있다고
+   * 할 때 쓴다. 갈래가 다르면(과부하 등) 그대로 둔다. 지웠으면 참.
+   */
+  clearBlocked(engine: Engine, kind: BlockKind): boolean {
+    return this.mutate((st) => {
+      const r = st.engines[engine];
+      if (r.blocked?.kind !== kind) return false;
+      r.blocked = null;
+      return true;
+    });
+  }
+
+  /**
    * 막혔다. 갈래마다 다시 해 볼 시각을 정한다(파일 머리 주석). 정해진 막힘을 돌려준다.
    *
    * **갈래가 다르면 새 것이 이긴다** — 서버가 방금 새로 알려 준 것이라서다. 단 서버가 알려 준
