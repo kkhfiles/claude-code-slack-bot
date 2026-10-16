@@ -182,6 +182,9 @@ function makeHandler(o = {}) {
   const posts = [];
   const notices = [];
   const logs = [];
+  // 상태 줄 고치기 · 지우기와 반응 — 다 막혀 모아 둔 차례의 끝 모양(「⏸ 모아 둠」 · ✋)을 본다(2026-10-16).
+  const updates = [];
+  const reacts = [];
   const nextTs = () => `${++tsBase}.000100`;
   h.logger = {
     info: (m) => logs.push(['info', m]), warn: (m) => logs.push(['warn', m]),
@@ -190,9 +193,9 @@ function makeHandler(o = {}) {
   h.app = { client: {
     chat: {
       postMessage: async (m) => { posts.push(m); return { ts: nextTs() }; },
-      update: async () => ({}), delete: async () => ({}),
+      update: async (m) => { updates.push(m.text); return {}; }, delete: async () => { updates.push('(지움)'); return {}; },
     },
-    reactions: { add: async () => ({}), remove: async () => ({}) },
+    reactions: { add: async (m) => { reacts.push(`+${m.name}`); return {}; }, remove: async (m) => { reacts.push(`-${m.name}`); return {}; } },
     conversations: {
       history: async () => ({ messages: o.history ?? [] }),
       replies: async () => ({ messages: [] }),
@@ -220,11 +223,14 @@ function makeHandler(o = {}) {
     'pendingOneTimeTools', 'pendingPlans']) h[k] = new Map();
   h.hintShownThreads = new Set();
   h.emojiToReaction = {};
+  // 상태 반응은 고른 이모지를 적는다(`=✋`) — 껍데기에는 반응 표(인스턴스 칸)가 없어 진짜 길은 여기서 못 돈다.
+  h.updateMessageReaction = async (_k, emoji) => { reacts.push(`=${emoji}`); };
   h.ANCHOR_REACTION = 'hourglass_flowing_sand';
   h.holdGate = new ChannelGate();
   h.assistantScheduler = null;
   h.engineNotice = new EngineNotice({
-    ladder: () => dmf.dmLadder(), post: async (t) => { notices.push(t); }, enabled: () => true, log: silent,
+    // 켜는 문 `ENGINE_NOTICE` 흉내 — 봇의 기본처럼 꺼짐(로그만) · `notice: true` 면 켜짐. 꺼짐이 예전 그대로인지가 아래 ②·⑥·⑦ 이다.
+    ladder: () => dmf.dmLadder(), post: async (t) => { notices.push(t); }, enabled: () => o.notice ?? false, log: silent,
   });
   const say = async (m) => { posts.push(typeof m === 'string' ? { text: m } : m); return { ts: nextTs() }; };
   const dm = async (text, extra = {}) => {
@@ -232,7 +238,7 @@ function makeHandler(o = {}) {
     await h.handleMessage({ user: 'U_ME', channel: extra.channel ?? 'D_DM', ts: nextTs(), text, outcomeSink: sink, ...extra }, say);
     return sink;
   };
-  return { h, posts, notices, logs, say, dm };
+  return { h, posts, notices, logs, updates, reacts, say, dm };
 }
 
 const allText = (posts) => posts.map((p) => [p.text ?? '', JSON.stringify(p.blocks ?? [])].join(' ')).join('\n');
@@ -254,8 +260,14 @@ async function scenario(o) {
   claudeScript = o.claude ?? 'ok';
   o.before?.();
   const t = makeHandler(o);
+  // `watch` — 봇처럼 막힘 변화를 듣게 한다(`init`) · 끝나면 끊는다(봇 전체가 쓰는 엔진 상태 하나를 다음 장면과 나눠 쓴다)
+  if (o.watch) t.h.engineNotice.init();
   const n0 = calls().length;
   const sink = await t.dm(o.text ?? '오늘 할 일 알려 줘', o.event ?? {});
+  if (o.watch) {
+    await sleep(30);
+    t.h.engineNotice.stop();
+  }
   return { ...t, sink, codex: calls().slice(n0) };
 }
 
@@ -457,6 +469,46 @@ try {
     eq('계획 모드 — GPT 안 부름', s.codex.length, 0);
     s = await scenario({ claude: 'limited', cwd: path.join(TMP, 'other-dir') });
     eq('작업 디렉터리가 업무 비서 뿌리가 아님 — GPT 안 부름', s.codex.length, 0);
+  }
+
+  // ================================================================ ⑦-1 다 막혀 모아 둠 — ⏸ 안내가 말하면 ⏳ 없이(2026-10-16 · 사용자 결정)
+  //   켜는 문 `ENGINE_NOTICE` 가 켜져 있고 · 비서 DM 이고 · 엔진 상태로 사다리가 다 막혔을 때만. 꺼짐은 위 ②·⑥·⑦ 이 예전 그대로를 본다.
+  {
+    const cancelBtn = (posts) => posts.some((p) => JSON.stringify(p.blocks ?? []).includes('cancel_retry'));
+    const quietEnd = (s) => !allText(s.posts).includes('⏳') && !cancelBtn(s.posts)
+      && s.updates.at(-1) === '⏸ *모아 둠*' && s.reacts.includes('=✋') && !s.reacts.includes('=❌');
+    const oldEnd = (s) => allText(s.posts).includes('⏳') && cancelBtn(s.posts)
+      && s.updates.at(-1) === '❌ *오류 발생*' && s.reacts.includes('=❌');
+    // GPT 도 이 차례에 막힘(사다리 Claude · GPT)
+    let s = await scenario({ notice: true, claude: 'limited', codex: 'usage-event', hold: true });
+    await sleep(30);
+    eq('GPT 도 막힘 · 켜짐 — 실패 표시 · 결과는 그대로', [bridge.failed.map((f) => f[1]), s.sink.outcome], [['limit'], 'limited']);
+    ok(`GPT 도 막힘 · 켜짐 — ⏳ · 「취소」 · ❌ 없이 「⏸ 모아 둠」 · ✋ — ${s.updates.at(-1)} · ${s.reacts.join(' ')}`, quietEnd(s));
+    eq('GPT 도 막힘 · 켜짐 — ⏸ 한 줄', s.notices.map((n) => n.slice(0, 1)), ['⏸']);
+    s = await scenario({ claude: 'limited', codex: 'usage-event', hold: true });
+    await sleep(30);
+    ok('GPT 도 막힘 · 꺼짐 — 예전 그대로(⏳ · 「취소」 · ❌)', oldEnd(s));
+    // 띄우기 전부터 둘 다 막힘
+    s = await scenario({ notice: true, claude: 'ok', before: () => { blockClaude(); blockCodex(); }, hold: true });
+    await sleep(30);
+    ok('둘 다 막힘 · 켜짐 — 「⏸ 모아 둠」 · ✋', quietEnd(s) && claudeCalls.length === 0 && s.codex.length === 0);
+    eq('둘 다 막힘 · 켜짐 — 장부에 모아 둠', fs.readFileSync(ENV.FALLBACK_LEDGER_FILE, 'utf-8').trim().split('\n')
+      .map((l) => JSON.parse(l)).map((r) => [r.engine, r.outcome]), [['none', 'hold']]);
+    // 폴백 꺼짐(사다리가 Claude 하나) · 안내 켜짐 — Claude 가 막히면 ⏸ 가 나가므로 그것으로
+    s = await scenario({ notice: true, watch: true, fallback: false, claude: 'limited' });
+    await sleep(30);
+    ok('폴백 꺼짐 · 안내 켜짐 — 「⏸ 모아 둠」 · ✋', quietEnd(s) && s.notices.length === 1 && s.notices[0].startsWith('⏸'));
+    // ⏸ 가 이 자리를 말하지 않는 보류는 켜져 있어도 ⏳ 그대로
+    s = await scenario({ notice: true, claude: 'limited', event: { channel: 'C_ROOM' }, before: blockCodex });
+    await sleep(30);
+    ok('채널 · 켜짐 · 다 막힘 — ⏸ 는 비서 DM 에만 가므로 그 자리에 ⏳', allText(s.posts).includes('⏳') && cancelBtn(s.posts));
+    s = await scenario({ notice: true, claude: 'limited', codex: 'fail', hold: true });
+    await sleep(30);
+    ok('GPT 가 막힌 게 아니라 실패 · 켜짐 — 사다리가 다 막힌 것이 아니라 ⏳ 그대로', oldEnd(s));
+    s = await scenario({ notice: true, claude: 'limited-after-private-write', hold: true, before: () => { privateTurn = true; },
+      text: '진행 남겨 줘' });
+    await sleep(30);
+    ok('넘겨줄 메모에 개인 글 · 켜짐 — 막힘 때문이 아니라 ⏳ 그대로', allText(s.posts).includes('⏳') && cancelBtn(s.posts));
   }
 
   // ================================================================ ⑧ 같은 방에서 한 줄로 — 새 DM 은 기다리고 GPT 를 안 끊는다
@@ -826,7 +878,7 @@ if (fails.length) {
     + 'GPT 도 못 하면 모아 둠(원문 안 올림) · 개인 글 · 채널 · 계획 · 다른 디렉터리는 안 넘김 · 같은 방은 한 줄로 · '
     + '-stop · -reset 이 차례와 같은 키 · 끊은 다시 돌리기는 버림 · 기다리기 전에 캡처 · 넘기지 않는 차례도 한도 글 안 올림 · '
     + 'GPT 가 받으면 세션 시각 그대로 · 장부 차례는 세션 정리에서 남김 · 짧은 갱신은 됨 · '
-    + '조용히 · 첨부 경로 · 엔진 안내 · 장부에 말 없음 · 돌아온 첫 차례 한 줄 · 연습 파일 · -engines · 오류 도구는 실패로 넘김 · 넘겨줄 메모의 개인 글 · Claude 다시 돌리기 끊음도 버림 · 기다리는 말도 재시작 뒤 드레인)');
+    + '조용히 · 첨부 경로 · 엔진 안내 · 장부에 말 없음 · 돌아온 첫 차례 한 줄 · 연습 파일 · -engines · 오류 도구는 실패로 넘김 · 넘겨줄 메모의 개인 글 · Claude 다시 돌리기 끊음도 버림 · 기다리는 말도 재시작 뒤 드레인 · ⏸ 가 말하면 ⏳ 없이 「⏸ 모아 둠」)');
 }
 // 대화 처리기가 차례 뒤 정리를 5분 뒤로 걸어 둔다 — 기다리지 않고 끝낸다.
 process.exit(process.exitCode ?? 0);

@@ -185,10 +185,18 @@ export interface EngineNoticeOptions {
   log?: { info: (msg: string, data?: any) => void; warn: (msg: string, data?: any) => void };
 }
 
+/**
+ * 미루기 상한 — 차례 하나가 사다리를 다 내려가도(칸마다 3분 · `FALLBACK_TIMEOUT_MS`) 이 안에 끝난다. 놓아 주는 쪽이
+ * 넘어져 안 놓아도 이 시각에 스스로 풀리고 그때 지금 모양을 알린다.
+ */
+export const NOTICE_HOLD_MAX_MS = 15 * 60_000;
+
 export class EngineNotice {
   private store: EngineState;
   private log: NonNullable<EngineNoticeOptions['log']>;
   private unsubscribe: (() => void) | null = null;
+  /** 사다리를 내려가는 중인 차례(`hold`) — 하나라도 있으면 안내를 미룬다. */
+  private holds = new Set<symbol>();
 
   constructor(private opts: EngineNoticeOptions = {}) {
     this.store = opts.store ?? engineState;
@@ -211,11 +219,51 @@ export class EngineNotice {
   }
 
   /**
+   * **차례 하나가 사다리를 내려가는 동안 안내를 미룬다**(2026-10-16) — 돌려주는 함수로 놓는다. 한 차례에 Gemini 가
+   * 막혀 agy 의 Sonnet 으로 내려가자 「🔁 … — Gemini 로 이어 갑니다」와 「🔁 … Gemini 소진 — agy 의 Sonnet 으로 이어
+   * 갑니다」가 잇달아 나갔다. 사용자 결정: **한 차례에는 실제로 답한 엔진 하나만**(다 막혔으면 ⏸ 하나) — 거쳐 간 칸은
+   * 마지막 줄의 「… 소진」 목록에 이미 있다.
+   *
+   * - **미루는 동안 차례를 안 적는다** — 놓을 때 「마지막으로 알린 차례 → 지금」 한 줄이 나가므로 사이 칸은 저절로 빠지고,
+   *   잃는 것이 없다(차례가 넘어져 놓지 못해도 다음 `check` 가 지금 모양을 알린다)
+   * - **마지막 하나를 놓을 때 한 번 본다** · 상한(`NOTICE_HOLD_MAX_MS`)이 지나면 스스로 놓는다
+   * - 차례 밖의 변화(회복 ✅ 등)는 미루는 차례가 없으면 그대로 바로 나간다
+   */
+  hold(maxMs: number = NOTICE_HOLD_MAX_MS): () => void {
+    const id = Symbol('notice-hold');
+    this.holds.add(id);
+    let done = false;
+    const release = (): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      this.holds.delete(id);
+      if (this.holds.size === 0) void this.check();
+    };
+    const timer = setTimeout(release, maxMs);
+    timer.unref?.();
+    return release;
+  }
+
+  /**
+   * 지금 엔진 상태로 본 DM 차례 — 알린 차례가 아니라 지금 값. **⏸ 가 이 보류를 말하나**를 가르는 데 쓴다
+   * (켜져 있고 이것이 `none` 이면 ⏸ 가 이미 나갔거나 미룬 것을 놓을 때 나간다).
+   */
+  rungNow(): Rung {
+    return dmRung(this.store.load(), this.store.nowSec(), this.opts.ladder?.() ?? ENGINES);
+  }
+
+  /**
    * 차례가 바뀌었으면 한 줄을 짓고 알린다(꺼져 있으면 로그만). 지은 줄을 돌려준다.
    * **알리기 전에 차례를 적는다** — 보내다 실패해도 같은 줄이 되풀이되지 않게.
    */
   async check(): Promise<string | null> {
     try {
+      // 사다리를 내려가는 차례가 있으면 차례를 안 적고 기다린다 — 놓을 때 다시 본다(`hold`).
+      if (this.holds.size > 0) {
+        this.log.info('차례가 사다리를 내려가는 중이라 엔진 안내를 미룹니다');
+        return null;
+      }
       const st = this.store.load();
       const now = this.store.nowSec();
       const ladder = this.opts.ladder?.() ?? ENGINES;

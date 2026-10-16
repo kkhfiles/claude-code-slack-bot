@@ -199,11 +199,15 @@ function makeHandler(o = {}) {
   const posts = [];
   const notices = [];
   const logs = [];
+  // 상태 줄 고치기 · 지우기와 반응 — 다 막혀 모아 둔 차례의 끝 모양(「⏸ 모아 둠」 · ✋)을 본다(2026-10-16).
+  const updates = [];
+  const reacts = [];
   const nextTs = () => `${++tsBase}.000100`;
   h.logger = { info: (m) => logs.push(['info', m]), warn: (m) => logs.push(['warn', m]), error: (m) => logs.push(['error', m]), debug() {} };
   h.app = { client: {
-    chat: { postMessage: async (m) => { posts.push(m); return { ts: nextTs() }; }, update: async () => ({}), delete: async () => ({}) },
-    reactions: { add: async () => ({}), remove: async () => ({}) },
+    chat: { postMessage: async (m) => { posts.push(m); return { ts: nextTs() }; },
+      update: async (m) => { updates.push(m.text); return {}; }, delete: async () => { updates.push('(지움)'); return {}; } },
+    reactions: { add: async (m) => { reacts.push(`+${m.name}`); return {}; }, remove: async (m) => { reacts.push(`-${m.name}`); return {}; } },
     conversations: { history: async () => ({ messages: o.history ?? [] }), replies: async () => ({ messages: [] }) },
     users: { info: async () => ({ user: { locale: 'ko-KR' } }) },
     auth: { test: async () => ({ user_id: 'UBOT' }) },
@@ -228,11 +232,14 @@ function makeHandler(o = {}) {
     'pendingOneTimeTools', 'pendingPlans']) h[k] = new Map();
   h.hintShownThreads = new Set();
   h.emojiToReaction = {};
+  // 상태 반응은 고른 이모지를 적는다(`=✋`) — 껍데기에는 반응 표(인스턴스 칸)가 없어 진짜 길은 여기서 못 돈다.
+  h.updateMessageReaction = async (_k, emoji) => { reacts.push(`=${emoji}`); };
   h.ANCHOR_REACTION = 'hourglass_flowing_sand';
   h.holdGate = new hr.ChannelGate();
   h.assistantScheduler = null;
   h.engineNotice = new EngineNotice({
-    ladder: () => dmf.dmLadder(), post: async (t) => { notices.push(t); }, enabled: () => true, log: silent,
+    // 켜는 문 `ENGINE_NOTICE` 흉내 — 기본 켜짐(이 검사의 안내 줄 시험) · `notice: false` 면 꺼짐(로그만)
+    ladder: () => dmf.dmLadder(), post: async (t) => { notices.push(t); }, enabled: () => o.notice ?? true, log: silent,
   });
   const say = async (m) => { posts.push(typeof m === 'string' ? { text: m } : m); return { ts: nextTs() }; };
   const dm = async (text, extra = {}) => {
@@ -240,7 +247,7 @@ function makeHandler(o = {}) {
     await h.handleMessage({ user: 'U_ME', channel: extra.channel ?? 'D_DM', ts: nextTs(), text, outcomeSink: sink, ...extra }, say);
     return sink;
   };
-  return { h, posts, notices, logs, say, dm };
+  return { h, posts, notices, logs, updates, reacts, say, dm };
 }
 
 const allText = (posts) => posts.map((p) => [p.text ?? '', JSON.stringify(p.blocks ?? [])].join(' ')).join('\n');
@@ -265,10 +272,21 @@ async function scenario(o) {
   if (o.codexBlocked !== false) blockCodex();
   o.before?.();
   const t = makeHandler(o);
+  // `watch` — 봇처럼 막힘 변화를 듣게 한다(`init`) · 차례 앞의 안내는 `notices0` 로 떼어 둔다
+  if (o.watch) {
+    t.h.engineNotice.init();
+    await new Promise((r) => setImmediate(r));
+  }
+  const notices0 = t.notices.length;
   const a0 = agyCalls().length;
   const c0 = fakeCodex.calls().length;
   const sink = await t.dm(o.text ?? '보고서 초안 시작했어', o.event ?? {});
-  return { ...t, sink, agy: agyCalls().slice(a0), codex: fakeCodex.calls().slice(c0) };
+  if (o.watch) {
+    // 상태 줄 · 반응 줄(`queueSlack`)이 다 나간 뒤에 듣기를 끊는다 — 봇 전체가 쓰는 엔진 상태 하나를 다음 장면과 나눠 쓴다.
+    await new Promise((r) => setTimeout(r, 30));
+    t.h.engineNotice.stop();
+  }
+  return { ...t, sink, agy: agyCalls().slice(a0), codex: fakeCodex.calls().slice(c0), turnNotices: t.notices.slice(notices0) };
 }
 
 const PLAN_MAIN = plan({
@@ -528,6 +546,68 @@ try {
     eq('모아 둠 — 실패 표시 limit · 한도 안내', [bridge.failed.map((f) => f[1]), allText(s.posts).includes('⏳')], [['limit'], true]);
     eq('명령 · 답 · 표시 줄 없음', [writes().length, markers(s.posts).length], [0, 0]);
     eq('결과는 막힘', s.sink.outcome, 'limited');
+  }
+
+  // ================================================================ ⑨-1 한 차례에 안내 하나 · 다 막히면 ⏸ 하나(2026-10-16 · 사용자 결정)
+  //   ① 한 차례가 GPT · Gemini 를 거쳐 Sonnet 까지 내려가도 🔁 는 실제로 답한 엔진 한 줄(사이 칸 Gemini 줄 없음)
+  //   ② 끝까지 다 막혀 모아 두면 「❌ 오류 발생」 · ⏳ 한도 안내(「취소」 버튼) · ⏸ 셋이 아니라 상태 줄 「⏸ 모아 둠」 · ✋ · ⏸ 하나
+  //   ③ 켜는 문(`ENGINE_NOTICE`)이 꺼져 있으면 예전 그대로(❌ · ⏳ · 「취소」) · ⏸ 가 안 나가는 보류(칸 실패)도 ⏳ 그대로
+  {
+    const cancelBtn = (posts) => posts.some((p) => JSON.stringify(p.blocks ?? []).includes('cancel_retry'));
+    const SONNET_OK = { 'sonnet-thinking': plan({ reply: '확인했습니다.', actions: [] }) };
+    // ① GPT 가 이 차례에 막히고 Gemini 도 막혀 Sonnet 이 답함 — 차례 앞에는 「→ GPT」가 이미 나가 있다
+    let s = await scenario({ watch: true, codexBlocked: false, codex: 'usage-event', modes: { 'flash-high': 'quota' }, replies: SONNET_OK });
+    eq('① 사다리 — GPT · Gemini · Sonnet', [s.codex.length, s.agy.map((c) => c.model), s.sink.engine], [1, ['flash-high', 'sonnet-thinking'], 'agy-claude']);
+    eq(`① 차례 앞 — GPT 로 이어 감 한 줄 — ${s.notices[0]}`, [s.notices.length - s.turnNotices.length, (s.notices[0] ?? '').includes('GPT')], [1, true]);
+    eq('① 차례 안 — 안내 한 줄(사이 칸 Gemini 줄 없음)', s.turnNotices.length, 1);
+    ok(`① 그 한 줄은 실제로 답한 엔진 — ${s.turnNotices[0]}`,
+      /^🔁 Claude·GPT·Gemini 소진 — agy 의 Claude T Sonnet \(High\)로 이어 갑니다/.test(s.turnNotices[0] ?? ''));
+
+    // ② 끝까지 다 막힘 — 켜짐
+    s = await scenario({ watch: true, modes: { 'flash-high': 'quota', 'sonnet-thinking': 'quota' } });
+    eq('② 켜짐 — 두 칸 다 부르고 모아 둠 · 실패 표시 limit · 결과는 막힘', [s.agy.length, bridge.failed.map((f) => f[1]), s.sink.outcome],
+      [2, ['limit'], 'limited']);
+    eq('② 켜짐 — 차례 안의 안내는 ⏸ 하나', s.turnNotices.map((n) => n.slice(0, 10)), ['⏸ 모든 엔진 소진 —'.slice(0, 10)]);
+    ok('② 켜짐 — ⏳ 한도 안내 없음', !allText(s.posts).includes('⏳'));
+    ok('② 켜짐 — 「취소」 버튼 없음', !cancelBtn(s.posts));
+    eq('② 켜짐 — 상태 줄 끝은 「⏸ 모아 둠」(지우지 않음)', s.updates.at(-1), '⏸ *모아 둠*');
+    ok(`② 켜짐 — 반응은 ✋ · ❌ 없음 — ${s.reacts.join(' ')}`, s.reacts.includes('=✋') && !s.reacts.includes('=❌'));
+    eq('② 켜짐 — 장부 끝은 Sonnet 못 함', ledgerRows().map((r) => r.engine).at(-1), 'agy-claude');
+    // ② 끝까지 다 막힘 — 꺼짐: 예전 그대로
+    s = await scenario({ watch: true, notice: false, modes: { 'flash-high': 'quota', 'sonnet-thinking': 'quota' } });
+    eq('② 꺼짐 — 실패 표시 · 결과는 같음', [bridge.failed.map((f) => f[1]), s.sink.outcome], [['limit'], 'limited']);
+    ok('② 꺼짐 — ⏳ 한도 안내 · 「취소」 버튼', allText(s.posts).includes('⏳') && cancelBtn(s.posts));
+    eq('② 꺼짐 — 상태 줄 끝은 「❌ 오류 발생」', s.updates.at(-1), '❌ *오류 발생*');
+    ok(`② 꺼짐 — 반응 ❌ — ${s.reacts.join(' ')}`, s.reacts.includes('=❌'));
+    eq('② 꺼짐 — 안내를 안 보냄(로그만)', s.notices, []);
+
+    // ② 띄우기 전부터 다 막힘(대체 칸을 아예 안 부름) — 켜짐 · 꺼짐
+    const allBlocked = () => {
+      engineState.recordBlocked('agy-gemini', { kind: 'usage', until: nowSec() + 3600 });
+      engineState.recordBlocked('agy-claude', { kind: 'usage', until: nowSec() + 3600 });
+    };
+    s = await scenario({ watch: true, before: allBlocked });
+    eq('② 처음부터 다 막힘 · 켜짐 — 안 부르고 모아 둠', [s.agy.length, s.codex.length, bridge.failed.map((f) => f[1]), s.sink.outcome],
+      [0, 0, ['limit'], 'limited']);
+    ok('② 처음부터 다 막힘 · 켜짐 — ⏸ 는 차례 앞에 한 번(차례 안에서 안 되풀이)',
+      s.notices.filter((n) => n.startsWith('⏸')).length === 1 && s.turnNotices.length === 0);
+    ok('② 처음부터 다 막힘 · 켜짐 — ⏳ · 「취소」 없음', !allText(s.posts).includes('⏳') && !cancelBtn(s.posts));
+    eq('② 처음부터 다 막힘 · 켜짐 — 상태 줄 「⏸ 모아 둠」', s.updates.at(-1), '⏸ *모아 둠*');
+    ok('② 처음부터 다 막힘 · 켜짐 — ✋', s.reacts.includes('=✋') && !s.reacts.includes('=❌'));
+    eq('② 처음부터 다 막힘 · 켜짐 — 장부 모아 둠', ledgerRows().map((r) => [r.engine, r.outcome]), [['none', 'hold']]);
+    s = await scenario({ watch: true, notice: false, before: allBlocked });
+    ok('② 처음부터 다 막힘 · 꺼짐 — ⏳ · 「취소」 · ❌', allText(s.posts).includes('⏳') && cancelBtn(s.posts)
+      && s.updates.at(-1) === '❌ *오류 발생*' && s.reacts.includes('=❌'));
+
+    // ③ 칸이 막힌 게 아니라 실패해 모아 둠(계획 아님) — ⏸ 가 안 나가므로 켜져 있어도 ⏳ 그대로
+    s = await scenario({ watch: true, replies: { 'flash-high': '그냥 글', 'sonnet-thinking': '역시 글' } });
+    eq('③ 실패로 모아 둠 · 켜짐 — 차례 안 ⏸ 없음', s.turnNotices.filter((n) => n.startsWith('⏸')).length, 0);
+    ok('③ 실패로 모아 둠 · 켜짐 — ⏳ · 「취소」 · ❌ 그대로', allText(s.posts).includes('⏳') && cancelBtn(s.posts)
+      && s.updates.at(-1) === '❌ *오류 발생*');
+    // ✋ 는 반응 표에 이름(raised_hand)이 있고 끝 상태 묶음에 들어 있어야 진행 중 반응(🤔 등)을 걷고 붙는다
+    const sh = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
+    ok('✋ 반응 이름 · 끝 상태 묶음', sh.includes("'✋': 'raised_hand'")
+      && sh.includes("['white_check_mark', 'x', 'stop_button', 'clipboard', 'raised_hand']"));
   }
 
   // ================================================================ ⑩ 첨부 · 켜는 문 · 개인 글 → agy 안 부름
@@ -891,6 +971,6 @@ if (fails.length) {
   console.log('통과 — agy 칸 (사다리 Gemini → agy Sonnet · 첨부 · Claude·GPT 몫 · 개인 글은 안 넘김 · 막힘만 건너뜀(횟수 상한 없음) · 대응표 모델 · luna 깊이 한 단계 위 · '
     + '계획 너그럽게 읽기 · 쿼터는 끝 줄로 · 허용 목록 여덟 · 셸 없이 인자 배열 · 캡처 환경 · 앞이 실패하면 멈춤 · '
     + '실행한 것 · 실행하지 않은 명령 · 표시 이름은 표에서 · needs_full 은 모아 둠(partial) · 조용히 · GPT 가 한 것을 넘김 · '
-    + '-stop · 드레인은 어느 칸이든 · 남긴 건은 시도 안 셈 · 예약 일 넷 · 판 번호 없음 · 일부 실패는 「됨」 아님 · 명령마다 기록 · 명령 사이 끊김 · 보낼 글 전체 개인 글 검사 · 안내 GPT 이름은 DM 방 모델)');
+    + '-stop · 드레인은 어느 칸이든 · 남긴 건은 시도 안 셈 · 예약 일 넷 · 판 번호 없음 · 일부 실패는 「됨」 아님 · 명령마다 기록 · 명령 사이 끊김 · 보낼 글 전체 개인 글 검사 · 안내 GPT 이름은 DM 방 모델 · 한 차례에 안내 하나 · 다 막히면 「⏸ 모아 둠」)');
 }
 process.exit(process.exitCode ?? 0);

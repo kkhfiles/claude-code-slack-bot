@@ -182,6 +182,8 @@ interface FallbackResult {
   steps: TurnStep[]; writeRan: boolean; markDone?: Promise<void>; next?: LadderPick;
   /** 넘길 글에 개인 글 조각이 있어 모아 둠 — 막힘이 아니라 「못 함」으로 끝낸다(드레인이 뒤의 건을 계속 본다). */
   privateHold?: boolean;
+  /** 다 막혀 모아 두었고 ⏸ 엔진 안내가 그것을 말한다 — ⏳ 안내를 안 올렸다(`holdToldByNotice`). */
+  quietHold?: boolean;
 }
 
 /** Claude 를 건너뛴 차례(DM 폴백 · 엔진 상태가 막혔다고 함)의 빈 흐름 — 스트림 고리가 그냥 지나간다. */
@@ -1677,6 +1679,14 @@ export class SlackHandler {
       needsFull: !!event.needsFull, isPrivate: isPrivateTurn(), cwdIsWorkAssistant: this.isWorkAssistantDir(workingDirectory),
       blocked: await this.ladderBlocked(), ...o,
     });
+    /**
+     * 이 보류를 ⏸ 엔진 안내가 대신 말했나(2026-10-16) — 그러면 ⏳ 한도 안내 대신 상태 줄 「⏸ 모아 둠」과 ✋ 만 남긴다
+     * (`holdToldByNotice`). 실패 표시 · 장부는 그대로다.
+     */
+    let heldQuiet = false;
+    // **넘길 수 있는 차례는 끝날 때까지 엔진 안내를 미룬다**(2026-10-16) — 한 차례가 사다리를 여러 칸 내려가도 실제로
+    // 답한 엔진 한 줄(다 막혔으면 ⏸ 한 줄)만 나가게. 아래 `finally` 가 놓고, 놓을 때 안내가 지금 모양을 한 번 본다.
+    const releaseNotice = fbBase ? this.engineNotice.hold() : null;
 
     try {
       this.logger.info('Spawning Claude CLI process', {
@@ -2084,6 +2094,7 @@ export class SlackHandler {
                   // 개인 글이라 모아 둔 것은 막힘이 아니다 — 드레인이 이 건에서 멈추지 않고 뒤의 건을 본다.
                   if (!fb.privateHold) turnBlock = claudeBlock;
                   markDone = fb.markDone ?? null;
+                  if (fb.quietHold) heldQuiet = true;
                 }
                 // **사람이 끊은 다시 돌리기는 버린다** — 옛 실패 표시가 남으면 다음 드레인이 또 돌리는데, 끊기 전에
                 // 대체 칸이 돌린 명령은 「이미 한 것」에 없어 같은 쓰기가 두 번 들어간다. 끊은 것은 사람이 고른 것이다.
@@ -2104,9 +2115,12 @@ export class SlackHandler {
           cliError = true;
           appendLedger({ channel, engine: 'none', model: '', captureId, outcome: 'hold' });
         }
-        // 맡는 엔진이 바뀌었으면 안내 한 줄(켜는 문 `ENGINE_NOTICE` · 막힘이 바뀔 때도 저절로 돈다).
-        void this.engineNotice.check();
+        // 맡는 엔진이 바뀌었으면 안내 한 줄 — 이 차례가 끝나 `releaseNotice` 가 놓을 때 한 번 본다(켜는 문 `ENGINE_NOTICE`).
       }
+
+      // **다 막혀 모아 두는 차례**(아래 예전 한도 길) — ⏸ 안내가 말하면 ⏳ 대신 상태 줄 「⏸ 모아 둠」과 ✋ 만.
+      const limitHold = !fallbackDone && !claudeStopped && !!(rateLimitInfo || rateLimitMessageText || limitSeen || claudeSkipped);
+      if (limitHold && this.holdToldByNotice(channel)) heldQuiet = true;
 
       // Update session activity timestamp and flush to disk
       // Claude 를 건너뛰었거나 다른 엔진이 끝을 맡은 차례는 안 고친다 — Claude 세션이 못 본 이 차례의 글(대체
@@ -2118,8 +2132,10 @@ export class SlackHandler {
       }
 
       // Completed
-      const doneEmoji = cliError ? '❌' : isPlanMode ? '📋' : '✅';
-      const doneLabel = cliError ? t('status.errorOccurred', locale) : isPlanMode ? t('status.planReady', locale) : t('status.taskCompleted', locale);
+      // 다 막혀 모아 둔 차례(`heldQuiet`)는 오류가 아니다 — 「❌ 오류 발생」이면 사람이 같은 말을 다시 보낸다.
+      const doneEmoji = heldQuiet ? '⏸' : cliError ? '❌' : isPlanMode ? '📋' : '✅';
+      const doneLabel = heldQuiet ? t('status.held', locale)
+        : cliError ? t('status.errorOccurred', locale) : isPlanMode ? t('status.planReady', locale) : t('status.taskCompleted', locale);
       // 완료 줄의 도구 목록도 DM 에서는 뗀다 — "작업 완료 (Read, Bash ×2)" 의
       // 괄호는 대화창에서 읽는 사람이 쓸 데가 없다. 완료 표시 자체는 남긴다.
       const toolSummary = (!isDM && toolUsageCounts.size > 0)
@@ -2144,11 +2160,13 @@ export class SlackHandler {
         //
         // ⚠️ **스트림 안의 고치기와 같은 줄에 세운다** — 따로 두면 이 「지우기」가
         // 아직 안 나간 「고치기」를 앞질러, 지운 메시지를 고치려 드는 순서가 나온다.
+        // 「⏸ 모아 둠」도 남긴다 — ❌ 대신 그 차례가 어떻게 끝났는지를 말하는 줄이다.
         this.queueStatus(sessionKey, channel, statusMessageTs,
           `${doneEmoji} ${doneLabel}${toolSummary}`,
-          (pushed || (isDM && !isPlanMode)) && !cliError);
+          (pushed || (isDM && !isPlanMode)) && !cliError && !heldQuiet);
       }
-      await this.updateMessageReaction(sessionKey, doneEmoji);
+      // 모아 둔 차례의 반응은 ✋(받았고 회복 때 처리) — ❌ 는 실패로 읽혀 다시 보내게 만든다.
+      await this.updateMessageReaction(sessionKey, heldQuiet ? '✋' : doneEmoji);
       await this.removeAnchorReaction(sessionKey);
       tmark('완료 표시');
       if (tailT0) this.logger.info('뒤처리', { ms: tail });
@@ -2204,7 +2222,7 @@ export class SlackHandler {
       // Handle rate limit (from rate_limit_event or error text)
       // DM 폴백이 끝을 맡았으면 건너뛴다 · 다 막혔으면(띄우기 전에 건너뜀 · 시각 없는 거절) 여기서 모아 둔다.
       // 거절을 봤으면 넘기지 않는 차례도 여기로 온다 — 위에서 한도 글을 안 올렸으니 안내가 대신 말한다.
-      if (!fallbackDone && !claudeStopped && (rateLimitInfo || rateLimitMessageText || limitSeen || claudeSkipped)) {
+      if (limitHold) {
         // **캡처에 남긴다 — 이유를 안 가리는 그 자국이다.** 아래 한도 큐는
         // 이유별 장치라 실제로 어긋났다(08/24 의 서버 과부하를 5시간짜리 한도로
         // 잡아 이레를 들고 있었다). 정본은 캡처 큐 한 곳으로 간다.
@@ -2215,7 +2233,8 @@ export class SlackHandler {
         const block = currentClaudeBlock(rateLimitInfo?.resetsAt, rateLimitMessageText);
         turnBlock = block;
 
-        await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, block, locale, say, ts, captureId);
+        // ⏸ 안내가 말하는 차례면 ⏳ 안내 · 「취소」 버튼을 안 올린다(2026-10-16 · 사용자 결정) — 셋이 한꺼번에 나갔다.
+        if (!heldQuiet) await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, block, locale, say, ts, captureId);
       }
 
       // Clean up temp files
@@ -2225,12 +2244,6 @@ export class SlackHandler {
     } catch (error: any) {
       this.logger.error('Error handling message', error);
 
-      if (statusMessageTs) {
-        this.queueStatus(sessionKey, channel, statusMessageTs, `❌ ${t('status.errorOccurred', locale)}`);
-      }
-      await this.updateMessageReaction(sessionKey, '❌');
-      await this.removeAnchorReaction(sessionKey);
-
       // Rate limit detection from error
       // 스트림에서 본 한도 글이면 Claude 의 것이 확실하다. 던진 오류는 슬랙 같은 남의 실패일 수 있어
       // Claude 한도·과부하 글로 읽힐 때만 막힘으로 적는다(`thrownClaudeBlock`).
@@ -2239,6 +2252,15 @@ export class SlackHandler {
         : this.isRateLimitError(error) ? thrownClaudeBlock(error) : null;
       turnBlock = block;
       turnThrew = true;
+      // 막혀 터졌고 ⏸ 안내가 말하는 차례면 ❌ · ⏳ 대신 「⏸ 모아 둠」과 ✋(위 완료 표시와 같은 규칙).
+      const quiet = !!block && this.holdToldByNotice(channel);
+
+      if (statusMessageTs) {
+        this.queueStatus(sessionKey, channel, statusMessageTs,
+          quiet ? `⏸ ${t('status.held', locale)}` : `❌ ${t('status.errorOccurred', locale)}`);
+      }
+      await this.updateMessageReaction(sessionKey, quiet ? '✋' : '❌');
+      await this.removeAnchorReaction(sessionKey);
 
       // **터진 것도 같은 자국을 남긴다.** 한도인지 아닌지는 재시도 *시점*만
       // 가르고, 「처리 못 했다」는 사실은 둘이 같다. 단 사람이 끊어 터진 다시 돌리기는 버린다(위 `claudeStopped`).
@@ -2251,7 +2273,7 @@ export class SlackHandler {
       }
 
       if (block) {
-        await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, block, locale, say, ts, captureId);
+        if (!quiet) await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, block, locale, say, ts, captureId);
       } else {
         await say({ text: t('error.generic', locale, { message: error.message || t('error.somethingWrong', locale) }), thread_ts: thread_ts || ts });
       }
@@ -2260,6 +2282,8 @@ export class SlackHandler {
         await this.fileHandler.cleanupTempFiles(processedFiles);
       }
     } finally {
+      // 미룬 엔진 안내를 놓는다 — 터졌어도 여기서 놓고, 놓을 때 지금 모양을 한 줄로 낸다(사이 칸은 빠진다).
+      releaseNotice?.();
       this.activeProcesses.delete(sessionKey);
       { const m = readInflight(); delete m[sessionKey]; if (waitRec) delete m[waitRec]; writeInflight(m); }
       // **차례가 끝나면 캡처 가리킴을 비운다.** 안 비우면 다음 쓰기가 앞 차례의
@@ -2476,6 +2500,25 @@ export class SlackHandler {
         { type: 'actions', elements: buttons },
       ],
     });
+  }
+
+  /**
+   * 이 보류를 ⏸ 엔진 안내가 대신 말하나(2026-10-16 · 사용자 결정) — 그러면 ⏳ 한도 안내 · 「취소」 버튼을 안 올린다.
+   * 사다리가 다 막힌 차례에 상태 줄 「❌ 오류 발생」 · ⏳ 안내 · ⏸ 안내 셋이 한꺼번에 나갔다. 「취소」는 2026-02 부터
+   * 한 번도 안 눌렸다(손잡이 `cancel_retry` 는 그대로 둔다 — 예전 안내에 달린 버튼이 남아 있다).
+   *
+   * 셋이 다 맞을 때만:
+   * - **켜는 문 `ENGINE_NOTICE` 가 켜짐** — 꺼져 있으면 ⏸ 가 로그로만 가므로 예전 그대로 ⏳
+   * - **비서 DM** — ⏸ 는 비서 DM 에만 간다. 채널 · 다른 DM 에서 모아 둔 것은 그 자리에 ⏳ 가 있어야 안다
+   * - **엔진 상태로 사다리가 다 막힘**(`rungNow() === 'none'`) — ⏸ 가 이미 나갔거나 이 차례가 끝날 때 나간다. 칸이 막힌 게
+   *   아니라 실패했거나(계획 아님 · 업무 목록 못 읽음) 첨부 때문에 agy 칸을 건너뛰어 모아 둔 것은 ⏸ 가 안 나가므로 ⏳
+   *
+   * 개인 글이라 모아 둔 것(`holdPrivateFallback`)은 이 함수를 안 거친다 — 막힘 때문이 아니라 밖으로 못 보내서 모은 것이라
+   * ⏸ 「모든 엔진 소진」이 그 까닭이 아니다.
+   */
+  private holdToldByNotice(channel: string): boolean {
+    const dm = config.assistant.dmChannel;
+    return !!dm && channel === dm && this.engineNotice.enabled && this.engineNotice.rungNow() === 'none';
   }
 
   // --- 한도에 막혀 밀린 요청 ---
@@ -2910,8 +2953,9 @@ export class SlackHandler {
       this.logger.warn(`DM 폴백 — GPT 도 못 했습니다(${r.kind}) · 모아 둡니다`, { detail: r.detail });
       const markDone = this.markTurnFailed(captureId, 'limit', { steps: [...a.claudeSteps, ...steps] },
         a.sessionId, event, a.files);
-      await this.handleRateLimitUI(channel, a.thread_ts || a.ts, a.finalPrompt, a.block, a.locale, a.say, a.ts, captureId);
-      return { result: 'failed', steps, writeRan: r.writeRan, markDone };
+      const quietHold = this.holdToldByNotice(channel);
+      if (!quietHold) await this.handleRateLimitUI(channel, a.thread_ts || a.ts, a.finalPrompt, a.block, a.locale, a.say, a.ts, captureId);
+      return { result: 'failed', steps, writeRan: r.writeRan, markDone, ...(quietHold ? { quietHold } : {}) };
     } finally {
       if (this.activeProcesses.get(sessionKey) === handle) this.activeProcesses.delete(sessionKey);
     }
@@ -2948,8 +2992,9 @@ export class SlackHandler {
       }
       this.logger.warn(`DM 폴백 — ${rung} 못 함(${kind}) · 모아 둡니다`, { detail });
       const markDone = this.markTurnFailed(captureId, 'limit', { steps: a.claudeSteps }, a.sessionId, event, a.files);
-      await this.handleRateLimitUI(channel, a.thread_ts || a.ts, a.finalPrompt, a.block, a.locale, a.say, a.ts, captureId);
-      return { result: 'failed', steps: [], writeRan: false, markDone };
+      const quietHold = this.holdToldByNotice(channel);
+      if (!quietHold) await this.handleRateLimitUI(channel, a.thread_ts || a.ts, a.finalPrompt, a.block, a.locale, a.say, a.ts, captureId);
+      return { result: 'failed', steps: [], writeRan: false, markDone, ...(quietHold ? { quietHold } : {}) };
     };
     try {
       const root = workAssistantRoot();
@@ -3194,6 +3239,8 @@ export class SlackHandler {
     '🤖': 'robot_face',
     '🔌': 'electric_plug',
     '✍️': 'writing_hand',
+    // 다 막혀 모아 둔 차례(⏸ 안내가 말할 때) — 받았고 회복 때 처리한다는 표시
+    '✋': 'raised_hand',
   };
 
   private getToolReactionEmoji(toolName: string): string {
@@ -3209,7 +3256,7 @@ export class SlackHandler {
   // Conflicting reaction groups: within each group, only one should be shown at a time
   private readonly conflictingReactionGroups: string[][] = [
     // Terminal states conflict with each other and with in-progress states
-    ['white_check_mark', 'x', 'stop_button', 'clipboard'],
+    ['white_check_mark', 'x', 'stop_button', 'clipboard', 'raised_hand'],
     // In-progress states conflict with each other and with terminal states
     ['thinking_face', 'memo', 'mag', 'pencil2', 'computer', 'globe_with_meridians', 'robot_face', 'electric_plug', 'gear', 'writing_hand', 'arrows_counterclockwise'],
   ];

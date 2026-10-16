@@ -134,6 +134,7 @@ npm test        # 빌드 + check:* 전부
 - CLI 프로세스 에러는 `try/catch`로 감싸고, Slack 메시지로 사용자에게 전달
 - Rate limit 감지: CLI `rate_limit_event` 이벤트 + `isRateLimitText()` 공유 유틸 (`src/rate-limit-utils.ts`)
   - 사용자 세션: 풀리는 예상 시각 안내 + 「취소」 버튼 하나 · 원문은 캡처 큐가 들고 회복 시각(+1분)에 `drainStuck()` 이 다시 돌림 · 「취소」는 그 캡처를 버림(`dropCapture`) · 시각은 엔진 상태가 정함(아래 「엔진 상태」)
+  - ⏸ 엔진 안내가 그 보류를 말하면(`ENGINE_NOTICE=on`, 비서 DM, 사다리 전체가 막힘) 이 안내와 버튼을 안 올리고 상태 줄 「⏸ 모아 둠」과 ✋ 만 남김(`holdToldByNotice` · 2026-10-16). 실패 표시와 장부는 그대로
   - 스케줄 세션: rate limit 감지 시 안내 메시지 전송 (브리핑), 분석 전체 중단
   - 캘린더 판단: rate limit 시 다음 정시까지 AI 판단 일시 중지 (`pauseAiJudgment()`)
 - 읽기 전용 도구 (Grep, Read, Glob 등)는 상태 메시지에서만 표시 (`STATUS_ONLY_TOOLS`)
@@ -151,7 +152,7 @@ Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(
 - **적는 곳은 전송 탭 하나**(`src/engine-tap.ts`) — `SdkProcess` · `CliProcess` 가 이벤트를 내보내는 자리에서 `rate_limit_event` 와 `result` 를 본다. 대화 · 예약 세션 · 분석이 다 지나므로 부르는 쪽에서 따로 적지 않는다. 한 흐름에 막힘은 한 번(과부하 한 번이 결과 둘로 온다)
 - **회복 타이머는 하나**(`src/engine-recovery.ts`) — 가장 이른 회복 시각 + 1분에 `drainStuck('한도 회복')` + 예약 쪽 `onEngineRecover` · 막힘이 바뀔 때마다 다시 걸고 **기동 드레인 뒤에 파일에서 다시 건다**(`startEngineWatch`)
 - **한도 안내는 막힘마다 한 번** — 키 `claude:<갈래>:<until>` 을 엔진 상태에 적어 재시작해도 남음 · 두 번째부터는 ✋ 만
-- **엔진 안내(`src/engine-notice.ts`)는 기본 꺼짐** — `ENGINE_NOTICE=on` 일 때만 비서 DM 에 한 줄, 꺼져 있으면 로그만. 모델 이름은 llm-playbook `models.json`(`LLM_PLAYBOOK_MODELS`)에서 읽는다 — 판 번호를 코드에 적지 않는다
+- **엔진 안내(`src/engine-notice.ts`)는 기본 꺼짐** — `ENGINE_NOTICE=on` 일 때만 비서 DM 에 한 줄, 꺼져 있으면 로그만. 모델 이름은 llm-playbook `models.json`(`LLM_PLAYBOOK_MODELS`)에서 읽는다 — 판 번호를 코드에 적지 않는다. 넘길 수 있는 DM 차례 안에서는 미뤘다가(`hold`) 끝날 때 한 줄만 낸다 — 한 차례가 여러 칸을 내려가도 실제로 답한 엔진 하나(2026-10-16)
 - **캡처 덧붙이기도 잠근다** — 파이썬(`tasks.py`)과 같은 `<inbox>.lock` · 30초 지나면 묵은 것 · 2초 안에 못 잡으면 경고 남기고 그대로 붙임(받은 말을 잃지 않는 것이 먼저)
 - 검사 `npm run check:engine` · `npm run check:inboxlock`
 

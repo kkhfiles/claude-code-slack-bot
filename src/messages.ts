@@ -10,6 +10,8 @@ const messages: Record<string, Record<Locale, string>> = {
   'status.taskCompleted': { en: '*Task completed*', ko: '*작업 완료*' },
   'status.planReady': { en: '*Plan ready*', ko: '*계획 완료*' },
   'status.errorOccurred': { en: '*Error occurred*', ko: '*오류 발생*' },
+  // 다 막혀 모아 둔 차례 — 회복 시각은 엔진 안내(⏸)가 말한다
+  'status.held': { en: '*Held*', ko: '*모아 둠*' },
   'status.cancelled': { en: '*Cancelled*', ko: '*취소됨*' },
 
   // --- Command responses ---

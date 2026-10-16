@@ -529,6 +529,51 @@ try {
       eq('보낸 것 — GPT 로 넘김 · 회복 하나', p4.length, 2);
       nowMs = T0;
     }
+
+    // 한 차례가 사다리를 여러 칸 내려가면 실제로 답한 엔진 한 줄만(2026-10-16 · 사용자 결정) — `hold` 동안은 미루고
+    // 차례도 안 적는다 · 놓을 때 한 번 · 놓지 못해도 상한에 스스로 놓는다 · 차례 밖의 변화는 바로 나간다.
+    {
+      const s5 = new EngineState({ file: path.join(TMP, 'notice-hold.json'), legacyFile: path.join(TMP, 'none-h.json'), now: clock });
+      const p5 = [];
+      const n5 = new EngineNotice({ store: s5, ladder: () => ['claude', 'codex', 'agy-gemini', 'agy-claude'], enabled: () => true,
+        labels: () => ({ codex: 'gpt-h', agyClaude: 'Sonnet H', gemini: 'Flash H' }), post: async (t) => { p5.push(t); },
+        log: { info() {}, warn() {} } });
+      n5.init();
+      s5.recordBlocked('claude', { kind: 'usage', until: nowSec() + 3600 });
+      await new Promise((r) => setImmediate(r));
+      eq('차례 밖 — 막힘은 바로 한 줄', p5.length, 1);
+      const release = n5.hold();
+      s5.recordBlocked('codex', { kind: 'usage', until: nowSec() + 3600 });
+      s5.recordBlocked('agy-gemini', { kind: 'usage', until: nowSec() + 3600 });
+      await new Promise((r) => setImmediate(r));
+      eq('미루는 동안 — 안 보냄 · 차례도 안 적음', [p5.length, s5.ladderRung()], [1, 'codex']);
+      eq('미루는 동안 — 지금 차례는 agy Claude', n5.rungNow(), 'agy-claude');
+      const second = n5.hold();
+      release();
+      await new Promise((r) => setImmediate(r));
+      eq('다른 차례가 아직 내려가는 중이면 계속 미룸', p5.length, 1);
+      second();
+      second();
+      await new Promise((r) => setImmediate(r));
+      eq('마지막을 놓으면 한 줄 — 사이 칸(Gemini) 없이 실제로 맡는 엔진', p5.slice(1),
+        ['🔁 Claude·GPT·Gemini 소진 — agy 의 Sonnet H로 이어 갑니다 · 업무 조회·등록·수정까지 · 지시문이 달라 답이 다를 수 있습니다']);
+      eq('놓은 뒤 차례를 적음', s5.ladderRung(), 'agy-claude');
+      // 끝까지 다 막혀 모아 둠 — ⏸ 한 줄 · 놓지 못하고 넘어진 차례도 상한에 스스로 놓는다
+      const leaked = n5.hold(30);
+      s5.recordBlocked('agy-claude', { kind: 'usage', until: nowSec() + 3600 });
+      await new Promise((r) => setImmediate(r));
+      eq('미루는 동안 — ⏸ 도 안 보냄 · 지금 차례는 none', [p5.length, n5.rungNow()], [2, 'none']);
+      await new Promise((r) => setTimeout(r, 80));
+      ok(`놓지 못해도 상한에 ⏸ 한 줄 — ${p5[2]}`, p5.length === 3 && (p5[2] ?? '').startsWith('⏸ 모든 엔진 소진'));
+      leaked();
+      await new Promise((r) => setImmediate(r));
+      eq('상한에 풀린 것을 늦게 놓아도 다시 안 보냄', p5.length, 3);
+      // 차례 밖 — 회복은 바로
+      s5.recordOk('claude');
+      await new Promise((r) => setImmediate(r));
+      eq('차례 밖 — 회복은 바로 한 줄', p5.slice(3), ['✅ Claude 회복 — 돌아왔습니다']);
+      n5.stop();
+    }
   }
 
   // ---------- 공개 저장소 — 상태 파일은 안 올린다 ----------
@@ -549,5 +594,5 @@ if (fails.length) {
 } else {
   console.log('통과 — 엔진 상태 (사용량 시각 · 앞당기지 않음 · 됐으면 지움 · 과부하 10→60분 · 60분 다시 봄'
     + ' · 가장 이른 회복 · 옛 파일 한 번 옮김 · 5시간 창 · 실제 문구 판정 · 탭 배선·동작 · 과부하에 5시간 없음'
-    + ' · 안내 한 번 · 기동 때 다시 걺 · 안내 문구는 표에서 · 꺼짐은 로그만 · 회복 안내는 된 뒤에)');
+    + ' · 안내 한 번 · 기동 때 다시 걺 · 안내 문구는 표에서 · 꺼짐은 로그만 · 회복 안내는 된 뒤에 · 차례 안에서는 미뤘다 한 줄)');
 }
