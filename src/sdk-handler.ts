@@ -516,7 +516,10 @@ export class SdkHandler {
     }
 
     // MCP
-    if (!opts.skipMcp) {
+    if (opts.skipMcp) {
+      // Omitting mcpServers does not exclude user/project MCP configurations.
+      sdkOptions.strictMcpConfig = true;
+    } else {
       const mcpServers = this.mcpManager.getServerConfiguration();
       if (mcpServers && Object.keys(mcpServers).length > 0) {
         sdkOptions.mcpServers = mcpServers;

@@ -10,6 +10,7 @@ const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { SlackHandler } = require(path.join(ROOT, 'dist', 'slack-handler.js'));
 const { CliHandler } = require(path.join(ROOT, 'dist', 'cli-handler.js'));
+const { SdkHandler } = require(path.join(ROOT, 'dist', 'sdk-handler.js'));
 const calls = [];
 const warm = [];
 const handler = Object.create(SlackHandler.prototype);
@@ -74,4 +75,17 @@ for (let index = 0; index < calls.length; index++) {
 assert.equal(CliHandler.prototype.runQuery, undefined);
 const source = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf8');
 assert.equal(source.includes('this.cliHandler.runQuery('), false);
+
+// skipMcp must exclude configurations discovered outside the explicit server list.
+const servers = { fixture: { type: 'http', url: 'http://127.0.0.1:9/mcp' } };
+const runtime = new SdkHandler({
+  getServerConfiguration() { return servers; },
+  getDefaultAllowedTools() { return []; },
+});
+const excluded = runtime.buildOptions('test', { skipMcp: true, tools: [], settingSources: [] }).sdkOptions;
+assert.equal(excluded.strictMcpConfig, true);
+assert.equal(excluded.mcpServers, undefined);
+const included = runtime.buildOptions('test', { skipMcp: false }).sdkOptions;
+assert.deepEqual(included.mcpServers, servers);
+assert.notEqual(included.strictMcpConfig, true);
 console.log('SDK routing and context forwarding passed; no model requests made.');
