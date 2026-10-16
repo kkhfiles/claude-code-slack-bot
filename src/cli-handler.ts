@@ -1,11 +1,9 @@
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess } from 'child_process';
 import { ConversationSession } from './types';
 import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
 import { errorCollector } from './error-collector';
-import { withoutApiKey } from './child-env';
 import { ClaudeTap } from './engine-tap';
-import { claudeDrill, claudeDrillEvents, drillChild, limitTail, relayChild, type DrillScope } from './engine-drill';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -239,19 +237,17 @@ interface PersistedSession {
   savedAt: string;
 }
 
-// --- CliHandler: manages sessions and spawns CLI processes ---
+// --- CliHandler: persisted conversation sessions and shared event types ---
 
 export class CliHandler {
   private sessions: Map<string, ConversationSession> = new Map();
   private logger = new Logger('CliHandler');
-  private mcpManager: McpManager;
 
   private readonly SESSION_STATE_FILE = path.join(__dirname, '..', '.session-state.json');
   private readonly SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(mcpManager: McpManager) {
-    this.mcpManager = mcpManager;
+  constructor(_mcpManager: McpManager) {
     this.loadFromDisk();
   }
 
@@ -328,149 +324,6 @@ export class CliHandler {
     }
   }
 
-  // --- Core: spawn CLI process ---
-
-  runQuery(prompt: string, opts: {
-    workingDirectory?: string;
-    session?: ConversationSession;
-    resumeSessionId?: string;
-    continueLastSession?: boolean;
-    model?: string;
-    /**
-     * 사고 깊이. **SDK 경로와 짝을 맞춰 둔다** — 예전에는 여기 칸이 없어
-     * `SLACKBOT_FORCE_CLI=1` 로 내려가는 순간 종별 등급이 통째로 사라졌고,
-     * 에러도 로그도 없이 전부 기본값으로 돌았다(2026-09-08).
-     */
-    effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-
-    permissionMode?: 'default' | 'safe' | 'trust' | 'plan' | 'auto';
-    allowedTools?: string[];
-    appendSystemPrompt?: string;
-    systemPrompt?: string;
-    env?: Record<string, string>;
-    maxBudgetUsd?: number;
-    skipMcp?: boolean;
-    noSessionPersistence?: boolean;
-    tools?: string[];
-    /** 작업 폴더 밖에 읽고 쓸 폴더 — SDK 경로의 `additionalDirectories` 와 짝. */
-    additionalDirectories?: string[];
-    /** 엔진 연습을 받는 차례인가 — SDK 경로와 같은 칸. */
-    drillScope?: DrillScope;
-  }): CliProcess {
-    // 입력도 stream-json — 메시지에 `client_composed` 를 붙여 `@경로` 펼침·슬래시 명령을 끄려고(아래 stdin).
-    const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
-
-    // Permission mode
-    if (opts.permissionMode === 'trust') {
-      args.push('--dangerously-skip-permissions');
-    } else if (opts.permissionMode === 'plan') {
-      args.push('--permission-mode', 'plan');
-    } else if (opts.permissionMode === 'auto') {
-      args.push('--permission-mode', 'auto');
-    } else {
-      args.push('--permission-mode', 'default');
-    }
-
-    // Pre-approved tools (--allowedTools)
-    if (opts.allowedTools && opts.allowedTools.length > 0 && opts.permissionMode !== 'trust') {
-      args.push('--allowedTools', ...opts.allowedTools);
-    }
-
-    // Model
-    if (opts.model) args.push('--model', opts.model);
-
-    // Effort — SDK 경로의 `effort` 와 같은 값이 CLI 로도 간다.
-    if (opts.effort) args.push('--effort', opts.effort);
-
-    // Budget limit
-    if (opts.maxBudgetUsd) args.push('--max-budget-usd', String(opts.maxBudgetUsd));
-
-
-    // Session resume
-    if (opts.resumeSessionId) {
-      args.push('--resume', opts.resumeSessionId);
-    } else if (opts.continueLastSession) {
-      args.push('--continue');
-    } else if (opts.session?.sessionId) {
-      args.push('--resume', opts.session.sessionId);
-    }
-
-    // MCP config (skip for sessions that don't need external tools, e.g. assistant scheduler)
-    if (!opts.skipMcp) {
-      const mcpConfigPath = this.mcpManager.getConfigPath();
-      if (mcpConfigPath) {
-        args.push('--mcp-config', mcpConfigPath);
-      }
-    }
-
-    // System prompt: --system-prompt (replace) takes priority over --append-system-prompt (add)
-    if (opts.systemPrompt) {
-      args.push('--system-prompt', opts.systemPrompt);
-    } else if (opts.appendSystemPrompt) {
-      args.push('--append-system-prompt', opts.appendSystemPrompt);
-    }
-
-    // Tools override (--tools "" disables all tools)
-    if (opts.tools !== undefined) {
-      args.push('--tools', ...opts.tools);
-    }
-
-    // Session persistence disable (prevents .jsonl file creation)
-    if (opts.noSessionPersistence) {
-      args.push('--no-session-persistence');
-    }
-
-    if (opts.additionalDirectories?.length) {
-      args.push('--add-dir', ...opts.additionalDirectories);
-    }
-
-    // Prompt is passed via stdin (not positional arg)
-    // because --allowedTools is variadic and consumes all remaining args
-
-    // Environment — API 키는 늘 뺀다(PC 에 남은 키로 과금되지 않게 · `child-env.ts`)
-    const spawnEnv = withoutApiKey({
-      ...process.env,
-      CLAUDECODE: '', // prevent nesting
-      ...opts.env,
-    });
-
-    this.logger.info('Spawning CLI process', {
-      prompt: prompt.substring(0, 200) + (prompt.length > 200 ? '...' : ''),
-      permissionMode: opts.permissionMode,
-      resumeSessionId: opts.resumeSessionId,
-      continueLastSession: opts.continueLastSession,
-      sessionId: opts.session?.sessionId,
-      model: opts.model,
-      allowedToolsCount: opts.allowedTools?.length,
-      cwd: opts.workingDirectory,
-    });
-
-    const spawnReal = () => spawn('claude', args, {
-      cwd: opts.workingDirectory || process.cwd(),
-      env: spawnEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      shell: process.platform === 'win32', // Use shell on Windows for PATH resolution
-      // 콘솔 창이 화면에 깜빡이지 않게 한다. 이 프로세스에는 콘솔이 없어서
-      // 윈도우가 자식마다 새 콘솔을 만들어 주고, `shell: true` 는 cmd.exe 를
-      // 거치므로 특히 필요하다. 출력은 이미 파이프로 받고 있어 잃는 것이 없다.
-      windowsHide: true,
-    });
-    // 엔진 연습(`engine-drill.ts`) — 막힌 모양을 stream-json 줄로 재생한다(SDK 길과 같은 갈래).
-    const drill = claudeDrill(opts.drillScope);
-    const sid = opts.resumeSessionId ?? opts.session?.sessionId ?? '';
-    const proc = drill === 'usage' || drill === 'overload' ? drillChild(claudeDrillEvents(drill, sid))
-      : drill === 'usage-after-tool' ? relayChild(spawnReal, () => limitTail(sid))
-      : spawnReal();
-
-    // 프롬프트를 사용자 메시지 한 줄로 쓰고 닫는다. `client_composed` = SDK 의 `verbatimPrompts` 와 같은
-    // 표시 — 없으면 글 속 `@경로` 가 그 파일 내용으로 붙는다(실측 2026-09-29 · `sdk-handler.ts` 같은 칸).
-    proc.stdin!.write(JSON.stringify({
-      type: 'user', message: { role: 'user', content: prompt }, parent_tool_use_id: null, client_composed: true,
-    }) + '\n');
-    proc.stdin!.end();
-
-    return new CliProcess(proc);
-  }
 
   // --- Persistence ---
 

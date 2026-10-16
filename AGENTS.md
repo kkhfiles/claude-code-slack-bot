@@ -34,7 +34,7 @@
 
 ## Overview
 - Fork of [mpociot/claude-code-slack-bot](https://github.com/mpociot/claude-code-slack-bot)
-- Cross-platform (Windows/macOS/Linux), CLI (`claude -p`) 기반 프로세스 스폰
+- Cross-platform (Windows/macOS/Linux), Claude Agent SDK 기반 실행
 - Slack Socket Mode (공개 URL 불필요)
 - `main` 브랜치 기반, 기능 개발은 `feature/*` 브랜치
 
@@ -203,32 +203,19 @@ Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(
 - Resume 우선순위: 명시적 resumeSessionId > Slack 세션 > 새 대화
 - Slack은 backtick(`)으로 텍스트를 감쌀 수 있음 → 정규식에서 선택적 backtick 처리
 
-### Runtime Routing (CLI / SDK)
+### Claude 실행 방식
 
-`claude -p` subprocess 경로(`cli-handler.ts`)와 in-process `@anthropic-ai/claude-agent-sdk` 경로(`sdk-handler.ts`)를 호출별로 선택. 두 경로는 동일한 `CliEvent` shape을 산출하므로 호출자(`slack-handler`, `assistant-scheduler`, `calendar-poller`)는 동일 for-await 루프로 처리.
+모든 Claude 요청은 `sdk-handler.ts`의 `SdkHandler`로 실행한다. 애플리케이션에서 직접 `claude -p` 프로세스를 만들지 않는다. `cli-handler.ts`는 세션 저장·복원과 공통 이벤트 타입을 담당한다.
 
-**Scope 토글 (`shouldUseSdk(scope)`)**:
-- `SLACKBOT_SDK_ENABLED`: 콤마(또는 `+`) 구분 scope 토큰 리스트, 또는 `all`/`1`/`true`. 빈 값이면 모두 CLI.
-- `scope`는 `category` 또는 `category:detail` 형식. detail이 있으면 category prefix도 매칭. 예: `analysis` 토큰은 `analysis:kg-skill-update` scope를 통과시킴.
-- `SLACKBOT_FORCE_CLI=1`: 긴급 롤백 — 모든 SDK 경로 무시하고 CLI로 강제.
+- **호출 기준**: 전역 `~/.claude/skills/claude-cli-spawn/SKILL.md` 적용
+- **실행 전환**: 대화와 예약 작업 모두 SDK 사용. 환경 변수로 직접 CLI 실행에 복귀하는 경로를 추가하지 않음
+- **환경 변수**: `{...process.env, ...opts.env}`를 병합하고 `withoutApiKey()` 적용. 호출자가 환경을 생략해도 API 키 제외
+- **시스템 지시**: `systemPrompt` 문자열은 교체, `preset: 'claude_code'`와 `append`는 기존 지시에 추가
+- **도구**: `tools`로 가용 도구 제한, `allowedTools`로 자동 승인 목록 지정
+- **설정 출처**: 제공한 입력만 처리하는 작업은 `settingSources: []`, 프로젝트 작업은 필요한 출처 유지
+- **세션과 스트림**: 이어받기가 필요한 대화는 저장 유지. `includePartialMessages: true`로 도구 상태 표시 유지
 
-**Scope별 호출 위치**:
-| Scope | 호출 위치 | 용도 |
-|---|---|---|
-| `interactive` | `slack-handler.ts:685` | 사용자 메인 채팅 (handleMessage 경유) |
-| `briefing` | `assistant-scheduler.ts:621` | 모닝 브리핑 |
-| `calendar` | `calendar-poller.ts:601` | 캘린더 변경 AI 판단 |
-| `analysis:${type}` | `assistant-scheduler.ts:922` | 12종 분석 (타입별 detail) |
-
-**SDK 핸들러 운영 컨벤션** (2026-05-26 phase2 fix에서 정합화):
-- **env 머지**: `{...process.env, ...opts.env}`로 머지하고 `withoutApiKey()`로 API 키를 뺀 것을 **늘** 넘김(`opts.env` 가 없어도 — 안 넘기면 SDK 가 `process.env` 를 그대로 씀). SDK는 `env` 옵션을 받으면 `process.env` 디폴트를 통째로 치환하므로 PATH·HOME·TZ 같은 표준 env 손실 방지.
-- **appendSystemPrompt → preset.append**: SDK public Options에 `appendSystemPrompt` 키 없음. `systemPrompt: { type: 'preset', preset: 'claude_code', append: <text> }` 형태로 넘겨야 모델에 전달됨.
-- **`tools` vs `allowedTools` 분리**: SDK는 두 개념을 별도 옵션으로 받음 — `tools`는 가용 도구 제한 (`[]`이면 모든 built-in 비활성), `allowedTools`는 auto-approve 리스트. CLI의 한 플래그(`--tools` variadic)와 다름.
-- **`persistSession` 호출자 제어**: SDK 디폴트 `true`, `opts.noSessionPersistence: true`일 때만 `false`. CLI 디폴트(`--no-session-persistence` 미사용 시 persist)와 동등.
-- **in-process 실행**: `SdkProcess.pid`는 항상 `undefined`. `activeProcesses: Map<string, CliProcess | SdkProcess>` 타입. `process-memory-watchdog`의 PID 매칭 정리는 SDK 호출에 무관 (외부 프로세스 없음).
-- **`includePartialMessages: true`**: 인터랙티브 채팅의 실시간 tool status(`stream_event`/`content_block_start`) 보존. 다른 호출자는 미인식 이벤트를 그냥 건너뛰므로 안전.
-
-자세한 회고는 `migrations/2026-06-sdk-restore/phase{0,1,2}-{notes,retrospective}.md` 참고.
+SDK도 내부적으로 Claude Code 실행 파일을 사용한다. `SdkProcess.pid`가 `undefined`인 것을 자식 프로세스가 없다는 근거로 사용하지 않는다.
 
 ### UX
 - 쓰레드 힌트: 새 세션 첫 응답 시 기본 명령어 안내 (`-stop`, `-reset`, `-plan`, `-help`) 표시

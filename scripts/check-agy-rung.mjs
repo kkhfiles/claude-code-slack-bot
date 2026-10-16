@@ -46,7 +46,6 @@ const ENV = {
   HOME: path.join(TMP, 'home'),
   CODEX_QUOTA_PYTHON: 'python-없는-이름-2026',
   LADDER_PYTHON: 'python-없는-이름-2026',
-  SLACKBOT_SDK_ENABLED: 'all',
   SESSION_FALLBACK_CODEX_MODEL: 'gpt-test-sol',
   // 시험이 진짜 키를 안 넘기는지 본다 — 가짜 값을 넣어 두고 받은 쪽에 없어야 한다.
   ANTHROPIC_API_KEY: 'placeholder-for-test',
@@ -122,7 +121,7 @@ setEnv();   // `.env` 가 같은 이름을 들고 와도 시험 값이 이긴다
 config.workAssistant.root = WA_ROOT;
 process.env.BOARD_NARROW_CODEX_BIN = fakeCodex.bin;
 process.env.AGY_TURN_CMD = fakeAgy.cmd;
-const SWITCHES = ['DM_FALLBACK', 'DM_FALLBACK_AGY', 'ENGINE_NOTICE', 'HOLD_V2', 'SLACKBOT_FORCE_CLI', 'SESSION_FALLBACK'];
+const SWITCHES = ['DM_FALLBACK', 'DM_FALLBACK_AGY', 'ENGINE_NOTICE', 'HOLD_V2', 'SESSION_FALLBACK'];
 for (const k of SWITCHES) delete process.env[k];
 
 const ladder = require(path.join(ROOT, 'dist', 'engine-ladder.js'));

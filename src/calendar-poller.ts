@@ -20,7 +20,6 @@ import { Logger } from './logger';
 import { errorCollector } from './error-collector';
 import type { SpawnOpts, SessionResult } from './assistant-scheduler';
 import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
-import { shouldUseSdk } from './sdk-handler';
 import { ladderText } from './model-ladder';
 import { agyRungsOn, agyText } from './agy-turn';
 
@@ -742,9 +741,8 @@ export class CalendarPoller {
     }
 
     try {
-      const useSdk = shouldUseSdk('calendar');
       const result = await this.spawnSession(prompt, {
-        workingDirectory: os.tmpdir(),  // No CLAUDE.md → saves ~39K tokens
+        workingDirectory: os.tmpdir(),
         settingSources: [],
         // 별칭 — 모델이 새로 나와도 이 줄을 안 고치게(봇 설정과 같은 원칙). 같은 등급 폴백도 이 이름으로 찾는다.
         model: CALENDAR_MODEL,
@@ -758,7 +756,6 @@ export class CalendarPoller {
         noSessionPersistence: true,
         skipMcp: true,
         env: { CLAUDE_SCHEDULED: '1' },
-        useSdk,
       });
 
       this.recordCost('reminder-judgment', result);

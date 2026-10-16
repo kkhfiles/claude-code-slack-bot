@@ -2,8 +2,8 @@ import { App } from '@slack/bolt';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { CliHandler, type CliEvent, type CliProcess, type CliAssistantEvent, type CliInitEvent, type CliResultEvent, type CliRateLimitEvent } from './cli-handler';
-import { SdkHandler, SdkProcess, SdkRunOptions, shouldUseSdk } from './sdk-handler';
+import { CliHandler, type CliEvent, type CliAssistantEvent, type CliInitEvent, type CliResultEvent, type CliRateLimitEvent } from './cli-handler';
+import { SdkHandler, SdkProcess, SdkRunOptions } from './sdk-handler';
 import { PendingDenial } from './types';
 import { Logger } from './logger';
 import { WorkingDirectoryManager } from './working-directory-manager';
@@ -1740,7 +1740,6 @@ export class SlackHandler {
         ? resumeData.resumeOptions.resumeSessionId : (event.resumeSessionId || undefined);
       const continueLastSession = resumeData?.mode === 'continue' ? true : undefined;
 
-      const useSdk = shouldUseSdk('interactive');
       const runOpts = {
         session,
         workingDirectory,
@@ -1787,8 +1786,7 @@ export class SlackHandler {
 
       // skills: 'all' surfaces ~/.claude/skills/ to the model so it can invoke
       // domain skills (notion-publish, mycelium, bbapi, …) by name. SDK headless
-      // mode does not auto-configure skills; CLI branch already exposes them
-      // through its own defaults.
+      // mode does not auto-configure skills.
       //
       // **사고 깊이를 내린다.** 안 넘기면 기본값 `'high'` 가 걸려 도구를 부르기도
       // 전에 20 초를 생각한다(2026-08-05 실측: "업무" 한 마디에 44 초 중 20.5 초).
@@ -1816,13 +1814,9 @@ export class SlackHandler {
       }
       const cliProcess: AsyncIterable<CliEvent> & TurnHandle = claudeSkipped
         ? skippedTurn()
-        : useSdk
-          ? this.sdkHandler.runQuery(sessionPrompt, sdkOpts)
-          : this.cliHandler.runQuery(sessionPrompt, {
-              ...runOpts, env: sessionEnv, appendSystemPrompt: surfaceNote,
-            });
+        : this.sdkHandler.runQuery(sessionPrompt, sdkOpts);
 
-      this.logger.info('Interactive session started', { via: claudeSkipped ? 'skipped' : useSdk ? 'sdk' : 'cli' });
+      this.logger.info('Interactive session started', { via: claudeSkipped ? 'skipped' : 'sdk' });
       // 여기서 상태 한 줄의 `ts` 를 받는다 — 세션이 뜨기를 기다리는 중이라 공짜다.
       // 아래 스트림이 그 `ts` 로 상태를 고쳐 쓰므로 들어가기 전에 받아 둔다.
       await statusSent;
@@ -2311,7 +2305,7 @@ export class SlackHandler {
       // 아니다. `prewarm` 이 통째로 `try` 로 감싸여 있다.
       // 옛 세션을 이어 간 차례(보류 v2) 뒤에는 안 띄운다 — 다음 차례는 원래 세션이라 지문이 안 맞는다.
       // Claude 가 막혀 GPT 가 받은 차례(DM 폴백) 뒤에도 안 띄운다 — 다음 차례도 Claude 를 건너뛰어 그냥 남는다.
-      if (sdkOptsForWarm && shouldUseSdk('interactive') && !event.resumeSessionId && !claudeSkipped && !fallbackDone) {
+      if (sdkOptsForWarm && !event.resumeSessionId && !claudeSkipped && !fallbackDone) {
         this.sdkHandler.prewarm(sdkOptsForWarm);
       }
 
@@ -2670,7 +2664,6 @@ export class SlackHandler {
         skipMcp: true,
         noSessionPersistence: true,
         maxDurationMs: 60_000,
-        useSdk: shouldUseSdk('interactive'),
       });
       this.logger.info('한도 떠 보기', { rateLimited: r.rateLimited, isError: r.isError });
     } catch (err) {
@@ -3659,7 +3652,6 @@ export class SlackHandler {
         skipMcp: true,
         noSessionPersistence: true,
         maxDurationMs: 120_000,
-        useSdk: shouldUseSdk('watchdog'),
       });
       return r.isError ? null : r.text;
     } catch (err) {
@@ -3698,11 +3690,9 @@ export class SlackHandler {
     const t0 = Date.now();
     const timing: { initMs?: number; firstMs?: number; resultMs?: number } = {};
     const sdkOpts = { ...commonOpts, effort: opts.effort };
-    const proc = opts.useSdk
-      ? this.sdkHandler.runQuery(prompt, sdkOpts)
-      : this.cliHandler.runQuery(prompt, { ...commonOpts, effort: opts.effort });
+    const proc = this.sdkHandler.runQuery(prompt, sdkOpts);
 
-    this.logger.info('Assistant session started', { via: opts.useSdk ? 'sdk' : 'cli' });
+    this.logger.info('Assistant session started', { via: 'sdk' });
 
     // Session timeout — kill process if it exceeds maxDurationMs
     let killTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3815,7 +3805,7 @@ export class SlackHandler {
 
     // **다음 차례를 위해 같은 옵션으로 하나 띄워 둔다**(좁은 길이 켬 · 2026-10-01). 방금 쓴 그
     // 객체를 그대로 넘겨 지문이 맞게 한다. 실패·한도에 걸린 차례 뒤에는 안 띄운다.
-    if (opts.useSdk && opts.prewarmAfter && !isError && !rateLimited) {
+    if (opts.prewarmAfter && !isError && !rateLimited) {
       this.sdkHandler.prewarm(sdkOpts);
     }
 

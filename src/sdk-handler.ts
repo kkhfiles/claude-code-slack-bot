@@ -26,31 +26,6 @@ import type {
 } from './cli-handler';
 import type { ConversationSession } from './types';
 
-// --- Feature flag --------------------------------------------------------
-
-/**
- * SLACKBOT_SDK_ENABLED token format: `<tok1>[,+]<tok2>...`
- *
- * Tokens map to scopes the caller passes (e.g. `analysis:kg-skill-update`,
- * `briefing`, `calendar`). A category token (`analysis`) matches any scope
- * starting with that category. `all` matches everything.
- *
- * SLACKBOT_FORCE_CLI=1 hard-disables every SDK path (emergency rollback).
- */
-export function shouldUseSdk(scope: string): boolean {
-  if (process.env.SLACKBOT_FORCE_CLI === '1') return false;
-  const flag = (process.env.SLACKBOT_SDK_ENABLED || '').trim();
-  if (!flag) return false;
-  if (flag === 'all' || flag === '1' || flag === 'true') return true;
-  const tokens = flag.split(/[,+]/).map(s => s.trim()).filter(Boolean);
-  if (tokens.includes(scope)) return true;
-  const colonIdx = scope.indexOf(':');
-  if (colonIdx > 0) {
-    const category = scope.substring(0, colonIdx);
-    if (tokens.includes(category)) return true;
-  }
-  return false;
-}
 
 /**
  * Strip CLI-style permission pattern off a tool name.

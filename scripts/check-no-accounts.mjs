@@ -10,8 +10,7 @@
  * 못 따라가 조용히 인증 실패로 넘어진다. 그래서 없어야 할 것과 있어야 할 것을 같이 센다.
  *
  * **API 키는 나가는 문에서 뺀다** — PC 환경 변수에 키가 남아 있으면 세션이 구독 대신 그 키로
- * 과금된다. 부르는 글자만 보면 부르고도 안 빼는 것을 못 잡으므로, 빌드된 두 길(SDK · CLI)에
- * 키를 심어 실제로 옵션을 지어 본다. 진짜 세션은 안 띄운다(CLI 는 띄우기 직전에 멈춘다).
+ * 과금된다. SDK 옵션에 시험용 키를 심어 제거 여부를 확인한다. 진짜 세션은 실행하지 않는다.
  */
 import './lib/fresh-dist.mjs';
 import fs from 'node:fs';
@@ -90,8 +89,8 @@ ok('토큰 만료 안내가 걷은 명령(-account)을 가리킨다', !expired.i
 const stale = ['-apikey', '-limit', '-account', '-schedule'].filter((c) => msgs.includes(c));
 ok(`도움말 · 문구에 걷은 명령이 남았다 — ${stale.join(' · ')}`, stale.length === 0);
 
-// ── ③ API 키를 두 길 다 나가는 문에서 빼나 ─────────────────────────────────
-for (const f of ['sdk-handler.ts', 'cli-handler.ts']) {
+// ── ③ SDK 환경에서 API 키 제거 ─────────────────────────────────────────────
+for (const f of ['sdk-handler.ts']) {
   const src = all[f] ?? '';
   ok(`${f} 가 빼는 함수를 안 불러온다`, /import \{[^}]*\bwithoutApiKey\b[^}]*\} from '\.\/child-env'/.test(src));
   ok(`${f} 가 빼는 함수를 안 부른다`, /withoutApiKey\(/.test(src.replace(/^import .*$/gm, '')));
@@ -119,24 +118,6 @@ try {
     if (extra.env) ok('SDK: 넘긴 토큰이 빠졌다', sdkOptions.env?.CLAUDE_CODE_OAUTH_TOKEN === 'oauth-check');
   }
 
-  // CLI — 띄우기 직전에 가로채 환경만 받고 멈춘다(진짜 `claude` 를 안 띄운다).
-  const cp = require('node:child_process');
-  const realSpawn = cp.spawn;
-  let seen = null;
-  cp.spawn = (_cmd, _args, o) => { seen = o?.env ?? null; throw new Error('검사용 멈춤'); };
-  try {
-    const { CliHandler } = require(path.join(DIST, 'cli-handler.js'));
-    const fake = { mcpManager: { getConfigPath: () => null }, logger: { info() {}, debug() {}, warn() {}, error() {} } };
-    try {
-      CliHandler.prototype.runQuery.call(fake, '확인', { skipMcp: true, env: { CLAUDE_CODE_OAUTH_TOKEN: 'oauth-check' } });
-    } catch { /* 위에서 일부러 멈췄다 */ }
-  } finally {
-    cp.spawn = realSpawn;
-  }
-  ok('CLI: 띄우는 곳까지 못 갔다(환경을 못 받음)', !!seen);
-  ok('CLI: 세션 환경에 API 키가 샌다', leaks(seen).length === 0);
-  ok('CLI: 나머지 환경(PATH)이 빠졌다', hasPath(seen));
-  ok('CLI: 넘긴 토큰이 빠졌다', seen?.CLAUDE_CODE_OAUTH_TOKEN === 'oauth-check');
 } finally {
   if (before === undefined) delete process.env.ANTHROPIC_API_KEY;
   else process.env.ANTHROPIC_API_KEY = before;
@@ -147,5 +128,5 @@ if (fails.length) {
   for (const f of fails) console.log('  ✗ ' + f);
   process.exitCode = 1;
 } else {
-  console.log(`통과 — 걷은 이름 ${GONE.length}개 없음 · 토큰 동기화 두 길 남음 · API 키는 SDK · CLI 두 길 다 뺌 (src ${files.length}개)`);
+  console.log(`통과 — 걷은 이름 ${GONE.length}개 없음 · 토큰 동기화 유지 · SDK 환경의 API 키 제거 (src ${files.length}개)`);
 }

@@ -7,7 +7,6 @@ import { Logger } from './logger';
 import { CalendarPoller } from './calendar-poller';
 import { errorCollector } from './error-collector';
 import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
-import { shouldUseSdk } from './sdk-handler';
 import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   noteUpdate, stageUpdate, summaryCandidates, summaryApply,
@@ -681,7 +680,6 @@ export interface SpawnOpts {
   settings?: Record<string, unknown>;
   settingSources?: ('user' | 'project' | 'local')[];
   maxDurationMs?: number;
-  useSdk?: boolean;
   /**
    * 끝나면 **같은 옵션으로 하나 미리 띄워 둔다**(SDK 길만 · 2026-10-01). 좁은 길이 켠다 —
    * 판 프롬프트는 다음까지 간격 중앙 20분이라 30분 유지면 절반 남짓이 맞는다(실측 −1.1초).
@@ -954,7 +952,6 @@ export class AssistantScheduler {
       },
       post: (text, blocks) => this.sendMessage(text, blocks),
       thread: deps.actionThreads,
-      useSdk: shouldUseSdk('analysis:actions'),
       afterResume: () => this.postActionDigest(),
     });
   }
@@ -1763,7 +1760,6 @@ export class AssistantScheduler {
       noSessionPersistence: true,
       // 12건이 161초였다 — 상한(10건)에 닿아도 두 배 넘게 남는다.
       maxDurationMs: 6 * 60_000,
-      useSdk: true,
       // codex 뒤에 agy 두 칸(6단계 · `DM_FALLBACK_AGY=on`) — 글만 주고받는 일이다.
       agyRung: 'text',
     });
@@ -1840,7 +1836,6 @@ export class AssistantScheduler {
       skipMcp: true,
       noSessionPersistence: true,
       maxDurationMs: 5 * 60_000,
-      useSdk: true,
     });
     this.recordSessionCost('improve', result);
     const said = (result.text || '').trim();
@@ -2245,7 +2240,6 @@ export class AssistantScheduler {
       skipMcp: true,
       noSessionPersistence: true,
       maxDurationMs: 3 * 60_000,
-      useSdk: true,
       // codex 뒤에 agy 두 칸(6단계) — 한 줄만 받고 `tasks.py focus` 는 봇이 돌린다.
       agyRung: 'focus',
     });
@@ -2914,7 +2908,6 @@ export class AssistantScheduler {
         noSessionPersistence: true,
         // 실측 중간값 3~4초 — 상한에 닿으면 세션으로 떨어지는 편이 낫다.
         maxDurationMs: 90_000,
-        useSdk: true,
         // 다음 판 프롬프트를 위해 같은 옵션으로 하나 띄워 둔다(띄우기 약 1.5초를 앞당김).
         prewarmAfter: true,
       });
@@ -3249,7 +3242,6 @@ export class AssistantScheduler {
       allowedTools = ['Read', 'Glob', 'Grep', ...GCAL_READ_TOOLS];
     }
 
-    const useSdk = shouldUseSdk('briefing');
     // **haiku 를 걷어냈다**(2026-09-08 사용자). 정기 작업의 바닥은 sonnet+low 다.
     // haiku 4.5 는 `effort` 자체를 안 받아 깊이 손잡이가 없었고, 브리핑은 하루
     // 한 번이라 등급을 올려도 값 차이가 거의 없다.
@@ -3262,7 +3254,6 @@ export class AssistantScheduler {
       noSessionPersistence: true,
       skipMcp: true,
       env: { CLAUDE_SCHEDULED: '1' },
-      useSdk,
       // codex 뒤에 agy 두 칸(6단계) — `tasks.py brief` 출력을 재료로 본문만(읽기만).
       agyRung: 'briefing',
     });
@@ -4106,7 +4097,6 @@ export class AssistantScheduler {
     const maxDurationMinutes = (typeConfig?.maxDurationMinutes as number | undefined)
       ?? defaults.maxDurationMinutes ?? 60;
 
-    const useSdk = shouldUseSdk(`analysis:${type}`);
     // **별칭으로 박는다** — `sonnet`·`opus` 는 세대가 바뀌어도 그 등급에 머문다.
     // 원래 취지(SDK 기본값이 조용히 Opus 로 올라가는 것 차단)는 그대로 지키면서
     // 세대만 따라간다. 앞서 박혀 있던 `claude-sonnet-4-6` 은 Sonnet 5 보다 낡은
@@ -4172,7 +4162,6 @@ export class AssistantScheduler {
         resumeSessionId,
         skipMcp: true,
         maxDurationMs: maxDurationMinutes * 60_000,
-        useSdk,
         // **종마다 다르게 준다** — 예전에는 안 넘겨 전부 기본값 'high' 로 돌았다.
         // 기계 산출물에 판단만 얹는 종은 그게 과하고, 웹을 훑어 판단까지 내는
         // 종은 모자랐다. 앞서 여기 걸려 있던 `thinkingBudgetTokens: 5000` 은
@@ -4196,7 +4185,7 @@ export class AssistantScheduler {
       servedBy: result.servedBy,
       subtype: result.subtype,
       costUsd: result.costUsd.toFixed(4),
-      via: useSdk ? 'sdk' : 'cli',
+      via: 'sdk',
       cacheRead: result.usage?.cacheReadTokens,
       textPreview: result.text?.substring(0, 600),
     });

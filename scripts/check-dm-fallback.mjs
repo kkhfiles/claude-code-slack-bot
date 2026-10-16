@@ -44,7 +44,6 @@ const ENV = {
   LADDER_PYTHON: 'python-없는-이름-2026',
   // 모델 표도 없는 자리로 — 서비스 폴백 대응표가 없을 때의 옛 길(기본 모델)을 잰다. 대응표 쪽은 `check:agy`.
   LLM_PLAYBOOK_MODELS: path.join(TMP, 'no-models.json'),
-  SLACKBOT_SDK_ENABLED: 'all',
   SESSION_FALLBACK_CODEX_MODEL: 'gpt-test-sol',
 };
 const setEnv = () => { Object.assign(process.env, ENV); };
@@ -65,7 +64,7 @@ const { config } = require(path.join(ROOT, 'dist', 'config.js'));
 setEnv();   // `.env` 가 같은 이름을 들고 와도 시험 값이 이긴다
 process.env.BOARD_NARROW_CODEX_BIN = fake.bin;
 // agy 칸(6단계)은 `check:agy` 가 잰다 — `.env` 가 켜 두었어도 여기서는 끈다(안 끄면 「GPT 다음은 모아 둠」이 agy 로 간다).
-for (const k of ['DM_FALLBACK', 'DM_FALLBACK_AGY', 'ENGINE_NOTICE', 'HOLD_V2', 'SLACKBOT_FORCE_CLI']) delete process.env[k];
+for (const k of ['DM_FALLBACK', 'DM_FALLBACK_AGY', 'ENGINE_NOTICE', 'HOLD_V2']) delete process.env[k];
 
 const ladder = require(path.join(ROOT, 'dist', 'engine-ladder.js'));
 const dmf = require(path.join(ROOT, 'dist', 'dm-fallback.js'));

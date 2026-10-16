@@ -260,7 +260,8 @@ ok('판 맞춤이 안 건드린 파일이 바뀌면 멈춤', guardReason({ ...G,
 // 안전장치가 소스에서 빠지면 조용히 옛 동작으로 돌아간다 — 줄을 못 박는다
 const src = (f) => fs.readFileSync(path.join(ROOT, f), 'utf-8');
 ok('SDK 경로는 프롬프트 속 `@경로`·슬래시 명령을 끈다', src('src/sdk-handler.ts').includes('verbatimPrompts: true'));
-ok('비상용 CLI 경로도 끈다(client_composed)', src('src/cli-handler.ts').includes('client_composed: true'));
+ok('Claude 요청은 SDK로만 실행한다', !src('src/slack-handler.ts').includes('this.cliHandler.runQuery('));
+ok('직접 Claude CLI 실행 구현을 제거했다', !src('src/cli-handler.ts').includes('runQuery('));
 ok('판 맞춤은 pm2 저장 환경을 안 건드리게 재시작한다',
   src('scripts/sdk-update.mjs').includes("'--keep-env'") && src('scripts/restart.mjs').includes("args.has('--keep-env')"));
 ok('재시작은 도는 판 맞춤을 기다린다(판 맞춤 자신만 통과)',

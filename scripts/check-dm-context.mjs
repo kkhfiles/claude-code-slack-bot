@@ -135,7 +135,7 @@ eq('붙일 것 없으면 빈 문자열',
 {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const src = fs.readFileSync(path.join(here, '..', 'src', 'slack-handler.ts'), 'utf-8');
-  eq('세션 두 갈래(SDK · CLI) 다 붙인 글을 넘긴다', (src.match(/runQuery\(sessionPrompt,/g) ?? []).length, 2);
+  eq('SDK 세션에 붙인 글을 넘긴다', (src.match(/runQuery\(sessionPrompt,/g) ?? []).length, 1);
   eq('붙이기 전 글을 세션에 넘기는 곳이 없다', (src.match(/runQuery\(finalPrompt,/g) ?? []).length, 0);
   ok('봇이 스스로 넘긴 차례에는 안 붙인다', /isDM && !\(event as any\)\.pushed/.test(src));
 }
@@ -145,5 +145,5 @@ if (fails.length) {
   process.exitCode = 1;
 } else {
   console.log('통과 — 세션이 못 본 대화방 글 (스레드 댓글은 첫 글을 · 최상위는 마지막 차례 뒤 글을 · '
-    + '이미 본 것·지금 말·개인 글은 빼고 · 최근 것과 첫 글을 남기고 · 실패·지연은 빈 문자열 · 세션 두 갈래에 다 실림)');
+    + '이미 본 것·지금 말·개인 글은 빼고 · 최근 것과 첫 글을 남기고 · 실패·지연은 빈 문자열 · SDK 세션에 전달)');
 }

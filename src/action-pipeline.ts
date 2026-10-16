@@ -98,7 +98,6 @@ export interface PipelineDeps {
   post: (text: string, blocks?: unknown[]) => Promise<void>;
   /** 제안마다 바깥 메시지 하나 · 이어지는 일은 그 스레드(`ThreadApi`). 없으면 예전처럼 `post` 로 한 통씩. */
   thread?: ThreadApi;
-  useSdk?: boolean;
   /** 한도 회복 뒤 이어 간 검토가 끝났을 때 — 스케줄러가 요약 DM 을 보낸다(`-actions review` 와 같은 끝맺음). */
   afterResume?: () => Promise<void>;
 }
@@ -852,7 +851,6 @@ export class ActionPipeline {
       env: { ASSISTANT_MODE: 'actions', CLAUDE_SCHEDULED: '1' },
       skipMcp: true,
       maxDurationMs: (spec.timeout_min ?? 30) * 60_000,
-      useSdk: this.deps.useSdk,
       // 폴백도 이 작업의 범위만 쓴다 — `null` 이면 폴백을 안 한다.
       fallbackScope: fb && fb.allowed ? { cwd: fb.cwd, writable: fb.writable } : null,
     };
