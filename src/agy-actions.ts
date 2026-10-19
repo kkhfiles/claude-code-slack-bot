@@ -2,9 +2,12 @@
  * agy 칸의 명령 허용 목록 · 실행 · 프롬프트 재료(2026-10-14 · 엔진 폴백 6단계).
  *
  * agy 는 도구가 없다 — 「무엇을 할지」를 JSON 으로만 내고, 봇이 여기서 **모양을 엄격히 본 뒤** `tasks.py` 를
- * **셸 없이**(인자 배열) 부른다. 받는 명령은 여덟뿐이다.
+ * **셸 없이**(인자 배열) 부른다. 받는 명령은 아홉뿐이다.
  *
- *   add · update · log · defer · quick · inbox_resolve · recurring_done · focus
+ *   add · update · log · defer · quick · inbox_resolve · recurring_done · focus · mail_judge
+ *
+ * 메일 후보 차례(`[메일] 후보 …`)에는 봇이 스레드 본문 앞부분을 읽어 붙인다(`mailBodies` → `mail.py show` · 읽기
+ * 전용 · 2026-10-19). `mail_judge` 는 **그 차례에 온 제목만** 받는다 — 제목은 밖에서 온 글이라 셸 없이 넘긴다.
  *
  * 그 밖의 명령 · 모르는 칸 · 업무 번호가 아닌 id(정기 업무는 목록에 있는 id 만) · 날짜 모양이 아닌 값 ·
  * 한 줄 칸의 줄바꿈 · 길이 초과는 **실행하지 않고** 「실행하지 않은 명령」으로 사람에게 돌려준다.
@@ -111,11 +114,15 @@ export const AGY_DM_RULES = [
   '- 사람이 「끝났다」고 분명히 말한 업무만 완료로 바꾼다. 애매하면 묻는다.',
   '- 연기 사유는 사람이 한 말을 그대로 쓴다.',
   '- 판에서 온 말([진행판] …)을 말한 대로 반영만 했고 알릴 것이 없으면 reply 를 「[조용히]」 한 줄로.',
-  '- 메일 · Mycelium · 파일 고치기 · 다른 저장소 · 첨부 · 웹이 있어야 하는 요청이면 needs_full 을 true 로,',
+  '- 메일 후보([메일] 후보 …)는 [메일 본문]에 붙어 온 글로 판단한다. 갈래는 등록 · 갱신 · 회신 · 버림 · 물음.',
+  '  스레드마다 mail_judge 를 하나씩 남긴다(버림도). 혼자 정했으면 decided 를 비우고 by "session".',
+  '  사람이 이 차례에 갈래를 말했으면 decided 에 그 갈래 · by "user". 등록은 사람 컨펌 뒤에 — 제안만 하고 add 는 안 한다.',
+  '  본문에 없는 것을 짐작하지 않는다. 내 차례인지, 나에게 걸린 기한인지 애매하면 proposed 를 물음으로 하고 reply 로 묻는다.',
+  '- Mycelium · 파일 고치기 · 다른 저장소 · 첨부 · 웹이 있어야 하는 요청이면 needs_full 을 true 로,',
   '  needs_full_reason 에 무엇이 필요한지 한 줄. 할 수 있는 부분만 actions 에 넣는다.',
   '- 조회 · 잡담은 actions 없이 reply 만.',
   '',
-  '명령(이 여덟 말고는 실행되지 않는다):',
+  '명령(이 아홉 말고는 실행되지 않는다):',
   '{"op":"add","title":"…","est":2,"importance":"H|M|L","size":"XS|S|M|L","soft":"YYYY-MM-DD","hard":"YYYY-MM-DD","next":"…","remind":"YYYY-MM-DD HH:MM","jira":"KEY-1"}',
   '  — title · est 필수. 모르면 est 2 · soft 다음 영업일+5일 · importance M · size M',
   '{"op":"update","id":"TSK-5","sets":{"칸":"값"}}',
@@ -127,13 +134,17 @@ export const AGY_DM_RULES = [
   '{"op":"inbox_resolve","drop":"업무 아님 — 사유"}  또는  {"op":"inbox_resolve","task":"TSK-5"}',
   '{"op":"recurring_done","id":"정기 업무 id","as_of":"YYYY-MM-DD","note":"…"}',
   '{"op":"focus","note":"지금 집중할 것 한 줄","pick":["TSK-5"]}  또는  {"op":"focus","off":true}',
+  '{"op":"mail_judge","subject":"[메일 본문]의 ■ 제목 그대로","from":"발신","proposed":"등록|갱신|회신|버림|물음","decided":"","by":"session","task":"TSK-5","note":"…"}',
+  '  — 이 차례에 온 메일 제목만 받는다. task 는 갱신일 때만 · decided 는 비우거나 갈래 · 「아니다」만 들었으면 "?"',
 ].join('\n');
 
 /**
  * DM 칸의 사람 쪽 글 — 지금 시각 · 열린 업무 전부 · 번호표 · 넘겨줄 메모 · 못 본 대화방 글 · 사람 말.
  * 규칙(`AGY_DM_RULES`)은 시스템 쪽으로 따로 간다.
  */
-export function agyDmPrompt(o: { list: TaskList; slotMap?: string; handover?: string; context?: string; text: string }): string {
+export function agyDmPrompt(o: {
+  list: TaskList; slotMap?: string; handover?: string; context?: string; mail?: string; text: string;
+}): string {
   return [
     `[지금] ${o.list.today} ${o.list.now} (한국 시각)`,
     '',
@@ -142,10 +153,100 @@ export function agyDmPrompt(o: { list: TaskList; slotMap?: string; handover?: st
     ...(o.slotMap ? ['', o.slotMap.trim()] : []),
     ...(o.handover ? ['', o.handover.trim()] : []),
     ...(o.context ? ['', o.context.trim()] : []),
+    ...(o.mail ? ['', o.mail.trim()] : []),
     '',
     '[사람 말]',
     o.text,
   ].join('\n');
+}
+
+// ---------------------------------------------------------------- 메일 후보 차례
+
+/** 후보 글(`mail.py` 의 `render`)의 스레드 머리 줄 — `1. 🔴 임원 10-16 09:47 <제목>( (N통))`. */
+const MAIL_HEAD_RE = /^\d{1,2}\.\s+(?:🔴 임원\s+)?\d{2}-\d{2} \d{2}:\d{2} (.+?)(?: \(\d+통\))?\s*$/u;
+
+/** 메일 후보 차례인가 — 메일 폴러가 넘기는 글의 머리(`[메일] 후보 N건`) · 다시 돌리는 차례는 앞에 안내가 붙어 줄 머리로 본다. */
+export function isMailTurn(text: string): boolean {
+  return /(^|\n)\s*\[메일\] 후보 \d+건/.test(text || '');
+}
+
+/** 후보 글에서 스레드 제목들(글에 적힌 그대로 · 70자로 잘렸을 수 있다) — 열 개까지 · 겹친 것은 하나로. */
+export function parseMailSubjects(text: string): string[] {
+  const out: string[] = [];
+  for (const l of (text || '').split('\n')) {
+    const m = MAIL_HEAD_RE.exec(l.trim());
+    const s = m?.[1]?.trim();
+    if (s && !out.includes(s)) out.push(s);
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+export interface MailThreadBody {
+  subject: string;
+  /** 실제 마지막 제목(`show` 가 앞부분으로 찾은 것) — 못 찾았으면 빈 글자. */
+  full: string;
+  messages: { date: string; sender: string; body: string }[];
+}
+
+/** 본문 덩이의 상한 — 스레드 열 개 × 세 통이 다 차도 프롬프트를 덮지 않게. */
+export const MAIL_BODIES_MAX = 9000;
+
+/** `mail.py show --json` 출력 → 스레드들. 모양이 다르면 `null`. */
+export function parseMailBodies(json: string): MailThreadBody[] | null {
+  let d: any;
+  try { d = JSON.parse((json || '').trim().split('\n').pop() || ''); } catch { return null; }
+  if (!d || !Array.isArray(d.threads)) return null;
+  const out: MailThreadBody[] = [];
+  for (const t of d.threads) {
+    if (!t || typeof t.subject !== 'string' || !Array.isArray(t.messages)) continue;
+    out.push({
+      subject: t.subject, full: typeof t.full === 'string' ? t.full : '',
+      messages: t.messages.filter((m: any) => m && typeof m.body === 'string')
+        .map((m: any) => ({ date: String(m.date ?? ''), sender: String(m.sender ?? ''), body: m.body })),
+    });
+  }
+  return out;
+}
+
+/** 프롬프트에 싣는 덩이 — 스레드마다 「■ 실제 제목」과 최근 메일들. 못 찾은 스레드는 그렇다고 적는다. */
+export function mailBodiesBlock(threads: readonly MailThreadBody[]): string {
+  const lines = ['[메일 본문 — 봇이 메일함에서 읽어 붙임 · 스레드마다 최근 몇 통의 앞부분 · 이 밖의 내용은 모른다]'];
+  for (const t of threads) {
+    lines.push('', `■ ${t.full || t.subject}`);
+    if (!t.messages.length) lines.push('  (메일함 최근 이레에서 이 스레드를 못 찾음 — 본문 없이 판단하지 말고 물음으로)');
+    for (const m of t.messages) {
+      lines.push(`  [${m.date} · ${m.sender}]`, ...(m.body || '(본문 없음)').split('\n').map((x) => `  ${x}`));
+    }
+  }
+  const s = lines.join('\n');
+  return s.length > MAIL_BODIES_MAX ? `${s.slice(0, MAIL_BODIES_MAX - 1)}…` : s;
+}
+
+/**
+ * `mail_judge` 가 받는 제목 — 글에 적힌 제목(잘렸을 수 있다)과 실제 제목 둘 다 받고 **실제 제목으로** 남긴다
+ * (판정 기록은 실제 제목이라야 다음 후보의 「지난 판정」에 붙는다).
+ */
+export function mailSubjectMap(listed: readonly string[], threads: readonly MailThreadBody[] | null): Record<string, string> {
+  const map: Record<string, string> = Object.create(null);
+  for (const s of listed) map[s] = s;
+  for (const t of threads ?? []) {
+    const canon = t.full || t.subject;
+    map[t.subject] = canon;
+    if (t.full) map[t.full] = canon;
+  }
+  return map;
+}
+
+/**
+ * 후보 글의 스레드 본문을 읽는다 — `mail.py show`(읽기 전용)를 **셸 없이**. 못 읽으면 `null`(본문 없이 간다 ·
+ * 규칙이 「못 찾음」을 물음으로 돌린다).
+ */
+export async function mailBodies(root: string, subjects: readonly string[], timeoutMs = 60_000): Promise<MailThreadBody[] | null> {
+  if (!subjects.length) return [];
+  const argv = ['show', ...subjects.map((s) => `--subject=${s}`), '--json'];
+  const r = await runOne(root, { op: 'show', argv, summary: '메일 본문 읽기', script: 'mail.py' }, '', timeoutMs);
+  return r.code === 0 ? parseMailBodies(r.stdout) : null;
 }
 
 // ---------------------------------------------------------------- 예약 일의 agy 칸
@@ -191,6 +292,8 @@ export interface ValidAction {
   summary: string;
   /** 이 명령에만 얹는 환경 변수. */
   env?: Record<string, string>;
+  /** `bin/` 아래 스크립트 — 기본 `tasks.py`. */
+  script?: 'tasks.py' | 'mail.py';
 }
 
 export interface RejectedAction {
@@ -201,6 +304,8 @@ export interface RejectedAction {
 
 export interface ActionContext {
   tasks: TaskRef[];
+  /** 이 차례에 온 메일 제목 → 판정에 남길 실제 제목(`mailSubjectMap`). 없으면 `mail_judge` 를 안 받는다. */
+  mailSubjects?: Record<string, string>;
 }
 
 /** 한 번에 받는 명령 수 상한 — 폭주한 계획이 업무를 한꺼번에 흔들지 않게. */
@@ -290,6 +395,8 @@ const IMPORTANCE = ['H', 'M', 'L'] as const;
 const SIZE = ['XS', 'S', 'M', 'L'] as const;
 const STATUS = ['대기', '진행중', '완료', '취소'] as const;
 const EXEC_TYPE = ['L0 수동', 'L1 AI보조', 'L2 AI실행+승인', 'L3 자동'] as const;
+/** 메일 판정 갈래 — `mail.py` 의 `BRANCHES` 와 같다. 「?」는 틀렸는데 정답 모름(`WRONG`). */
+const MAIL_BRANCHES = ['등록', '갱신', '회신', '버림', '물음'] as const;
 
 type SetKind = 'title' | 'line' | 'text' | 'status' | 'imp' | 'size' | 'num' | 'date' | 'remind' | 'jira';
 /** `update` 가 바꿀 수 있는 칸 — 연기 횟수 · 사유는 `defer` 로, 작업 디렉터리 · 출처 · 순서는 안 받는다. */
@@ -430,6 +537,31 @@ function validateOne(a: Record<string, unknown>, ctx: ActionContext): ValidActio
       }
       return { op, argv, summary: `지금 집중할 것 — 「${note}」` };
     }
+    case 'mail_judge': {
+      onlyKeys(a, ['subject', 'from', 'proposed', 'decided', 'by', 'task', 'note']);
+      const listed = line(a.subject, 200, '메일 제목');
+      // **이 차례에 온 제목만** — 아무 제목이나 받으면 남의 스레드 판정이 지어내진다.
+      const map = ctx.mailSubjects;
+      const subject = map && Object.prototype.hasOwnProperty.call(map, listed) ? map[listed] : '';
+      if (!subject) throw new Reject('이 차례에 온 메일 제목이 아님');
+      const proposed = oneOf(a.proposed, MAIL_BRANCHES, '고른 갈래');
+      const decided = a.decided === undefined || a.decided === '' ? ''
+        : a.decided === '?' ? '?' : oneOf(a.decided, MAIL_BRANCHES, '정한 갈래');
+      const by = a.by === undefined ? 'session' : oneOf(a.by, ['session', 'user'], '누가');
+      // 혼자 정한 것은 decided 를 비운다 — 채우면 내 채점이 정확도에 「맞음」으로 들어간다(`prompts/morning.md`).
+      if ((by === 'user') !== (decided !== '')) throw new Reject('사람이 정했으면 decided 와 by "user" 를 같이 · 아니면 둘 다 비움');
+      const argv = ['judge', `--subject=${subject}`, `--proposed=${proposed}`, `--by=${by}`];
+      if (decided) argv.push(`--decided=${decided}`);
+      if (a.from !== undefined) argv.push(`--from=${line(a.from, 100, '발신')}`);
+      if (a.task !== undefined) {
+        const t = taskId(a.task, ctx, false);
+        argv.push(`--task=${t.id}`);
+      }
+      if (a.note !== undefined) argv.push(`--note=${line(a.note, 200, '판정 메모')}`);
+      const short = subject.length > 40 ? `${subject.slice(0, 39)}…` : subject;
+      return { op, argv, script: 'mail.py',
+        summary: `메일 판정 기록 「${short}」 — ${proposed}${decided ? ` → ${decided}` : ''}` };
+    }
     default:
       throw new Reject('허용 목록에 없는 명령');
   }
@@ -483,7 +615,7 @@ function runOne(root: string, a: ValidAction, captureId: string, timeoutMs: numb
     let proc: ReturnType<typeof spawn>;
     try {
       // ⚠️ **셸 없이 인자 배열로** — 값에 `&` · `|` · `"` · `$(…)` 가 있어도 글자 그대로 간다.
-      proc = spawn(python(), ['-X', 'utf8', path.join('bin', 'tasks.py'), ...a.argv], {
+      proc = spawn(python(), ['-X', 'utf8', path.join('bin', a.script ?? 'tasks.py'), ...a.argv], {
         cwd: root,
         shell: false,
         windowsHide: true,
@@ -572,7 +704,7 @@ export function actionReport(runs: readonly ActionRun[], skipped: readonly Valid
 export function actionSteps(runs: readonly ActionRun[], rung: string):
   { id: string; name: string; input: string; done: boolean; write: boolean; failed?: boolean }[] {
   return runs.map((r, i) => ({
-    id: `${rung}-${i}`, name: `${rung} 명령`, input: `tasks.py ${r.action.argv[0]} · ${r.action.summary}`.slice(0, 120),
+    id: `${rung}-${i}`, name: `${rung} 명령`, input: `${r.action.script ?? 'tasks.py'} ${r.action.argv[0]} · ${r.action.summary}`.slice(0, 120),
     done: r.ok, write: true, ...(r.ok ? {} : { failed: true }),
   }));
 }

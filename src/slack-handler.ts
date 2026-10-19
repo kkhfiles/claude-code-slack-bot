@@ -59,7 +59,10 @@ import { codexQuota } from './codex-quota';
 import { sameTier, serviceCodex } from './model-ladder';
 import { readDrill } from './engine-drill';
 import { agyDisplay, agyModel, agyRungsOn, agyTurn, type AgyRung } from './agy-turn';
-import { AGY_DM_RULES, actionReport, actionSteps, agyDmPrompt, fetchTaskList, runActions, validateActions } from './agy-actions';
+import {
+  AGY_DM_RULES, actionReport, actionSteps, agyDmPrompt, fetchTaskList, isMailTurn, mailBodies, mailBodiesBlock,
+  mailSubjectMap, parseMailSubjects, runActions, validateActions,
+} from './agy-actions';
 
 /**
  * 슬랙 대화 세션의 사고 깊이. SDK 기본값은 `'high'` 다.
@@ -2983,8 +2986,13 @@ export class SlackHandler {
           currentTs: a.ts, threadTs: a.thread_ts, isNewSession: true, botUserId, isPrivate: containsPrivate,
         })).catch(() => '');
       const handover = handoverNote(a.claudeSteps, 'Claude·GPT');
+      // 메일 후보 차례 — agy 는 메일함을 못 읽으니 봇이 본문 앞부분을 붙이고, 판정 기록은 그 제목만 받는다.
+      const mailListed = isMailTurn(a.finalPrompt) ? parseMailSubjects(a.finalPrompt) : [];
+      const mailThreads = mailListed.length ? await mailBodies(root, mailListed) : null;
+      if (mailListed.length && !mailThreads) this.logger.warn('DM 폴백 — 메일 본문을 못 읽음 · 본문 없이 넘깁니다');
       const prompt = agyDmPrompt({
         list, slotMap: a.slotMap, handover, context, text: a.finalPrompt,
+        ...(mailThreads?.length ? { mail: mailBodiesBlock(mailThreads) } : {}),
       });
       this.logger.warn(`DM 폴백 — ${rung} 가 이어 받습니다`, { model: model.alias, priorWrites, origin: event.replay ? 'replay' : 'dm' });
       const r = await agyTurn(prompt, {
@@ -3002,7 +3010,9 @@ export class SlackHandler {
       // **명령 하나가 끝날 때마다 처리 중 기록에 적는다 — 다음 명령을 띄우기 전에**(2026-10-15 검토). 전에는 다 끝난
       // 뒤에야 모았고 그사이 기록은 빈 목록으로 덮였다 — 재시작에 끊기면 앞서 끝난 등록이 「이미 한 것」에서 빠져
       // 다음 엔진이 또 등록했다.
-      const { ok: valid, rejected } = validateActions(plan.actions, { tasks: list.tasks });
+      const { ok: valid, rejected } = validateActions(plan.actions, {
+        tasks: list.tasks, ...(mailListed.length ? { mailSubjects: mailSubjectMap(mailListed, mailThreads) } : {}),
+      });
       let done: TurnStep[] = [];
       const ran = await runActions(valid, {
         root, captureId,

@@ -261,7 +261,7 @@
   - stderr 는 끝 40KB 만 들고 있음 — 앞을 남기면 말 많은 차례에서 끝 줄을 잃어 쿼터 글이 답으로 읽힘
 - **agy 가 내는 것** — JSON 하나: `reply`, `actions`, `needs_full`, `needs_full_reason`
   - 코드펜스와 앞뒤 한 줄은 너그럽게 읽음, 모양이 다르면 다음 칸
-- **프롬프트** — 이 칸의 규칙(`AGY_DM_RULES`), 지금 시각, 열린 업무 전부(`tasks.py json --slim`), 체크인 번호표, 넘겨줄 메모, 못 본 대화방 글, 사람 말
+- **프롬프트** — 이 칸의 규칙(`AGY_DM_RULES`), 지금 시각, 열린 업무 전부(`tasks.py json --slim`), 체크인 번호표, 넘겨줄 메모, 못 본 대화방 글, 메일 본문(메일 후보 차례만), 사람 말
   - 열린 업무를 일부만 주면 두 엔진 다 엉뚱한 업무를 골랐음(0단계 측정)
 
 ### 허용 목록 — `src/agy-actions.ts`
@@ -276,10 +276,18 @@
 | `inbox_resolve` | task 또는 drop | 다른 캡처 id |
 | `recurring_done` | id(목록의 정기 업무), as_of, note | 목록에 없는 id |
 | `focus` | note, pick(열린 업무 3개까지) 또는 off | 목록에 없는 번호 |
+| `mail_judge` | subject, from, proposed, decided, by, task, note | 이 차례에 온 메일 제목이 아닌 것, 혼자 정했는데 decided 를 채운 것 |
+
+- **메일 후보 차례**(`[메일] 후보 N건`, 2026-10-19) — 전에는 agy 가 메일함을 못 읽어 이 차례를 보류(10/16 1건)
+  - 봇이 후보 글에서 제목을 뽑아 `mail.py show`(읽기 전용, 셸 없이)로 스레드마다 최근 세 통의 앞부분을 읽고 `[메일 본문]` 덩이로 붙임(9,000자 상한, 실측 7.2초)
+  - 후보 글은 제목을 70자로 자르므로 `show` 가 앞부분으로 찾아 실제 제목을 돌려주고, `mail_judge` 는 그 실제 제목으로 남김(다음 후보의 「지난 판정」에 붙게)
+  - 본문을 못 읽으면 덩이 없이 넘기고 규칙이 물음으로 돌림
+  - 사람이 다음 DM 에서 답한 차례는 제목이 글에 없어 `mail_judge` 를 거절하고 Claude·GPT 몫으로 남김
+  - 실행은 `bin/mail.py judge` — 같은 캡처 환경이라 다 정해지면 캡처가 닫힘
 
 - **공통** — 모르는 칸, 날짜가 `YYYY-MM-DD` 가 아님, 한 줄 칸의 줄바꿈과 제어 문자, 한 번에 8개 넘음 → 「실행하지 않은 명령」
   - `update` 의 칸 이름은 목록의 제 칸만 받음(`constructor`, `__proto__` 같은 원형 이름은 거절)
-- **실행** — `python -X utf8 bin/tasks.py <명령> --이름=값 …`, 셸 없이(값에 `&`, `|`, `$(…)` 가 있어도 글자 그대로)
+- **실행** — `python -X utf8 bin/tasks.py <명령> --이름=값 …`(`mail_judge` 는 `bin/mail.py judge`), 셸 없이(값에 `&`, `|`, `$(…)` 가 있어도 글자 그대로)
   - 환경 변수 `WORK_ASSISTANT_CAPTURE=<캡처 id>`, `CLAUDE_BOT_SESSION=1`, API 키 뺌
   - 앞 명령이 실패하면 뒤는 안 돌림
   - 값의 뜻(상태 낱말, 칸 이름)은 파이썬 문(`_check_sets`)이 한 번 더 봄

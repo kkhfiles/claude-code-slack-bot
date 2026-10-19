@@ -103,6 +103,42 @@ fs.writeFileSync(path.join(WA_ROOT, 'bin', 'tasks.py'), [
   'print("ok")',
 ].join('\n'), 'utf-8');
 process.env.FAKE_SLIM = JSON.stringify(SLIM);
+// 가짜 mail.py — 받은 인자를 같은 기록에 적고(`script: mail`), `show` 는 제목마다 가짜 본문을 낸다(「없는」 · 못 찾음).
+// 「잘린」 제목은 실제 제목이 더 길다(후보 글이 70자로 자르는 것 흉내).
+fs.writeFileSync(path.join(WA_ROOT, 'bin', 'mail.py'), [
+  'import json, os, sys',
+  'a = sys.argv[1:]',
+  'with open(os.environ["FAKE_TASKS_LOG"], "a", encoding="utf-8") as f:',
+  '    f.write(json.dumps({"argv": a, "script": "mail", "capture": os.environ.get("WORK_ASSISTANT_CAPTURE"),',
+  '        "cwd": os.getcwd()}, ensure_ascii=False) + "\\n")',
+  'if a[:1] == ["show"]:',
+  '    subs = [x.split("=", 1)[1] for x in a if x.startswith("--subject=")]',
+  '    if any("FAIL-SHOW" in s for s in subs):',
+  '        sys.exit(1)',
+  '    out = []',
+  '    for s in subs:',
+  '        if "없는" in s:',
+  '            out.append({"subject": s, "full": "", "messages": []})',
+  '        else:',
+  '            full = s + " 끝까지" if "잘린" in s else s',
+  '            out.append({"subject": s, "full": full, "messages": [{"date": "2026-10-16 09:47", "sender": "발신 갑", "body": "본문 — " + full}]})',
+  '    print(json.dumps({"threads": out}, ensure_ascii=False))',
+  '    sys.exit(0)',
+  'print("판정 기록 — 시험")',
+].join('\n'), 'utf-8');
+const MAIL_TEXT = [
+  '[메일] 후보 2건',
+  '최근 1일 · 메일 30건 → 거르개 통과 4건 → 낼 스레드 2개',
+  '',
+  '1. 🔴 임원 10-16 09:47 검토 요청 잘린 (2통)',
+  '     발신: 발신 갑   위치: 받은 편지함',
+  '     답 요구: 회신',
+  '',
+  '2.    10-16 10:00 없는 스레드 제목',
+  '     발신: 발신 을   위치: 받은 편지함',
+  '',
+  '판단은 세션이 한다 — 등록·갱신·회신·버림·물음. 등록은 사용자 컨펌 뒤에.',
+].join('\n');
 
 const fails = [];
 const eq = (label, got, want) => {
@@ -152,7 +188,7 @@ const blockCodex = () => engineState.recordBlocked('codex', { kind: 'usage', unt
 const writeDrill = (d) => fs.writeFileSync(ENV.ENGINE_DRILL_FILE, JSON.stringify(d), 'utf-8');
 const taskCalls = () => (fs.existsSync(ENV.FAKE_TASKS_LOG)
   ? fs.readFileSync(ENV.FAKE_TASKS_LOG, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
-const writes = () => taskCalls().filter((c) => c.argv[0] !== 'json' && c.argv[0] !== 'brief');
+const writes = () => taskCalls().filter((c) => !['json', 'brief', 'show'].includes(c.argv[0]));
 const ledgerRows = () => (fs.existsSync(ENV.FALLBACK_LEDGER_FILE)
   ? fs.readFileSync(ENV.FALLBACK_LEDGER_FILE, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
 const setModes = (m) => { process.env.FAKE_AGY_MODES = JSON.stringify(m); };
@@ -400,6 +436,40 @@ try {
     eq('명령이 객체가 아님', V(['rm -rf /']).rejected[0]?.why, '명령 모양이 아님');
   }
 
+  // ================================================================ ④-2 메일 후보 차례 — 제목 뽑기 · 판정 기록 허용 목록(2026-10-19)
+  {
+    eq('메일 차례 — 머리 · 다시 돌리는 안내 뒤 · 아님', [acts.isMailTurn(MAIL_TEXT), acts.isMailTurn(`↻ 안내\n\n${MAIL_TEXT}`),
+      acts.isMailTurn('메일 후보 봤어?')], [true, true, false]);
+    eq('제목 — 임원 표시 · 통 수 떼고 · 둘', acts.parseMailSubjects(MAIL_TEXT), ['검토 요청 잘린', '없는 스레드 제목']);
+    const threads = acts.parseMailBodies(JSON.stringify({ threads: [
+      { subject: '검토 요청 잘린', full: '검토 요청 잘린 끝까지', messages: [{ date: 'd', sender: 's', body: '본문' }] },
+      { subject: '없는 스레드 제목', full: '', messages: [] }] }));
+    const map = acts.mailSubjectMap(acts.parseMailSubjects(MAIL_TEXT), threads);
+    const block = acts.mailBodiesBlock(threads);
+    ok(`본문 덩이 — 실제 제목 · 못 찾음 표시\n${block}`, block.startsWith('[메일 본문') && block.includes('■ 검토 요청 잘린 끝까지')
+      && block.includes('  본문') && block.includes('■ 없는 스레드 제목') && block.includes('못 찾음'));
+    eq('본문 덩이 상한', acts.mailBodiesBlock([{ subject: 'x', full: '', messages: [{ date: '', sender: '', body: 'y'.repeat(20000) }] }]).length,
+      acts.MAIL_BODIES_MAX);
+    const ctx = { tasks: acts.parseTaskList(JSON.stringify(SLIM)).tasks, mailSubjects: map };
+    const one = (a) => acts.validateActions([{ op: 'mail_judge', ...a }], ctx);
+    eq('잘린 제목 → 실제 제목으로 남김 · mail.py', [one({ subject: '검토 요청 잘린', proposed: '버림' }).ok[0]?.argv,
+      one({ subject: '검토 요청 잘린', proposed: '버림' }).ok[0]?.script],
+    [['judge', '--subject=검토 요청 잘린 끝까지', '--proposed=버림', '--by=session'], 'mail.py']);
+    eq('실제 제목으로 줘도 받음', one({ subject: '검토 요청 잘린 끝까지', proposed: '갱신', task: 'TSK-5' }).ok[0]?.argv,
+      ['judge', '--subject=검토 요청 잘린 끝까지', '--proposed=갱신', '--by=session', '--task=TSK-5']);
+    eq('이 차례에 안 온 제목은 거절', one({ subject: '다른 메일', proposed: '버림' }).rejected[0]?.why, '이 차례에 온 메일 제목이 아님');
+    eq('메일 차례가 아니면 거절', acts.validateActions([{ op: 'mail_judge', subject: '검토 요청 잘린', proposed: '버림' }],
+      { tasks: ctx.tasks }).rejected[0]?.why, '이 차례에 온 메일 제목이 아님');
+    eq('원형의 이름은 제목이 아님', one({ subject: 'constructor', proposed: '버림' }).rejected[0]?.why, '이 차례에 온 메일 제목이 아님');
+    eq('갈래 낱말', one({ subject: '검토 요청 잘린', proposed: '삭제' }).rejected[0]?.why, '고른 갈래: 등록/갱신/회신/버림/물음 중 하나만');
+    eq('혼자 정했는데 decided 를 채움 → 거절', one({ subject: '검토 요청 잘린', proposed: '버림', decided: '버림' }).rejected[0]?.why,
+      '사람이 정했으면 decided 와 by "user" 를 같이 · 아니면 둘 다 비움');
+    eq('사람이 정함 · 정답 모름(?)', [one({ subject: '검토 요청 잘린', proposed: '등록', decided: '갱신', by: 'user' }).ok[0]?.argv.slice(3),
+      one({ subject: '검토 요청 잘린', proposed: '등록', decided: '?', by: 'user' }).ok[0]?.argv.slice(3)],
+    [['--by=user', '--decided=갱신'], ['--by=user', '--decided=?']]);
+    eq('모르는 칸', one({ subject: '검토 요청 잘린', proposed: '버림', apply: true }).rejected[0]?.why, '모르는 칸 apply');
+  }
+
   // ================================================================ ⑤ 실행 — 셸 없이 · 캡처 환경 · 앞이 실패하면 멈춤
   {
     reset();
@@ -495,6 +565,40 @@ try {
     eq('장부', ledgerRows().map((r) => [r.engine, r.outcome]), [['agy-gemini', 'hold']]);
     ok(`안내 — Claude·GPT 소진 → Gemini · 「같은 모델」 없음 — ${s.notices.at(-1)}`,
       (s.notices.at(-1) ?? '').includes('Gemini T Flash (High)로 이어 갑니다') && !s.notices.join('').includes('같은 모델'));
+  }
+
+  // ================================================================ ⑦-m 메일 후보 차례 — 봇이 본문을 붙이고 판정 기록을 셸 없이(2026-10-19)
+  {
+    const meta = '버림 & echo pwned > PWNED.txt | "q" $(whoami)';
+    const s = await scenario({ text: MAIL_TEXT, replies: { 'flash-high': plan({
+      reply: '메일 둘 — 「검토 요청」은 버림으로, 다른 하나는 본문을 못 찾아 여쭙니다.',
+      actions: [
+        { op: 'mail_judge', subject: '검토 요청 잘린', from: '발신 갑', proposed: '버림', note: meta },
+        { op: 'mail_judge', subject: '없는 스레드 제목', proposed: '물음' },
+      ] }) } });
+    const p = s.agy[0]?.prompt ?? '';
+    ok('프롬프트 — 메일 본문 덩이 · 실제 제목 · 본문 · 못 찾음', p.includes('[메일 본문 — 봇이 메일함에서 읽어 붙임')
+      && p.includes('■ 검토 요청 잘린 끝까지') && p.includes('본문 — 검토 요청 잘린 끝까지') && p.includes('못 찾음'));
+    ok('프롬프트 — 메일 규칙', p.includes('스레드마다 mail_judge 를 하나씩'));
+    const show = taskCalls().find((c) => c.argv[0] === 'show');
+    eq('본문 보기 — mail.py show · 제목 둘 · 읽기라 캡처 없음', [show?.script, show?.argv, show?.capture],
+      ['mail', ['show', '--subject=검토 요청 잘린', '--subject=없는 스레드 제목', '--json'], '']);
+    const w = writes();
+    eq('판정 기록 둘 — mail.py · 실제 제목 · 캡처 id', w.map((c) => [c.script, c.argv[1], c.capture]),
+      [['mail', '--subject=검토 요청 잘린 끝까지', 'cap-1'], ['mail', '--subject=없는 스레드 제목', 'cap-1']]);
+    eq('셸 문자도 글자 그대로', w[0]?.argv.at(-1), `--note=${meta}`);
+    ok('셸이 끼어들지 않았다', !fs.existsSync(path.join(WA_ROOT, 'PWNED.txt')));
+    eq('다 됐으면 됨 · Gemini', [s.sink.outcome, s.sink.engine], ['ok', 'agy-gemini']);
+    const body = s.posts.find((x) => (x.text ?? '').includes('실행한 것'))?.text ?? '';
+    ok(`실행한 것 — 판정 기록 한 줄씩\n${body}`, body.includes('• 메일 판정 기록 「검토 요청 잘린 끝까지」 — 버림'));
+    // 본문을 못 읽어도 차례는 간다 — 본문 덩이 없이(규칙이 물음으로 돌린다)
+    const f = await scenario({ text: MAIL_TEXT.replace('검토 요청 잘린', 'FAIL-SHOW 잘린'),
+      replies: { 'flash-high': plan({ reply: '본문을 못 읽어 여쭙니다.', actions: [] }) } });
+    ok('본문을 못 읽으면 덩이 없이 · 차례는 감', !(f.agy[0]?.prompt ?? '').includes('[메일 본문 — 봇이') && f.sink.engine === 'agy-gemini');
+    // 메일 차례가 아니면 본문을 안 읽는다
+    const n = await scenario({ replies: { 'flash-high': plan({ reply: '네', actions: [] }) } });
+    eq('메일 차례가 아니면 show 를 안 부름', [taskCalls().some((c) => c.argv[0] === 'show'), (n.agy[0]?.prompt ?? '').includes('[메일 본문 — 봇이')],
+      [false, false]);
   }
 
   // ================================================================ ⑦-2 다 됐으면 됨 · 중간에 실패하면 못 함 · 명령마다 기록(2026-10-15 검토)
@@ -974,7 +1078,7 @@ if (fails.length) {
   process.exitCode = 1;
 } else {
   console.log('통과 — agy 칸 (사다리 Gemini → agy Sonnet · 첨부 · Claude·GPT 몫 · 개인 글도 넘김 · 막힘만 건너뜀(횟수 상한 없음) · 대응표 모델 · luna 깊이 한 단계 위 · '
-    + '계획 너그럽게 읽기 · 쿼터는 끝 줄로 · 허용 목록 여덟 · 셸 없이 인자 배열 · 캡처 환경 · 앞이 실패하면 멈춤 · '
+    + '계획 너그럽게 읽기 · 쿼터는 끝 줄로 · 허용 목록 아홉 · 메일 차례는 봇이 본문을 붙이고 그 제목만 판정 기록 · 셸 없이 인자 배열 · 캡처 환경 · 앞이 실패하면 멈춤 · '
     + '실행한 것 · 실행하지 않은 명령 · 표시 이름은 표에서 · needs_full 은 모아 둠(partial) · 조용히 · GPT 가 한 것을 넘김 · '
     + '-stop · 드레인은 어느 칸이든 · 남긴 건은 시도 안 셈 · 예약 일 넷 · 판 번호 없음 · 일부 실패는 「됨」 아님 · 명령마다 기록 · 명령 사이 끊김 · 보낼 글의 개인 글도 넘김 · 안내 GPT 이름은 DM 방 모델 · 한 차례에 안내 하나 · 다 막히면 「⏸ 모아 둠」)');
 }
