@@ -66,7 +66,7 @@ export function currentClaudeBlock(
 ): Block {
   const b = store.blocked('claude');
   if (b && store.isBlocked('claude')) return b;
-  const c = resetsAt ? { kind: 'usage' as const, until: resetsAt } : classifyClaudeErrorText(text ?? '');
+  const c = resetsAt ? { kind: 'usage' as const, until: resetsAt } : classifyClaudeErrorText(text ?? '', store.nowSec() * 1000);
   return store.recordBlocked('claude', c ?? { kind: 'unknown' });
 }
 
@@ -82,6 +82,6 @@ export function thrownClaudeBlock(error: any, store: EngineState = engineState):
   if (typeof error?.code === 'string' && error.code.startsWith('slack_')) return null;
   const b = store.blocked('claude');
   if (b && store.isBlocked('claude')) return b;
-  const c = classifyClaudeErrorText(String(error?.message ?? error ?? ''));
+  const c = classifyClaudeErrorText(String(error?.message ?? error ?? ''), store.nowSec() * 1000);
   return c ? store.recordBlocked('claude', c) : null;
 }

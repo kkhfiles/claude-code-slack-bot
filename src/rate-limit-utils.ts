@@ -68,6 +68,17 @@ const OVERLOAD_PATTERN = /overloaded|\b529\b|capacity/i;
  */
 const RATE_PATTERN = /rate.?limit|too many requests|\b429\b|resets\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)/i;
 
+/**
+ * 성공한 세션의 로그 줄에도 실려 오는 이벤트 이름 — 지우고 읽는다(llm-playbook `limits.py` `_EVENT_NAMES` 와 같다).
+ * 「{"type":"rate_limit_event","rate_limit_info":{"status":"allowed",…}}」 가 `rate.?limit` 에 걸려 사용량 소진이 되면
+ * 안 된다(공유 시료 `limit_samples.json`). 대소문자 그대로 — 「ratelimited」 같은 글은 남긴다.
+ */
+const EVENT_NAMES = /rate_limit_event|rate_limit_info|rateLimit[A-Za-z]*/g;
+
+export function stripEventNames(text: string): string {
+  return text.replace(EVENT_NAMES, ' ');
+}
+
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 
 /** 그 시각대가 UTC 보다 몇 밀리초 앞서나. 시각대를 모르면 이 PC 의 것을 쓴다. */
@@ -161,6 +172,7 @@ export function classifyClaudeErrorText(
   text: string, nowMs: number = Date.now(),
 ): { kind: 'usage' | 'overload'; until?: number } | null {
   if (!text) return null;
+  text = stripEventNames(text);
   if (USAGE_PATTERN.test(text) || (!OVERLOAD_PATTERN.test(text) && RATE_PATTERN.test(text))) {
     const until = parseResetAt(text, nowMs);
     return until !== null ? { kind: 'usage', until } : { kind: 'usage' };
@@ -236,7 +248,9 @@ export function parseCodexResetAt(text: string, nowMs: number = Date.now()): num
 export function classifyCodexErrorText(
   text: string, nowMs: number = Date.now(),
 ): { kind: 'usage'; until?: number } | null {
-  if (!text || !CODEX_USAGE_PATTERN.test(text)) return null;
+  if (!text) return null;
+  text = stripEventNames(text);
+  if (!CODEX_USAGE_PATTERN.test(text)) return null;
   const until = parseCodexResetAt(text, nowMs);
   return until !== null ? { kind: 'usage', until } : { kind: 'usage' };
 }
