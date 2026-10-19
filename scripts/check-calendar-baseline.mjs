@@ -27,6 +27,9 @@ process.env.ENGINE_STATE_FILE = path.join(TMP, 'engine-state.json');
 const require = createRequire(import.meta.url);
 const { CalendarPoller } = require('../dist/calendar-poller.js');
 const { errorCollector } = require('../dist/error-collector.js');
+const { engineState } = require('../dist/engine-state.js');
+// agy 칸을 안 부르게 — 켜져 있으면 실제 agy 를 띄운다.
+delete process.env.DM_FALLBACK_AGY;
 
 const fails = [];
 const eq = (label, got, want) => {
@@ -160,6 +163,45 @@ try {
     p.spawnSession = real;
     eq('도는 중이면 다음 폴링은 판단을 안 부른다', prompts.length - n0, 1);
   }
+
+  // ⑥ Claude 가 막혔는지는 엔진 상태가 말한다(2026-10-19) — 막혔으면 Claude 를 안 부르고 사다리로 · 자체 「다음 정시」
+  //    멈춤이 없다(엔진 상태가 풀리면 바로 다시 Claude). 10/19 08:00 · 09:55 에 막힌 Claude 를 불러 한도 글을 받았다.
+  {
+    const clear = () => fs.rmSync(process.env.ENGINE_STATE_FILE, { force: true });
+    const diff = { added: [ev('b1', 2 * H)], removed: [], modified: [] };
+    reply = said([upcoming('b1')]);
+    clear();
+    engineState.recordBlocked('claude', { kind: 'usage', until: Math.floor(Date.now() / 1000) + 3600 });
+    let n0 = prompts.length;
+    eq('엔진 상태가 Claude 막힘이면 사다리로(사다리도 없으면 null)', await p.getAIJudgment(diff), null);
+    eq('엔진 상태가 Claude 막힘이면 Claude 를 안 부른다', prompts.length - n0, 0);
+
+    clear();
+    n0 = prompts.length;
+    eq('엔진 상태가 풀리면 Claude 가 판단', (await p.getAIJudgment(diff))?.map((x) => x.eventId), ['b1']);
+    eq('풀리면 Claude 를 부른다', prompts.length - n0, 1);
+
+    // 던진 한도 오류 → 엔진 상태에 적힘 → 다음 차례는 Claude 를 안 부름 → 상태를 지우면 곧바로 다시 부름
+    const real = p.spawnSession;
+    p.spawnSession = async (prompt) => { prompts.push(prompt); throw new Error("You've hit your weekly limit · resets 10am"); };
+    n0 = prompts.length;
+    eq('던진 한도 오류면 사다리로', await p.getAIJudgment(diff), null);
+    ok('던진 한도 오류를 엔진 상태에 적는다', engineState.isBlocked('claude'));
+    p.spawnSession = real;
+    await p.getAIJudgment(diff);
+    eq('적힌 뒤 다음 차례는 Claude 를 안 부른다', prompts.length - n0, 1);
+    clear();
+    await p.getAIJudgment(diff);
+    eq('엔진 상태가 풀리면 자체 멈춤 없이 곧바로 다시 부른다', prompts.length - n0, 2);
+
+    // 결과로 온 한도(전송 탭이 못 봤을 때)도 적는다
+    clear();
+    reply = { text: 'Claude AI usage limit reached', costUsd: 0, sessionId: '', subtype: 'error_during_execution', isError: true, rateLimited: true };
+    await p.getAIJudgment(diff);
+    ok('결과로 온 한도도 엔진 상태에 적는다', engineState.isBlocked('claude'));
+    clear();
+    errorCollector.getAndClear();
+  }
 } finally {
   p.stop();
   fs.rmSync(TMP, { recursive: true, force: true });
@@ -172,5 +214,5 @@ if (fails.length) {
 } else {
   console.log('통과 — 회의 알림 판단 기준 (못 함은 null · 알릴 것 없음은 [] · 못 한 차례는 기준을 안 옮겨 '
     + '다음 차례에 다시 판단 · 캐시 새로 받기도 기준을 안 지움 · JSON 아닌 답은 null · 같은 변경에 세 번이면 받음 · '
-    + '겹쳐 돌지 않음)');
+    + '겹쳐 돌지 않음 · 엔진 상태가 Claude 막힘이면 Claude 를 안 부름 · 한도를 엔진 상태에 적고 자체 멈춤 없음)');
 }

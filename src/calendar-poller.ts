@@ -22,6 +22,8 @@ import type { SpawnOpts, SessionResult } from './assistant-scheduler';
 import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
 import { ladderText } from './model-ladder';
 import { agyRungsOn, agyText } from './agy-turn';
+import { engineState } from './engine-state';
+import { currentClaudeBlock, thrownClaudeBlock } from './engine-tap';
 
 /** 회의 알림 판단 모델 — 별칭(하위 등급). 같은 등급 폴백(codex·agy)도 이 이름으로 찾는다. */
 const CALENDAR_MODEL = 'haiku';
@@ -119,8 +121,6 @@ export class CalendarPoller {
   // Auth failure tracking
   private consecutiveAuthFailures = 0;
   private paused = false;
-  private aiJudgmentPaused = false;
-  private aiJudgmentResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Diff dedup
   private lastDiffHash = '';
@@ -199,30 +199,7 @@ export class CalendarPoller {
       clearInterval(this.dispatchTimer);
       this.dispatchTimer = null;
     }
-    if (this.aiJudgmentResumeTimer) {
-      clearTimeout(this.aiJudgmentResumeTimer);
-      this.aiJudgmentResumeTimer = null;
-    }
     this.logger.info('CalendarPoller stopped');
-  }
-
-  /** Pause AI judgment until next hour (rate limit backoff). HTTP polling continues. */
-  private pauseAiJudgment(): void {
-    this.aiJudgmentPaused = true;
-    const now = new Date();
-    const nextHour = new Date(now);
-    nextHour.setHours(now.getHours() + 1, 0, 0, 0);
-    const ms = nextHour.getTime() - now.getTime();
-
-    this.logger.warn(`AI judgment paused until ${nextHour.toTimeString().slice(0, 5)} (rate limit)`);
-    errorCollector.add('CalendarPoller', 'AI 판단 rate limit — 다음 정시까지 일시 중지');
-
-    if (this.aiJudgmentResumeTimer) clearTimeout(this.aiJudgmentResumeTimer);
-    this.aiJudgmentResumeTimer = setTimeout(() => {
-      this.aiJudgmentPaused = false;
-      this.aiJudgmentResumeTimer = null;
-      this.logger.info('AI judgment resumed after rate limit backoff');
-    }, ms);
   }
 
   restart(): void {
@@ -733,11 +710,13 @@ export class CalendarPoller {
       : existing.map(n => `- [${n.eventId}] type=${n.type} notifyAt=${n.notifyAt} "${n.message}"`).join('\n');
     prompt = prompt.replace(/\{existingNotifications\}/g, existingText);
 
-    if (this.aiJudgmentPaused) {
-      // Claude 가 한도로 쉬는 동안에도 판단은 한다 — 같은 등급의 codex → agy(2026-09-23).
-      // 예전에는 여기서 [] 로 끝나, 그 시간의 일정 변경 알림이 영구히 사라졌다(변경은 이미 캐시에 저장됨).
-      this.logger.debug('AI judgment paused (rate limit backoff) — 사다리로 판단');
-      return this.judgeByLadder(prompt, diff, config.reminders.beforeMinutes, 'Claude 한도로 쉬는 중');
+    // **Claude 가 막혔는지는 엔진 상태가 말한다**(2026-10-19) — 막혔으면 Claude 를 안 띄우고 사다리(codex → agy)로.
+    // 전에는 이 판단만 자체 「다음 정시」 멈춤을 들고 있어 엔진 상태를 안 봤다. 10/19 08:00 · 09:55 에 이미 막힌
+    // Claude 를 불러 한도 글을 받고서야 멈췄고, 정시가 되면 또 불렀다. 풀리는 시각도 엔진 상태가 서버 값으로 안다.
+    // 막혀 있어도 판단은 한다 — 예전에는 여기서 [] 로 끝나 그 시간의 일정 변경 알림이 사라졌다(2026-09-23).
+    if (engineState.isBlocked('claude')) {
+      this.logger.debug('회의 알림 판단 — Claude 가 막혀 있어(엔진 상태) 사다리로 판단');
+      return this.judgeByLadder(prompt, diff, config.reminders.beforeMinutes, 'Claude 막힘(엔진 상태)');
     }
 
     try {
@@ -765,7 +744,9 @@ export class CalendarPoller {
       // 실제로 막혔다는 것은 `rate_limit_event` 가 알려 주고, 텍스트 검사는
       // 에러일 때만 연다(분석·브리핑 경로와 같은 형태).
       if (isSessionRateLimited(result)) {
-        this.pauseAiJudgment();
+        // 막힘은 전송 탭이 이미 적었다 — 탭이 못 본 결과(글로만 한도를 알린 것)면 여기서 적는다. 다음 차례는
+        // 위의 엔진 상태 확인에서 Claude 를 건너뛴다.
+        currentClaudeBlock(result.rateLimitResetsAt, result.text);
         return this.judgeByLadder(prompt, diff, config.reminders.beforeMinutes, 'Claude 한도');
       }
       if (result.isError || !(result.text || '').trim()) {
@@ -779,7 +760,8 @@ export class CalendarPoller {
     } catch (error) {
       const msg = (error as Error).message || '';
       if (isRateLimitText(msg)) {
-        this.pauseAiJudgment();
+        // 던진 오류는 스트림 밖이라 전송 탭이 못 본다 — Claude 한도·과부하 글로 읽히면 엔진 상태에 적는다.
+        thrownClaudeBlock(error);
         return this.judgeByLadder(prompt, diff, config.reminders.beforeMinutes, 'Claude 한도');
       }
       // **예산에 걸린 것을 「AI 판단 실패」로만 적으면 고칠 데를 못 찾는다.**
