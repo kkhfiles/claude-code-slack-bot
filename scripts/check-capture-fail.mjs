@@ -203,6 +203,10 @@ try {
     eq('막혀 있으면 드레인이 쉰다', /if \(stillBlocked\(\)\)/.test(h), true);
     // 취소를 누르면 캡처를 버린다 — 안 버리면 회복 시각에 다시 돌아온다.
     eq('취소가 캡처를 버린다', /dropCapture\(captureId, '사람이 취소함'\)/.test(h), true);
+    // 사람의 취소는 물음 막음을 넘는다 — 안 넘으면 조용히 실패하고 회복 때 다시 돈다(2026-10-19).
+    const wa = fs.readFileSync(path.join(ROOT, 'src', 'work-assistant.ts'), 'utf-8');
+    eq('취소는 --force 로 버리고 실패를 남긴다',
+       /'inbox', 'resolve', '--id', id, '--drop', why, '--force'/.test(wa) && /r\.code !== 0\) logger\.warn\('캡처를 못 버렸습니다'/.test(wa), true);
   }
 
   // 봇이 부르는 이름이 실제로 있는가 — 계약이 갈리면 조용히 안 남는다.

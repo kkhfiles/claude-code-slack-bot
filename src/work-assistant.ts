@@ -335,7 +335,11 @@ export async function markCaptureTried(id: string): Promise<void> {
 export async function dropCapture(id: string, why: string): Promise<void> {
   if (!id || !isWorkAssistantEnabled()) return;
   try {
-    await runTasks(['inbox', 'resolve', '--id', id, '--drop', why], 30_000);
+    // **사람이 고른 것이라 `--force`** (2026-10-19) — `inbox resolve` 는 답을 기다리는 메일 물음이 남은
+    // 캡처를 안 닫는데, 그 막음은 세션이 닫으려 할 때를 위한 것이다. 안 붙이면 취소가 조용히 실패하고
+    // 회복 때 드레인이 그 캡처를 다시 돌린다.
+    const r = await runTasks(['inbox', 'resolve', '--id', id, '--drop', why, '--force'], 30_000);
+    if (r.code !== 0) logger.warn('캡처를 못 버렸습니다', { id, code: r.code, stderr: r.stderr.slice(-200) });
   } catch (err) {
     logger.error('캡처를 못 버렸습니다', err);
   }
