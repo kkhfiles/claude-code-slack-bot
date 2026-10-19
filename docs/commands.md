@@ -40,7 +40,7 @@
   - 전체 캘린더 조회 후 `excludeCalendars`로만 제외 (화이트리스트 없음)
   - 5분 간격 폴링, diff 감지 시에만 AI 판단 (Haiku 모델 · 4.5 실측 중앙값 $0.072/회(20회, ~2026-10-07) · 5.5 는 단가가 그 1/10)
   - AI 판단 경량 모드: `cwd=tmpdir` + `--system-prompt` + `--tools ""` + `--no-session-persistence`
-  - AI 판단 rate limit 시 다음 정시까지 자동 일시 중지 (`aiJudgmentPaused`)
+  - 엔진 상태가 Claude 막힘이면 Claude 를 안 띄우고 사다리(codex 다음 agy)로 판단 (2026-10-19, 자체 「다음 정시」 멈춤은 걷음)
   - Claude · 사다리가 다 못 하면 비교 기준(캐시의 `baseline`)과 중복 표시를 안 옮김 — 다음 폴링에 같은 변경을 다시 판단 (2026-10-14)
   - 알림 큐 (`.calendar-notifications.json`) + 1분 간격 발송
   - 토큰 공유: `~/.config/google-calendar-mcp/tokens.json` (MCP 서버와 동일)

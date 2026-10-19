@@ -138,7 +138,7 @@ npm test        # 빌드 + check:* 전부
   - 사용자 세션: 풀리는 예상 시각 안내 + 「취소」 버튼 하나 · 원문은 캡처 큐가 들고 회복 시각(+1분)에 `drainStuck()` 이 다시 돌림 · 「취소」는 그 캡처를 버림(`dropCapture`) · 시각은 엔진 상태가 정함(아래 「엔진 상태」)
   - ⏸ 엔진 안내가 그 보류를 말하면(`ENGINE_NOTICE=on`, 비서 DM, 사다리 전체가 막힘) 이 안내와 버튼을 안 올리고 상태 줄 「⏸ 모아 둠」과 ✋ 만 남김(`holdToldByNotice` · 2026-10-16). 실패 표시와 장부는 그대로
   - 스케줄 세션: rate limit 감지 시 안내 메시지 전송 (브리핑), 분석 전체 중단
-  - 캘린더 판단: rate limit 시 다음 정시까지 AI 판단 일시 중지 (`pauseAiJudgment()`)
+  - 캘린더 판단, 좁은 길: 엔진 상태가 Claude 막힘이면 1차를 안 띄움(2026-10-19)
 - 읽기 전용 도구 (Grep, Read, Glob 등)는 상태 메시지에서만 표시 (`STATUS_ONLY_TOOLS`)
 - CLI `is_error` 감지: `cliError` 플래그 추적 → 에러 시 ❌ 리액션 + `status.errorOccurred` 표시
 - 완료 시 도구 사용 요약 표시 (`toolUsageCounts` → `✅ Task completed (Grep ×5, Read ×2)`)

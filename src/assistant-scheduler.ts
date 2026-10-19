@@ -728,7 +728,7 @@ export interface SpawnOpts {
    *  폴백이 1차보다 넓게 쓰지 않게(2026-09-29 사용자 결정). `null` 이면 폴백을 안 한다. */
   fallbackScope?: { cwd: string; writable: string[] } | null;
   /**
-   * codex 뒤에 agy 두 칸(agy Claude → Gemini · 상한 5시간 15회)을 받는 일인가 — 6단계 · 켜는 문
+   * codex 뒤에 agy 두 칸(Gemini → agy Claude Sonnet · 막힘만 건너뜀)을 받는 일인가 — 6단계 · 켜는 문
    * `DM_FALLBACK_AGY=on`. `text` 글만 주고받는 일(카드 요약) · `focus` 지금 집중할 것(한 줄을 받아 봇이
    * `tasks.py focus` 를 돌림) · `briefing` 아침 브리핑(`tasks.py brief` 출력을 재료로 · 읽기만).
    * 무거운 분석은 안 받는다(제 재시도 · 미룸이 따로 있다).
@@ -3195,7 +3195,7 @@ export class AssistantScheduler {
   }
 
   /**
-   * 예약 일의 agy 칸(6단계) — agy Claude → Gemini(막힘 · 상한이면 건너뜀). agy 는 도구가 없어 재료를 봇이 대신
+   * 예약 일의 agy 칸(6단계) — Gemini → agy Claude Sonnet(`AGY_RUNG_ORDER` · 막혔으면 건너뜀). agy 는 도구가 없어 재료를 봇이 대신
    * 읽어 넘긴다. 못 하면 `null` — 부르는 쪽이 예전처럼 실패로 처리한다(브리핑은 회복 뒤 다시 · 한도 글 안 올림).
    *
    * - `text` 받은 글 그대로(카드 요약 · 회의 알림 판단과 같은 길)

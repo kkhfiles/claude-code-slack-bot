@@ -785,8 +785,8 @@ export class CalendarPoller {
   private async judgeByLadder(
     prompt: string, diff: CalendarDiff, beforeMinutes: number, why: string,
   ): Promise<CalendarNotification[] | null> {
-    // 6단계(`DM_FALLBACK_AGY=on`) — 사다리에서 agy 를 빼고 codex 뒤에 agy 두 칸(agy Claude → Gemini ·
-    // 엔진 상태 · Gemini 5시간 상한)을 거친다. 꺼져 있으면 예전 사다리(codex → agy) 그대로.
+    // 6단계(`DM_FALLBACK_AGY=on`) — 사다리에서 agy 를 빼고 codex 뒤에 agy 두 칸(Gemini → agy Claude Sonnet ·
+    // 엔진 상태가 막혔다고 하면 건너뜀)을 거친다. 꺼져 있으면 예전 사다리(codex → agy) 그대로.
     const agy = agyRungsOn();
     let got = await ladderText('회의 알림 판단', prompt, {
       model: CALENDAR_MODEL, system: JUDGE_SYSTEM, timeoutMs: 180_000, ...(agy ? { vendors: ['codex'] } : {}),
