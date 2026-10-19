@@ -308,7 +308,7 @@ try {
       dmf.dmLadder({ DM_FALLBACK: 'on', DM_FALLBACK_AGY: 'on' })],
     [['claude'], ['claude', 'codex'], ['claude'], ['claude', 'codex', 'agy-gemini', 'agy-claude']]);
     const L = ladder.DM_LADDER_AGY;
-    const base = { origin: 'dm', planMode: false, resumeCmd: false, hasFiles: false, isPrivate: false, cwdIsWorkAssistant: true };
+    const base = { origin: 'dm', planMode: false, resumeCmd: false, hasFiles: false, cwdIsWorkAssistant: true };
     const P = (o) => ladder.pickEngine({ ...base, ...o }, L);
     eq('Claude·GPT 막힘 → Gemini 먼저', P({ blocked: { claude: true, codex: true } }), 'agy-gemini');
     eq('Gemini 도 막힘 → agy Sonnet', P({ blocked: { claude: true, codex: true, 'agy-gemini': true } }), 'agy-claude');
@@ -316,12 +316,14 @@ try {
     eq('첨부 — agy 를 건너뛰고 모아 둠', P({ hasFiles: true, blocked: { claude: true, codex: true } }), 'hold');
     eq('첨부 — GPT 는 받는다', P({ hasFiles: true, blocked: { claude: true } }), 'codex');
     eq('Claude·GPT 몫 — agy 를 건너뜀', P({ needsFull: true, blocked: { claude: true, codex: true } }), 'hold');
-    eq('개인 글 — 넘기지 않음', P({ isPrivate: true, blocked: { claude: true, codex: true } }), 'claude');
+    // 개인 글도 넘긴다(2026-10-19 실장 확인 — 세 구독 모두 학습 미사용). 옛 호출이 `isPrivate` 를 실어 와도 안 쓴다.
+    eq('개인 글 — agy 칸도 넘김', P({ isPrivate: true, blocked: { claude: true, codex: true } }), 'agy-gemini');
     eq('다음 칸 — GPT 가 실패(막힘 아님)해도 같은 차례에 다시 안 부름',
       ladder.pickAfter({ ...base, blocked: { claude: true } }, 'codex', L), 'agy-gemini');
     eq('다음 칸 — Gemini 뒤는 Sonnet', ladder.pickAfter({ ...base, blocked: { claude: true } }, 'agy-gemini', L), 'agy-claude');
     eq('다음 칸 — 마지막 뒤는 모아 둠', ladder.pickAfter({ ...base, blocked: {} }, 'agy-claude', L), 'hold');
-    eq('다음 칸 — 넘기지 않는 차례면 모아 둠', ladder.pickAfter({ ...base, isPrivate: true, blocked: {} }, 'codex', L), 'hold');
+    eq('다음 칸 — 넘기지 않는 차례(채널)면 모아 둠', ladder.pickAfter({ ...base, origin: 'channel', blocked: {} }, 'codex', L), 'hold');
+    eq('다음 칸 — 개인 글도 다음 칸으로', ladder.pickAfter({ ...base, isPrivate: true, blocked: {} }, 'codex', L), 'agy-gemini');
     eq('칸 별칭 — Gemini 는 flash-high 고정(등급 대응 없음) · agy Claude 는 Sonnet',
       [agy.agyModel('agy-gemini').alias, agy.agyModel('agy-claude').alias], ['flash-high', 'sonnet-thinking']);
     eq('표시 이름은 표에서', [agy.agyDisplay('agy-gemini', agy.agyModel('agy-gemini').label),
@@ -610,7 +612,7 @@ try {
       && sh.includes("['white_check_mark', 'x', 'stop_button', 'clipboard', 'raised_hand']"));
   }
 
-  // ================================================================ ⑩ 첨부 · 켜는 문 · 개인 글 → agy 안 부름
+  // ================================================================ ⑩ 첨부 · 켜는 문 → agy 안 부름 · 개인 글은 agy 가 받음
   {
     const att = path.join(TMP, 'att.png');
     fs.writeFileSync(att, 'x');
@@ -619,7 +621,8 @@ try {
     s = await scenario({ agy: false });
     eq('DM_FALLBACK_AGY 꺼짐 — agy 안 부름', [s.agy.length, bridge.failed.map((f) => f[1])], [0, ['limit']]);
     s = await scenario({ text: '비밀조각이 든 말', before: () => { privateTurn = true; } });
-    eq('개인 글 — agy 안 부름', s.agy.length, 0);
+    eq('개인 글 — agy 가 받음 · 모아 두지 않음', [s.agy.length, bridge.failed.length], [1, 0]);
+    ok('개인 글 — 사람 말을 그대로 넘김', (s.agy[0]?.prompt ?? '').includes('비밀조각이 든 말'));
   }
 
   // ================================================================ ⑪ needs_full — 답 + ⏸ + 모아 둠(명령이 돌았으면 partial)
@@ -712,8 +715,9 @@ try {
     ok('명령 사이에 끊음 — 돈 것은 사람에게 보임', allText(t.posts).includes('*실행한 것*'));
   }
 
-  // ================================================================ ⑬-3 보낼 글 전체에 개인 글 조각 — GPT · agy 로 안 보내고 모아 둠
-  //   사람 말에는 없고 넘겨줄 메모(앞 엔진이 돌린 명령의 인자)에만 있는 경우(2026-10-15 검토).
+  // ================================================================ ⑬-3 보낼 글에 개인 글 조각 — GPT · agy 에 그대로 보냄(2026-10-19)
+  //   사람 말에는 없고 넘겨줄 메모(앞 엔진이 돌린 명령의 인자)에만 있는 경우. 2026-10-15 에는 모아 뒀다 — 세 구독 모두
+  //   학습 미사용이라 그 대화를 맡는 엔진에 보내는 것은 「나간다」가 아니다(실장 확인). 방으로 나가는 답은 개인 글 문이 본다.
   {
     reset();
     for (const k of SWITCHES) delete process.env[k];
@@ -737,9 +741,10 @@ try {
         };
         const r = rung === 'codex' ? await t.h.runDmFallback(args)
           : await t.h.runAgyFallback({ ...args, rung, ladder: dmf.dmLadder() });
-        eq(`개인 글 조각(${rung}) — 안 보냄 · 모아 둠 · 막힘 아님`,
-          [r.result, r.privateHold, agyCalls().length - a0, fakeCodex.calls().length - c0, bridge.failed.map((f) => f[0])],
-          ['failed', true, 0, 0, ['cap-p']]);
+        const sent = rung === 'codex' ? fakeCodex.calls().slice(c0) : agyCalls().slice(a0);
+        eq(`개인 글 조각(${rung}) — 그대로 보냄 · 답함 · 모아 두지 않음`,
+          [r.result, sent.length, bridge.failed.length], ['ok', 1, 0]);
+        ok(`개인 글 조각(${rung}) — 넘겨줄 메모에 실림`, (sent[0]?.prompt ?? '').includes('비밀조각'));
       }
     } finally {
       privateTurn = false;
@@ -768,7 +773,7 @@ try {
     eq('agy 만 남음 — Claude·GPT 몫은 남김', t.h.drainSkip(item({ needs: 'full' })), true);
     eq('agy 만 남음 — 첨부는 남김', t.h.drainSkip(item({ files: [{ path: 'x', name: 'x' }] })), true);
     privateTurn = true;
-    eq('agy 만 남음 — 개인 글은 남김', t.h.drainSkip(item({ text: '비밀조각' })), true);
+    eq('agy 만 남음 — 개인 글도 돌림(2026-10-19)', t.h.drainSkip(item({ text: '비밀조각' })), false);
     privateTurn = false;
     engineState.recordOk('codex');
     eq('GPT 가 비면 Claude·GPT 몫도 돌림', t.h.drainSkip(item({ needs: 'full' })), false);
@@ -968,9 +973,9 @@ if (fails.length) {
   for (const f of fails) console.error('  ✗ ' + f);
   process.exitCode = 1;
 } else {
-  console.log('통과 — agy 칸 (사다리 Gemini → agy Sonnet · 첨부 · Claude·GPT 몫 · 개인 글은 안 넘김 · 막힘만 건너뜀(횟수 상한 없음) · 대응표 모델 · luna 깊이 한 단계 위 · '
+  console.log('통과 — agy 칸 (사다리 Gemini → agy Sonnet · 첨부 · Claude·GPT 몫 · 개인 글도 넘김 · 막힘만 건너뜀(횟수 상한 없음) · 대응표 모델 · luna 깊이 한 단계 위 · '
     + '계획 너그럽게 읽기 · 쿼터는 끝 줄로 · 허용 목록 여덟 · 셸 없이 인자 배열 · 캡처 환경 · 앞이 실패하면 멈춤 · '
     + '실행한 것 · 실행하지 않은 명령 · 표시 이름은 표에서 · needs_full 은 모아 둠(partial) · 조용히 · GPT 가 한 것을 넘김 · '
-    + '-stop · 드레인은 어느 칸이든 · 남긴 건은 시도 안 셈 · 예약 일 넷 · 판 번호 없음 · 일부 실패는 「됨」 아님 · 명령마다 기록 · 명령 사이 끊김 · 보낼 글 전체 개인 글 검사 · 안내 GPT 이름은 DM 방 모델 · 한 차례에 안내 하나 · 다 막히면 「⏸ 모아 둠」)');
+    + '-stop · 드레인은 어느 칸이든 · 남긴 건은 시도 안 셈 · 예약 일 넷 · 판 번호 없음 · 일부 실패는 「됨」 아님 · 명령마다 기록 · 명령 사이 끊김 · 보낼 글의 개인 글도 넘김 · 안내 GPT 이름은 DM 방 모델 · 한 차례에 안내 하나 · 다 막히면 「⏸ 모아 둠」)');
 }
 process.exit(process.exitCode ?? 0);

@@ -174,7 +174,7 @@ export interface DrainReport {
   /** 안 돌리고 남긴 건수(다시 막힌 것 포함). */
   left: number;
   stopped: '' | 'blocked' | 'canary' | 'relimit';
-  /** 지금 맡을 엔진이 없어 건너뛴 건수(6단계 — 첨부 · 개인 글 · Claude·GPT 몫). 시도는 안 셈. */
+  /** 지금 맡을 엔진이 없어 건너뛴 건수(6단계 — 첨부 · Claude·GPT 몫). 시도는 안 셈. */
   skipped?: number;
 }
 
@@ -299,7 +299,7 @@ export interface DrainDeps {
   /** 다시 돌릴 엔진이 하나도 없나 — DM 폴백이 꺼져 있으면 Claude 막힘, 켜져 있으면 사다리 전부 막힘. */
   blocked(): boolean;
   /**
-   * 이 건을 지금 맡을 엔진이 없나(6단계) — 시도도 안 세고 남긴다. 첨부 · 개인 글 · 「Claude·GPT 몫」은
+   * 이 건을 지금 맡을 엔진이 없나(6단계) — 시도도 안 세고 남긴다. 첨부 · 「Claude·GPT 몫」은
    * agy 칸이 못 맡는다. 없으면 다 돌린다(예전 그대로).
    */
   skip?(item: HeldItem): boolean;

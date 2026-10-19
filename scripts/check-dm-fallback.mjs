@@ -9,7 +9,7 @@
  * 파이썬을 부르는 다리(`work-assistant.js`의 캡처 · 실패 표시 · 버림)만 가짜로 바꿔 부른 것을 적는다.
  *
  * **왜 기계로 세나** — 이 길은 Claude 가 바닥나는 날에만 돈다. 그리고 틀려도 조용하다: 한도 글이 그대로 나가거나,
- * GPT 가 답했는데 실패로 적혀 같은 일이 두 번 돌거나, 개인 글이 밖으로 나가도 오류도 로그도 없다.
+ * GPT 가 답했는데 실패로 적혀 같은 일이 두 번 돌거나, 넘길 차례를 모아 두기만 해도 오류도 로그도 없다.
  *
  * 상태 파일은 전부 임시 폴더로 옮긴다(엔진 상태 · 장부 · 처리 중 기록 · 연습 파일 · 홈) — 운영 파일을 안 건드린다.
  */
@@ -274,20 +274,20 @@ async function scenario(o) {
 try {
   // ================================================================ ① 고르는 함수 — 모든 조합
   {
-    const base = { origin: 'dm', planMode: false, resumeCmd: false, hasFiles: false, isPrivate: false,
+    const base = { origin: 'dm', planMode: false, resumeCmd: false, hasFiles: false,
       cwdIsWorkAssistant: true, blocked: {} };
     const P = (o) => ladder.pickEngine({ ...base, ...o });
     const origins = ['dm', 'pushed', 'replay', 'channel'];
     const outcomes = [undefined, 'notRun', 'ok', 'limited', 'overload', 'error'];
     const blocks = [{}, { claude: true }, { codex: true }, { claude: true, codex: true }];
-    const flags = [{}, { planMode: true }, { resumeCmd: true }, { hasFiles: true }, { isPrivate: true }, { cwdIsWorkAssistant: false }];
+    const flags = [{}, { planMode: true }, { resumeCmd: true }, { hasFiles: true }, { cwdIsWorkAssistant: false }];
     let n = 0;
     const bad = [];
     for (const origin of origins) for (const f of flags) for (const claudeOutcome of outcomes)
       for (const blocked of blocks) for (const writeRan of [false, true]) {
         n += 1;
         const i = { origin, ...f, claudeOutcome, blocked, writeRan };
-        const eligible = origin !== 'channel' && !f.planMode && !f.resumeCmd && !f.isPrivate && f.cwdIsWorkAssistant !== false;
+        const eligible = origin !== 'channel' && !f.planMode && !f.resumeCmd && f.cwdIsWorkAssistant !== false;
         const next = blocked.codex ? 'hold' : 'codex';
         let want = 'claude';
         if (eligible) {
@@ -300,7 +300,9 @@ try {
     eq(`고르기 — ${n}개 조합이 다 규칙대로`, bad.slice(0, 5), []);
     eq('쓰기가 돌았어도 넘긴다(넘길 때 프롬프트만 바뀐다)', P({ claudeOutcome: 'limited', writeRan: true }), 'codex');
     eq('Claude 의 보통 오류는 안 넘긴다', P({ claudeOutcome: 'error' }), 'claude');
-    eq('개인 글은 안 넘긴다', P({ claudeOutcome: 'limited', isPrivate: true }), 'claude');
+    // 개인 글도 넘긴다(2026-10-19 실장 확인 — 세 구독 모두 학습 미사용). 옛 호출이 `isPrivate` 를 실어 와도 고르기에 안 쓴다.
+    eq('개인 글도 넘긴다', P({ claudeOutcome: 'limited', isPrivate: true }), 'codex');
+    eq('개인 글도 넘긴다 — Claude 막힘이면 띄우기 전에', P({ isPrivate: true, blocked: { claude: true } }), 'codex');
     eq('사다리 배열 — 6단계가 뒤에 칸을 붙인다', ladder.DM_LADDER, ['claude', 'codex']);
     eq('사다리에 칸이 붙으면 그리로', ladder.pickEngine({ ...base, claudeOutcome: 'limited', blocked: { codex: true } },
       ['claude', 'codex', 'agy-claude']), 'agy-claude');
@@ -444,24 +446,25 @@ try {
     eq('둘 다 막힘 — 장부에 모아 둠', led.map((r) => [r.engine, r.outcome]), [['none', 'hold']]);
   }
 
-  // ================================================================ ⑦ 넘기지 않는 차례
+  // ================================================================ ⑦ 개인 글은 넘긴다 · 넘기지 않는 차례(채널 · 계획 · 다른 디렉터리)
+  //   개인 글(2026-10-19 실장 확인) — 세 구독 모두 학습 미사용이라 그 대화를 맡는 엔진에 보내는 것은 「나간다」가 아니다.
+  //   방 · 다른 사람 DM 으로 나가는 답을 막는 개인 글 문은 그대로다(`check:privacy`).
   {
     let s = await scenario({ claude: 'limited', before: () => { privateTurn = true; }, text: '비밀조각이 든 말' });
-    eq('개인 글 — GPT 안 부름', s.codex.length, 0);
-    eq('개인 글 — 모아 둠', bridge.failed.map((f) => f[1]), ['limit']);
-    // 넘기지 않는 차례는 폴백이 아예 안 끼어든다 — 장부도 안 적힌다. 한도 글은 안 올리고 한도 안내가 말한다.
-    ok('개인 글 — 한도 글 안 올림 · 한도 안내', !LIMIT_TEXT.test(allText(s.posts)) && allText(s.posts).includes('⏳'));
-    ok('개인 글 — 장부에 안 적음', !fs.existsSync(ENV.FALLBACK_LEDGER_FILE));
-    // 사람 말은 깨끗한데 넘겨줄 메모(Claude 가 돌린 명령의 인자)에 조각이 있음 — 보낼 글 전체를 다시 본다(2026-10-15 검토)
+    eq('개인 글 — GPT 가 이어 받음 · 모아 두지 않음', [s.codex.length, bridge.failed.length], [1, 0]);
+    ok('개인 글 — 사람 말을 그대로 넘김', (s.codex[0]?.prompt ?? '').includes('비밀조각이 든 말'));
+    ok('개인 글 — 한도 글 안 올림 · 한도 안내 없음', !LIMIT_TEXT.test(allText(s.posts)) && !allText(s.posts).includes('⏳'));
+    const led7 = fs.existsSync(ENV.FALLBACK_LEDGER_FILE)
+      ? fs.readFileSync(ENV.FALLBACK_LEDGER_FILE, 'utf-8').trim().split('\n').map((l) => JSON.parse(l)) : [];
+    eq('개인 글 — 장부에 GPT 가 답함', led7.map((r) => [r.engine, r.outcome]), [['codex', 'ok']]);
+    // 사람 말은 깨끗한데 넘겨줄 메모(Claude 가 돌린 명령의 인자)에 조각이 있음 — 그대로 넘긴다(옛 「보낼 글 전체 다시 보기」를 걷음)
     s = await scenario({ claude: 'limited-after-private-write', hold: true, before: () => { privateTurn = true; },
       text: '진행 남겨 줘' });
-    eq('넘겨줄 메모에 개인 글 — GPT 안 부름 · 모아 둠(일하다 끊김)', [s.codex.length, bridge.failed.map((f) => f[1])],
-      [0, ['partial']]);
-    ok('넘겨줄 메모에 개인 글 — 한도 안내', allText(s.posts).includes('⏳'));
-    eq('넘겨줄 메모에 개인 글 — 결과는 막힘이 아니라 못 함(드레인이 뒤의 건을 본다)', s.sink.outcome, 'error');
+    eq('넘겨줄 메모에 개인 글 — GPT 가 이어 받음 · 모아 두지 않음', [s.codex.length, bridge.failed.length], [1, 0]);
+    ok('넘겨줄 메모에 개인 글 — 이미 한 것으로 넘김', (s.codex[0]?.prompt ?? '').includes(`- 완료 · Bash · ${CMD1} 비밀조각`));
+    eq('넘겨줄 메모에 개인 글 — 결과는 됨', s.sink.outcome, 'ok');
     s = await scenario({ claude: 'ok', before: () => { privateTurn = true; blockClaude(); }, text: '비밀조각이 든 말' });
-    eq('개인 글 + Claude 막힘 — GPT 안 부름(Claude 길로)', [s.codex.length, claudeCalls.length], [0, 1]);
-    ok('개인 글 + Claude 막힘 — Claude 가 답하면 그 글은 올린다', allText(s.posts).includes('Claude 답'));
+    eq('개인 글 + Claude 막힘 — Claude 를 안 띄우고 GPT', [s.codex.length, claudeCalls.length], [1, 0]);
     s = await scenario({ claude: 'limited', event: { channel: 'C_ROOM' } });
     eq('채널 — GPT 안 부름', s.codex.length, 0);
     ok('채널 — 한도 글 안 올림 · 한도 안내', !LIMIT_TEXT.test(allText(s.posts)) && allText(s.posts).includes('⏳'));
@@ -505,10 +508,12 @@ try {
     s = await scenario({ notice: true, claude: 'limited', codex: 'fail', hold: true });
     await sleep(30);
     ok('GPT 가 막힌 게 아니라 실패 · 켜짐 — 사다리가 다 막힌 것이 아니라 ⏳ 그대로', oldEnd(s));
-    s = await scenario({ notice: true, claude: 'limited-after-private-write', hold: true, before: () => { privateTurn = true; },
-      text: '진행 남겨 줘' });
+    // 개인 글도 다른 보류와 같다(2026-10-19) — GPT 까지 막혀 모아 두면 ⏸ 가 말한다(옛 「개인 글이라 모아 둠」 ⏳ 길을 걷음)
+    s = await scenario({ notice: true, claude: 'limited-after-private-write', codex: 'usage-event', hold: true,
+      before: () => { privateTurn = true; }, text: '진행 남겨 줘' });
     await sleep(30);
-    ok('넘겨줄 메모에 개인 글 · 켜짐 — 막힘 때문이 아니라 ⏳ 그대로', allText(s.posts).includes('⏳') && cancelBtn(s.posts));
+    ok(`넘겨줄 메모에 개인 글 · GPT 도 막힘 · 켜짐 — 다른 보류처럼 「⏸ 모아 둠」 · ✋ — ${s.updates.at(-1)}`, quietEnd(s));
+    eq('넘겨줄 메모에 개인 글 · GPT 도 막힘 — 결과는 막힘(드레인이 멈춘다)', s.sink.outcome, 'limited');
   }
 
   // ================================================================ ⑧ 같은 방에서 한 줄로 — 새 DM 은 기다리고 GPT 를 안 끊는다
@@ -875,10 +880,10 @@ if (fails.length) {
 } else {
   console.log('통과 — DM 폴백 (고르기 전 조합 · 꺼짐이면 예전 그대로 · 막혀 있으면 Claude 안 띄움 · 거절 뒤 한도 글 안 올림 · '
     + '캡처 id 값으로 · 봇 세션 표시 · 답과 표시 줄 · 됐으면 실패 표시 없음 · 쓰기 뒤 끊김은 이미 한 것과 함께 · '
-    + 'GPT 도 못 하면 모아 둠(원문 안 올림) · 개인 글 · 채널 · 계획 · 다른 디렉터리는 안 넘김 · 같은 방은 한 줄로 · '
+    + 'GPT 도 못 하면 모아 둠(원문 안 올림) · 개인 글은 넘김 · 채널 · 계획 · 다른 디렉터리는 안 넘김 · 같은 방은 한 줄로 · '
     + '-stop · -reset 이 차례와 같은 키 · 끊은 다시 돌리기는 버림 · 기다리기 전에 캡처 · 넘기지 않는 차례도 한도 글 안 올림 · '
     + 'GPT 가 받으면 세션 시각 그대로 · 장부 차례는 세션 정리에서 남김 · 짧은 갱신은 됨 · '
-    + '조용히 · 첨부 경로 · 엔진 안내 · 장부에 말 없음 · 돌아온 첫 차례 한 줄 · 연습 파일 · -engines · 오류 도구는 실패로 넘김 · 넘겨줄 메모의 개인 글 · Claude 다시 돌리기 끊음도 버림 · 기다리는 말도 재시작 뒤 드레인 · ⏸ 가 말하면 ⏳ 없이 「⏸ 모아 둠」)');
+    + '조용히 · 첨부 경로 · 엔진 안내 · 장부에 말 없음 · 돌아온 첫 차례 한 줄 · 연습 파일 · -engines · 오류 도구는 실패로 넘김 · 넘겨줄 메모의 개인 글도 넘김 · Claude 다시 돌리기 끊음도 버림 · 기다리는 말도 재시작 뒤 드레인 · ⏸ 가 말하면 ⏳ 없이 「⏸ 모아 둠」)');
 }
 // 대화 처리기가 차례 뒤 정리를 5분 뒤로 걸어 둔다 — 기다리지 않고 끝낸다.
 process.exit(process.exitCode ?? 0);

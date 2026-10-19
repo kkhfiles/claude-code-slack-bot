@@ -10,8 +10,11 @@
  *
  * 넘기지 않는 차례(늘 Claude · 막혔으면 모아 둠):
  *   - 채널(여럿이 보는 방) · 계획 모드 · 세션을 직접 고른 이어 가기(`-r <id>` · `-continue`)
- *   - 개인 글 조각이 든 말(`privacy-guard.ts` `containsPrivate`) — 밖(OpenAI)으로 안 보낸다
  *   - 작업 디렉터리가 업무 비서 뿌리가 아님 — 대체 엔진의 규칙·쓰기 범위가 그 뿌리에 맞춰져 있다
+ *
+ * **개인 글 조각이 든 말도 넘긴다**(2026-10-19 실장 확인) — 세 구독(Claude Code · Codex · agy) 모두 학습에 안 쓰게
+ * 설정돼 있어, 그 대화를 맡는 엔진에 보내는 것은 「나간다」가 아니다(`AGENTS.md` 「개인 글」). 방 · 다른 사람 DM 으로
+ * 나가는 답은 여전히 개인 글 문(`privacy-guard.ts`)이 막는다.
  *
  * **쓰기가 돌았어도 넘긴다**(사용자 결정) — 막혀 끊긴 차례를 다음 엔진이 곧바로 이어 받고, 쓰기가
  * 돌았다는 것은 프롬프트만 바꾼다(「이미 한 것 — 다시 하지 말 것」). Claude 의 보통 오류(한도 ·
@@ -49,7 +52,6 @@ export interface PickInput {
   hasFiles: boolean;
   /** agy 가 「Claude·GPT 몫」으로 남긴 차례(`needs_full`)를 다시 돌림 — agy 칸을 건너뛴다. */
   needsFull?: boolean;
-  isPrivate: boolean;
   cwdIsWorkAssistant: boolean;
   /** 엔진별 지금 막혔나(엔진 상태 · codex 는 한도 조회를 옮긴 뒤). 없는 칸은 안 막힘. */
   blocked: Partial<Record<Engine, boolean>>;
@@ -59,8 +61,8 @@ export interface PickInput {
 }
 
 /** 이 차례를 다른 엔진에 넘겨도 되나 — 안 되면 늘 Claude(막혔으면 모아 둠). */
-export function fallbackEligible(i: Pick<PickInput, 'origin' | 'planMode' | 'resumeCmd' | 'isPrivate' | 'cwdIsWorkAssistant'>): boolean {
-  return i.origin !== 'channel' && !i.planMode && !i.resumeCmd && !i.isPrivate && i.cwdIsWorkAssistant;
+export function fallbackEligible(i: Pick<PickInput, 'origin' | 'planMode' | 'resumeCmd' | 'cwdIsWorkAssistant'>): boolean {
+  return i.origin !== 'channel' && !i.planMode && !i.resumeCmd && i.cwdIsWorkAssistant;
 }
 
 /**

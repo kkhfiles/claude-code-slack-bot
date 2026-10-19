@@ -180,8 +180,6 @@ interface FallbackArgs {
 interface FallbackResult {
   result: 'ok' | 'held' | 'failed' | 'stopped' | 'next';
   steps: TurnStep[]; writeRan: boolean; markDone?: Promise<void>; next?: LadderPick;
-  /** 넘길 글에 개인 글 조각이 있어 모아 둠 — 막힘이 아니라 「못 함」으로 끝낸다(드레인이 뒤의 건을 계속 본다). */
-  privateHold?: boolean;
   /** 다 막혀 모아 두었고 ⏸ 엔진 안내가 그것을 말한다 — ⏳ 안내를 안 올렸다(`holdToldByNotice`). */
   quietHold?: boolean;
 }
@@ -1651,17 +1649,13 @@ export class SlackHandler {
     const restoreSession = event.resumeSessionId
       ? { sessionId: session.sessionId, uuid: session.lastAssistantUuid } : null;
     // **DM 폴백**(엔진 폴백 5단계 · `DM_FALLBACK=on`) — Claude 가 막히면 이 차례를 GPT 가 이어 받는다.
-    // 넘겨도 되는 차례인지는 `engine-ladder.ts` 가 정한다. 개인 글 검사는 넘길 일이 생겼을 때 한 번만
-    // 돌린다(긴 첨부에서 느리다). 꺼져 있으면 `fbOn()` 이 늘 거짓이라 예전 그대로 돈다.
+    // 넘겨도 되는 차례인지는 `engine-ladder.ts` 가 정한다. 꺼져 있으면 `fbBase` 가 늘 거짓이라 예전 그대로 돈다.
+    // 개인 글 조각이 든 말도 넘긴다(2026-10-19 실장 확인 — 세 구독 모두 학습 미사용 · `AGENTS.md` 「개인 글」).
     const origin: DmOrigin = !isDM ? 'channel' : event.replay ? 'replay' : (event as any).pushed ? 'pushed' : 'dm';
     const fbBase = dmFallbackOn() && fallbackEligible({
-      origin, planMode: isPlanMode, resumeCmd: !!resumeData, isPrivate: false,
+      origin, planMode: isPlanMode, resumeCmd: !!resumeData,
       cwdIsWorkAssistant: this.isWorkAssistantDir(workingDirectory),
     });
-    let fbPrivate: boolean | undefined;
-    const isPrivateTurn = (): boolean =>
-      (fbPrivate ??= containsPrivate([finalPrompt, event.replayNote ?? ''].join('\n')));
-    const fbOn = (): boolean => fbBase && !isPrivateTurn();
     /** 띄우기 전에 Claude 를 건너뛰었나(엔진 상태가 막혔다고 함) — 그러면 아래 스트림이 비어 있다. */
     let claudeSkipped = false;
     /** 이 차례의 손잡이 — 터졌을 때(`catch`) 사람이 끊은 것인지 가른다. */
@@ -1676,7 +1670,7 @@ export class SlackHandler {
     /** 고르는 함수에 넘길 것 — 막힘은 부를 때마다 새로 읽는다(codex 한도 조회 포함). */
     const pickInput = async (o: Pick<PickInput, 'claudeOutcome' | 'writeRan'> = {}): Promise<PickInput> => ({
       origin, planMode: isPlanMode, resumeCmd: !!resumeData, hasFiles: processedFiles.length > 0,
-      needsFull: !!event.needsFull, isPrivate: isPrivateTurn(), cwdIsWorkAssistant: this.isWorkAssistantDir(workingDirectory),
+      needsFull: !!event.needsFull, cwdIsWorkAssistant: this.isWorkAssistantDir(workingDirectory),
       blocked: await this.ladderBlocked(), ...o,
     });
     /**
@@ -1817,7 +1811,7 @@ export class SlackHandler {
       // **DM 폴백 — 띄우기 전**: 엔진 상태가 Claude 가 막혔다고 하면 안 띄운다(띄워도 한도 글만 받는다).
       // 다음 칸(GPT)이 비었으면 스트림 뒤에서 그리로 넘기고, 다 막혔으면 예전 한도 길로 모아 둔다.
       let pick: LadderPick = 'claude';
-      if (engineState.isBlocked('claude') && fbOn()) {
+      if (engineState.isBlocked('claude') && fbBase) {
         pick = pickEngine(await pickInput(), dmLadder());
         claudeSkipped = pick !== 'claude';
         if (claudeSkipped) this.logger.warn('Claude 가 막혀 있어 띄우지 않습니다(DM 폴백)', { next: pick });
@@ -1952,7 +1946,7 @@ export class SlackHandler {
             const content = this.extractTextFromContent(contentParts);
             if (content && limitSeen) {
               // **막힌 뒤의 Claude 글(「You've hit your limit…」)은 안 올린다** — 넘길 차례면 이어 받는 엔진이
-              // 답하고, 못 넘기는 차례(개인 글 · 채널 · 계획 · 다른 디렉터리 · 폴백 꺼짐)는 아래 한도 안내(한 번만)가
+              // 답하고, 못 넘기는 차례(채널 · 계획 · 다른 디렉터리 · 폴백 꺼짐)는 아래 한도 안내(한 번만)가
               // 알린다. 판정은 이벤트(거절 · API 오류 칸)로만 한다 — 보통 글은 낱말로 안 훑는다(아래 NOTE).
               this.logger.info('막힌 뒤의 Claude 글을 올리지 않습니다');
             } else if (content) {
@@ -2042,7 +2036,7 @@ export class SlackHandler {
       // 다음 칸으로 넘긴다. 쓰기가 돌았어도 넘긴다 — 「이미 한 것」을 같이 준다. 다 막혔으면(`hold`)
       // 아래 예전 한도 길이 실패 표시와 안내를 맡는다. Claude 의 보통 오류는 안 넘긴다(예전 오류 길).
       const claudeLimited = !!(rateLimitInfo || rateLimitMessageText || limitSeen);
-      if ((claudeSkipped || claudeLimited) && fbOn() && !claudeStopped) {
+      if ((claudeSkipped || claudeLimited) && fbBase && !claudeStopped) {
         const claudeBlock = currentClaudeBlock(rateLimitInfo?.resetsAt, rateLimitMessageText);
         const ladder = dmLadder();
         if (!claudeSkipped) {
@@ -2091,8 +2085,7 @@ export class SlackHandler {
               } else {
                 cliError = true;
                 if (fb.result === 'failed') {
-                  // 개인 글이라 모아 둔 것은 막힘이 아니다 — 드레인이 이 건에서 멈추지 않고 뒤의 건을 본다.
-                  if (!fb.privateHold) turnBlock = claudeBlock;
+                  turnBlock = claudeBlock;
                   markDone = fb.markDone ?? null;
                   if (fb.quietHold) heldQuiet = true;
                 }
@@ -2512,9 +2505,6 @@ export class SlackHandler {
    * - **비서 DM** — ⏸ 는 비서 DM 에만 간다. 채널 · 다른 DM 에서 모아 둔 것은 그 자리에 ⏳ 가 있어야 안다
    * - **엔진 상태로 사다리가 다 막힘**(`rungNow() === 'none'`) — ⏸ 가 이미 나갔거나 이 차례가 끝날 때 나간다. 칸이 막힌 게
    *   아니라 실패했거나(계획 아님 · 업무 목록 못 읽음) 첨부 때문에 agy 칸을 건너뛰어 모아 둔 것은 ⏸ 가 안 나가므로 ⏳
-   *
-   * 개인 글이라 모아 둔 것(`holdPrivateFallback`)은 이 함수를 안 거친다 — 막힘 때문이 아니라 밖으로 못 보내서 모은 것이라
-   * ⏸ 「모든 엔진 소진」이 그 까닭이 아니다.
    */
   private holdToldByNotice(channel: string): boolean {
     const dm = config.assistant.dmChannel;
@@ -2610,7 +2600,7 @@ export class SlackHandler {
    * - 오래된 것부터 받은 자리에서 · 도는 동안 그 방의 새 차례는 기다림 · 다시 막히면 멈춤
    * - 끝까지 간 것은 실패 자국 · 보관 첨부를 걷음 · 한 건 이상 돌았으면 한 줄 요약
    * - **DM 폴백이 켜져 있으면 사다리의 어느 칸이든 비면 돈다**(6단계) — 다시 돌린 차례는 대화 처리기가 골라
-   *   맡긴다. 떠 보기는 Claude 가 맡을 칸일 때만 · 지금 맡을 칸이 없는 건(첨부 · 개인 글 · 「Claude·GPT 몫」)은
+   *   맡긴다. 떠 보기는 Claude 가 맡을 칸일 때만 · 지금 맡을 칸이 없는 건(첨부 · 「Claude·GPT 몫」)은
    *   시도를 안 세고 남긴다(`drainSkip`)
    */
   private async drainStuckV2(why: string): Promise<void> {
@@ -2674,7 +2664,7 @@ export class SlackHandler {
 
   /**
    * 이 건을 지금 맡을 엔진이 없나(6단계) — 대화 처리기가 그 차례에 고를 것을 미리 본다. Claude 가 비었으면
-   * 무엇이든 맡는다. 아니면 넘기지 않는 차례(개인 글 · 채널 · 다른 작업 디렉터리)는 Claude 몫이고, 첨부 ·
+   * 무엇이든 맡는다. 아니면 넘기지 않는 차례(채널 · 다른 작업 디렉터리)는 Claude 몫이고, 첨부 ·
    * 「Claude·GPT 몫」은 agy 칸이 못 맡는다 — 그런 건은 시도를 안 세고 남긴다.
    */
   private drainSkip(it: HeldItem): boolean {
@@ -2685,7 +2675,7 @@ export class SlackHandler {
     const cwd = this.workingDirManager.getWorkingDirectory(target.channel, target.thread, config.bot.allowUsers[0]);
     const pick = pickEngine({
       origin: target.channel.startsWith('D') ? 'replay' : 'channel', planMode: false, resumeCmd: false,
-      hasFiles: !!it.files?.length, needsFull: it.needs === 'full', isPrivate: containsPrivate(it.text),
+      hasFiles: !!it.files?.length, needsFull: it.needs === 'full',
       cwdIsWorkAssistant: this.isWorkAssistantDir(cwd), blocked: b,
     }, dmLadder());
     return pick === 'hold' || pick === 'claude';
@@ -2788,7 +2778,7 @@ export class SlackHandler {
         const { run, tell } = await pendingHeld(50);
         const item = [...tell, ...run].find((x) => x.id === id);
         if (!item) return { text: '이미 처리했거나 버린 요청입니다', settle: true };
-        // 지금 남은 칸이 이 건을 못 맡으면(첨부 · 개인 글 · 「Claude·GPT 몫」) 돌리지 않는다 — 6단계.
+        // 지금 남은 칸이 이 건을 못 맡으면(첨부 · 「Claude·GPT 몫」) 돌리지 않는다 — 6단계.
         if (this.drainSkip(item)) return { text: '⏳ 이 요청을 맡을 엔진이 아직 막혀 있습니다 — 풀린 뒤 다시 눌러 주세요', settle: false };
         const release = this.holdGate.hold([replayTarget(item, config.assistant.dmChannel).channel]);
         try {
@@ -2854,19 +2844,6 @@ export class SlackHandler {
     return { ...base, codex };
   }
 
-  /**
-   * 넘길 글에 개인 글 조각이 있다 — GPT · agy 로 안 보내고 모아 둔다(개인 글 차례와 같은 길: 실패 표시 · 한도 안내
-   * 한 번). 다음 칸으로도 안 넘긴다(그쪽도 밖이다). 회복 때 Claude 가 다시 돌린다.
-   * 결과는 막힘이 아니라 「못 함」(`privateHold`) — 드레인이 이 건에서 멈추면 뒤의 건까지 묶인다.
-   */
-  private async holdPrivateFallback(a: FallbackArgs, rung: Engine): Promise<FallbackResult> {
-    this.logger.warn('DM 폴백 — 넘길 글에 개인 글 조각이 있어 대체 엔진에 안 보내고 모아 둡니다', { rung });
-    appendLedger({ channel: a.channel, engine: 'none', model: '', captureId: a.captureId, outcome: 'hold' });
-    const markDone = this.markTurnFailed(a.captureId, 'limit', { steps: a.claudeSteps }, a.sessionId, a.event, a.files);
-    await this.handleRateLimitUI(a.channel, a.thread_ts || a.ts, a.finalPrompt, a.block, a.locale, a.say, a.ts, a.captureId);
-    return { result: 'failed', steps: [], writeRan: false, markDone, privateHold: true };
-  }
-
   /** 이 작업 디렉터리가 업무 비서 뿌리인가 — 대체 엔진의 규칙 · 쓰기 범위가 거기에 맞춰져 있다. */
   private isWorkAssistantDir(dir: string | undefined): boolean {
     const root = workAssistantRoot();
@@ -2903,9 +2880,6 @@ export class SlackHandler {
           currentTs: a.ts, threadTs: a.thread_ts, isNewSession: true, botUserId, isPrivate: containsPrivate,
         })).catch(() => '');
       const prompt = [handoverNote(a.claudeSteps), context, a.finalPrompt + filesNote(a.files)].filter(Boolean).join('\n');
-      // **보낼 글 전체를 개인 글 문에 한 번 더 댄다**(2026-10-15 검토) — 차례 앞에서는 사람 말만 봤다. 넘겨줄 메모
-      // (Claude 가 돌린 명령의 인자) · 못 본 대화방 글 · 밀린 요청 메모에 섞인 조각도 OpenAI 로 안 나가게 모아 둔다.
-      if (containsPrivate(prompt)) return await this.holdPrivateFallback(a, 'codex');
       // 모델은 서비스 폴백 대응표(`service_fallback` · 한 급 낮게) — 표가 없으면 예전처럼 같은 등급 · 기본 모델.
       const svc = serviceCodex(a.claudeModel, INTERACTIVE_EFFORT);
       const model = svc?.model
@@ -3007,9 +2981,6 @@ export class SlackHandler {
           currentTs: a.ts, threadTs: a.thread_ts, isNewSession: true, botUserId, isPrivate: containsPrivate,
         })).catch(() => '');
       const handover = handoverNote(a.claudeSteps, 'Claude·GPT');
-      // **보낼 글을 개인 글 문에 한 번 더 댄다**(2026-10-15 검토) — 넘겨줄 메모 · 못 본 대화방 글 · 밀린 요청 메모 ·
-      // 사람 말. 걸리면 Google 로 안 보내고 모아 둔다(업무 목록 · 이 칸의 규칙은 봇이 짓는 글이라 안 본다).
-      if (containsPrivate([handover, context, a.finalPrompt].join('\n'))) return await this.holdPrivateFallback(a, rung);
       const prompt = agyDmPrompt({
         list, slotMap: a.slotMap, handover, context, text: a.finalPrompt,
       });
