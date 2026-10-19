@@ -164,6 +164,7 @@
 - **`agyGemini`**, **`agyClaude`**(6단계) — `codex` 와 같은 두 갈래, agy 를 안 띄움
 - **안 받는 파일** — 없음, 지남, `expiresAt` 이 2시간 넘게 남음, 깨짐
 - **범위** — 대화 차례만, `scope: "all"` 이면 예약 일까지
+  - 부서 대화 봇(파이썬 `chatbot/turn.py`)도 `scope: "all"` 일 때만 받음 — `agyGemini`, `codex`, `claude` 갈래와 막힘 길이는 이 절과 같음
 - **막힘 길이** — 20분 뒤와 연습 파일의 `expiresAt` 중 이른 쪽(`drillBlockUntil`). 파일을 일찍 지우면 남은 시간만큼 엔진 상태에 남음(그동안 DM 은 Claude 를 건너뜀)
 - **로그** — 주입할 때마다 WARN 한 줄
 
@@ -193,6 +194,7 @@
   - 첫 칸이 Claude 여야 하는 까닭 — 고르는 함수가 Claude 다음 칸부터 찾음(세션과 모아 둔 차례가 Claude 에 묶여 있음)
 - **사용자 설정은 못 봄** — 봇은 패키지 기본값 파일(`LLM_PLAYBOOK_MODELS` 가 있으면 그것)을 직접 읽음. `~/.config/llm-playbook/config.json` 의 `ladders` 덮어쓰기는 파이썬만 따름
 - **나머지 사다리** — `batch`, `chat`(부서 대화 봇), `review`(교차 검증) 와 `reserve`(배치와 대화 봇이 GPT 5시간 통을 덜 쓰게 함)는 파이썬 `llm_playbook.ladder.ask(…, ladder=이름)` 몫이라 봇은 안 읽음
+  - `chat` 을 켜는 문은 이 봇의 `.env` 에 있는 `CHATBOT_FALLBACK=on`(기본은 꺼짐). 대화 호스트(`src/chat-host.ts`)가 환경을 그대로 물려주므로 봇 코드에는 읽는 곳이 없음
 - **검사** — `npm run check:servladder`. 지금 표가 오늘 차례인지, 칸을 빼면 따라오는지, 이상한 표에서 기본 차례로 도는지, 파이썬이 보는 차례와 같은지 확인
 
 ## 폴백 모델 — 서비스 폴백 대응표
