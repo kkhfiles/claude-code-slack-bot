@@ -432,6 +432,36 @@ export function shiftDate(ymdText: string, days: number): string {
   return new Date(t).toISOString().slice(0, 10);
 }
 
+/**
+ * 저녁에 발화하는 데일리 스케줄(`daily-18:00` ~ `daily-23:59`, 예: `daily-22:00`)은
+ * **다음 날(대상 업무일) 자정 회차를 앞당겨 도는 것**이므로, 업무일 판정과 예정일(slot)을
+ * 다음 달력 날짜(`+1일`)로 잡는다.
+ */
+export function targetDateForSchedule(schedule: string, fire: Date): Date {
+  const m = /^daily-(\d{1,2}):(\d{2})$/i.exec(schedule);
+  if (m && Number(m[1]) >= 18) {
+    const nextDay = new Date(fire);
+    nextDay.setDate(nextDay.getDate() + 1);
+    return nextDay;
+  }
+  return fire;
+}
+
+/**
+ * 데일리 스케줄의 한도 재시도가 새벽 쿼터 보호 구간(00:50~06:05)에 떨어지면
+ * 06:01 쿼터 웜업 뒤인 06:05 로 미룬다(토요일 주간 분석은 제외).
+ */
+export function clampDailyRetryTime(schedule: string, retryTime: Date): Date {
+  if (!schedule.toLowerCase().startsWith('daily-')) return retryTime;
+  const mins = retryTime.getHours() * 60 + retryTime.getMinutes();
+  if (mins >= 50 && mins < 6 * 60 + 5) {
+    const clamped = new Date(retryTime);
+    clamped.setHours(6, 5, 0, 0);
+    return clamped;
+  }
+  return retryTime;
+}
+
 /** 러너가 쓴 기계본 표식 — 판정 세션이 지운다. report-log `PENDING_MARK` 와 같은 글자. */
 export const PENDING_MARK = '<!-- judgment: pending -->';
 /** 판정 세션이 채워야 하는 자리표시자가 남았다는 표식 — report-log `INCOMPLETE_MARKERS` 와 같다. */
@@ -1464,12 +1494,23 @@ export class AssistantScheduler {
     const window = parseWindow(a?.reviewWindow ?? '02:00-07:00');
     this.logger.info('처리 제안 타이머 시작', { nightlyReview: !!a?.nightlyReview, window: a?.reviewWindow });
     this.actionsTimer = setInterval(() => {
+      const now = new Date();
       void this.actionPipeline.tick({
-        review: !!a?.nightlyReview, window, workingDay: !this.isNonWorkingDay().skip,
-      });
+        review: !!a?.nightlyReview, window, workingDay: this.isActionsWorkingDay(window, now),
+      }, now);
     }, ACTIONS_TICK_MS);
     // 한도로 미뤄 둔 사람이 시킨 검토 — 재시작 · 설정 저장(clearAllTimers 가 지움) 뒤에 다시 건다.
     this.actionPipeline.restoreResume();
+  }
+
+  /** 밤 검토의 기준 업무일 — 자정 넘김 시간대(예: 23:00-00:50)의 자정 전(18시 이후)에는 다음 날 아침이 업무일인지 본다. */
+  private isActionsWorkingDay(window: [number, number] | null, now: Date = new Date()): boolean {
+    if (window && window[0] > window[1] && now.getHours() >= 18) {
+      const tomorrow = new Date(now);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      return !this.isNonWorkingDay(tomorrow).skip;
+    }
+    return !this.isNonWorkingDay(now).skip;
   }
 
   /**
@@ -3408,9 +3449,9 @@ export class AssistantScheduler {
       nextFire: nextFire.toISOString(),
     });
 
-    // **예정일은 예약 발화 시각의 한국 날짜다** — 실제로 돈 시각이 아니다. 자정 회차가
-    // 늦게 깨거나 그룹이 자정을 넘겨도 그 회차의 날짜는 그대로다.
-    const slot = kstDate(nextFire);
+    // **예정일은 예약 발화 시각의 대상 한국 날짜다** — 실제로 돈 시각이 아니다. 저녁 데일리 회차
+    // (`daily-22:00` 등)는 다음 날 아침 업무일을 앞당겨 도는 것이므로 다음 달력 날짜를 잡는다.
+    const slot = kstDate(targetDateForSchedule(schedule, nextFire));
     const timer = setTimeout(async () => {
       try {
         await this.runAnalysisGroup(schedule, types, { slot, trigger: 'scheduled' });
@@ -3783,13 +3824,26 @@ export class AssistantScheduler {
     }
     await this.sendMessage(parts.join('\n')).catch(() => {});
 
-    // Schedule retry for session-limit failures (weekly only)
+    // 밤 데일리 회차(`daily-22:00` 등, 낮 회차 제외)가 끝나면 방금 등록된 처리 제안을
+    // 1시간 주기 타이머를 기다리지 않고 곧장 밤 검토 시간대에 태운다.
+    if (isDaily && schedule.toLowerCase() !== 'daily-12:00' && this.config?.actions?.enabled && reportLogAvailable()) {
+      const a = this.config.actions;
+      const window = parseWindow(a.reviewWindow ?? '02:00-07:00');
+      const now = new Date();
+      void this.actionPipeline.tick({
+        review: !!a.nightlyReview, window, workingDay: this.isActionsWorkingDay(window, now),
+      }, now);
+    }
+
+    // Schedule retry for session-limit failures
     if (failedRetryTypes.length > 0) {
       // 해제 시각을 받았으면 그 시각 +5분에 잡는다. 없으면 종전대로 다음 정시+5분
-      // (근거가 없는 값이라 폴백으로만 남긴다). 어느 쪽이든 최소 1분은 띄운다.
-      const retryTime = limitResetsAt
+      // (근거가 없는 값이라 폴백으로만 남긴다). 어느 쪽이든 최소 1분은 띄우고,
+      // 데일리 스케줄은 새벽 쿼터 보호 구간(00:50~06:05)을 피해 06:05 뒤로 미룬다.
+      const rawRetryTime = limitResetsAt
         ? new Date(Math.max(Date.now() + 60_000, limitResetsAt * 1000 + 5 * 60_000))
         : this.getNextHourPlus5Min();
+      const retryTime = clampDailyRetryTime(schedule, rawRetryTime);
       const retryTypes = failedRetryTypes.map(f => f.type);
 
       this.logger.info('Scheduling retry for session-limited types', {
@@ -4363,11 +4417,11 @@ export class AssistantScheduler {
     next.setHours(h, m, 0, 0);
 
     if (dayStr.toLowerCase() === 'daily') {
-      // Daily: next working day at the specified time
+      // Daily: next working day at the specified time (evening schedules target the next day)
       if (next <= now) {
         next.setDate(next.getDate() + 1);
       }
-      while (this.isNonWorkingDay(next).skip) {
+      while (this.isNonWorkingDay(targetDateForSchedule(schedule, next)).skip) {
         next.setDate(next.getDate() + 1);
       }
     } else {

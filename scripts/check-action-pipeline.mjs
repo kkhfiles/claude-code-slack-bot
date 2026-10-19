@@ -498,9 +498,10 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   // 계정 명령(`-ac` · `-account`)은 2026-10-14 에 걷었다 — 걷힌 쪽은 `check:noaccounts` 가 본다.
 }
 
-// ── ⑦ 밤 검토 시간대 ──────────────────────────────────────────────────
+// ── ⑦ 밤 검토 시간대 · 저녁 데일리 날짜 · 새벽 재시도 보호 ───────────────
 {
   eq('시간대 읽기', parseWindow('02:00-07:00'), [120, 420]);
+  eq('자정 넘김 밤 시간대 읽기', parseWindow('23:00-00:50'), [1380, 50]);
   eq('거꾸로 된 시간대는 안 켠다', parseWindow('07:00-02:00'), null);
   eq('못 읽으면 안 켠다', parseWindow('밤'), null);
   const at = (h, m) => { const d = new Date(2026, 8, 29, h, m); return d; };
@@ -514,6 +515,24 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   eq('업무일 07:30 → 이어 가기만', await kinds(on, at(7, 30)), ['run']);
   eq('쉬는 날 → 이어 가기만', await kinds({ ...on, workingDay: false }, at(2, 30)), ['run']);
   eq('밤 검토를 안 켰으면 → 이어 가기만', await kinds({ ...on, review: false }, at(2, 30)), ['run']);
+
+  const cross = { review: true, window: [1380, 50], workingDay: true };
+  eq('자정 넘김 23:30 → 이어 가기 + 검토', await kinds(cross, at(23, 30)), ['run', 'review']);
+  eq('자정 넘김 00:30 → 이어 가기 + 검토', await kinds(cross, at(0, 30)), ['run', 'review']);
+  eq('자정 넘김 00:50 → 이어 가기만(쿼터 보호 시작)', await kinds(cross, at(0, 50)), ['run']);
+  eq('자정 넘김 22:30 → 이어 가기만', await kinds(cross, at(22, 30)), ['run']);
+
+  const { targetDateForSchedule, clampDailyRetryTime, kstDate } = require(path.join(ROOT, 'dist', 'assistant-scheduler.js'));
+  eq('daily-22:00 의 대상 날짜는 다음 날', kstDate(targetDateForSchedule('daily-22:00', new Date(2026, 9, 18, 22, 0))), '2026-10-19');
+  eq('daily-12:00 의 대상 날짜는 당일', kstDate(targetDateForSchedule('daily-12:00', new Date(2026, 9, 19, 12, 0))), '2026-10-19');
+  eq('saturday-00:00 의 대상 날짜는 그대로', kstDate(targetDateForSchedule('saturday-00:00', new Date(2026, 9, 16, 23, 59, 30))), '2026-10-16');
+
+  const clamped = clampDailyRetryTime('daily-22:00', at(1, 5));
+  eq('데일리 재시도가 00:50~06:05 에 떨어지면 06:05 로 미룬다', [clamped.getHours(), clamped.getMinutes()], [6, 5]);
+  const kept = clampDailyRetryTime('daily-22:00', at(0, 30));
+  eq('데일리 재시도가 00:50 전이면 그대로', [kept.getHours(), kept.getMinutes()], [0, 30]);
+  const satKept = clampDailyRetryTime('saturday-00:00', at(2, 5));
+  eq('토요일 주간 분석 재시도는 그대로', [satKept.getHours(), satKept.getMinutes()], [2, 5]);
 }
 
 // ── ⑧ 한도로 끊긴 사람이 시킨 검토 — 회복 뒤 이어 감 · 재시작에도 남음 · 밤 검토는 안 남김 ──

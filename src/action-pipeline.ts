@@ -322,13 +322,38 @@ function writtenSince(file: string, sinceMs: number): boolean {
   }
 }
 
-/** 밤 검토 시간대 `"02:00-07:00"` → 자정부터 분. 못 읽으면 null — 검토를 안 켠다. */
+/**
+ * 밤 검토 시간대 `"02:00-07:00"` 또는 자정 넘김 `"23:00-00:50"` → 자정부터 분 `[from, to]`.
+ * 자정 넘김(`from > to`)은 저녁(18:00 이후)에 시작해 오전(12:00 이전)에 끝나는 범위만 허용한다.
+ * 못 읽으면 null — 검토를 안 켠다.
+ */
 export function parseWindow(text: string | undefined): [number, number] | null {
   const m = /^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/.exec((text || '').trim());
   if (!m) return null;
   const from = Number(m[1]) * 60 + Number(m[2]);
   const to = Number(m[3]) * 60 + Number(m[4]);
-  return from < to && to <= 24 * 60 ? [from, to] : null;
+  if (from < 0 || to < 0 || from >= 24 * 60 || to > 24 * 60) return null;
+  if (from < to) return [from, to];
+  if (from > to && from >= 18 * 60 && to <= 12 * 60) return [from, to];
+  return null;
+}
+
+/** 현 시각(자정부터 분)이 `window` 안에 드는가. 자정 넘김(`from > to`)도 함께 다룬다. */
+export function inWindow(window: [number, number], mins: number): boolean {
+  const [from, to] = window;
+  return from < to ? (mins >= from && mins < to) : (mins >= from || mins < to);
+}
+
+/** 밤 검토 마감 시각(epoch ms). 자정 넘김 시간대에서 자정 전(`mins >= from`)이면 다음 날 `to` 분이 마감이다. */
+export function windowUntil(window: [number, number], now: Date): number {
+  const [from, to] = window;
+  const mins = now.getHours() * 60 + now.getMinutes();
+  const until = new Date(now);
+  if (from > to && mins >= from) {
+    until.setDate(until.getDate() + 1);
+  }
+  until.setHours(0, to, 0, 0);
+  return until.getTime();
 }
 
 // ── 메시지 ─────────────────────────────────────────────────────────
@@ -658,10 +683,8 @@ export class ActionPipeline {
     const p = this.request('run');
     if (opts.review && opts.window && opts.workingDay) {
       const mins = now.getHours() * 60 + now.getMinutes();
-      if (mins >= opts.window[0] && mins < opts.window[1]) {
-        const until = new Date(now);
-        until.setHours(0, opts.window[1], 0, 0);
-        return this.request('review', until.getTime());
+      if (inWindow(opts.window, mins)) {
+        return this.request('review', windowUntil(opts.window, now));
       }
     }
     return p;
