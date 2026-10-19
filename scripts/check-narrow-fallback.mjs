@@ -40,6 +40,9 @@ const ok = (label, cond) => { if (!cond) fails.push(label); };
 const NOBIN = 'codex-없는-이름-2026';
 // 엔진 상태 — codex 한 차례(`codexTurn`)가 적는 곳. 운영 파일에 안 쓰게.
 process.env.ENGINE_STATE_FILE = path.join(os.tmpdir(), `narrow-engine-${Date.now()}.json`);
+// 비용 원장 — 폴백 회차를 적는다(`recordFallbackRun`). 운영 원장에 시험 줄이 안 들어가게(2026-10-19).
+const COSTS = path.join(os.tmpdir(), `narrow-costs-${Date.now()}.json`);
+process.env.ASSISTANT_COSTS_FILE = COSTS;
 
 // ── ③ 꺼 두면 아무것도 안 한다 ──────────────────────────────────
 process.env.BOARD_NARROW_FALLBACK = 'off';
@@ -101,10 +104,35 @@ if (!workAssistantRoot()) {
   if (fb.length === 1) {
     eq('던진 것을 `threw` 로 적는다', [fb[0].why, fb[0].ok], ['threw', false]);
   }
+
+  // ── ⑤ 엔진 상태가 Claude 막힘이면 1차를 안 띄운다(2026-10-19) ──────
+  // 띄워도 한도 글만 받는다 — 곧장 codex 칸으로 간다(예약 세션의 `spawnOrFallback` 과 같은 규칙).
+  const { engineState } = await import('../dist/engine-state.js');
+  fs.writeFileSync(evFile, '');
+  engineState.recordBlocked('claude', { kind: 'usage', until: Math.floor(Date.now() / 1000) + 3600 });
+  let spawned = 0;
+  const blockedSched = new AssistantScheduler(
+    async () => {},
+    async () => { spawned += 1; return { text: '', costUsd: 0, sessionId: '', subtype: 'error', isError: true }; },
+    config.assistant.configDir,
+  );
+  let out5 = null;
+  try {
+    out5 = await blockedSched.narrowFromBoard('[진행판] TSK-48 「시험」\n폴백 배선 시험입니다.');
+  } catch (e) {
+    fails.push(`Claude 막힘에서 좁은 길이 던졌다 (${e})`);
+  }
+  eq('엔진 상태가 Claude 막힘이면 1차(Claude)를 안 띄운다', spawned, 0);
+  if (out5) eq('Claude 막힘 · codex 도 빈손이면 세션으로 물러난다', out5.kind, 'not-quick');
+  const fb5 = fs.readFileSync(evFile, 'utf-8').trim().split('\n').filter(Boolean).map(JSON.parse)
+    .filter((x) => x.kind === 'narrow-fallback');
+  eq('Claude 막힘이면 곧장 codex 칸으로 가고 `claude-blocked` 로 적는다', fb5.map((x) => x.why), ['claude-blocked']);
+  fs.rmSync(process.env.ENGINE_STATE_FILE, { force: true });
 }
 delete process.env.BOARD_NARROW_CODEX_BIN;
 delete process.env.WORK_EVENTS_FILE;
 try { fs.unlinkSync(evFile); } catch { /* 없으면 그만 */ }
+try { fs.unlinkSync(COSTS); } catch { /* 없으면 그만 */ }
 
 // ── ②④ 소스 모양 ───────────────────────────────────────────────
 const sched = fs.readFileSync(
@@ -136,5 +164,5 @@ if (fails.length) {
   process.exitCode = 1;
 } else {
   console.log('통과 — 좁은 길 폴백 (꺼짐 · 실행체 없음 · **던져도 닿음** · '
-    + '오류 표시 · 부르는 조건 · 같은 규칙 · 관찰 기록)');
+    + '오류 표시 · 부르는 조건 · 같은 규칙 · 관찰 기록 · Claude 막힘이면 1차를 안 띄움)');
 }

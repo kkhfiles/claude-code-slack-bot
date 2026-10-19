@@ -2936,45 +2936,52 @@ export class AssistantScheduler {
     let said = '';
     // 왜 1차가 못 했나 — 관찰 기록에 그대로 실어 보낸다.
     let why = '';
-    try {
-      const result = await this.spawnSession(user, {
-        workingDirectory: root,
-        model: NARROW_MODEL,
-        effort: NARROW_EFFORT,
-        permissionMode: 'default',
-        // **도구가 하나도 없다.** 읽기도 쓰기도 파이썬이 한다.
-        tools: [],
-        allowedTools: [],
-        // 규칙 파일을 안 읽는다 — CLAUDE.md 가 따라 들어오면 좁은 길이 아니게 된다.
-        settingSources: [],
-        appendSystemPrompt: rulesText,
-        env: { ASSISTANT_MODE: 'narrow', CLAUDE_SCHEDULED: '1' },
-        skipMcp: true,
-        noSessionPersistence: true,
-        // 실측 중간값 3~4초 — 상한에 닿으면 세션으로 떨어지는 편이 낫다.
-        maxDurationMs: 90_000,
-        // 다음 판 프롬프트를 위해 같은 옵션으로 하나 띄워 둔다(띄우기 약 1.5초를 앞당김).
-        prewarmAfter: true,
-      });
-      this.recordSessionCost('narrow', result);
-      said = (result.text || '').trim();
-      // **답이 있어도 오류 표시가 붙었으면 안 믿는다** — 한도에 걸리거나 중간에
-      // 끊긴 회차가 **부분 응답**을 들고 올 수 있고, 그것을 성공으로 읽으면
-      // 반쪽짜리 판단이 카드에 앉는다. 폴백 한 번이 그보다 싸다.
-      if (result.isError || result.rateLimited) {
-        why = result.rateLimited ? 'rate-limited' : (result.subtype || 'error');
-        said = '';
-      } else if (!said) {
-        why = 'empty';
+    // **Claude 가 막혔다고 엔진 상태가 말하면 1차를 안 띄운다**(2026-10-19) — 띄워도 한도 글만 받고 끝난다.
+    // 곧장 아래 codex 칸으로 간다(예약 세션의 `spawnOrFallback` 과 같은 규칙).
+    if (engineState.isBlocked('claude')) {
+      why = 'claude-blocked';
+      this.logger.warn('좁은 길 — Claude 가 막혀 있어(엔진 상태) 1차를 안 띄우고 codex 로 갑니다');
+    } else {
+      try {
+        const result = await this.spawnSession(user, {
+          workingDirectory: root,
+          model: NARROW_MODEL,
+          effort: NARROW_EFFORT,
+          permissionMode: 'default',
+          // **도구가 하나도 없다.** 읽기도 쓰기도 파이썬이 한다.
+          tools: [],
+          allowedTools: [],
+          // 규칙 파일을 안 읽는다 — CLAUDE.md 가 따라 들어오면 좁은 길이 아니게 된다.
+          settingSources: [],
+          appendSystemPrompt: rulesText,
+          env: { ASSISTANT_MODE: 'narrow', CLAUDE_SCHEDULED: '1' },
+          skipMcp: true,
+          noSessionPersistence: true,
+          // 실측 중간값 3~4초 — 상한에 닿으면 세션으로 떨어지는 편이 낫다.
+          maxDurationMs: 90_000,
+          // 다음 판 프롬프트를 위해 같은 옵션으로 하나 띄워 둔다(띄우기 약 1.5초를 앞당김).
+          prewarmAfter: true,
+        });
+        this.recordSessionCost('narrow', result);
+        said = (result.text || '').trim();
+        // **답이 있어도 오류 표시가 붙었으면 안 믿는다** — 한도에 걸리거나 중간에
+        // 끊긴 회차가 **부분 응답**을 들고 올 수 있고, 그것을 성공으로 읽으면
+        // 반쪽짜리 판단이 카드에 앉는다. 폴백 한 번이 그보다 싸다.
+        if (result.isError || result.rateLimited) {
+          why = result.rateLimited ? 'rate-limited' : (result.subtype || 'error');
+          said = '';
+        } else if (!said) {
+          why = 'empty';
+        }
+      } catch (err) {
+        // ★ **여기가 이 폴백의 진짜 방아쇠다.** 구독 만료·인증 실패는 스트림에
+        // 오류를 실어 보내는 것이 아니라 **토큰을 가져오다 던진다**
+        // (`runAssistantSession` 이 `getAccessToken()` 을 먼저 부른다).
+        // 감싸지 않으면 그 길로 새어 폴백을 통째로 건너뛴다 — 정작 필요한
+        // 그날에만 안 도는 장치가 된다.
+        why = 'threw';
+        this.logger.warn('좁은 길 1차(Agent SDK)가 터졌습니다 — codex 로 갑니다', err);
       }
-    } catch (err) {
-      // ★ **여기가 이 폴백의 진짜 방아쇠다.** 구독 만료·인증 실패는 스트림에
-      // 오류를 실어 보내는 것이 아니라 **토큰을 가져오다 던진다**
-      // (`runAssistantSession` 이 `getAccessToken()` 을 먼저 부른다).
-      // 감싸지 않으면 그 길로 새어 폴백을 통째로 건너뛴다 — 정작 필요한
-      // 그날에만 안 도는 장치가 된다.
-      why = 'threw';
-      this.logger.warn('좁은 길 1차(Agent SDK)가 터졌습니다 — codex 로 갑니다', err);
     }
 
     // ★ **폴백 한 칸** (2026-09-03) — 1차가 빈손이면 codex 가 같은 일을 한다.
