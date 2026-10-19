@@ -54,7 +54,7 @@
   - 로컬 HTTP 서버 (`src/report-server.ts`): 업무 칸반(`/board`)과 수동 분석 실행(`POST /trigger?type=<종류>` · `-analyze <종류>` 와 같은 `manual` 회차 · `type=@group` 이면 `-analyze` 와 같은 기본 스케줄 그룹 · 호출은 202 만 받고 결과 한 줄은 DM 으로)만 남음 · 127.0.0.1 바인딩, per-process 토큰(`?t=<hex>`) 인증. 옛 `/` 는 칸반으로 돌리고 `/report/…` 는 410. `index.ts`에서 `config.reports.localServer.enabled && config.assistant.configDir` 조건으로 부팅. `EADDRINUSE` 시 +5까지 재시도 후 비활성화.
   - 환경변수: `REPORTS_SERVER_ENABLED` (0이면 비활성), `REPORTS_SERVER_PORT` (기본 8765)
 - `-actions` / `-actions review` / `-actions run`: 처리 제안(report-log) — 그냥 `-actions` 는 결정이 필요한 제안 요약(🗂 · 아침 브리핑에 붙는 것과 같은 블록 · 없으면 한 줄) · `review` 는 검토 대기 제안을 밤 검토 시간대와 무관하게 지금 검토 · `run` 은 진행 중인 제안(실행 준비 · 실행 · 확인)을 지금 이어 가기 — 둘 다 끝나면 🗂 요약을 DM 으로 · 다른 차례가 도는 중이면 그 뒤에 이어 돎(`runActionsNow`) · report-log 자동 기록 클론(`~/.report-log/repo`)이 없으면 설정 안 됨 안내
-  - 처리 제안 흐름: 정기 보고서의 「## 권장 액션」이 `complete` 저장 때 처리 제안으로 등록 → 밤 검토(업무일 `config.json` `actions.reviewWindow` · 기본 02:00~07:00 · 한 시간 타이머 `startActionsTicker`) → 제안 스레드의 [진행] · [보류] · [폐기] 버튼 → 실행 준비 · 실행 · 확인 → 결과는 같은 스레드 · 상태 전환 규칙은 report-log `tools/flow.py` 에 있고 여기 옮겨 적지 않음 · 사람이 시킨 검토가 한도에 끊기면 회복 시각에 이어 감(`.actions-resume.json`) · 원격에 못 맞추거나 요약을 못 만들면 「시스템 이슈」 · 검사 `npm run check:actions`
+  - 처리 제안 흐름: 정기 보고서의 「## 권장 액션」이 `complete`로 저장될 때 처리 제안으로 등록된다. 밤 검토(업무일 `config.json` `actions.reviewWindow`, 기본 `23:00-00:50`, 한 시간 타이머 `startActionsTicker` 및 밤 데일리 완료 직후 즉시 발화, `00:50~06:05` 새벽 쿼터 보호 구간에는 이어 가기·추가 단계·한도 회복 재개 모두 중지)를 거쳐 제안 스레드의 [진행]·[보류]·[폐기] 버튼으로 결정하고, 실행 준비·실행·확인 후 결과는 같은 스레드에 남긴다. 상태 전환 규칙은 report-log `tools/flow.py`에 있으며, 사람이 시킨 검토가 한도에 끊기면 회복 시각에 이어 간다(`.actions-resume.json`). 원격 동기화나 요약 생성에 실패하면 「시스템 이슈」로 기록한다(검사: `npm run check:actions`).
   - 제안 스레드(2026-10-12): 제안마다 DM 바깥 메시지 하나(제목 · 요약 · 「지금」 상태 줄 · 상태가 바뀌면 고쳐 씀) · 검토 결과 · 결정 요청(버튼 · 사람 차례면 멘션) · 두 번째 승인 · 결과는 그 스레드 답글 · 아침 🗂 요약은 버튼 없는 목록 + 스레드 링크 · 제안 ↔ 스레드 대응은 `.actions-threads.json`(재시작에도 유지 · 90일) · 바깥 메시지가 지워졌으면 새로 만듦 · 스레드로 못 보내면 예전처럼 DM 한 통(요약은 버튼 포함 모양)
 - `-analyze [type]`/`-an [type]`/`분석 [타입]`: 분석 수동 실행 — 타입 지정 시 단일 실행, 미지정 시 기본 스케줄 그룹 실행 · 둘 다 `manual` 회차(예정일 = 오늘 한국 날짜) · 단일 실행 결과 메시지에 처리한 백엔드(`claude` · `codex`)와 저장 상태
 - `-assistant [subcmd]`/`-as [subcmd]`: 어시스턴트 설정 관리
@@ -69,7 +69,7 @@
   - 분석 세션 타임아웃: `maxDurationMinutes` (기본 60분) 초과 시 CLI 프로세스 강제 종료, `maxRetries` (기본 2) 회 재시도 후 포기 → 다음 타입으로 진행
   - 분석 세션: 비용 한도 도달 시 `--resume`로 이어서 진행 (총 `budgetUsd` 내에서)
   - 분석 회차와 보고서 저장 — report-log 5단계(쓰는 쪽). **저장 주체는 스탠리 하나** · 설계 정본은 report-log `docs/stage5-plan.md` 「쓰는 흐름」 · 검사 `npm run check:reportrun`
-    - 회차 열기: 종류마다 첫 시도 전에 `report_log.py open --type --slot --trigger` · 예정일 = 예약 발화 시각(`nextFire`)의 한국 날짜(늦게 깨거나 자정을 넘겨도 그대로) · 수동은 오늘
+    - 회차 열기: 종류마다 첫 시도 전에 `report_log.py open --type --slot --trigger`를 호출하며, 예정일은 `targetDateForSchedule(schedule, nextFire)`의 한국 날짜다(`daily-22:00` 같은 저녁 데일리는 다음 날 업무일 날짜 `+1일`, 그 외는 발화 시각 날짜, 수동 실행은 오늘).
     - 같은 회차: 타임아웃 · 오류 재시도, 한도 재시도(다른 날 포함) — 재시도 큐가 회차를 들고 감 · 한도로 못 돈 뒤쪽 종류도 그때 회차를 엶 · 원래 회차가 없던 칸만 `retry` 로 엶
     - 프롬프트 자리: `{{REPORT_OUT}}`(임시 파일 · `/` 경로) · `{{SLOT}}` · `{{PREV_REPORT}}` · `{{AVOID_LIST}}`(`prompt-context --type`) · `{{PREV_REPORT:<종류>}}`(다른 종류의 직전 보고서 · 같은 상한) · `{{WEEK_INPUT}}`(`week-input --since <예정일-7일>`) — 본문에 직접 넣음(본문이 정본 · Codex 폴백도 2026-10-14 부터 환경 변수를 받음) · 틀에 있는 자리만 report-log 에 물음 · 한 번에 바꿈(넣은 값 안의 `{{SLOT}}` 같은 글은 다시 안 바꾸고 거부에도 안 셈) · 틀에 남은 `{{` 가 있으면 세션을 안 띄우고 오류
     - 쓰기 범위: `~/.report-log/tmp` 를 Claude 추가 폴더 · Codex 쓰기 허용 폴더로 엶 · 시스템 문구의 쓰기 허용은 설정 `writablePaths` 에서 `reports/` 를 빼고 그 폴더를 더함

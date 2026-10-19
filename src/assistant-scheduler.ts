@@ -448,13 +448,17 @@ export function targetDateForSchedule(schedule: string, fire: Date): Date {
 }
 
 /**
- * 데일리 스케줄의 한도 재시도가 새벽 쿼터 보호 구간(00:50~06:05)에 떨어지면
- * 06:01 쿼터 웜업 뒤인 06:05 로 미룬다(토요일 주간 분석은 제외).
+ * 데일리 스케줄의 한도 재시도가 새벽 쿼터 보호 구간에 떨어지면 06:01 쿼터 웜업 뒤인
+ * 06:05 로 미룬다(토요일 주간 분석은 제외). 저녁 데일리(`daily-22:00` 등)는 실행에 60~110분이
+ * 걸리므로 자정 이후(`00:00~06:05`) 시작을 모두 막아 `00:50` 침범을 차단한다.
  */
 export function clampDailyRetryTime(schedule: string, retryTime: Date): Date {
-  if (!schedule.toLowerCase().startsWith('daily-')) return retryTime;
+  const m = /^daily-(\d{1,2}):(\d{2})$/i.exec(schedule);
+  if (!m) return retryTime;
+  const isEveningDaily = Number(m[1]) >= 18;
+  const startProtectMins = isEveningDaily ? 0 : 50;
   const mins = retryTime.getHours() * 60 + retryTime.getMinutes();
-  if (mins >= 50 && mins < 6 * 60 + 5) {
+  if (mins >= startProtectMins && mins < 6 * 60 + 5) {
     const clamped = new Date(retryTime);
     clamped.setHours(6, 5, 0, 0);
     return clamped;
@@ -1491,7 +1495,7 @@ export class AssistantScheduler {
       return;
     }
     const a = this.config?.actions;
-    const window = parseWindow(a?.reviewWindow ?? '02:00-07:00');
+    const window = parseWindow(a?.reviewWindow ?? '23:00-00:50');
     this.logger.info('처리 제안 타이머 시작', { nightlyReview: !!a?.nightlyReview, window: a?.reviewWindow });
     this.actionsTimer = setInterval(() => {
       const now = new Date();
@@ -3833,7 +3837,7 @@ export class AssistantScheduler {
     // 1시간 주기 타이머를 기다리지 않고 곧장 밤 검토 시간대에 태운다.
     if (isDaily && schedule.toLowerCase() !== 'daily-12:00' && this.config?.actions?.enabled && reportLogAvailable()) {
       const a = this.config.actions;
-      const window = parseWindow(a.reviewWindow ?? '02:00-07:00');
+      const window = parseWindow(a.reviewWindow ?? '23:00-00:50');
       const now = new Date();
       void this.actionPipeline.tick({
         review: !!a.nightlyReview, window, workingDay: this.isActionsWorkingDay(window, now),
@@ -3941,10 +3945,22 @@ export class AssistantScheduler {
   /**
    * 때가 된 계획 하나를 돌린다 — **Claude 가 막혀 있으면 안 돌리고 파일에 둔다**(회복 타이머가
    * `onEngineRecover` 로 다시 부른다). 막힌 채 돌리면 한 번뿐인 재시도를 헛되이 쓴다.
+   * 또한 데일리 재시도가 새벽 쿼터 보호 구간에 깨어나면 06:05 로 미룬다.
    */
-  private async runRetryPlanIfClear(id: string, why: string): Promise<boolean> {
+  private async runRetryPlanIfClear(id: string, why: string, nowMs: number = Date.now()): Promise<boolean> {
     if (engineState.isBlocked('claude')) {
       this.logger.info(`한도 재시도를 미룹니다 — Claude 가 아직 막혀 있음 (${why})`, { id });
+      return false;
+    }
+    const plans = this.loadRetryPlans();
+    const peek = plans.find((p) => p.id === id);
+    if (!peek) return false;
+    const clamped = clampDailyRetryTime(peek.schedule, new Date(nowMs));
+    if (clamped.getTime() > nowMs) {
+      peek.due = clamped.getTime();
+      this.saveRetryPlans(plans);
+      this.armRetryPlan(peek);
+      this.logger.info(`한도 재시도를 새벽 쿼터 보호 구간 뒤(06:05)로 미룹니다 (${why})`, { id, due: clamped.toISOString() });
       return false;
     }
     const plan = this.takeRetryPlan(id);
@@ -3975,7 +3991,7 @@ export class AssistantScheduler {
     this.retryBusy = true;
     try {
       for (const p of this.loadRetryPlans().filter((x) => x.due <= now)) {
-        if (!(await this.runRetryPlanIfClear(p.id, why)) && engineState.isBlocked('claude')) break;
+        if (!(await this.runRetryPlanIfClear(p.id, why, now)) && engineState.isBlocked('claude')) break;
       }
     } finally {
       this.retryBusy = false;

@@ -356,6 +356,23 @@ export function windowUntil(window: [number, number], now: Date): number {
   return until.getTime();
 }
 
+/**
+ * 새벽 5시간 쿼터 보호 구간(00:50~06:05) — 06:01 cli_warmup.py 가 깨끗한 5시간 창을
+ * 열 수 있도록 이 구간에는 자동 이어 가기 · 밤 검토 추가 단계 · 한도 회복 재개를 띄우지 않는다.
+ */
+export function isQuotaProtectedTime(now: Date = new Date()): boolean {
+  const mins = now.getHours() * 60 + now.getMinutes();
+  return mins >= 50 && mins < 6 * 60 + 5;
+}
+
+/** 시각(epoch ms)이 새벽 쿼터 보호 구간(00:50~06:05)에 떨어지면 그날 06:05 로 미룬다. */
+export function clampOutOfQuotaProtected(ts: number): number {
+  const d = new Date(ts);
+  if (!isQuotaProtectedTime(d)) return ts;
+  d.setHours(6, 5, 0, 0);
+  return d.getTime();
+}
+
 // ── 메시지 ─────────────────────────────────────────────────────────
 
 const KIND_HEAD: Record<string, string> = {
@@ -515,7 +532,7 @@ export function buildDigestLinkBlocks(d: FlowDigest, links: Record<string, strin
   return blocks;
 }
 
-const QUEUED_NOTE = '검토 대기 = 새벽 검토(업무일 02:00~07:00)가 아직 못 본 권고 · 아침마다 남아 있으면 검토가 멈춘 것(사용량 한도 · 실패)';
+const QUEUED_NOTE = '검토 대기 = 밤 검토(업무일 전날 23:00~당일 00:50)가 아직 못 본 권고 · 아침마다 남아 있으면 검토가 멈춘 것(사용량 한도 · 실패)';
 
 /** 아침 요약 — 사람 차례인 제안(버튼)과 멈춘 제안. 둘 다 없으면 null(메시지를 안 보낸다). 스레드 통로가 없을 때의 모양. */
 export function buildDigestBlocks(d: FlowDigest): unknown[] | null {
@@ -677,9 +694,16 @@ export class ActionPipeline {
     return this.pumping !== null;
   }
 
-  /** 타이머 한 번 — 이어 가기는 늘 · 검토는 업무일의 시간대 안에서만. */
+  /**
+   * 타이머 한 번 — 이어 가기는 늘 · 검토는 업무일의 시간대 안에서만.
+   * 단, 자정 넘김 밤 검토 창(`from > to`, 예: `23:00-00:50`)이 끝난 뒤 새벽 쿼터 보호 구간
+   * (`00:50~06:05`)에는 이어 가기(`run`)도 멈춰 06:01 5시간 쿼터 웜업을 보호한다.
+   */
   tick(opts: { review: boolean; window: [number, number] | null; workingDay: boolean },
        now: Date = new Date()): Promise<void> {
+    if (opts.window && opts.window[0] > opts.window[1] && isQuotaProtectedTime(now)) {
+      return Promise.resolve();
+    }
     const p = this.request('run');
     if (opts.review && opts.window && opts.workingDay) {
       const mins = now.getHours() * 60 + now.getMinutes();
@@ -754,9 +778,11 @@ export class ActionPipeline {
 
   private armResume(resetsAt: number | null): void {
     this.stopResume();
-    const delay = resetsAt
+    const rawDelay = resetsAt
       ? Math.max(RESUME_SLACK_MS, resetsAt * 1000 + RESUME_SLACK_MS - Date.now())
       : RESUME_UNKNOWN_MS;
+    const targetTs = clampOutOfQuotaProtected(Date.now() + rawDelay);
+    const delay = Math.max(RESUME_SLACK_MS, targetTs - Date.now());
     this.resumeTimer = setTimeout(() => {
       this.resumeTimer = null;
       this.resume().catch((err) => this.logger.error('한도 회복 뒤 이어 가기 실패', err));
@@ -831,15 +857,19 @@ export class ActionPipeline {
         this.logger.info('검토 시간대가 끝나 남은 제안은 다음 밤으로');
         break;
       }
-      const end = await this.drain(id);
+      const end = await this.drain(id, until);
       if (end === 'rate-limited' || end === 'busy') return end;
     }
     return 'done';
   }
 
   /** 제안 하나를 사람 차례 · 대기 · 끝까지 밀고 간다. */
-  async drain(id: string): Promise<DrainEnd> {
+  async drain(id: string, until?: number): Promise<DrainEnd> {
     for (let step = 0; step < MAX_STEPS; step += 1) {
+      if (step > 0 && until && Date.now() >= until) {
+        this.logger.info(`${id} — 검토 시간대가 끝나 다음 단계는 다음 차례로`);
+        return 'stop';
+      }
       const spec: FlowSpec = await this.deps.run('flow', ['next', id]);
       if (!spec || spec.error) {
         this.logger.warn(`${id} 다음 할 일을 못 받음 — ${spec?.error}`);

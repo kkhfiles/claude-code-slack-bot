@@ -164,8 +164,9 @@ Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(
 - **Claude 가 막혀 있으면 1차를 안 띄움**(`spawnOrFallback`) · codex 는 한도 조회(`src/codex-quota.ts` · 5분 캐시 · 못 읽으면 모름)나 엔진 상태가 막혔다고 하면 건너뜀
 - **브리핑 「올린 날」 자국 `.briefing-delivered.json`** — 올린 뒤에만 찍음 · 놓친 브리핑이 이것을 봄 · 한도 · 오류 글은 브리핑으로 안 올림 · 회복 때 업무일 정오 전이면 다시 돌림
 - **분석 한도 재시도 계획 `.analysis-retry.json`** — 재시작 뒤 다시 걸고, 때가 지났으면 Claude 가 풀렸을 때만 돌림(재시도는 한 번)
+- **평일 밤 배치는 22:00 시작, 새벽 00:50~06:05 쿼터 보호**(2026-10-19 사용자 결정, **되돌리지 말 것**) — 06:01/11:01 `cli_warmup.py`가 여는 5시간 쿼터 창을 새벽 작업이 먼저 열어 소진하지 않도록, 평일 데일리(`data-sync`, `mycelium-issues`)는 전날 `daily-22:00`(예정일 `+1일`), 처리 제안 밤 검토는 `23:00-00:50`에 실행하고 `00:50~06:05`에는 이어 가기·추가 단계·데일리 재시도를 모두 멈춘다(토요일 주간 분석 `saturday-00:00`은 예외)
 - 회의 알림 판단이 다 실패하면 비교 기준을 안 옮김(다음 차례에 다시 판단)
-- 검사 `check:sessionfb` · `check:limit` · `check:schedgaps` · `check:calbase`
+- 검사: `check:sessionfb`, `check:limit`, `check:schedgaps`, `check:calbase`, `check:actions`
 
 ### 보류 재실행 v2 — 막힌 동안 모아 두고 받은 자리에서 처리 (2026-10-14 · `HOLD_V2=on`)
 

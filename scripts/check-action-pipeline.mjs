@@ -519,8 +519,28 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   const cross = { review: true, window: [1380, 50], workingDay: true };
   eq('자정 넘김 23:30 → 이어 가기 + 검토', await kinds(cross, at(23, 30)), ['run', 'review']);
   eq('자정 넘김 00:30 → 이어 가기 + 검토', await kinds(cross, at(0, 30)), ['run', 'review']);
-  eq('자정 넘김 00:50 → 이어 가기만(쿼터 보호 시작)', await kinds(cross, at(0, 50)), ['run']);
+  eq('자정 넘김 00:50 → 쿼터 보호 구간이라 이어 가기·검토 모두 멈춤', await kinds(cross, at(0, 50)), []);
+  eq('자정 넘김 02:30 → 쿼터 보호 구간이라 이어 가기·검토 모두 멈춤', await kinds(cross, at(2, 30)), []);
+  eq('자정 넘김 06:05 → 쿼터 보호 해제 후 이어 가기 재개', await kinds(cross, at(6, 5)), ['run']);
   eq('자정 넘김 22:30 → 이어 가기만', await kinds(cross, at(22, 30)), ['run']);
+
+  // 다단계 제안(critical 1차 review → 2차 cross-review)이 1단계 도중 마감(until)을 넘기면 2단계를 안 띄운다
+  {
+    const s1 = spec('a-20261019-01', 'review', 1);
+    const s2 = spec('a-20261019-01', 'cross-review', 2);
+    const w = world({
+      pending: { review: ['a-20261019-01'] },
+      nexts: { 'a-20261019-01': [s1, s2] },
+      completes: [
+        { result: 'completed', state: 'cross-review' },
+        { result: 'completed', state: 'proposed' },
+      ],
+      session: writes(s1.out),
+    });
+    // 1단계는 이미 진입했고, 2단계 진입 직전에 until 이 이미 지난 상태(Date.now() - 1000)를 모사
+    await w.pipe.drain('a-20261019-01', Date.now() - 1000);
+    eq('1단계 도중 밤 검토 마감을 넘기면 2단계(cross-review)는 다음 차례로 멈춘다', w.sessions.length, 1);
+  }
 
   const { targetDateForSchedule, clampDailyRetryTime, kstDate } = require(path.join(ROOT, 'dist', 'assistant-scheduler.js'));
   eq('daily-22:00 의 대상 날짜는 다음 날', kstDate(targetDateForSchedule('daily-22:00', new Date(2026, 9, 18, 22, 0))), '2026-10-19');
@@ -528,11 +548,22 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   eq('saturday-00:00 의 대상 날짜는 그대로', kstDate(targetDateForSchedule('saturday-00:00', new Date(2026, 9, 16, 23, 59, 30))), '2026-10-16');
 
   const clamped = clampDailyRetryTime('daily-22:00', at(1, 5));
-  eq('데일리 재시도가 00:50~06:05 에 떨어지면 06:05 로 미룬다', [clamped.getHours(), clamped.getMinutes()], [6, 5]);
-  const kept = clampDailyRetryTime('daily-22:00', at(0, 30));
-  eq('데일리 재시도가 00:50 전이면 그대로', [kept.getHours(), kept.getMinutes()], [0, 30]);
+  eq('저녁 데일리 재시도가 00:00~06:05 에 떨어지면 06:05 로 미룬다 (01:05)', [clamped.getHours(), clamped.getMinutes()], [6, 5]);
+  const clampedAfterMidnight = clampDailyRetryTime('daily-22:00', at(0, 30));
+  eq('저녁 데일리 재시도는 자정 직후(00:30)도 06:05 로 미룬다(110분 실행이 00:50 침범 방지)', [clampedAfterMidnight.getHours(), clampedAfterMidnight.getMinutes()], [6, 5]);
+  const keptBeforeMidnight = clampDailyRetryTime('daily-22:00', at(23, 30));
+  eq('저녁 데일리 재시도가 자정 전(23:30)이면 그대로', [keptBeforeMidnight.getHours(), keptBeforeMidnight.getMinutes()], [23, 30]);
   const satKept = clampDailyRetryTime('saturday-00:00', at(2, 5));
   eq('토요일 주간 분석 재시도는 그대로', [satKept.getHours(), satKept.getMinutes()], [2, 5]);
+
+  // 운영 설정(claude-workflow/assistant/config.json) 회귀 방지 — 다른 세션이 옛 시간으로 되돌리면 실패
+  const wfCfgPath = 'P:/github/claude-workflow/assistant/config.json';
+  if (fs.existsSync(wfCfgPath)) {
+    const wfCfg = JSON.parse(fs.readFileSync(wfCfgPath, 'utf-8'));
+    eq('data-sync 스케줄은 06:01 쿼터 보호를 위해 daily-22:00 유지', wfCfg?.analysis?.types?.['data-sync']?.schedule, 'daily-22:00');
+    eq('mycelium-issues 스케줄은 06:01 쿼터 보호를 위해 daily-22:00 유지', wfCfg?.analysis?.types?.['mycelium-issues']?.schedule, 'daily-22:00');
+    eq('밤 검토 시간대는 06:01 쿼터 보호를 위해 23:00-00:50 유지', wfCfg?.actions?.reviewWindow, '23:00-00:50');
+  }
 }
 
 // ── ⑧ 한도로 끊긴 사람이 시킨 검토 — 회복 뒤 이어 감 · 재시작에도 남음 · 밤 검토는 안 남김 ──
