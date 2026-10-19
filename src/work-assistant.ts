@@ -13,7 +13,7 @@
  *   - **요약(출력)은 실패해도 된다.** 노션 왕복이 필요하니 파이썬 CLI 를 부르고,
  *     실패하면 그 사실만 알린다.
  */
-import { spawn, execSync } from 'child_process';
+import { spawn, execSync, execFile } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -1337,6 +1337,60 @@ function runCodex(
 
 
 /**
+ * 업무 볼트 위치 — **`tasks.py` 의 `VAULT_DIR` 과 같은 규칙**이다. 설정 파일은 `WORK_ASSISTANT_HOME` 이 있으면
+ * 그 아래, 없으면 레포 루트(`HOME = WORK_ASSISTANT_HOME or ROOT`). 그래서 가짜 홈을 쓰는 시험은 진짜 볼트에 안 닿는다.
+ * git 저장소가 아니면 `null`.
+ */
+export function workVaultDir(): string | null {
+  const home = process.env.WORK_ASSISTANT_HOME || workAssistantRoot();
+  if (!home) return null;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf-8'));
+    const raw = typeof cfg.vault_dir === 'string' ? cfg.vault_dir : '';
+    const dir = raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw;
+    return dir && fs.existsSync(path.join(dir, '.git')) ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `tasks.py` 의 `_GIT_ENV_DROP` 과 같은 목록 — 남은 값이 있으면 엉뚱한 저장소에 커밋한다. */
+const GIT_ENV_DROP = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_PREFIX',
+  'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'];
+
+export type VaultCommitResult = 'committed' | 'nothing' | 'skipped' | 'failed';
+
+/**
+ * **codex 가 쓴 볼트를 봇이 대신 커밋한다** (2026-10-19).
+ *
+ * codex 의 쓰기 모래상자(workspace-write)는 쓰기를 연 폴더 안에서도 **`.git` 을 읽기 전용으로 둔다.**
+ * 그래서 GPT 차례의 `tasks.py` 는 업무 md 를 다 쓰고 커밋에서만 넘어졌고(`.git/index.lock: Permission denied` ·
+ * `codex sandbox` 로 재현), 그 변경은 다른 쓰기가 올 때까지 커밋 없이 남았다(2026-10-19 Claude 주간 한도 동안).
+ * 봇은 모래상자 밖에 있으므로 차례가 끝난 뒤 여기서 한 번 `add -A` → 바뀐 것이 있을 때만 `commit`.
+ *
+ * **절대 안 던진다** — 실패는 WARN 한 줄. 커밋을 못 해도 파일은 이미 볼트에 있고, 다음 `tasks.py` 쓰기가 담는다.
+ */
+export async function commitVaultAfterCodex(label: string, vaultDir: string | null = workVaultDir()): Promise<VaultCommitResult> {
+  if (!vaultDir) return 'skipped';
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
+  for (const k of GIT_ENV_DROP) delete env[k];
+  const git = (args: string[]) => new Promise<string>((resolve, reject) => {
+    execFile('git', ['-C', vaultDir, ...args], { env, windowsHide: true, timeout: 30_000, encoding: 'utf8' },
+      (err, stdout, stderr) => (err ? reject(new Error(String(stderr || err.message).trim())) : resolve(stdout)));
+  });
+  try {
+    await git(['add', '-A']);
+    if (!(await git(['status', '--porcelain'])).trim()) return 'nothing';
+    await git(['commit', '-q', '-m', `[GPT 대신 커밋] ${label}`.slice(0, 200)]);
+    logger.info('codex 차례가 쓴 볼트를 대신 커밋했습니다', { label });
+    return 'committed';
+  } catch (err) {
+    logger.warn(`볼트 대신 커밋 실패(${label}) — ${clipLine(String((err as Error)?.message ?? err), 200)}`);
+    return 'failed';
+  }
+}
+
+/**
  * 예약 세션 폴백이 **작업 디렉터리 밖에서** 써야 하는 곳.
  *
  * 셋뿐이고 다 업무 비서 설정에서 나온다 — 손으로 적으면 설정을 옮겼을 때
@@ -1414,6 +1468,8 @@ export interface CodexTurnOpts {
   store?: EngineState;
   /** 엔진 연습을 받는 차례인가 — 대화 차례(DM 폴백)는 `interactive`(생략하면 예약 일 · `engine-drill.ts`). */
   drillScope?: DrillScope;
+  /** 볼트 대신 커밋의 메시지 이름(`[GPT 대신 커밋] <이름>`) — 사람 이름 · 글을 넣지 않는다. 생략하면 `codex 차례`. */
+  label?: string;
 }
 
 /** codex 가 돌린 것 하나 — `done` 성공으로 끝남 · `failed` 실패로 끝남(종료 코드 · 상태) · 둘 다 없으면 결과 모름. */
@@ -1483,6 +1539,8 @@ export async function codexTurn(prompt: string, opts: CodexTurnOpts): Promise<Co
     });
     const ev = run.events;
     const writeRan = opts.sandbox === 'workspace-write' && ev.touched;
+    // 쓰기 차례의 `tasks.py` 는 모래상자 안에서 볼트 커밋을 못 한다(`.git` 읽기 전용) — 끝났든 끊겼든 봇이 대신.
+    if (writeRan) await commitVaultAfterCodex(opts.label ?? 'codex 차례');
     let out = '';
     try { out = fs.existsSync(of) ? fs.readFileSync(of, 'utf-8').trim() : ''; } catch { /* 없으면 이벤트 쪽 */ }
     // 차례가 끝났나 — 이벤트를 봤으면 `turn.completed`, 못 봤으면(옛 판) rc 로.

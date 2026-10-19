@@ -2924,6 +2924,7 @@ export class SlackHandler {
         env: fallbackEnv(captureId),
         onSpawn: (k) => { kill = k; if (stopped) k(); },
         drillScope: 'interactive',
+        label: 'DM 폴백',
       });
       const steps = codexSteps(r.steps);
       if (stopped) {

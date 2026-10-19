@@ -3152,6 +3152,7 @@ export class AssistantScheduler {
         model: cell?.model,
         // 1차에 주던 환경 변수 그대로 — 전에는 codex 쪽에서 `CLAUDE_SCHEDULED` 등이 사라졌다.
         env: opts.env,
+        label,
       });
       said = turn.kind === 'ok' ? turn.text.trim() : '';
       via = `codex ${cell?.model ?? '(기본 모델)'} ${sandbox}`;

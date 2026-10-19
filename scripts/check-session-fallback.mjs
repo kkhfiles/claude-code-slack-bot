@@ -51,6 +51,14 @@ const engineFile = path.join(STATE_DIR, 'engine-state.json');
 process.env.ENGINE_STATE_FILE = engineFile;
 process.env.BRIEFING_DELIVERED_FILE = path.join(STATE_DIR, 'briefing-delivered.json');
 process.env.ANALYSIS_RETRY_FILE = path.join(STATE_DIR, 'analysis-retry.json');
+// 업무 비서 홈도 임시로 — 쓰기 차례가 끝나면 봇이 볼트를 대신 커밋한다(2026-10-19). 홈이 운영 레포면 **진짜 볼트**에
+// 커밋한다. 임시 홈의 설정이 가리키는 볼트는 시험용 git 저장소다(⑧).
+const WA_HOME = path.join(STATE_DIR, 'wa-home');
+const VAULT = path.join(STATE_DIR, 'vault');
+fs.mkdirSync(WA_HOME, { recursive: true });
+fs.mkdirSync(VAULT, { recursive: true });
+fs.writeFileSync(path.join(WA_HOME, 'config.json'), JSON.stringify({ vault_dir: VAULT }), 'utf-8');
+process.env.WORK_ASSISTANT_HOME = WA_HOME;
 // 폴백이 실제로 불리는지만 보고 싶다 — 없는 실행체를 주면 빈손으로 돌아온다.
 process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
 // 등급 사다리(파이썬)도 같은 까닭으로 — 없는 실행체면 표도 사다리도 빈손으로 물러난다(2026-09-23).
@@ -314,6 +322,40 @@ try {
     resetEngine();
     const r2 = await sched.spawnOrFallback('시험', '말', WRITE);
     eq('풀리면 1차를 띄운다', [spawned, r2.servedBy], [1, 'claude']);
+  }
+
+  // ⑧ 쓰기 차례가 끝나면 봇이 볼트를 대신 커밋한다(2026-10-19) — codex 모래상자는 `.git` 을 읽기 전용으로 둬서
+  //    `tasks.py` 의 커밋이 넘어진다. 바뀐 것이 있을 때만 · 읽기 전용 차례는 안 함 · `GIT_DIR` 이 남아 있어도 볼트에.
+  {
+    const { spawnSync } = await import('node:child_process');
+    const git = (...a) => spawnSync('git', ['-C', VAULT, ...a], { encoding: 'utf-8' });
+    const count = () => Number(git('rev-list', '--count', 'HEAD').stdout.trim());
+    const dirty = () => git('status', '--porcelain').stdout.trim() !== '';
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'test');
+    git('commit', '-q', '--allow-empty', '-m', 'init');
+    resetEngine();
+    process.env.FAKE_CODEX_MODE = 'ok';
+    fs.writeFileSync(path.join(VAULT, 'TSK-1.md'), '진행 로그\n', 'utf-8');
+    const w = await turn('workspace-write', { label: '시험 볼트' });
+    eq('쓰기 차례 뒤 커밋 안 된 변경 → 봇이 커밋', [w.writeRan, count(), dirty()], [true, 2, false]);
+    eq('메시지는 [GPT 대신 커밋] <이름>', git('log', '-1', '--format=%s').stdout.trim(), '[GPT 대신 커밋] 시험 볼트');
+    const again = await turn('workspace-write', { label: '시험 볼트' });
+    eq('커밋할 것이 없으면 새 커밋 없음 · 차례는 그대로 ok', [again.kind, count()], ['ok', 2]);
+    eq('커밋할 것이 없으면 nothing', await wa.commitVaultAfterCodex('시험', VAULT), 'nothing');
+    fs.writeFileSync(path.join(VAULT, 'TSK-2.md'), '읽기만\n', 'utf-8');
+    await turn('read-only');
+    eq('읽기 전용 차례는 대신 커밋 안 함', [count(), dirty()], [2, true]);
+    process.env.FAKE_CODEX_MODE = 'usage-after-write';
+    const prevGitDir = process.env.GIT_DIR;
+    process.env.GIT_DIR = path.join(STATE_DIR, 'not-a-repo');
+    const u = await turn('workspace-write', { label: '시험 볼트' });
+    if (prevGitDir === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = prevGitDir;
+    eq('쓰다가 한도에 걸린 차례도 커밋 · GIT_DIR 이 남아 있어도 볼트에', [u.kind, u.writeRan, count(), dirty()], ['usage', true, 3, false]);
+    eq('저장소가 아니면 failed(안 던짐)', await wa.commitVaultAfterCodex('시험', path.join(STATE_DIR, 'no-such-vault')), 'failed');
+    eq('볼트를 모르면 skipped', await wa.commitVaultAfterCodex('시험', null), 'skipped');
+    resetEngine();
   }
 } finally {
   delete process.env.ANTHROPIC_API_KEY;
