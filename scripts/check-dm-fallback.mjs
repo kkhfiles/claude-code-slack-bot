@@ -336,6 +336,7 @@ try {
     const c = s.codex[0] ?? {};
     eq('캡처 id 를 값으로 · 봇 세션 표시', c.dmEnv, { WORK_ASSISTANT_CAPTURE: 'cap-1', CLAUDE_BOT_SESSION: '1' });
     eq('방마다 하나인 가리킴 파일은 안 넘긴다', c.env?.WORK_ASSISTANT_CAPTURE_FILE ?? null, null);
+    ok('볼트 커밋을 봇에 미루는 파일(WORK_ASSISTANT_DEFER_COMMIT)이 GPT 에 닿는다', typeof c.defer === 'string' && c.defer.length > 0);
     const a = c.argv ?? [];
     ok('쓰기 모래상자 · 깊이 low · 업무 비서 뿌리', a.includes('--approve-for-me') && a.includes('model_reasoning_effort=low')
       && a[a.indexOf('-C') + 1] === WA_ROOT);

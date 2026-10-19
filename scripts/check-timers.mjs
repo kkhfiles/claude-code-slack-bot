@@ -35,6 +35,7 @@ const REGISTRAR = {
   offsitePushTimer: 'scheduleOffsitePush',
   mailPollTimer: 'startMailPoller',
   remindTimer: 'startRemindPoller',
+  vaultSweepTimer: 'startVaultSweep',
   actionsTimer: 'startActionsTicker',
   runSweepTimer: 'startRunSweeper',
 };
@@ -48,6 +49,7 @@ const REGISTRAR = {
  */
 const ALSO_DOES = {
   scheduleOffsitePush: ['runCommitHarvest', 'runOffsitePush'],
+  startVaultSweep: ['runVaultSweep'],
 };
 
 /**

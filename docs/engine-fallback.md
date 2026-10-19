@@ -43,6 +43,7 @@
 - **환경 변수**
   - `WORK_ASSISTANT_CAPTURE=<캡처 id>` — 값으로 넘김(방마다 하나인 가리킴 파일은 다음 차례가 갈아 끼움)
   - `CLAUDE_BOT_SESSION=1` — codex 시작 훅이 투영 동기화를 건너뜀
+  - `WORK_ASSISTANT_DEFER_COMMIT=<임시 파일>` — 볼트 커밋을 봇에 미룸(아래 「볼트 커밋 — GPT 차례도 같은 메시지」)
 - **실행 조건**
   - 쓰기 모래상자(`--approve-for-me`)와 기존 쓰기 폴더
   - 작업 폴더는 업무 비서 뿌리
@@ -137,6 +138,35 @@
 - **검사**
   - `npm run check:engineshare` — 두 언어 왕복, 동시 150번씩 써도 잃는 기록 0. 파이썬을 못 부르면 그 절만 건너뜀
   - `npm run check:limitsamples`
+
+## 볼트 커밋 — GPT 차례도 같은 메시지(2026-10-19)
+
+- **바꾸기 전 문제** — codex 쓰기 모래상자(`workspace-write`)가 쓰기를 연 폴더 안에서도 `.git` 을 읽기 전용으로 둠
+  - GPT 차례마다 `tasks.py` 의 `_vault_commit` 이 실패했고, GPT 가 그 경고를 「Git 커밋은 실패했습니다」로 사람에게 전함(거짓 경보)
+  - 차례 뒤 봇이 대신 커밋했지만 메시지가 `[GPT 대신 커밋] DM 폴백` 하나뿐이라 Claude 차례의 커밋과 모양이 달랐음
+- **미룬 커밋** — 쓰기 차례마다 `codexTurn` 이 임시 폴더에 파일 하나(`wa-cx-<id>.commits.txt`)를 정하고, codex 환경에 `WORK_ASSISTANT_DEFER_COMMIT` 으로 넘김
+  - `tasks.py` 는 그 값이 있으면 git 을 부르지 않고 메시지를 그 파일에 한 줄 적음
+  - 표준 오류에는 경고가 아닌 안내 한 줄(「· 볼트 커밋은 차례가 끝나면 봇이 대신 합니다」)
+  - 읽기 전용 차례에는 넘기지 않음
+  - 임시 폴더를 쓰는 까닭 — codex 쓰기 모래상자가 그곳의 쓰기를 허용함(`codex sandbox` 로 확인: 임시 폴더 쓰기 성공, 홈 폴더와 `.git` 쓰기 차단, 환경 변수 전달됨)
+- **차례 뒤 커밋**(`commitVaultAfterCodex`) — 바뀐 것이 있을 때만 커밋
+  - 메시지 — 미룬 줄을 이어 붙인 `[GPT] TSK-114 새 업무 — … · [메일 판정] 갱신`
+  - 앞머리 `[GPT]` 로 출처 표시, 바로 앞과 같은 줄은 하나로 합침, 200자에서 자름
+  - 파일이 비었거나 없으면 예전 일반 메시지 `[GPT 대신 커밋] <이름>`
+  - 파일은 커밋 뒤 지우고, 오류를 던지지 않음
+  - 미룬 줄이 있으면 이벤트를 못 봤어도(`writeRan` 거짓) 커밋함
+- **남은 변경 커밋 — 안전망**(`commitVaultLeftovers`, 예약 타이머 `vaultSweepTimer`, 10분 간격)
+  - 대신 커밋이 실패했거나 차례가 중간에 죽어 남은 변경을 `[남은 변경] 봇이 모아 커밋` 으로 커밋하고 INFO 로그 한 줄을 남김
+  - codex 쓰기 차례가 도는 중이면 건너뜀(`busy`) — 끝나면 그 차례가 미룬 메시지로 커밋함
+  - `index.lock` 이 있으면 건너뜀(`locked`) — 묵은 잠금도 지우지 않음
+  - 업무 비서가 켜져 있을 때 `scheduleAll()` 이 걸고 `clearAllTimers()` 가 지움, 쉬는 날에도 실행
+  - git 환경은 대신 커밋과 같은 함수(`vaultGit`)로 만듦 — `GIT_DIR` 류를 지우고 자격 증명 창을 띄우지 않음
+- **Claude 차례와 agy 차례는 그대로** — 모래상자 밖이라 `tasks.py` 가 쓰기마다 직접 커밋함
+- **검사**
+  - `npm run check:sessionfb` — 예약 세션 폴백과 쓰기 차례에 파일 전달, 읽기 전용 차례에는 미전달, 미룬 줄이 커밋 메시지가 됨, 빈 파일은 일반 메시지, 파일 삭제, 남은 변경 커밋(잠금과 도는 중 건너뜀, `GIT_DIR` 제거)
+  - `npm run check:dmfallback` — DM 폴백의 GPT 에 파일 전달
+  - `npm run check:timers` — 타이머 짝(지움, 다시 걺, 한 차례 함수 호출)
+  - 업무 비서 저장소 `bin/selftest.py` — 값이 있으면 git 호출 없이 한 줄씩 쌓이고, 값이 없으면 예전대로 커밋
 
 ## 장부 — `.fallback-ledger.jsonl`
 

@@ -1364,6 +1364,31 @@ const GIT_ENV_DROP = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_PREFIX'
 
 export type VaultCommitResult = 'committed' | 'nothing' | 'skipped' | 'failed';
 
+/** 볼트에 git 을 부르는 손잡이 — `GIT_DIR` 류를 털고 자격 증명 창을 안 띄운다. 대신 커밋 · 남은 변경 커밋이 같이 쓴다. */
+function vaultGit(vaultDir: string): (args: string[]) => Promise<string> {
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
+  for (const k of GIT_ENV_DROP) delete env[k];
+  return (args: string[]) => new Promise<string>((resolve, reject) => {
+    execFile('git', ['-C', vaultDir, ...args], { env, windowsHide: true, timeout: 30_000, encoding: 'utf8' },
+      (err, stdout, stderr) => (err ? reject(new Error(String(stderr || err.message).trim())) : resolve(stdout)));
+  });
+}
+
+/**
+ * 미룬 커밋 메시지들 → 커밋 메시지 한 줄. `tasks.py` 가 `WORK_ASSISTANT_DEFER_COMMIT` 파일에 한 줄씩 적은 것이다.
+ * 빈 줄 · 바로 앞과 같은 줄은 뺀다(진행 로그를 두 번 남기면 같은 줄이 둘). 없으면 `null` — 일반 메시지로 간다.
+ */
+export function deferredCommitMessage(pendingFile?: string | null): string | null {
+  if (!pendingFile) return null;
+  let raw = '';
+  try { raw = fs.readFileSync(pendingFile, 'utf-8'); } catch { return null; }
+  const lines: string[] = [];
+  for (const l of raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+    if (lines[lines.length - 1] !== l) lines.push(l);
+  }
+  return lines.length ? `[GPT] ${lines.join(' · ')}`.slice(0, 200) : null;
+}
+
 /**
  * **codex 가 쓴 볼트를 봇이 대신 커밋한다** (2026-10-19).
  *
@@ -1372,24 +1397,69 @@ export type VaultCommitResult = 'committed' | 'nothing' | 'skipped' | 'failed';
  * `codex sandbox` 로 재현), 그 변경은 다른 쓰기가 올 때까지 커밋 없이 남았다(2026-10-19 Claude 주간 한도 동안).
  * 봇은 모래상자 밖에 있으므로 차례가 끝난 뒤 여기서 한 번 `add -A` → 바뀐 것이 있을 때만 `commit`.
  *
- * **절대 안 던진다** — 실패는 WARN 한 줄. 커밋을 못 해도 파일은 이미 볼트에 있고, 다음 `tasks.py` 쓰기가 담는다.
+ * **메시지는 `tasks.py` 가 미뤄 둔 것** — 쓰기 차례에 `WORK_ASSISTANT_DEFER_COMMIT=<파일>` 을 넘기면 `tasks.py` 가
+ * git 대신 그 파일에 메시지를 한 줄씩 적는다(그래서 GPT 가 「커밋 실패」를 사람에게 전하지 않는다). 그 줄들을 이어
+ * `[GPT] TSK-114 새 업무 — … · [메일 판정] 갱신` 으로 커밋한다 — Claude 차례의 커밋과 같은 말이고 앞머리로 출처를 남긴다.
+ * 파일이 비었거나 없으면 예전 일반 메시지(`[GPT 대신 커밋] <이름>`). 파일은 끝나면 지운다.
+ *
+ * **절대 안 던진다** — 실패는 WARN 한 줄. 커밋을 못 해도 파일은 이미 볼트에 있고, 다음 `tasks.py` 쓰기나
+ * 남은 변경 커밋(`commitVaultLeftovers`)이 담는다.
  */
-export async function commitVaultAfterCodex(label: string, vaultDir: string | null = workVaultDir()): Promise<VaultCommitResult> {
-  if (!vaultDir) return 'skipped';
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
-  for (const k of GIT_ENV_DROP) delete env[k];
-  const git = (args: string[]) => new Promise<string>((resolve, reject) => {
-    execFile('git', ['-C', vaultDir, ...args], { env, windowsHide: true, timeout: 30_000, encoding: 'utf8' },
-      (err, stdout, stderr) => (err ? reject(new Error(String(stderr || err.message).trim())) : resolve(stdout)));
-  });
+export async function commitVaultAfterCodex(
+  label: string, vaultDir: string | null = workVaultDir(), pendingFile?: string | null,
+): Promise<VaultCommitResult> {
   try {
-    await git(['add', '-A']);
+    if (!vaultDir) return 'skipped';
+    const git = vaultGit(vaultDir);
+    try {
+      await git(['add', '-A']);
+      if (!(await git(['status', '--porcelain'])).trim()) return 'nothing';
+      const msg = deferredCommitMessage(pendingFile) ?? `[GPT 대신 커밋] ${label}`.slice(0, 200);
+      await git(['commit', '-q', '-m', msg]);
+      logger.info('codex 차례가 쓴 볼트를 대신 커밋했습니다', { label, deferred: msg.startsWith('[GPT] ') });
+      return 'committed';
+    } catch (err) {
+      logger.warn(`볼트 대신 커밋 실패(${label}) — ${clipLine(String((err as Error)?.message ?? err), 200)}`);
+      return 'failed';
+    }
+  } finally {
+    if (pendingFile) { try { fs.unlinkSync(pendingFile); } catch { /* 없으면 그만 */ } }
+  }
+}
+
+/** 지금 도는 codex 쓰기 차례 수 — 남은 변경 커밋이 그 사이에 끼어들지 않게(차례가 끝나면 그쪽이 제 메시지로 커밋한다). */
+let codexWriteTurns = 0;
+export function codexWriteTurnsInFlight(): number { return codexWriteTurns; }
+
+export type VaultLeftoverResult = VaultCommitResult | 'busy' | 'locked';
+
+/**
+ * **남은 변경 커밋 — 안전망** (2026-10-19 · 예약 타이머가 10분마다 부른다).
+ *
+ * 대신 커밋이 실패했거나(잠금 · 시간 초과) 차례가 중간에 죽으면 볼트에 커밋 안 된 변경이 남는다. 전에는 다음
+ * `tasks.py` 쓰기가 남의 메시지로 함께 담아 갔다. 이제 여기서 `[남은 변경] 봇이 모아 커밋` 으로 따로 담는다.
+ *
+ * 건너뛰는 때 둘 — codex 쓰기 차례가 도는 중(`busy` · 끝나면 그 차례가 미룬 메시지로 커밋한다) ·
+ * `index.lock` 이 있음(`locked` · 다른 git 이 쓰는 중이다. 묵은 잠금이면 사람이 볼 일이라 지우지 않는다).
+ * **절대 안 던진다.**
+ */
+export async function commitVaultLeftovers(vaultDir: string | null = workVaultDir()): Promise<VaultLeftoverResult> {
+  try {
+    if (!vaultDir) return 'skipped';
+    if (codexWriteTurns > 0) return 'busy';
+    const git = vaultGit(vaultDir);
+    // 잠금 경로는 git 에 묻는다 — 볼트가 작업 트리면 `.git` 이 폴더가 아니다.
+    const lock = path.resolve(vaultDir, (await git(['rev-parse', '--git-path', 'index.lock'])).trim());
+    if (fs.existsSync(lock)) return 'locked';
     if (!(await git(['status', '--porcelain'])).trim()) return 'nothing';
-    await git(['commit', '-q', '-m', `[GPT 대신 커밋] ${label}`.slice(0, 200)]);
-    logger.info('codex 차례가 쓴 볼트를 대신 커밋했습니다', { label });
+    // 묻는 사이 쓰기 차례가 시작됐으면 그쪽에 맡긴다.
+    if (codexWriteTurns > 0) return 'busy';
+    await git(['add', '-A']);
+    await git(['commit', '-q', '-m', '[남은 변경] 봇이 모아 커밋']);
+    logger.info('볼트에 남은 변경을 모아 커밋했습니다');
     return 'committed';
   } catch (err) {
-    logger.warn(`볼트 대신 커밋 실패(${label}) — ${clipLine(String((err as Error)?.message ?? err), 200)}`);
+    logger.warn(`볼트 남은 변경 커밋 실패 — ${clipLine(String((err as Error)?.message ?? err), 200)}`);
     return 'failed';
   }
 }
@@ -1524,6 +1594,10 @@ export async function codexTurn(prompt: string, opts: CodexTurnOpts): Promise<Co
   const pf = path.join(os.tmpdir(), `wa-cx-${id}.txt`);
   const of = path.join(os.tmpdir(), `wa-cx-${id}.out.txt`);
   const sf = opts.outputSchema ? path.join(os.tmpdir(), `wa-cx-${id}.schema.json`) : undefined;
+  // 쓰기 차례는 `tasks.py` 의 커밋을 봇에 미룬다 — 메시지가 이 파일에 한 줄씩 쌓이고 차례 뒤 대신 커밋이 읽는다.
+  // 임시 폴더에 둔다: codex 쓰기 모래상자가 그곳 쓰기를 연다(`.git` 은 막고 · `codex sandbox` 로 확인 2026-10-19).
+  const write = opts.sandbox === 'workspace-write';
+  const df = write ? path.join(os.tmpdir(), `wa-cx-${id}.commits.txt`) : undefined;
   const fail = (detail: string, steps: CodexStep[] = [], writeRan = false): CodexTurnResult =>
     ({ text: '', kind: 'fail', steps, writeRan, ms: Date.now() - t0, detail });
   // 엔진 연습 — codex 를 안 띄우고 막힌 모양만 낸다. 사용량 소진은 진짜처럼 엔진 상태에 적는다.
@@ -1534,17 +1608,20 @@ export async function codexTurn(prompt: string, opts: CodexTurnOpts): Promise<Co
     return { text: '', kind: 'usage', steps: [], writeRan: false, resetsAt: until, ms: Date.now() - t0, detail: '연습 주입(usage)' };
   }
   if (drill === 'fail') return fail('연습 주입(fail)');
+  if (write) codexWriteTurns += 1;
   try {
     const head = opts.appendSystemPrompt ? `${opts.appendSystemPrompt}\n\n----\n\n` : '';
     fs.writeFileSync(pf, head + prompt, 'utf-8');
     if (sf) fs.writeFileSync(sf, JSON.stringify(opts.outputSchema), 'utf-8');
+    const env = df ? { ...(opts.env ?? {}), WORK_ASSISTANT_DEFER_COMMIT: df } : opts.env;
     const run = await runCodex(codexTurnArgs(opts, of, sf), pf, {
-      timeoutMs: opts.timeoutMs ?? 600_000, env: opts.env, onSpawn: opts.onSpawn,
+      timeoutMs: opts.timeoutMs ?? 600_000, env, onSpawn: opts.onSpawn,
     });
     const ev = run.events;
-    const writeRan = opts.sandbox === 'workspace-write' && ev.touched;
+    const writeRan = write && ev.touched;
     // 쓰기 차례의 `tasks.py` 는 모래상자 안에서 볼트 커밋을 못 한다(`.git` 읽기 전용) — 끝났든 끊겼든 봇이 대신.
-    if (writeRan) await commitVaultAfterCodex(opts.label ?? 'codex 차례');
+    // 미룬 메시지가 있으면 이벤트를 못 봤어도(옛 판) 커밋한다 — `tasks.py` 가 썼다는 사실 그 자체다.
+    if (writeRan || (df && fs.existsSync(df))) await commitVaultAfterCodex(opts.label ?? 'codex 차례', workVaultDir(), df);
     let out = '';
     try { out = fs.existsSync(of) ? fs.readFileSync(of, 'utf-8').trim() : ''; } catch { /* 없으면 이벤트 쪽 */ }
     // 차례가 끝났나 — 이벤트를 봤으면 `turn.completed`, 못 봤으면(옛 판) rc 로.
@@ -1569,7 +1646,8 @@ export async function codexTurn(prompt: string, opts: CodexTurnOpts): Promise<Co
     logger.warn('codex 한 차례가 터졌습니다 — 물러납니다', err);
     return fail(String((err as Error)?.message ?? err));
   } finally {
-    for (const f of [pf, of, sf]) {
+    if (write) codexWriteTurns -= 1;
+    for (const f of [pf, of, sf, df]) {
       if (f) { try { fs.unlinkSync(f); } catch { /* 이미 없다 */ } }
     }
   }

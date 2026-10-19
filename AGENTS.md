@@ -162,7 +162,7 @@ Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(
 
 - **codex 한 차례는 `codexTurn`(`src/work-assistant.ts`) 하나** — `--json` 이벤트로 답 · 한 일(명령 ≤120자) · `writeRan` · `ok|usage|fail` · 한도 글이면 엔진 상태에 codex 막힘 · 부르는 쪽 `env` 를 얹고 API 키는 뺌
 - **폴백은 1차보다 넓게 안 씀** — 1차 도구가 읽기뿐이면(`primaryReadOnly` · 브리핑) `-s read-only` · 아니면 `--approve-for-me`(둘을 같이 주면 rc 2)
-- **쓰기 차례 뒤 볼트는 봇이 대신 커밋**(`commitVaultAfterCodex` · 2026-10-19) — codex 모래상자가 `.git` 을 읽기 전용으로 둬 `tasks.py` 커밋이 넘어진다
+- **쓰기 차례 뒤 볼트는 봇이 대신 커밋**(`commitVaultAfterCodex` · 2026-10-19) — 메시지는 `tasks.py` 가 미룬 것(`WORK_ASSISTANT_DEFER_COMMIT`), 남은 변경은 10분 타이머가 커밋한다. 상세는 `docs/engine-fallback.md` 「볼트 커밋」
 - **Claude 가 막혀 있으면 1차를 안 띄움**(`spawnOrFallback`) · codex 는 한도 조회(`src/codex-quota.ts` · 5분 캐시 · 못 읽으면 모름)나 엔진 상태가 막혔다고 하면 건너뜀
 - **브리핑 「올린 날」 자국 `.briefing-delivered.json`** — 올린 뒤에만 찍음 · 놓친 브리핑이 이것을 봄 · 한도 · 오류 글은 브리핑으로 안 올림 · 회복 때 업무일 정오 전이면 다시 돌림
 - **분석 한도 재시도 계획 `.analysis-retry.json`** — 재시작 뒤 다시 걸고, 때가 지났으면 Claude 가 풀렸을 때만 돌림(재시도는 한 번)

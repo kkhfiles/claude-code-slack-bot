@@ -191,6 +191,8 @@ try {
     eq('가짜 codex 를 한 번 부른다', c.length, 1);
     eq('부르는 쪽 환경 변수(CLAUDE_SCHEDULED · 캡처 파일)가 codex 까지 닿는다', c[0]?.env, ENV);
     eq('API 키는 codex 에 안 넘긴다', c[0]?.apiKey, false);
+    ok(`예약 세션 폴백(쓰기)도 볼트 커밋을 미루는 파일을 codex 에 넘긴다 (받음 ${c[0]?.defer})`,
+       typeof c[0]?.defer === 'string' && path.dirname(c[0].defer) === os.tmpdir());
     const a = c[0]?.argv ?? [];
     ok(`쓰기 차례는 --approve-for-me 만 (받음 ${a.join(' ')})`, a.includes('--approve-for-me') && !a.includes('-s'));
     ok('이벤트를 읽게 --json', a.includes('--json'));
@@ -355,6 +357,64 @@ try {
     eq('쓰다가 한도에 걸린 차례도 커밋 · GIT_DIR 이 남아 있어도 볼트에', [u.kind, u.writeRan, count(), dirty()], ['usage', true, 3, false]);
     eq('저장소가 아니면 failed(안 던짐)', await wa.commitVaultAfterCodex('시험', path.join(STATE_DIR, 'no-such-vault')), 'failed');
     eq('볼트를 모르면 skipped', await wa.commitVaultAfterCodex('시험', null), 'skipped');
+
+    // 미룬 커밋 — `tasks.py` 가 쓰기 차례에 git 대신 메시지를 적고(`WORK_ASSISTANT_DEFER_COMMIT`) 봇이 그 말로 커밋한다.
+    // Claude 차례의 커밋과 같은 말이 남는다 · 앞머리 `[GPT]` 로 출처를 남긴다.
+    process.env.FAKE_CODEX_MODE = 'ok';
+    const n1 = fake.calls().length;
+    fs.writeFileSync(path.join(VAULT, 'TSK-3.md'), '새 업무\n', 'utf-8');
+    process.env.FAKE_CODEX_DEFER_LINES = 'TSK-114 새 업무 — 시험|[메일 판정] 갱신|[메일 판정] 갱신';
+    await turn('workspace-write', { label: '시험 볼트' });
+    delete process.env.FAKE_CODEX_DEFER_LINES;
+    const dpath = fake.calls().slice(n1)[0]?.defer;
+    ok(`쓰기 차례는 미룬 커밋 파일을 codex 에 넘긴다 (받음 ${dpath})`, typeof dpath === 'string' && dpath.length > 0);
+    eq('미룬 메시지가 커밋 메시지(겹친 줄은 하나 · [GPT] 앞머리)', [git('log', '-1', '--format=%s').stdout.trim(), count(), dirty()],
+       ['[GPT] TSK-114 새 업무 — 시험 · [메일 판정] 갱신', 4, false]);
+    eq('미룬 커밋 파일은 차례 뒤 지운다', typeof dpath === 'string' && fs.existsSync(dpath), false);
+    const n2 = fake.calls().length;
+    await turn('read-only');
+    eq('읽기 전용 차례에는 미룬 커밋 파일을 안 넘긴다', fake.calls().slice(n2)[0]?.defer, null);
+    // 파일이 비었으면 예전 일반 메시지 · 그래도 파일은 지운다
+    const empty = path.join(STATE_DIR, 'defer-empty.txt');
+    fs.writeFileSync(empty, '\n', 'utf-8');
+    fs.writeFileSync(path.join(VAULT, 'TSK-4.md'), '빈 미룸\n', 'utf-8');
+    eq('미룬 메시지가 없으면 일반 메시지', [await wa.commitVaultAfterCodex('시험 볼트', VAULT, empty),
+      git('log', '-1', '--format=%s').stdout.trim(), fs.existsSync(empty)], ['committed', '[GPT 대신 커밋] 시험 볼트', false]);
+    eq('긴 미룸은 200자에서 자름', wa.deferredCommitMessage((() => {
+      const f = path.join(STATE_DIR, 'defer-long.txt'); fs.writeFileSync(f, `${'가'.repeat(300)}\n`, 'utf-8'); return f;
+    })())?.length, 200);
+
+    // 남은 변경 커밋(안전망 · 10분 타이머) — 남은 것이 있으면 모아 커밋 · 쓰기 차례가 도는 중 · index.lock 이 있으면 건너뜀
+    fs.writeFileSync(path.join(VAULT, 'TSK-5.md'), '남은 변경\n', 'utf-8');
+    const lock = path.join(VAULT, '.git', 'index.lock');
+    fs.writeFileSync(lock, '', 'utf-8');
+    eq('index.lock 이 있으면 건너뜀', [await wa.commitVaultLeftovers(VAULT), dirty()], ['locked', true]);
+    fs.rmSync(lock, { force: true });
+    process.env.FAKE_CODEX_MODE = 'slow';
+    process.env.FAKE_CODEX_SLOW_MS = '1500';
+    const slow = turn('workspace-write', { label: '시험 볼트', writableDirs: [] });
+    await new Promise((r) => setTimeout(r, 300));
+    eq('쓰기 차례가 도는 중이면 건너뜀', [wa.codexWriteTurnsInFlight(), await wa.commitVaultLeftovers(VAULT), dirty()], [1, 'busy', true]);
+    await slow;
+    delete process.env.FAKE_CODEX_SLOW_MS;
+    eq('차례가 끝나면 쓰기 차례 수는 0', wa.codexWriteTurnsInFlight(), 0);
+    // 느린 차례는 명령을 안 돌려(writeRan 거짓) 대신 커밋을 안 한다 — 남은 변경은 그대로 남아 있다.
+    const c0 = count();
+    eq('남은 변경을 모아 커밋', [await wa.commitVaultLeftovers(VAULT), count(), dirty(),
+      git('log', '-1', '--format=%s').stdout.trim()], ['committed', c0 + 1, false, '[남은 변경] 봇이 모아 커밋']);
+    eq('남은 것이 없으면 nothing', await wa.commitVaultLeftovers(VAULT), 'nothing');
+    const prevGitDir2 = process.env.GIT_DIR;
+    process.env.GIT_DIR = path.join(STATE_DIR, 'not-a-repo');
+    fs.writeFileSync(path.join(VAULT, 'TSK-6.md'), 'GIT_DIR 남음\n', 'utf-8');
+    const lg = await wa.commitVaultLeftovers(VAULT);
+    if (prevGitDir2 === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = prevGitDir2;
+    eq('남은 변경 커밋도 GIT_DIR 을 털고 볼트에', [lg, dirty()], ['committed', false]);
+    eq('남은 변경 — 볼트를 모르면 skipped · 저장소가 아니면 failed(안 던짐)',
+       [await wa.commitVaultLeftovers(null), await wa.commitVaultLeftovers(path.join(STATE_DIR, 'no-such-vault'))], ['skipped', 'failed']);
+    // 예약 타이머가 부르는 그 함수 — 홈 설정이 가리키는 볼트(시험용 저장소)에 커밋한다.
+    fs.writeFileSync(path.join(VAULT, 'TSK-7.md'), '타이머\n', 'utf-8');
+    const sweeper = new AssistantScheduler(async () => {}, async () => OKR, config.assistant.configDir);
+    eq('예약 타이머의 한 차례(runVaultSweep)가 볼트를 커밋', [await sweeper.runVaultSweep(), dirty()], ['committed', false]);
     resetEngine();
   }
 } finally {

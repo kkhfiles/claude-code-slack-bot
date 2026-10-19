@@ -34,10 +34,18 @@ fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({
     WORK_ASSISTANT_CAPTURE: process.env.WORK_ASSISTANT_CAPTURE ?? null,
     CLAUDE_BOT_SESSION: process.env.CLAUDE_BOT_SESSION ?? null,
   },
+  // 쓰기 차례가 얹는 미룬 커밋 파일(WORK_ASSISTANT_DEFER_COMMIT) — 읽기 전용 차례에는 없어야 한다.
+  defer: process.env.WORK_ASSISTANT_DEFER_COMMIT ?? null,
   apiKey: Object.keys(process.env).some((k) => k.toUpperCase() === 'ANTHROPIC_API_KEY'),
   prompt,
   at: startedAt,
 }) + '\n');
+// tasks.py 흉내 — 받은 파일에 미룬 커밋 메시지를 적는다(FAKE_CODEX_DEFER_LINES · 줄은 | 로 가름).
+if (process.env.WORK_ASSISTANT_DEFER_COMMIT && process.env.FAKE_CODEX_DEFER_LINES) {
+  for (const l of process.env.FAKE_CODEX_DEFER_LINES.split('|')) {
+    fs.appendFileSync(process.env.WORK_ASSISTANT_DEFER_COMMIT, l + '\n', 'utf-8');
+  }
+}
 const out = argv[argv.indexOf('-o') + 1];
 const reply = process.env.FAKE_CODEX_REPLY || '☀️ codex 답';
 const ev = (o) => process.stdout.write(JSON.stringify(o) + '\n');

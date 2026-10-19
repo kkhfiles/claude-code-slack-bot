@@ -13,7 +13,7 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell, dropCapture,
-  offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexTurn, codexWritableDirs,
+  offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexTurn, codexWritableDirs, commitVaultLeftovers,
   improveGather, improveAccept, improveShow, improvePosted, improveDecide, runTasks } from './work-assistant';
 import { agyRungsOn, agyText } from './agy-turn';
 import { AGY_BRIEF_NOTE, AGY_FOCUS_NOTE, parseTaskList, parseFocusReply, runActions, validateActions } from './agy-actions';
@@ -162,6 +162,11 @@ export function boardQueueDailyCalls(): number {
  * 한 시간 일찍 나가는 값이 없었다.
  */
 const MAIL_POLL_MS = 600_000;
+/**
+ * 볼트에 남은 변경을 모아 커밋하는 간격 (2026-10-19 · `commitVaultLeftovers`). 쉬는 날에도 돈다 —
+ * 밖으로 나가는 것이 아니라 볼트 안에 되돌릴 지점을 남기는 일이다. 바뀐 것이 없으면 git 상태만 묻고 끝난다.
+ */
+const VAULT_SWEEP_MS = 600_000;
 const MAIL_POLL_FROM_HOUR = 8;
 const MAIL_POLL_TO_HOUR = 20;
 /** 보고서 파일 시각을 세션 시작과 견줄 때의 여유 — `reportProduced` 참조. */
@@ -922,6 +927,7 @@ export class AssistantScheduler {
   /** 막혀서 건너뛴다는 로그를 이 막힘(시작 시각)에 이미 남겼나 — 10분마다 같은 줄이 안 쌓이게. */
   private mailBlockedLogged: number | null = null;
   private remindTimer: ReturnType<typeof setInterval> | null = null;
+  private vaultSweepTimer: ReturnType<typeof setInterval> | null = null;
   private remindBusy = false;
   private actionsTimer: ReturnType<typeof setInterval> | null = null;
   private runSweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -1401,6 +1407,7 @@ export class AssistantScheduler {
       this.scheduleOffsitePush();
       this.startMailPoller();
       this.startRemindPoller();
+      this.startVaultSweep();
       // 켜는 문이 꺼져 있으면 안 건다 — 06:30 에 아무것도 안 만든다(시안 확인 전).
       if (improveEnabled()) this.scheduleImprove();
     }
@@ -1455,6 +1462,10 @@ export class AssistantScheduler {
     if (this.remindTimer) {
       clearInterval(this.remindTimer);
       this.remindTimer = null;
+    }
+    if (this.vaultSweepTimer) {
+      clearInterval(this.vaultSweepTimer);
+      this.vaultSweepTimer = null;
     }
     if (this.actionsTimer) {
       clearInterval(this.actionsTimer);
@@ -2016,6 +2027,20 @@ export class AssistantScheduler {
     this.remindTimer = setInterval(() => {
       void this.runRemindPoll();
     }, REMIND_POLL_MS);
+  }
+
+  /**
+   * 볼트 남은 변경 커밋 — 안전망. 대신 커밋이 실패했거나 차례가 중간에 죽어 커밋 없이 남은 변경을
+   * `[남은 변경] 봇이 모아 커밋` 으로 담는다. codex 쓰기 차례가 도는 중 · `index.lock` 이 있으면 건너뛴다
+   * (`commitVaultLeftovers` · 안 던진다).
+   */
+  private startVaultSweep(): void {
+    this.vaultSweepTimer = setInterval(() => { void this.runVaultSweep(); }, VAULT_SWEEP_MS);
+  }
+
+  /** 한 차례 — 타이머와 시험이 부른다. 안 던진다. */
+  async runVaultSweep(): Promise<string> {
+    return commitVaultLeftovers();
   }
 
   /** 한 판 돈다. **절대 던지지 않는다** — 여기서 터지면 조용히 안 울린다. */
