@@ -17,10 +17,21 @@
  *   - auth · unknown  60분 뒤에 다시 본다
  *
  * 읽기·쓰기는 부를 때마다 파일을 읽고 고쳐 쓴다(작은 JSON 한 개) — 메모리 사본을 두지 않아야
- * 다시 읽은 값이 곧 재시작 뒤의 값이다.
+ * 다시 읽은 값이 곧 재시작 뒤의 값이고, **파이썬이 쓴 값도 바로 보인다.**
+ *
+ * **파이썬(llm-playbook `engine_state.py`)과 같은 파일을 쓴다**(2026-10-19) — 배치가 막힌 Claude 를 밤새
+ * 부르지 않게. 규약은 두 쪽이 같다(바꾸면 둘을 같이 바꾼다):
+ *   - 쓰기는 `<파일>.lock` 을 잡고(`O_CREAT|O_EXCL` = `'wx'` · 안에 pid · 30초 넘은 잠금은 지움) 읽고 → 고치고 →
+ *     임시 파일에 써서 바꿔 끼운다. **못 잡으면 기록만 건너뛴다**(fail-open · WARN 한 줄)
+ *   - **깨진 파일은 덮어쓰지 않는다** — 읽을 때는 빈 상태로 보고(막힌 것 없음) 쓰기는 건너뛴다
+ *   - **모르는 열쇠를 지우지 않는다** — 파이썬만 쓰는 엔진(`agy-argon`)이나 위 단계 칸이 봇의 쓰기에 사라지면 안 된다
+ *   - 남이 쓴 막힘 변화는 `startWatch` 가 파일을 들여다보다 같은 알림(`subscribe`)으로 낸다
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { Logger } from './logger';
+
+const logger = new Logger('EngineState');
 
 export type Engine = 'claude' | 'codex' | 'agy-claude' | 'agy-gemini';
 /** DM 을 맡는 차례 — 앞이 막히면 다음으로 내려간다. 6단계부터 Gemini 가 agy 의 Claude(Sonnet)보다 앞이다. */
@@ -53,11 +64,14 @@ export interface EngineRecord {
 
 export interface EngineStateData {
   v: 1;
-  engines: Record<Engine, EngineRecord>;
+  /** 봇이 아는 네 엔진 + 모르는 열쇠(파이썬만 쓰는 `agy-argon` 등) — 모르는 것은 읽은 그대로 되쓴다. */
+  engines: Record<Engine, EngineRecord> & Record<string, unknown>;
   /** 한도 안내를 이번 구간에 이미 올렸나 — 키가 같으면 두 번째부터는 ✋ 만 붙인다. */
   notice: { key: string; at: number } | null;
   /** 엔진 안내가 마지막으로 알린 DM 차례 — 재시작해도 같은 안내를 되풀이하지 않게. */
   ladder: { rung: string; key: string; at: number } | null;
+  /** 모르는 윗단 칸 — 읽은 그대로 되쓴다. */
+  [extra: string]: unknown;
 }
 
 export interface BlockInput { kind: BlockKind; until?: number; limitType?: string; }
@@ -72,6 +86,57 @@ export const USE_WINDOW_SEC = 5 * 60 * 60;
 
 export function overloadBackoffSec(step: number): number {
   return Math.min(OVERLOAD_MAX_SEC, OVERLOAD_FIRST_SEC * 2 ** Math.max(0, step - 1));
+}
+
+// 쓰기 잠금 — 파이썬 `engine_state.py` 의 `LOCK_STALE_S` · `LOCK_POLL_S` 와 같은 값. 바꾸면 둘을 같이 바꾼다.
+/** 이보다 오래된 잠금은 죽은 프로세스가 남긴 것으로 보고 지운다. */
+export const LOCK_STALE_MS = 30_000;
+/**
+ * 잠금을 이만큼만 기다린다 — **봇은 기다리는 동안 이벤트 고리가 선다**(쓰기가 동기다). 파이썬은 2초를
+ * 기다리지만 잡고 있는 시간은 읽고 쓰는 몇 밀리초뿐이라 짧게 둔다. 못 잡으면 기록만 건너뛴다.
+ */
+export const LOCK_WAIT_MS = 1_000;
+const LOCK_POLL_MS = 20;
+/** 바꿔 끼우기를 윈도가 거절하면(읽는 쪽이 잠깐 쥠) 이만큼 다시 해 본다 — 파이썬과 같은 25번. */
+const REPLACE_TRIES = 25;
+/** 남이 쓴 것을 들여다보는 간격 — 안내 · 회복 타이머용이라 급하지 않다(고르기는 매번 파일을 읽는다). */
+export const WATCH_MS = 30_000;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** 잠금 파일을 만들어 잡는다(안에 pid). 못 잡으면 `false` — 묵은 잠금은 지우고 바로 다시 해 본다. */
+function takeLock(lock: string, waitMs: number): boolean {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      const fd = fs.openSync(lock, 'wx');
+      try { fs.writeSync(fd, `${process.pid}\n`); } finally { fs.closeSync(fd); }
+      return true;
+    } catch (err: any) {
+      // 있다(EEXIST) · 윈도에서 지우는 중(EPERM) — 기다릴 일이다. 그 밖(폴더가 없음 등)은 기다려도 안 풀린다.
+      if (err?.code !== 'EEXIST' && err?.code !== 'EPERM') return false;
+    }
+    try {
+      if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) {
+        fs.rmSync(lock, { force: true });
+        continue;
+      }
+    } catch {
+      /* 그 사이에 풀렸다 — 다시 해 본다 */
+    }
+    if (Date.now() >= deadline) return false;
+    sleepSync(LOCK_POLL_MS);
+  }
+}
+
+/** 읽은 결과 — 없음 · 깨짐(덮어쓰면 안 됨) · 읽음. */
+type ReadResult = { state: 'missing' } | { state: 'corrupt'; why: string } | { state: 'ok'; st: EngineStateData };
+
+/** 바뀌었나를 가르는 지문 — 봇이 아는 엔진의 막힘만(듣는 쪽이 보는 것이 그것뿐이다). */
+function blockPrint(st: EngineStateData): string {
+  return JSON.stringify(ENGINES.map((e) => st.engines[e].blocked));
 }
 
 const ROOT = path.join(__dirname, '..');
@@ -103,15 +168,27 @@ function emptyState(): EngineStateData {
   return { v: 1, engines, notice: null, ladder: null };
 }
 
-/** 읽은 것을 모양에 맞춘다 — 손으로 고쳤거나 옛 판이어도 칸이 다 있게. */
+/**
+ * 읽은 것을 모양에 맞춘다 — 손으로 고쳤거나 옛 판이어도 칸이 다 있게.
+ * **모르는 열쇠는 그대로 둔다**(윗단 칸 · 모르는 엔진 · 아는 엔진 기록 안의 모르는 칸) — 파이썬이 쓴 것을
+ * 봇의 다음 쓰기가 지우면 안 된다.
+ */
 function normalize(raw: any): EngineStateData {
   const st = emptyState();
-  if (!raw || typeof raw !== 'object') return st;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return st;
+  const known = new Set<string>(['v', 'engines', 'notice', 'ladder']);
+  for (const [k, val] of Object.entries(raw)) if (!known.has(k)) st[k] = val;
+  const rawEngines = raw.engines && typeof raw.engines === 'object' && !Array.isArray(raw.engines) ? raw.engines : {};
+  for (const [k, val] of Object.entries(rawEngines)) {
+    if (!(ENGINES as readonly string[]).includes(k)) st.engines[k] = val;
+  }
   for (const e of ENGINES) {
-    const r = raw.engines?.[e];
+    const r = rawEngines[e];
     if (!r || typeof r !== 'object') continue;
     const b = r.blocked;
+    const { util: _util, ...rest } = r;
     st.engines[e] = {
+      ...rest,
       blocked: b && typeof b === 'object' && typeof b.kind === 'string' ? {
         kind: b.kind,
         until: typeof b.until === 'number' ? b.until : null,
@@ -165,19 +242,17 @@ export class EngineState {
    * 아직 안 지났을 때만. 옛 파일은 그대로 둔다.
    */
   load(): EngineStateData {
-    const file = this.file;
-    try {
-      if (fs.existsSync(file)) return normalize(JSON.parse(fs.readFileSync(file, 'utf-8')));
-    } catch {
-      return emptyState();
-    }
+    const r = this.read();
+    if (r.state === 'ok') return r.st;
+    if (r.state === 'corrupt') return emptyState();
     const st = emptyState();
     try {
       const until = JSON.parse(fs.readFileSync(this.legacyFile, 'utf-8')).until;
       const now = this.nowSec();
       if (typeof until === 'number' && until > now) {
         st.engines.claude.blocked = { kind: 'usage', until, untilKnown: true, since: now };
-        this.save(st);
+        // 잠그고 그 사이 아무도 안 만들었을 때만 쓴다 — 파이썬이 먼저 만든 파일을 옮겨 온 값이 덮으면 안 된다.
+        this.withLock(() => { if (this.read().state === 'missing') this.save(st); });
       }
     } catch {
       /* 옛 파일이 없다 — 옮길 것이 없다 */
@@ -185,21 +260,83 @@ export class EngineState {
     return st;
   }
 
-  /** 임시 파일에 쓰고 바꿔 끼운다. 윈도가 바꿔 끼우기를 거절하면 그 자리에 쓴다. */
-  save(st: EngineStateData): void {
+  /**
+   * 파일을 읽는다 — 없음 · 깨짐 · 읽음. 안 던진다. 윈도에서 남이 바꿔 끼우는 순간의 읽기 거절(EPERM ·
+   * EBUSY)은 잠깐 다시 해 본다 — 한 번 거절로 「깨짐」이 되면 그 차례만 막힘을 못 본다.
+   */
+  private read(): ReadResult {
+    const file = this.file;
+    for (let i = 0; ; i++) {
+      let raw: string;
+      try {
+        raw = fs.readFileSync(file, 'utf-8');
+      } catch (err: any) {
+        if (err?.code === 'ENOENT') return { state: 'missing' };
+        if ((err?.code === 'EPERM' || err?.code === 'EBUSY' || err?.code === 'EACCES') && i < 3) {
+          sleepSync(10);
+          continue;
+        }
+        return { state: 'corrupt', why: String(err?.code ?? err) };
+      }
+      try {
+        const j = JSON.parse(raw);
+        if (!j || typeof j !== 'object' || Array.isArray(j)
+            || (j.engines !== undefined
+              && (j.engines === null || typeof j.engines !== 'object' || Array.isArray(j.engines)))) {
+          return { state: 'corrupt', why: '모양이 아님' };
+        }
+        return { state: 'ok', st: normalize(j) };
+      } catch (err: any) {
+        return { state: 'corrupt', why: String(err?.message ?? err) };
+      }
+    }
+  }
+
+  /** `<파일>.lock` 을 잡고 `fn` 을 돌린다 — 못 잡으면 `fn` 을 안 돌리고 `false`. 안 던진다(fn 의 것도 삼킨다). */
+  private withLock(fn: () => void): boolean {
+    const lock = `${this.file}.lock`;
+    if (!takeLock(lock, LOCK_WAIT_MS)) {
+      logger.warn('엔진 상태 잠금을 못 잡아 기록을 건너뜁니다', { lock });
+      return false;
+    }
+    try {
+      fn();
+      return true;
+    } catch (err: any) {
+      logger.warn('엔진 상태 기록이 넘어졌습니다 — 차례는 그대로 갑니다', { err: String(err?.message ?? err) });
+      return false;
+    } finally {
+      try { fs.rmSync(lock, { force: true }); } catch { /* 다음 잡는 쪽이 묵은 것으로 지운다 */ }
+    }
+  }
+
+  /**
+   * 임시 파일에 쓰고 바꿔 끼운다 — **잠금을 쥔 쪽만 부른다**(`mutate`). 윈도가 바꿔 끼우기를 거절하면
+   * (읽는 쪽이 잠깐 쥠) 잠깐씩 다시 해 본다. 그 자리에 바로 쓰지 않는다 — 반쪽 파일을 파이썬이 읽으면
+   * 「깨짐」으로 보고 그 기록을 건너뛴다. 끝내 못 바꾸면 이 기록만 버린다. 썼으면 참.
+   */
+  save(st: EngineStateData): boolean {
     const file = this.file;
     const body = JSON.stringify(st, null, 2);
     const tmp = `${file}.${process.pid}.tmp`;
     try {
       fs.writeFileSync(tmp, body, 'utf-8');
-      try {
-        fs.renameSync(tmp, file);
-      } catch {
-        fs.writeFileSync(file, body, 'utf-8');
-        fs.rmSync(tmp, { force: true });
+      for (let i = 0; i < REPLACE_TRIES; i++) {
+        try {
+          fs.renameSync(tmp, file);
+          return true;
+        } catch (err: any) {
+          if (err?.code !== 'EPERM' && err?.code !== 'EBUSY' && err?.code !== 'EACCES') throw err;
+          sleepSync(LOCK_POLL_MS * (1 + (i % 5)));
+        }
       }
-    } catch {
-      /* 안전망이라 실패해도 본 차례를 막지 않는다 — 다음 쓰기가 덮는다 */
+      logger.warn('엔진 상태를 못 바꿔 끼워 기록을 건너뜁니다', { file });
+      return false;
+    } catch (err: any) {
+      logger.warn('엔진 상태를 못 써 기록을 건너뜁니다', { file, err: String(err?.message ?? err) });
+      return false;
+    } finally {
+      try { fs.rmSync(tmp, { force: true }); } catch { /* 남으면 다음 쓰기가 같은 이름으로 덮는다 */ }
     }
   }
 
@@ -215,14 +352,96 @@ export class EngineState {
     }
   }
 
-  /** 고치고 쓴다 — 막힘이 바뀌었으면 듣는 쪽에 알린다. */
+  /**
+   * 고치고 쓴다 — 잠그고 · 다시 읽고 · 고치고 · 바꿔 끼운다. 막힘이 바뀌었으면 듣는 쪽에 알린다.
+   *
+   * **못 쓰면(잠금을 못 잡음 · 파일이 깨짐) 고친 값으로 답만 하고 파일은 그대로 둔다**(fail-open) — 부르는 쪽이
+   * 받는 값(정해진 막힘 등)은 지금 읽은 것에 고친 결과다. 알림은 안 낸다(파일이 안 바뀌었다).
+   *
+   * 「바뀌었나」는 **마지막으로 본 지문**(`seen`)과 견준다 — 남(파이썬)이 그 사이 쓴 막힘도 이 쓰기에서 알림이
+   * 나가게. 아직 본 적이 없으면 읽은 값과 견준다.
+   */
   private mutate<T>(fn: (st: EngineStateData) => T): T {
-    const st = this.load();
-    const before = JSON.stringify(ENGINES.map((e) => st.engines[e].blocked));
-    const out = fn(st);
-    this.save(st);
-    if (JSON.stringify(ENGINES.map((e) => st.engines[e].blocked)) !== before) this.emit();
-    return out;
+    let out: T | undefined;
+    let ran = false;
+    let changed = false;
+    const wrote = this.withLock(() => {
+      const r = this.read();
+      if (r.state === 'corrupt') {
+        logger.warn('엔진 상태 파일이 깨져 있어 덮어쓰지 않습니다 — 기록을 건너뜁니다', { file: this.file, why: r.why });
+        return;
+      }
+      const st = r.state === 'ok' ? r.st : emptyState();
+      const before = this.seen ?? blockPrint(st);
+      ran = true;
+      out = fn(st);
+      if (!this.save(st)) return;
+      const after = blockPrint(st);
+      changed = after !== before;
+      this.seen = after;
+      this.stamp = this.statKey();
+    });
+    if (!ran) out = fn(this.load());
+    if (wrote && changed) this.emit();
+    return out as T;
+  }
+
+  /** 마지막으로 본 막힘 지문 — 내가 쓴 것 · 들여다보며 읽은 것. */
+  private seen: string | null = null;
+  /** 마지막으로 본 파일 표시(수정 시각 · 크기) — 안 바뀌었으면 읽지도 않는다. */
+  private stamp: string | null = null;
+  private watchTimer: NodeJS.Timeout | null = null;
+
+  private statKey(): string {
+    try {
+      const s = fs.statSync(this.file);
+      return `${s.mtimeMs}:${s.size}`;
+    } catch {
+      return 'none';
+    }
+  }
+
+  /**
+   * 남이 쓴 것을 한 번 본다 — 파일이 바뀌었고 막힘 지문이 마지막으로 본 것과 다르면 듣는 쪽에 알린다(참).
+   * **내가 쓴 것으로는 안 알린다** — 쓸 때 지문을 적어 두므로 같은 값이 다시 보일 뿐이다. 깨진 파일은
+   * 「다 풀림」이 아니라 「모름」이라 건너뛰고 다음 차례에 다시 본다.
+   */
+  pollFile(): boolean {
+    try {
+      const key = this.statKey();
+      if (key === this.stamp) return false;
+      const r = this.read();
+      if (r.state === 'corrupt') return false;
+      this.stamp = key;
+      const now = blockPrint(r.state === 'ok' ? r.st : emptyState());
+      const prev = this.seen;
+      this.seen = now;
+      if (prev === null || prev === now) return false;
+      this.emit();
+      return true;
+    } catch (err: any) {
+      logger.warn('엔진 상태 파일을 못 들여다봤습니다', { err: String(err?.message ?? err) });
+      return false;
+    }
+  }
+
+  /**
+   * 파일을 `intervalMs` 마다 들여다본다 — 파이썬이 적은 막힘 · 풀림에도 안내와 회복 타이머가 다시 걸리게
+   * (`subscribe` 를 듣는 쪽은 이 프로세스 안의 쓰기만 들었다). 돌려주는 함수로 끈다. 두 번 불러도 하나만 돈다.
+   */
+  startWatch(intervalMs: number = WATCH_MS): () => void {
+    if (!this.watchTimer) {
+      // 지금 모양을 기준으로 삼는다 — 켜는 순간의 막힘은 기동 때 안내 · 타이머가 이미 본다.
+      this.pollFile();
+      this.watchTimer = setInterval(() => { this.pollFile(); }, intervalMs);
+      this.watchTimer.unref?.();
+    }
+    return () => this.stopWatch();
+  }
+
+  stopWatch(): void {
+    if (this.watchTimer) clearInterval(this.watchTimer);
+    this.watchTimer = null;
   }
 
   /** 됐다 — 막힘을 지운다(과부하 단계도 처음으로). */

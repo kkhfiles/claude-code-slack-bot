@@ -2518,10 +2518,12 @@ export class SlackHandler {
    *
    * 회복 타이머를 파일에서 다시 걸고(재시작이 메모리 타이머를 지운다 — 전에는 다시 거는 곳이
    * 없어 회복 시각이 와도 아무도 안 깨웠다) 엔진 안내가 막힘 변화를 듣게 한다.
+   * 파이썬(llm-playbook)이 같은 파일에 적은 막힘 · 풀림도 들리게 파일을 30초마다 들여다본다(`startWatch`).
    */
   private startEngineWatch(): void {
     this.engineRecovery.init();
     this.engineNotice.init();
+    engineState.startWatch();
   }
 
   /**
