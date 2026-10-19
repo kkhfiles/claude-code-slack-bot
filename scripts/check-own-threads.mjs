@@ -108,6 +108,16 @@ for (const [name, cfg, key, said] of [
   await host['tellManager'](client, 'C_ELSE', '다른 방');
   check('다른 방이면 따로 센다', sent.length === 2, sent);
 }
+{
+  sent.length = 0;
+  const host = make({});
+  const real = client.chat.postMessage;
+  client.chat.postMessage = async () => { throw new Error('끊김'); };
+  await host['tellManager'](client, ROOM, '첫 시도');
+  client.chat.postMessage = real;
+  await host['tellManager'](client, ROOM, '다시 시도');
+  check('보내기가 실패하면 30분 기다리지 않고 다음에 보낸다', sent.length === 1 && sent[0].text.includes('다시 시도'), sent);
+}
 
 console.log('');
 console.log(`통과 ${pass} / 실패 ${fails.length}`);

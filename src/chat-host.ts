@@ -1434,12 +1434,13 @@ export class ChatHost {
       this.logger.info(`실장께 알릴 줄이 또 나왔지만 ${channel} 은 방금 알려서 넘깁니다`);
       return;
     }
-    this.toldManagerAt.set(channel, Date.now());
     try {
       const im = await client.conversations.open({ users: manager });
       if (!im.channel?.id) return;
       await client.chat.postMessage({ channel: im.channel.id,
                                       text: `<#${channel}> 방에서 짚인 일이 있어 알려 드립니다.\n${text.slice(0, 400)}` });
+      // 보낸 뒤에 적는다 — 먼저 적으면 보내기가 실패해도 30분 동안 다시 안 보낸다(재검토).
+      this.toldManagerAt.set(channel, Date.now());
       this.logger.info(`실장께 알렸습니다 (${channel})`);
     } catch (error) {
       this.logger.warn('실장께 알리지 못했습니다', error);
