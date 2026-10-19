@@ -38,6 +38,12 @@ const ROOMS_RECENT_DAYS = 3;
 const ROOMS_RECENT_LINES = 20;
 const ROOMS_RECENT_LINE_CHARS = 200;
 const ROOMS_RECENT_TIMEOUT_MS = 4000;
+/** 자기 글 답글(`ownThreads`) — 답글 달린 봇 글 몇 개 · 글마다 답글 몇 줄. 기간·시한·한 줄 길이는 위와 같다. */
+const OWN_THREADS_POSTS = 3;
+const OWN_THREADS_REPLIES = 30;
+const OWN_THREAD_WORDS = /스레드|쓰레드|답글|댓글|thread/i;
+/** 실장께 알리기(`tellManager`) — 같은 방에서 이 시간 안에는 한 번만. */
+const TELL_MANAGER_GAP_MS = 30 * 60 * 1000;
 /** 한 방에서 「이미 집어 갔다」를 기억해 둘 글 수. 넘으면 오래된 것부터 버린다. */
 const TAKEN_MEMORY = 500;
 /**
@@ -255,6 +261,8 @@ export interface TurnResult {
   reopened?: { from?: string; why?: string; ok?: boolean };
   /** 실장 확인을 거쳐야 나가는 부탁(`turn.py` 의 `_control_do`). 평소 턴에는 없다. */
   ask?: TurnAsk[];
+  /** 방 사람이 짚은 잘못을 실장께 알릴 한두 줄(`turn.py` 의 `BOSS_NOTE`). 평소 턴에는 없다. */
+  tell_manager?: string;
   /** 아침 턴(`initiate`)이었다는 표시. */
   initiate?: boolean;
 }
@@ -354,6 +362,8 @@ export class ChatHost {
   private toldMuteBot = new Set<string>();
   /** **허락 안 한 방**인데 불려 간 곳. 주인에게 방마다 한 번만 알린다. */
   private toldStranger = new Set<string>();
+  /** 방 사람이 짚은 잘못을 실장께 마지막으로 알린 때(`tellManager`) — 방마다. */
+  private toldManagerAt = new Map<string, number>();
   /**
    * 대화를 새로 열었다고 실장에게 마지막으로 알린 시각. **봇마다 한 시간에 한 번** —
    * 상류가 한 시간 내내 나쁘면 방마다 턴마다 DM 이 오고, 그러면 아무도 안 읽는다.
@@ -1214,7 +1224,8 @@ export class ChatHost {
         try {
           result = await this.runTurn(key, await this.displayName(client, key), merged, !forced,
                                       this.isManagerTurn(waiting.users),
-                                      await this.roomsRecent(client, key, waiting.users));
+                                      { ...await this.roomsRecent(client, key, waiting.users),
+                                        ...await this.ownThreads(client, key, merged) });
         } catch (error) {
           this.logger.warn('Turn crashed', error);
           result = { reply: '', error: String(error) };
@@ -1237,6 +1248,10 @@ export class ChatHost {
           void this.opts.onAsk(client, result.ask, { user: users.length === 1 ? users[0] : '',
                                                      channel: waiting.channel })
             .catch((error) => this.logger.warn('확인 카드를 못 띄웠습니다', error));
+        }
+        // **방 사람이 짚은 잘못은 실장께**(`tellManager`) — 기다리지 않는다(방 답이 늦으면 안 된다).
+        if (result.tell_manager && !this.isManagerTurn(waiting.users)) {
+          void this.tellManager(client, waiting.channel, result.tell_manager);
         }
 
         if (result.error) {
@@ -1359,6 +1374,76 @@ export class ChatHost {
     if (!out.length) return {};
     this.logger.info(`다른 방 ${out.length}곳 ${count}줄을 턴에 넘깁니다 (${key.startsWith('U') ? '1:1' : '시험 방'})`);
     return { rooms_recent: out };
+  }
+
+  /**
+   * **이 방에서 봇이 올린 글에 달린 답글** — 맡은 방의 턴에서 말에 스레드·답글 이야기가 나올 때만 읽어 넘긴다(봇 설정
+   * `own_threads`). 2026-10-19 한 방에서 사람들이 「스레드에 올렸잖아」라고 했는데 봇은 답글 수만 받아 「볼 수 없다」고만 했다.
+   * 그 방 글을 그 방 턴에 싣는 것이라 다른 방으로 새는 길은 아니다 — 1:1 에는 안 싣는다. 실을지는 `turn.py` 가 한 번 더 본다.
+   */
+  private async ownThreads(client: App['client'], key: string, said: string): Promise<Record<string, unknown>> {
+    if (this.isDmKey(key) || !(this.opts.channels ?? []).includes(key) || !OWN_THREAD_WORDS.test(said)) return {};
+    const cfg = this.readNear('bots', this.opts.name, 'config.json') as { own_threads?: unknown } | null;
+    if (!cfg?.own_threads) return {};
+    const oldest = ((Date.now() - ROOMS_RECENT_DAYS * 86400 * 1000) / 1000).toFixed(6);
+    const timeout = () => new Promise<null>((r) => { setTimeout(() => r(null), ROOMS_RECENT_TIMEOUT_MS).unref?.(); });
+    let posts: Record<string, unknown>[];
+    try {
+      const res = await Promise.race([client.conversations.history({ channel: key, oldest, limit: 60 }), timeout()]);
+      posts = ((res?.messages ?? []) as Record<string, unknown>[])
+        .filter((m) => m.user === this.selfUserId && Number(m.reply_count ?? 0) > 0)
+        .slice(0, OWN_THREADS_POSTS);
+    } catch {
+      return {};
+    }
+    const out: Array<Record<string, unknown>> = [];
+    let count = 0;
+    for (const p of posts.reverse()) {
+      let msgs: Record<string, unknown>[] = [];
+      try {
+        const res = await Promise.race([client.conversations.replies({ channel: key, ts: p.ts as string,
+                                                                       limit: OWN_THREADS_REPLIES + 1 }), timeout()]);
+        msgs = ((res?.messages ?? []) as Record<string, unknown>[]).slice(1, OWN_THREADS_REPLIES + 1);
+      } catch {
+        continue;
+      }
+      const replies: Array<Record<string, unknown>> = [];
+      for (const m of msgs) {
+        const text = (await this.plainText(client, (m.text as string) ?? '')).slice(0, ROOMS_RECENT_LINE_CHARS);
+        if (!text) continue;
+        const self = m.user === this.selfUserId;
+        const who = self ? '' : (await this.displayName(client, (m.user as string) ?? '')) || '(이름 모름)';
+        replies.push({ at: this.clock(Number(m.ts)), who, self, text });
+      }
+      if (!replies.length) continue;
+      out.push({ at: this.clock(Number(p.ts)),
+                 text: (await this.plainText(client, (p.text as string) ?? '')).slice(0, 120), replies });
+      count += replies.length;
+    }
+    if (!out.length) return {};
+    this.logger.info(`자기 글 ${out.length}개의 답글 ${count}줄을 턴에 넘깁니다`);
+    return { own_threads: out };
+  }
+
+  /** 방 사람이 짚은 잘못을 실장 DM 으로 — 같은 방은 `TELL_MANAGER_GAP_MS` 에 한 번. 실패는 삼킨다. */
+  private async tellManager(client: App['client'], channel: string, text: string): Promise<void> {
+    const manager = this.opts.managerUserId;
+    if (!manager) return;
+    const last = this.toldManagerAt.get(channel) ?? 0;
+    if (Date.now() - last < TELL_MANAGER_GAP_MS) {
+      this.logger.info(`실장께 알릴 줄이 또 나왔지만 ${channel} 은 방금 알려서 넘깁니다`);
+      return;
+    }
+    this.toldManagerAt.set(channel, Date.now());
+    try {
+      const im = await client.conversations.open({ users: manager });
+      if (!im.channel?.id) return;
+      await client.chat.postMessage({ channel: im.channel.id,
+                                      text: `<#${channel}> 방에서 짚인 일이 있어 알려 드립니다.\n${text.slice(0, 400)}` });
+      this.logger.info(`실장께 알렸습니다 (${channel})`);
+    } catch (error) {
+      this.logger.warn('실장께 알리지 못했습니다', error);
+    }
   }
 
   /** 「10-06 16:33」 — 이 PC 시각대. */
