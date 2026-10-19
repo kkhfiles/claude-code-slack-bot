@@ -332,7 +332,7 @@ try {
     const count = () => Number(git('rev-list', '--count', 'HEAD').stdout.trim());
     const dirty = () => git('status', '--porcelain').stdout.trim() !== '';
     git('init', '-q');
-    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.email', 'check-sessionfb');
     git('config', 'user.name', 'test');
     git('commit', '-q', '--allow-empty', '-m', 'init');
     resetEngine();
