@@ -3336,6 +3336,9 @@ export class AssistantScheduler {
    * 보고서 폴더를 훑지 않게. **못 채우면(목록을 못 읽음 · 다른 자리가 남음) 덧붙임 없이** 빈
    * 글자를 돌려주고 오류를 남긴다 — 브리핑 본문은 그대로 나가고, 빈 자리를 받은 세션이 옛
    * 폴더를 훑거나 지어내지 않게 한다(브리핑 「시스템 이슈」로 보인다).
+   *
+   * `{{COST_FILE}}` 는 비용 원장의 절대 경로(`/` 로) — 프롬프트가 상대 경로로 적으면 다른 폴더에서 도는 세션
+   * (GPT 폴백)이 못 찾고 「총 비용: 집계 불가」를 냈다(2026-10-19).
    */
   private async mondayBriefingExtra(now: Date = new Date()): Promise<string> {
     const since = this.weekReportSince(now);
@@ -3344,6 +3347,7 @@ export class AssistantScheduler {
     if (!fs.existsSync(file)) return '';
     const text = fs.readFileSync(file, 'utf-8');
     const values: Record<string, string> = {};
+    if (text.includes('{{COST_FILE}}')) values.COST_FILE = slashPath(path.resolve(COST_FILE));
     if (text.includes('{{WEEK_INPUT}}')) {
       const w = await this.reportLog('report_log', ['week-input', '--since', since]);
       if (w && !w.error) values.WEEK_INPUT = renderWeekInput(w);

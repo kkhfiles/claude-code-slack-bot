@@ -737,6 +737,13 @@ const LIMIT = (sid = 'sL') => ({ ...WORKED, sessionId: sid, rateLimited: true, r
   ok(`월요일 보고에 그 주 판이 들어간다 — 받음 ${extra}`, extra.includes('cli-usage · 2026-10-03 · complete — CLI') && extra.includes('- [ ] 권고 하나'));
   ok('월요일 보고에 {{WEEK_INPUT}} 가 안 남는다', !extra.includes('{{WEEK_INPUT}}'));
   eq('그 주 = 오늘(한국) 7일 전부터', rl.of('week-input').map((c) => argOf(c, '--since')), ['2026-09-28']);
+  // {{COST_FILE}} — 비용 원장의 절대 경로(`/` 로). 상대 경로로 적으면 다른 폴더에서 도는 GPT 가 못 찾았다(2026-10-19)
+  fs.writeFileSync(path.join(PROMPTS, 'monday-briefing-extra.md'), '{{WEEK_INPUT}}\n원장: {{COST_FILE}}\n', 'utf-8');
+  const costWant = S.slashPath(path.resolve(process.env.ASSISTANT_COSTS_FILE || path.join(ROOT, '.assistant-costs.json')));
+  const withCost = await harness({ rl: fakeReportLog({ week: [] }) }).sched.mondayBriefingExtra(MONDAY);
+  eq('{{COST_FILE}} → 비용 원장 절대 경로', withCost.split('\n').find((l) => l.startsWith('원장: ')), `원장: ${costWant}`);
+  ok(`비용 원장 경로는 절대 · 역슬래시 없음 — 받음 ${costWant}`, path.isAbsolute(costWant) && !costWant.includes('\\'));
+  fs.writeFileSync(path.join(PROMPTS, 'monday-briefing-extra.md'), '## 지난주 판\n\n{{WEEK_INPUT}}\n', 'utf-8');
 
   // 그 주 첫 업무일 — 월요일이 쉬는 주는 처음 일하는 날에 붙인다(2026-10-05 대체공휴일 주에 빠졌다)
   // 쉬는 날은 시험이 정한다 — 운영 휴일 목록(config.json)에 기대지 않는다
