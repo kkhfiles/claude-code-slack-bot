@@ -8,6 +8,7 @@
  *   node scripts/sdk-update.mjs --run --request <파일>   봇 버튼이 pm2 한 번짜리 앱으로 부르는 모양
  *   … --no-push --no-restart                             저장소 사본에서 끝까지 돌려 볼 때(커밋까지만)
  *   환경 변수 LLM_PLAYBOOK_ROOT                            llm-playbook 위치를 바꿀 때(사본 시험) · 없으면 설치본에서 찾음
+ *   환경 변수 ENGINE_STATE_FILE · SDK_UPDATE_RESULT · SDK_UPDATE_LOG   시험이 엔진 상태 · 결과 · 기록을 임시 파일로 옮길 때
  *
  * **왜** — SDK 는 Claude Code 실행 파일을 띄우는 부품이고 판마다 짝 CLI 판이 정해져 있다(TypeScript
  * `claudeCodeVersion` · 파이썬 `__cli_version__`). Claude Code 는 스스로 업데이트되므로 SDK 를 그대로 두면 판이
@@ -30,13 +31,14 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  bumpPyproject, busyReason, childEnv, guardReason, normalizeNpmView, pickTarget, requestFresh,
+  blockedStopDetail, bumpPyproject, busyReason, childEnv, claudeBlockNow, engineStateFile, guardReason, limitHit,
+  LIMIT_REASON, normalizeNpmView, pickTarget, requestFresh,
 } from './lib/sdk-update-lib.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATE = path.join(os.homedir(), '.claude', 'state');
 const RESULT = process.env.SDK_UPDATE_RESULT || path.join(STATE, 'sdk-update-result.json');
-const LOG = path.join(STATE, 'sdk-update.log');
+const LOG = process.env.SDK_UPDATE_LOG || path.join(STATE, 'sdk-update.log');
 const PY = process.env.PYTHON || 'python';
 const PY_HELPER = path.join(ROOT, 'scripts', 'lib', 'sdk_py_versions.py');
 const PUSH_GATE = path.join(os.homedir(), '.claude', 'hooks', 'public-push-gate.py');
@@ -260,9 +262,10 @@ function tsStage(c, step, base) {
     if (!sh('npm', ['run', 'build']).ok) return fail('봇 빌드', '빌드 실패');
     if (!npmTest()) return fail('봇 시험', '두 번 다 실패');
     step('봇 빌드·시험', true, '통과');
-    if (!sh(process.execPath, [path.join('scripts', 'probe-warm-live.mjs')], { timeout: 300_000 }).ok) {
-      return fail('봇 실제 호출', '미리 띄운 세션이 안 끝남');
-    }
+    // 한도 글은 끝 코드 0 으로도 온다 — 답이 「You've hit your weekly limit」여도 흐름은 끝났다(2026-10-19).
+    const warm = sh(process.execPath, [path.join('scripts', 'probe-warm-live.mjs')], { timeout: 300_000 });
+    if (limitHit(warm.stdout + warm.stderr)) return fail('봇 실제 호출', LIMIT_REASON);
+    if (!warm.ok) return fail('봇 실제 호출', '미리 띄운 세션이 안 끝남');
     step('봇 실제 호출', true, '미리 띄운 세션 통과');
     const r = commitPush(ROOT, TS_FILES,
       `chore(deps): Agent SDK ${c.ts.version} → ${t} — Claude Code(${c.cli})와 판을 맞춤\n\n`
@@ -296,6 +299,7 @@ function pyStage(c, llm, step, base) {
     if (!test.ok) return fail('llm-playbook 시험', lastLine(test.stdout));
     step('llm-playbook 시험', true, lastLine(test.stdout));
     const probe = sh(PY, ['-X', 'utf8', '-c', PY_PROBE], { cwd: llm, timeout: 300_000 });
+    if (limitHit(probe.stdout + probe.stderr)) return fail('파이썬 실제 호출', LIMIT_REASON);
     if (!probe.ok) return fail('파이썬 실제 호출', '응답 없음');
     step('파이썬 실제 호출', true, lastLine(probe.stdout));
     if (after === before) { step('llm-playbook 최소 판', true, `이미 ${t} — 커밋 없음`); return 'pushed'; }
@@ -349,7 +353,21 @@ function describe(c) {
   return `Claude Code ${c.cli} · ${part('봇 SDK', c.ts)} · ${part('파이썬 SDK', c.py)}`;
 }
 
+/** 엔진 상태가 지금 Claude 가 막혔다고 하나 — 파일을 **읽기만** 한다(봇 모듈을 불러오면 옛 파일을 옮겨 쓴다). */
+function claudeBlocked() {
+  try {
+    const st = JSON.parse(fs.readFileSync(engineStateFile(process.env, ROOT), 'utf-8'));
+    return claudeBlockNow(st, Math.floor(Date.now() / 1000));
+  } catch {
+    return null;   // 파일이 없거나 못 읽으면 모름 — 실제 호출 시험이 가린다
+  }
+}
+
 async function steps(res, step) {
+  // **맨 먼저** — Claude 가 막혀 있으면 실제 호출을 시험할 수 없다. 그대로 가면 봇 SDK 만 올라가고(미리 띄운
+  // 세션은 한도 글로도 끝난다) 파이썬은 되돌려지는 반쪽 판 맞춤이 된다(2026-10-19). 아무것도 안 바꾸고 멈춘다.
+  const blocked = claudeBlocked();
+  if (blocked) { step('점검', false, blockedStopDetail(blocked)); return 'failed'; }
   const llm = llmRoot();
   const base = {};
   for (const [label, cwd] of [['봇 저장소', ROOT], ['llm-playbook', llm]]) {

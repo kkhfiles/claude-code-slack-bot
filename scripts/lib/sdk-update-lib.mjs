@@ -96,3 +96,44 @@ export function busyReason(branch, want, porcelain) {
   const n = String(porcelain ?? '').split('\n').filter((l) => l.trim()).length;
   return n ? `커밋 안 된 파일 ${n}개` : '';
 }
+
+// --- Claude 가 막혔을 때 (2026-10-19) ---------------------------------------------
+// 주간 한도 중에 버튼을 누르자 봇 SDK 는 「미리 띄운 세션 통과」로 올라가고(답이 한도 글이었는데 흐름은 끝났다)
+// 파이썬만 「응답 없음 · 되돌림」이 됐다. 실제 호출을 시험할 수 없는 때는 아무것도 바꾸지 않고, 한도에 걸린
+// 호출은 한도라고 적는다.
+
+/** 엔진 상태 파일 자리 — `src/engine-state.ts` 의 `defaultFile` 과 같은 규칙(시험은 `ENGINE_STATE_FILE`). */
+export function engineStateFile(env, root) {
+  if (env.ENGINE_STATE_FILE) return env.ENGINE_STATE_FILE;
+  if (env.RATE_LIMIT_UNTIL_FILE) return `${env.RATE_LIMIT_UNTIL_FILE.replace(/[^/\\]+$/, '')}.engine-state.json`;
+  return `${root}/.engine-state.json`;
+}
+
+/** 엔진 상태(JSON 내용)에서 **지금** Claude 막힘 — `isBlocked` 와 같은 판정(`until` 이 지금보다 뒤). 없으면 null. */
+export function claudeBlockNow(state, nowSec) {
+  const b = state?.engines?.claude?.blocked;
+  return b && typeof b.until === 'number' && b.until > nowSec ? b : null;
+}
+
+const BLOCK_LABEL = { usage: '사용량 소진', overload: '과부하', auth: '인증 오류' };
+const mmddhhmm = (sec) => {
+  const d = new Date(sec * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+/** 막혀서 멈출 때의 「점검」 줄 — 시각은 이 PC 시간. 서버가 준 시각이 아니면 「다시 볼 시각」. */
+export function blockedStopDetail(block) {
+  const when = `${block.untilKnown ? '풀림' : '다시 볼 시각'} ${mmddhhmm(block.until)}`;
+  return `Claude ${BLOCK_LABEL[block.kind] ?? '막힘'}(${when}) · 실제 호출을 시험할 수 없어 아무것도 바꾸지 않았습니다 · 풀린 뒤 다시 누르세요`;
+}
+
+/**
+ * 실제 호출 출력에 한도 글이 있나 — 끝 코드가 0 이어도(답이 한도 글이어도 흐름은 끝난다) 본다.
+ * 봇의 `isRateLimitText` 보다 좁다 — 성공한 호출의 기록 줄(`rate_limit_event` · 숫자 429)에 안 걸리게.
+ */
+export function limitHit(out) {
+  return /You['’]ve hit your|usage limit|weekly limit|rate limit|Too Many Requests/i.test(String(out ?? ''));
+}
+
+export const LIMIT_REASON = 'Claude 한도에 걸려 실제 호출을 시험하지 못함';

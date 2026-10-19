@@ -14,7 +14,8 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import {
-  bumpPyproject, busyReason, childEnv, cmpVer, guardReason, normalizeNpmView, parseVer, pickTarget, requestFresh,
+  blockedStopDetail, bumpPyproject, busyReason, childEnv, claudeBlockNow, cmpVer, engineStateFile, guardReason, limitHit,
+  LIMIT_REASON, normalizeNpmView, parseVer, pickTarget, requestFresh,
 } from './lib/sdk-update-lib.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -268,6 +269,64 @@ ok('재시작은 도는 판 맞춤을 기다린다(판 맞춤 자신만 통과)'
   src('scripts/restart.mjs').includes('SDK_UPDATE_SELF') && src('scripts/sdk-update.mjs').includes("SDK_UPDATE_SELF: '1'"));
 ok('판 맞춤은 당겨 오지 않는다(원격과 같아야만 진행)', !src('scripts/sdk-update.mjs').includes("'pull'"));
 
+// ── Claude 가 막혔을 때(2026-10-19) — 주간 한도 중에 눌러 봇 SDK 만 올라가고 파이썬은 「응답 없음」으로 되돌려졌다 ──
+{
+  const nowSec = Math.floor(Date.now() / 1000);
+  const st = (blocked) => ({ v: 1, engines: { claude: { blocked, lastOkAt: null, uses: [] } } });
+  const until = Math.floor(new Date(2026, 9, 20, 10, 0).getTime() / 1000);   // 이 PC 시간 10/20 10:00
+  const usage = { kind: 'usage', until, untilKnown: true, since: until - 3600 };
+  eq('지금보다 뒤까지 막혔으면 그 막힘', claudeBlockNow(st(usage), until - 60), usage);
+  eq('풀린 시각이 지났으면 막힘 아님', claudeBlockNow(st(usage), until + 60), null);
+  eq('막힘이 없거나 파일 모양이 다르면 막힘 아님', [claudeBlockNow(st(null), nowSec), claudeBlockNow({}, nowSec), claudeBlockNow(null, nowSec)],
+    [null, null, null]);
+  const STOP = 'Claude 사용량 소진(풀림 10/20 10:00) · 실제 호출을 시험할 수 없어 아무것도 바꾸지 않았습니다 · 풀린 뒤 다시 누르세요';
+  eq('멈춤 줄 — 갈래 · 풀리는 시각 · 무엇을 하라는지', blockedStopDetail(usage), STOP);
+  ok('서버가 준 시각이 아니면 「다시 볼 시각」', blockedStopDetail({ ...usage, kind: 'overload', untilKnown: false }).startsWith('Claude 과부하(다시 볼 시각 10/20 10:00)'));
+  eq('엔진 상태 자리 — ENGINE_STATE_FILE 이 먼저 · 없으면 봇 폴더', [engineStateFile({ ENGINE_STATE_FILE: 'X/e.json' }, 'R'), engineStateFile({}, 'R')],
+    ['X/e.json', 'R/.engine-state.json']);
+  // 한도 글 — 10/19 에 실제로 받은 두 모양(봇: 끝 코드 0 인 답 · 파이썬: 예외)
+  ok('봇 실제 호출의 답이 한도 글', limitHit("○ 결과를 받고 흐름이 끝났습니다 — 1.9초\n  답: You've hit your weekly limit · resets 10am (Asia/Seoul)"));
+  ok('파이썬 실제 호출의 예외가 한도 글', limitHit("claude_agent_sdk._errors.ResultError: Claude Code returned an error result: You've hit your weekly limit"));
+  ok('429 Too Many Requests 도 한도', limitHit('HTTP 429 Too Many Requests'));
+  ok('성공한 호출의 기록 줄(rate_limit_event · 숫자 429)은 한도 아님', !limitHit('{"type":"rate_limit_event","status":"allowed"}\n"resultMs": 429\n  답: ok'));
+  ok('한도면 「응답 없음」이 아니라 한도라고 적는다', LIMIT_REASON.includes('한도') && !LIMIT_REASON.includes('응답 없음'));
+  const s = src('scripts/sdk-update.mjs');
+  ok('봇 실제 호출은 끝 코드보다 한도 글을 먼저 본다',
+    s.includes("if (limitHit(warm.stdout + warm.stderr)) return fail('봇 실제 호출', LIMIT_REASON);")
+    && s.indexOf('limitHit(warm.') < s.indexOf('if (!warm.ok)'));
+  ok('파이썬 실제 호출도 한도 글을 먼저 본다',
+    s.includes("if (limitHit(probe.stdout + probe.stderr)) return fail('파이썬 실제 호출', LIMIT_REASON);")
+    && s.indexOf('limitHit(probe.') < s.indexOf("if (!probe.ok) return fail('파이썬 실제 호출'"));
+  // 슬랙에 뜨는 모양 — 버튼을 누른 스레드에 이 글이 간다
+  const shown = formatResult({ status: 'failed', startedAt: '2026-10-19T00:30:00Z', finishedAt: '2026-10-19T00:30:01Z',
+    steps: [{ name: '점검', ok: false, detail: STOP }] });
+  eq('슬랙 알림 — 멈춘 단계 · 그 줄', shown, `❌ 「점검」에서 멈췄습니다 (1초)\n✗ 점검 — ${STOP}`);
+
+  // 실제로 돌려 본다 — 엔진 상태 · 결과 · 기록은 임시 파일. 파이썬은 없는 이름이라 막힘 문을 지나면 첫 조회
+  // (llm-playbook 찾기)에서 바로 넘어진다 — 문이 빠져도 아무것도 깔지 않는다. `--dry-run` 이라 더 안전하다.
+  const { spawnSync } = await import('node:child_process');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sdkupd-blk-'));
+  dirs.push(tmp);
+  const runWith = (blocked) => {
+    const f = { state: path.join(tmp, 'engine-state.json'), result: path.join(tmp, 'result.json'), log: path.join(tmp, 'log.txt') };
+    fs.writeFileSync(f.state, JSON.stringify(st(blocked)), 'utf-8');
+    fs.rmSync(f.result, { force: true });
+    fs.rmSync(f.log, { force: true });
+    const env = { ...process.env, ENGINE_STATE_FILE: f.state, SDK_UPDATE_RESULT: f.result, SDK_UPDATE_LOG: f.log,
+      PYTHON: 'python-없는-이름-2026' };
+    delete env.LLM_PLAYBOOK_ROOT;
+    spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'sdk-update.mjs'), '--run', '--dry-run'],
+      { cwd: ROOT, env, encoding: 'utf-8', timeout: 60_000, windowsHide: true });
+    return { res: JSON.parse(fs.readFileSync(f.result, 'utf-8')), ran: fs.existsSync(f.log) };
+  };
+  const b = runWith({ ...usage, until: nowSec + 3600 });
+  eq('막혀 있으면 「점검」 한 줄로 멈춤', [b.res.status, b.res.steps.map((x) => [x.name, x.ok])], ['failed', [['점검', false]]]);
+  ok(`멈춤 줄이 한도를 말한다 — 받음 ${b.res.steps[0]?.detail}`, /^Claude 사용량 소진\(풀림 \d\d\/\d\d \d\d:\d\d\) · 실제 호출을 시험할 수 없어/.test(b.res.steps[0]?.detail ?? ''));
+  eq('막혀 있으면 명령을 하나도 안 돌린다(기록 없음)', b.ran, false);
+  const u = runWith({ ...usage, until: nowSec - 60 });
+  eq('풀렸으면 막힘 문을 지나간다(다음 조회에서 넘어짐)', u.res.steps[0]?.name, '예상 못 한 오류');
+}
+
 for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 
 if (fails.length) {
@@ -275,5 +334,6 @@ if (fails.length) {
   process.exitCode = 1;
 } else {
   console.log('통과 — SDK 판 맞춤(짝 판이 CLI 이하인 가장 새 판 · 내리지 않음 · pyproject 두 곳 · 낡은 요청 안 함 · '
-    + '다른 작업 중 · 주 한 번 카드 · 쉬는 날 넘김 · 맞으면 조용히 · DM 누름만 · 도는 중 안 겹침 · 결과 한 번)');
+    + '다른 작업 중 · 주 한 번 카드 · 쉬는 날 넘김 · 맞으면 조용히 · DM 누름만 · 도는 중 안 겹침 · 결과 한 번 · '
+    + 'Claude 가 막혔으면 아무것도 안 바꿈 · 실제 호출의 한도 글은 한도로)');
 }
