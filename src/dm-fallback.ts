@@ -13,9 +13,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { ENGINES, engineState, type Block, type Engine, type EngineState, type EngineStateData } from './engine-state';
-import { DM_LADDER, DM_LADDER_AGY } from './engine-ladder';
+import { isAgyRung } from './engine-ladder';
 import { formatKst } from './engine-notice';
 import { agyRungsOn } from './agy-turn';
+import { serviceLadder } from './model-ladder';
 import type { Drill } from './engine-drill';
 import { stepState, type StepState, type TurnStep } from './turn-outcome';
 import type { CodexStep } from './work-assistant';
@@ -28,10 +29,13 @@ export function dmFallbackOn(env: NodeJS.ProcessEnv = process.env): boolean {
 /**
  * 지금 DM 을 맡는 칸 — 폴백이 꺼져 있으면 Claude 하나(막히면 곧 모아 둠) · `DM_FALLBACK_AGY=on` 이면
  * GPT 뒤에 agy 두 칸(6단계). 엔진 안내 · `-engines` · 드레인이 다 이것을 본다.
+ * **칸 차례는 `models.json` 의 `ladders.dm`** 이 정한다(`model-ladder.ts` `serviceLadder` · 못 읽으면 기본 차례).
+ * 켜는 문은 그대로다 — `DM_FALLBACK_AGY` 가 꺼져 있으면 표에 agy 칸이 있어도 뺀다.
  */
-export function dmLadder(env: NodeJS.ProcessEnv = process.env): readonly Engine[] {
+export function dmLadder(env: NodeJS.ProcessEnv = process.env, file?: string): readonly Engine[] {
   if (!dmFallbackOn(env)) return ['claude'];
-  return agyRungsOn(env) ? DM_LADDER_AGY : DM_LADDER;
+  const all = serviceLadder('dm', file);
+  return agyRungsOn(env) ? all : all.filter((e) => !isAgyRung(e));
 }
 
 /**

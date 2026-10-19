@@ -3195,7 +3195,7 @@ export class AssistantScheduler {
   }
 
   /**
-   * 예약 일의 agy 칸(6단계) — Gemini → agy Claude Sonnet(`AGY_RUNG_ORDER` · 막혔으면 건너뜀). agy 는 도구가 없어 재료를 봇이 대신
+   * 예약 일의 agy 칸(6단계) — Gemini → agy Claude Sonnet(`agyRungOrder` · `ladders.scheduled` · 막혔으면 건너뜀). agy 는 도구가 없어 재료를 봇이 대신
    * 읽어 넘긴다. 못 하면 `null` — 부르는 쪽이 예전처럼 실패로 처리한다(브리핑은 회복 뒤 다시 · 한도 글 안 올림).
    *
    * - `text` 받은 글 그대로(카드 요약 · 회의 알림 판단과 같은 길)

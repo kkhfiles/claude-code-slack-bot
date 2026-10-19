@@ -4,7 +4,8 @@
 
 - **원칙**(사용자 결정 2026-10-14) — 멈추는 것보다 품질이 조금 떨어져도 이어 가는 쪽
 - **사다리** — Claude → GPT(codex) → agy Gemini → agy Claude Sonnet → 모아 두고 회복 때 처리
-  - agy 두 칸은 `DM_FALLBACK_AGY=on` 일 때만(`src/engine-ladder.ts` 의 `DM_LADDER_AGY`) — 「6단계 — agy 두 칸」 절
+  - 칸 차례의 정본은 llm-playbook `models.json` 의 `ladders.dm`(아래 「칸 차례 — 사다리 표 `ladders`」)
+  - agy 두 칸은 `DM_FALLBACK_AGY=on` 일 때만 — 「6단계 — agy 두 칸」 절
 - **폴백 모델** — llm-playbook `models.json` 의 `service_fallback`(아래 「폴백 모델 — 서비스 폴백 대응표」)
 - **꺼져 있으면** — 예전 그대로(막히면 한도 안내를 내고 모아 둠)
 
@@ -172,6 +173,28 @@
 - **엔진 네 줄** — 막힘, 풀리는 시각, 마지막 성공, 5시간과 7일 사용률, 사다리 밖 표시(순서는 사다리 순서)
 - 버튼 없음
 
+## 칸 차례 — 사다리 표 `ladders`(2026-10-19)
+
+- **정본** — llm-playbook `models.json` 의 `ladders`. 봇은 그 가운데 `dm` 과 `scheduled` 를 읽음(`src/model-ladder.ts` 의 `serviceLadder`)
+  - `dm` — DM 차례(`dmLadder`, 엔진 안내와 `-engines`, 드레인이 이것을 봄)
+  - `scheduled` — 예약 일의 agy 칸 차례(`agyRungOrder`, 카드 요약과 아침 브리핑과 지금 집중할 것과 회의 알림 판단)
+- **지금 값** — 두 사다리 모두 `claude` → `codex` → `agy:flash-high` → `agy:sonnet-low`
+  - 별칭 없는 `claude` 와 `codex` 칸의 모델은 `service_fallback` 대응표가 정함(아래 「폴백 모델」 절)
+- **칸 → 엔진 열쇠** — `claude`, `codex` 는 그대로. agy 칸은 별칭의 표시 이름(`agy.models`)으로 가름
+  - 「Claude …」 → `agy-claude`
+  - 「Gemini …」(Argon 제외) → `agy-gemini`
+  - Argon 과 모르는 별칭은 봇이 맡지 못하는 칸이라 아래 「못 읽으면」으로 감
+- **켜는 문은 그대로** — `DM_FALLBACK` 이 꺼지면 Claude 하나, `DM_FALLBACK_AGY` 가 꺼지면 표에 agy 칸이 있어도 뺌
+- **고치는 법** — 표에서 칸을 빼거나 순서를 바꿈. 봇은 파일 수정 시각이 바뀌면 다음 차례에 다시 읽음(재시작 불필요)
+  - agy 칸의 별칭은 `service_fallback.agy` 에 있는 것만 받음(파이썬 검사가 막음). 호출에 쓰는 별칭과 표시 이름은 그 칸에서 읽음
+- **못 읽으면** — 표 없음, 깨진 JSON, 사다리 없음, 첫 칸이 Claude 가 아님, 모르는 칸, 같은 엔진 두 번 중 하나면 기본 차례로 돎(DM 을 멈추지 않음)
+  - 기본 차례는 2026-10-19 까지 박혀 있던 값(`src/engine-ladder.ts` 의 `DM_LADDER_AGY`)
+  - 까닭마다 WARN 한 번 — 그동안은 표를 고쳐도 안 따라옴
+  - 첫 칸이 Claude 여야 하는 까닭 — 고르는 함수가 Claude 다음 칸부터 찾음(세션과 모아 둔 차례가 Claude 에 묶여 있음)
+- **사용자 설정은 못 봄** — 봇은 패키지 기본값 파일(`LLM_PLAYBOOK_MODELS` 가 있으면 그것)을 직접 읽음. `~/.config/llm-playbook/config.json` 의 `ladders` 덮어쓰기는 파이썬만 따름
+- **나머지 사다리** — `batch`, `chat`(부서 대화 봇), `review`(교차 검증) 와 `reserve`(배치와 대화 봇이 GPT 5시간 통을 덜 쓰게 함)는 파이썬 `llm_playbook.ladder.ask(…, ladder=이름)` 몫이라 봇은 안 읽음
+- **검사** — `npm run check:servladder`. 지금 표가 오늘 차례인지, 칸을 빼면 따라오는지, 이상한 표에서 기본 차례로 도는지, 파이썬이 보는 차례와 같은지 확인
+
 ## 폴백 모델 — 서비스 폴백 대응표
 
 - **정본** — llm-playbook `models.json` 의 `service_fallback`(`src/model-ladder.ts` 의 `serviceCodex`), `tiers` 가 아님
@@ -189,7 +212,7 @@
 - **옛 모양**(집안마다 별칭 하나 + `effort_up`) — 그 표가 오면 예전처럼 1차 깊이를 `effort_up` 만큼 올림. 지금 정본은 위 대응표
 - **쓰는 곳** — DM 의 GPT 칸, 예약 일 폴백(`spawnOrFallback`), 도구 없는 사다리의 codex 칸, 판의 좁은 길
   - 좁은 길은 `BOARD_NARROW_CODEX_MODEL`, `BOARD_NARROW_CODEX_EFFORT` 가 먼저
-- **agy 칸** — `service_fallback.agy` 의 앞이 Gemini 칸, 뒤가 agy Claude 칸(1차 모델과 무관)
+- **agy 칸의 별칭** — `service_fallback.agy` 의 앞이 Gemini 칸, 뒤가 agy Claude 칸(1차 모델과 무관). 칸의 차례는 `ladders` 가 정함
 - **표에 칸이 없으면** — 예전 그대로(같은 등급 `sameTier`, 기본 모델), WARN 한 번
 - **`after_agy`** — `sol-low`(agy 두 칸을 다 못 쓸 때) · 부서 대화 봇 몫이라 이 봇은 안 읽음
 

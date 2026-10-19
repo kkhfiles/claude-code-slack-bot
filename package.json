@@ -64,7 +64,8 @@
     "check:agy": "node scripts/check-agy-rung.mjs",
     "check:sdkroute": "node scripts/check-sdk-routing.mjs",
     "check:limitsamples": "node scripts/check-limit-samples.mjs",
-    "check:engineshare": "node scripts/check-engine-share.mjs"
+    "check:engineshare": "node scripts/check-engine-share.mjs",
+    "check:servladder": "node scripts/check-service-ladder.mjs"
   },
   "keywords": [],
   "author": "",

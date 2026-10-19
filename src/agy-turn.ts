@@ -24,13 +24,22 @@ import * as path from 'path';
 import { withoutApiKey } from './child-env';
 import { agyDrill, drillBlockUntil, type DrillScope } from './engine-drill';
 import { modelsFile } from './engine-notice';
+import { isAgyRung } from './engine-ladder';
 import { engineState, type BlockKind, type EngineState } from './engine-state';
 import { Logger } from './logger';
+import { serviceLadder } from './model-ladder';
 
 const logger = new Logger('AgyTurn');
 
 export type AgyRung = 'agy-claude' | 'agy-gemini';
-export const AGY_RUNG_ORDER: readonly AgyRung[] = ['agy-gemini', 'agy-claude'];
+
+/**
+ * 예약 일의 agy 칸 차례 — `models.json` 의 `ladders.scheduled` 에서 agy 칸만(앞에서부터 · `model-ladder.ts`
+ * `serviceLadder` · 못 읽으면 Gemini → agy Claude). **부를 때마다 본다** — 표에서 칸을 빼면 다음 회차부터 안 부른다.
+ */
+export function agyRungOrder(file?: string): AgyRung[] {
+  return serviceLadder('scheduled', file).filter(isAgyRung);
+}
 
 /** 켜는 문 — DM 의 agy 두 칸(`DM_FALLBACK=on` 도 있어야 함)과 예약 일 넷의 agy 칸. 부를 때마다 읽는다. */
 export function agyRungsOn(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -323,14 +332,14 @@ export async function agyTurn(prompt: string, opts: AgyCallOpts): Promise<AgyTur
 // ---------------------------------------------------------------- 예약 일
 
 /**
- * 도구 없는 예약 일의 agy 칸 — Gemini → agy 의 Claude Sonnet(막혔으면 건너뜀). 답 글을 돌려준다 · 못 하면 `null`.
- * 부르는 쪽이 켜는 문(`agyRungsOn`)을 본다.
+ * 도구 없는 예약 일의 agy 칸 — `ladders.scheduled` 의 agy 칸 차례(지금 Gemini → agy 의 Claude Sonnet · 막혔으면
+ * 건너뜀). 답 글을 돌려준다 · 못 하면 `null`. 부르는 쪽이 켜는 문(`agyRungsOn`)을 본다.
  */
 export async function agyText(label: string, prompt: string, opts: {
   system?: string; store?: EngineState; drillScope?: DrillScope; modelsFile?: string;
 } = {}): Promise<{ text: string; rung: AgyRung; model: AgyModel } | null> {
   const store = opts.store ?? engineState;
-  for (const rung of AGY_RUNG_ORDER) {
+  for (const rung of agyRungOrder(opts.modelsFile)) {
     if (agyRungBlocked(rung, store)) {
       logger.info(`${label} — ${rung} 건너뜀(막힘)`);
       continue;

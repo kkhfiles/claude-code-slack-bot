@@ -21,6 +21,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { Logger } from './logger';
 import { modelsFile } from './engine-notice';
+import type { Engine } from './engine-state';
+import { DM_LADDER_AGY } from './engine-ladder';
 
 const logger = new Logger('ModelLadder');
 
@@ -45,6 +47,10 @@ export interface ServiceTable {
   /** 별칭마다 1차 깊이를 몇 단계 올리나. */
   effortUp: Record<string, number>;
   claudeAliases: Record<string, string>;
+  /** 이름 붙은 사다리의 칸 목록(`ladders.<이름>.rungs` · 「백엔드[:별칭]」) — 목록으로 적힌 것만. */
+  ladders: Record<string, string[]>;
+  /** agy 별칭 → 표시 이름(`agy.models`) — 사다리 칸을 엔진 열쇠로 가를 때 쓴다. */
+  agyLabels: Record<string, string>;
 }
 
 let serviceCache: { file: string; mtimeMs: number; table: ServiceTable | null } | null = null;
@@ -77,6 +83,12 @@ export function serviceFallbackTable(file: string = modelsFile()): ServiceTable 
         codexEfforts,
         effortUp,
         claudeAliases: (t?.claude?.aliases ?? {}) as Record<string, string>,
+        ladders: Object.fromEntries(Object.entries(t?.ladders ?? {})
+          .filter(([k, v]) => !k.startsWith('_') && Array.isArray((v as any)?.rungs)
+            && (v as any).rungs.every((x: unknown) => typeof x === 'string'))
+          .map(([k, v]) => [k, [...(v as any).rungs]])),
+        agyLabels: Object.fromEntries(Object.entries(t?.agy?.models ?? {})
+          .filter(([, v]) => typeof v === 'string')) as Record<string, string>,
       };
     }
   } catch {
@@ -88,6 +100,71 @@ export function serviceFallbackTable(file: string = modelsFile()): ServiceTable 
   }
   serviceCache = { file, mtimeMs, table };
   return table;
+}
+
+// ---------------------------------------------------------------- 이름 붙은 사다리
+
+/** 봇이 읽는 사다리 — DM(`dm`) · 예약 일(`scheduled`). 칸 순서의 정본은 `models.json` 의 `ladders`(2026-10-19). */
+export type ServiceLadderName = 'dm' | 'scheduled';
+
+/**
+ * 표를 못 읽을 때의 칸 — 2026-10-19 까지 봇에 박혀 있던 순서 그대로(Claude → GPT → agy Gemini → agy Claude).
+ * **이 값으로 도는 동안은 표를 고쳐도 안 따라온다** — 그래서 까닭마다 한 번 WARN.
+ */
+export const LADDER_DEFAULT: Readonly<Record<ServiceLadderName, readonly Engine[]>> = {
+  dm: DM_LADDER_AGY,
+  scheduled: DM_LADDER_AGY,
+};
+
+const ladderWarned = new Set<string>();
+
+/**
+ * 칸 하나(「백엔드[:별칭]」) → 엔진 열쇠. agy 는 별칭의 표시 이름으로 쿼터 풀을 가른다(파이썬 `agy.model_pool` 과
+ * 같은 기준 — 「Claude …」 · Argon 이 아닌 「Gemini …」). 봇이 못 맡는 칸(Argon · 모르는 별칭)이면 undefined.
+ */
+export function rungEngine(spec: string, agyLabels: Record<string, string>): Engine | undefined {
+  const i = spec.indexOf(':');
+  const backend = i < 0 ? spec : spec.slice(0, i);
+  const alias = i < 0 ? '' : spec.slice(i + 1);
+  if (backend === 'claude' || backend === 'codex') return backend;
+  if (backend !== 'agy' || !alias) return undefined;
+  const label = (agyLabels[alias] ?? '').toLowerCase();
+  if (label.startsWith('claude ')) return 'agy-claude';
+  if (label.startsWith('gemini ') && !label.includes('argon')) return 'agy-gemini';
+  return undefined;
+}
+
+/**
+ * 사다리의 엔진 차례 — `models.json` 의 `ladders.<이름>.rungs` 를 엔진 열쇠로. **부를 때마다 본다**(파일이 바뀌었을
+ * 때만 다시 읽음) — 칸을 빼면 다음 차례부터 따라온다.
+ *
+ * 표를 못 읽거나 · 그 사다리가 없거나 · 첫 칸이 Claude 가 아니거나 · 모르는 칸 · 겹친 칸이 있으면 `LADDER_DEFAULT`
+ * (WARN 한 번) — **DM 을 멈추지 않는다.** 첫 칸이 Claude 여야 하는 까닭은 고르는 함수(`engine-ladder.ts`)가 Claude
+ * 다음 칸부터 찾기 때문이다(세션 · 모아 둔 차례가 Claude 에 묶여 있다).
+ */
+export function serviceLadder(name: ServiceLadderName, file: string = modelsFile()): readonly Engine[] {
+  const t = serviceFallbackTable(file);
+  const rungs = t?.ladders[name];
+  let why = '';
+  const out: Engine[] = [];
+  if (!t) why = '표를 못 읽음';
+  else if (!rungs || !rungs.length) why = `ladders.${name} 가 없음`;
+  else {
+    for (const r of rungs) {
+      const e = rungEngine(r, t.agyLabels);
+      if (!e) { why = `모르는 칸 ${r}`; break; }
+      if (out.includes(e)) { why = `겹친 칸 ${r}`; break; }
+      out.push(e);
+    }
+    if (!why && out[0] !== 'claude') why = '첫 칸이 Claude 가 아님';
+  }
+  if (!why) return out;
+  const key = `${file}|${name}|${why}`;
+  if (!ladderWarned.has(key)) {
+    ladderWarned.add(key);
+    logger.warn(`사다리 ${name} 을 표에서 못 읽어(${why}) 기본 차례로 돕니다 — ${LADDER_DEFAULT[name].join(' → ')}`);
+  }
+  return LADDER_DEFAULT[name];
 }
 
 /** Claude 모델 이름(별칭 · id · `[1m]` 꼬리)이 표의 어느 칸인가 — opus · sonnet · haiku. 모르면 undefined. */

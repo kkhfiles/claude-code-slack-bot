@@ -3,7 +3,7 @@
  *
  * 사용자 결정(2026-10-14): 「중단보다 품질이 조금 떨어져도 이어가는 것이 낫다」. 그래서 Claude 가
  * 막히면 다음 엔진이 이어 받는다 — 5단계는 GPT(codex) 한 칸, 6단계는 그 뒤에 agy Gemini · agy Claude(Sonnet)
- * (`DM_LADDER_AGY` · `DM_FALLBACK_AGY=on`). 다 막히면 모아 두고(`hold`) 회복 때 다시 돌린다.
+ * (`DM_FALLBACK_AGY=on` · 차례는 `models.json` 의 `ladders.dm`). 다 막히면 모아 두고(`hold`) 회복 때 다시 돌린다.
  *
  * **여기서는 파일도 슬랙도 안 본다** — 부르는 쪽이 엔진 상태를 읽어(codex 는 한도 조회까지 옮긴 뒤)
  * 막힘 표를 넘긴다. 그래서 검사가 모든 조합을 그대로 돌린다(`scripts/check-dm-fallback.mjs`).
@@ -28,16 +28,19 @@ export type DmOrigin = 'dm' | 'pushed' | 'replay' | 'channel';
 export type ClaudeOutcome = 'ok' | 'limited' | 'overload' | 'error' | 'notRun';
 export type LadderPick = Engine | 'hold';
 
-/** DM 을 맡는 차례 — 앞에서부터. `DM_FALLBACK=on` 이면 이것(5단계 · Claude → GPT). */
+/**
+ * **실제 차례의 정본은 `models.json` 의 `ladders.dm`**(2026-10-19 · `model-ladder.ts` `serviceLadder` 가 읽고
+ * `dm-fallback.ts` `dmLadder` 가 켜는 문을 얹는다). 아래 둘은 표를 못 읽을 때의 기본값이자 고르는 함수의 기본 인자다.
+ */
+/** agy 칸을 뺀 차례(5단계 · Claude → GPT) — `DM_FALLBACK_AGY` 가 꺼졌을 때와 같다. */
 export const DM_LADDER: readonly Engine[] = ['claude', 'codex'];
 /**
- * `DM_FALLBACK_AGY=on` 이면 agy 두 칸을 codex 뒤에 붙인다(6단계) — **Gemini(flash-high) 먼저, 그다음 agy 의
- * Claude Sonnet**(`sonnet-thinking`). agy 의 Opus 는 안 쓴다(그 풀이 너무 작다 · 2026-10-14 사용자 결정). agy 는 도구가 없어 JSON 계획만 내고
+ * agy 두 칸을 codex 뒤에 붙인 차례(6단계) — **Gemini(flash-high) 먼저, 그다음 agy 의 Claude Sonnet**. agy 의 Opus 는
+ * 안 쓴다(그 풀이 너무 작다 · 2026-10-14 사용자 결정). agy 는 도구가 없어 JSON 계획만 내고
  * 봇이 허용 목록 명령만 실행한다(`agy-actions.ts`) — 그래서 첨부를 읽어야 하는 차례 · Claude·GPT 몫으로
  * 남긴 차례(`needsFull`)는 agy 칸을 건너뛴다.
  */
 export const DM_LADDER_AGY: readonly Engine[] = ['claude', 'codex', 'agy-gemini', 'agy-claude'];
-export const AGY_RUNGS: readonly Engine[] = ['agy-gemini', 'agy-claude'];
 
 export function isAgyRung(e: Engine | LadderPick): e is 'agy-claude' | 'agy-gemini' {
   return e === 'agy-claude' || e === 'agy-gemini';
