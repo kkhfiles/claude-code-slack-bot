@@ -162,6 +162,14 @@ const UNHUSH = /(다시\s*(해|시작|얘기|이야기)|계속\s*해)/;
  */
 const NO_REPLY = /(?:대답|답장|답|대꾸|말|참견)\s*(?:을|은|도)?\s*하지\s*(?:마|말)|끼(?:어들)?지\s*(?:마|말)|나서지\s*(?:마|말)/;
 const NO_REPLY_MS = 60 * 60 * 1000;
+/**
+ * **「대답하지 마」를 모델이 판정한다**(`HUSH_JUDGE` · 2026-10-20 실장 「규칙으로 하지 말고 가장 싼 모델로」). 맡은 방의 사람 말마다
+ * 작업 폴더의 `chatbot/hush.py` 를 띄워 0/1 을 받고, 1 이면 그 한 줄(빈 글이면 말없이)을 올리고 위 `NO_REPLY_MS` 동안 먼저
+ * 말 걸지 않으며 그 말 뒤로 만들던 답은 부른 답이라도 버린다. 멈춘 방에서는 「다시 말해도 되나」를 묻는다.
+ * `on` — 맡은 방 전부 · `test` — 시험 방(봇 설정 `rooms[방].rules`)만 · 그 밖 — 예전 낱말(`NO_REPLY`). 모델이 다 실패하면 0 이다
+ * (따로 낱말 규칙을 두지 않는다). 판정에는 시간 제한을 두지 않는다 — 칸마다의 멈춤 방지는 `hush.py` 가 한다.
+ */
+const HUSH_JUDGE_ENV = 'HUSH_JUDGE';
 
 export interface ChatBotOptions {
   name: string;           // turn.py 의 봇 이름이자 로그 이름
@@ -244,6 +252,8 @@ interface Waiting {
    * 에서도 「지금 이 말에 답을 만들고 있다」를 하나는 보여 주려고 들고 있는다.
    */
   lastTs?: string;
+  /** 이 묶음에서 **가장 오래된 글의 ts** — 모델 판정이 이 글이나 그 뒤의 말을 「대답하지 마」로 봤으면 이 묶음의 답은 버린다. */
+  firstTs?: string;
   /**
    * 이 묶음에 **형제 봇의 말이 들어 있나.** 훑기는 봇 말을 못 집으므로, 자리가 났을 때
    * 여기서 안 집으면 그 말은 사람이 입을 열 때까지 대기열에 묻힌다.
@@ -362,6 +372,14 @@ export class ChatHost {
   private buttInHushed = new Set<string>();
   /** 「대답하지 마」를 들은 때(`NO_REPLY`) — 방마다. 그 뒤 `NO_REPLY_MS` 동안 먼저 말 걸지 않고, 그때 돌던 턴의 답은 버린다. */
   private noReplyAt = new Map<string, number>();
+  /** 모델 판정(`HUSH_JUDGE`)이 1 을 낸 그 말의 ts(초) — 방마다. 이 말과 그 뒤로 쌓인 묶음의 답은 버린다(`hushDrops`). */
+  private noReplyTs = new Map<string, number>();
+  /**
+   * 판정은 **방마다** 한 줄로 선다 — 같은 방의 말은 차례대로(멈춤 → 풀림 순서가 뒤집히지 않게), 다른 방은 나란히. 봇 하나에
+   * 줄 하나로 두면 이 방 답이 다른 방 판정 뒤에서 기다린다(검토 2026-10-20). 방마다 아직 안 끝난 판정 — 답을 올리기 전에 기다린다.
+   */
+  private hushChain = new Map<string, Promise<void>>();
+  private hushInFlight = new Map<string, Set<Promise<void>>>();
   /** 채널에서 우리가 마지막으로 입을 연 시각·횟수. */
   private lastSpoke = new Map<string, number>();
   private spokenToday = new Map<string, { day: string; count: number }>();
@@ -620,6 +638,8 @@ export class ChatHost {
     if (fromSibling) this.siblingSpoke.set(channel, Date.now());
     if (fromSibling) say = this.botTalkTurn(channel, text);
     else this.humanSpoke(channel, text);
+    // **답 턴보다 먼저 건다** — 이 말에 대한 턴은 답을 올리기 전에 이 판정을 기다린다(`hushDrops`).
+    if (!fromSibling && this.judgeOn(channel)) this.startJudge(client, channel, user, ts, m.thread_ts as string | undefined, text);
     if (say === null) return;
 
     await this.onChannelMessage(client, user, channel, ts,
@@ -671,9 +691,10 @@ export class ChatHost {
       // 푸는 것은 부르지 않아도 듣는다 — 잘못 재워졌을 때 깨울 길이 있어야 한다.
       this.hushed.delete(channel);
       this.buttInHushed.delete(channel);
-      this.noReplyAt.delete(channel);
+      // 모델이 판정하는 방은 「다시 말해도 되나」도 모델이 본다(`judgeHush` 의 resume)
+      if (!this.judgeOn(channel)) this.noReplyAt.delete(channel);
     }
-    if (NO_REPLY.test(text) && this.toMe(channel, text)) {
+    if (!this.judgeOn(channel) && NO_REPLY.test(text) && this.toMe(channel, text)) {
       this.noReplyAt.set(channel, Date.now());
       this.logger.info(`「대답하지 마」 — ${NO_REPLY_MS / 60000}분 동안 먼저 말 걸지 않고 만들던 답도 버립니다 (${channel})`);
     }
@@ -689,6 +710,150 @@ export class ChatHost {
     const cfg = this.readNear('bots', this.opts.name, 'config.json') as { call_names?: unknown } | null;
     return Array.isArray(cfg?.call_names)
       && cfg.call_names.some((n) => typeof n === 'string' && n.length > 0 && text.includes(n));
+  }
+
+  // ── 「대답하지 마」 모델 판정(`HUSH_JUDGE`) ─────────────────────────────────
+  /** 이 방의 사람 말을 모델이 판정하나. 읽을 때마다 환경값을 본다(재시작 때 `.env` 를 다시 읽는다). */
+  private judgeOn(channel: string): boolean {
+    const mode = (process.env[HUSH_JUDGE_ENV] || '').trim();
+    if (mode === 'on') return true;
+    if (mode !== 'test') return false;
+    const cfg = this.readNear('bots', this.opts.name, 'config.json') as
+      { rooms?: Record<string, { rules?: unknown } | undefined> } | null;
+    return !!cfg?.rooms?.[channel]?.rules;
+  }
+
+  /** 판정을 그 방 줄 끝에 세우고, 그 방의 「아직 안 끝난 판정」에 올린다. 실패는 안에서 삼킨다(줄이 안 막히게). */
+  private startJudge(client: App['client'], channel: string, user: string, ts: string,
+                     threadTs: string | undefined, text: string): void {
+    const run = (this.hushChain.get(channel) ?? Promise.resolve())
+      .then(() => this.judgeHush(client, channel, user, ts, threadTs, text))
+      .catch((error) => this.logger.warn('「대답하지 마」 판정 실패', error));
+    this.hushChain.set(channel, run);
+    const set = this.hushInFlight.get(channel) ?? new Set<Promise<void>>();
+    set.add(run);
+    this.hushInFlight.set(channel, set);
+    void run.finally(() => set.delete(run));
+  }
+
+  private async judgeHush(client: App['client'], channel: string, user: string, ts: string,
+                          threadTs: string | undefined, text: string): Promise<void> {
+    const stopped = Date.now() - (this.noReplyAt.get(channel) ?? 0) < NO_REPLY_MS;
+    const req = {
+      bot: this.opts.name, key: channel, busy: this.active.has(channel),
+      lines: await this.hushLines(client, channel, ts, threadTs),
+      last: { who: (await this.displayName(client, user)) || '(이름 모름)', text: await this.plainText(client, text) },
+    };
+    // **멈춘 방에서도 「멈추라는 말인가」부터 묻는다.** 「다시 말해도 되나」만 물으면 거듭한 「대답하지 마」가 멈춤을 늘리지
+    // 못하고, 「시키는 말」로 읽혀 거꾸로 풀 수도 있다(검토 2026-10-20). 0 일 때만 「다시 말해도 되나」를 잇는다.
+    const out = await this.runHush({ ...req, mode: 'stop' });
+    this.noteJudge(channel, 'stop', out);
+    if (out.ans === 1) {
+      this.noReplyAt.set(channel, Date.now());
+      this.noReplyTs.set(channel, Number(ts));
+      this.logger.info(`「대답하지 마」로 판정 — ${NO_REPLY_MS / 60000}분 동안 먼저 말 걸지 않고 그 뒤 답은 버립니다 (${channel} · ${out.model})`);
+      // 이미 멈춰 있던 방이면 한 줄을 또 하지 않는다. 그 말 뒤로 답을 올렸어도 안 한다 — 답하고 나서 「알겠습니다」가 되면 두 번 말한 꼴이다.
+      if (!stopped && out.reply && (this.lastSpoke.get(channel) ?? 0) < Number(ts) * 1000) {
+        await this.say(client, channel, out.reply, threadTs);
+      }
+      return;
+    }
+    if (!stopped) return;
+    const again = await this.runHush({ ...req, mode: 'resume' });
+    this.noteJudge(channel, 'resume', again);
+    if (again.ans !== 1) return;
+    this.noReplyAt.delete(channel);
+    this.noReplyTs.delete(channel);
+    this.logger.info(`「다시 말해도 된다」로 판정 — 먼저 말 걸기를 다시 엽니다 (${channel} · ${again.model})`);
+  }
+
+  /** 판정 한 줄을 활동 기록에 — 실원 말은 안 적는다. 무엇을 물었고 어느 모델이 얼마나 걸렸는지만. */
+  private noteJudge(channel: string, mode: string, out: { ans?: number; model?: string; elapsed_s?: number;
+    error?: string; warn?: string }): void {
+    const why = [out.error, out.warn].filter(Boolean).join(' · ');
+    note(this.opts.name, '판정', { 어디: channel, 무엇: mode, 결과: out.ans ?? 0, 모델: out.model ?? null,
+      초: out.elapsed_s ?? null, ...(why ? { 왜: why.slice(0, 300) } : {}) });
+  }
+
+  /** 판정에 넘길 앞 대화 — 그 말이 스레드면 그 스레드, 아니면 방의 최근 글(최대 10줄 · 오래된 것부터). */
+  private async hushLines(client: App['client'], channel: string, ts: string,
+                          threadTs?: string): Promise<Array<{ who: string; bot: boolean; text: string }>> {
+    let msgs: Record<string, unknown>[] = [];
+    try {
+      if (threadTs) {
+        const res = await client.conversations.replies({ channel, ts: threadTs, limit: 50 });
+        msgs = ((res.messages ?? []) as Record<string, unknown>[]).filter((m) => Number(m.ts) < Number(ts));
+      } else {
+        const res = await client.conversations.history({ channel, latest: ts, inclusive: false, limit: 10 });
+        msgs = ((res.messages ?? []) as Record<string, unknown>[]).reverse();
+      }
+    } catch (error) {
+      this.logger.debug('판정용 앞 대화를 못 읽었습니다', error);
+      return [];
+    }
+    const cfg = this.readNear('bots', this.opts.name, 'config.json') as { call_names?: unknown } | null;
+    const me = Array.isArray(cfg?.call_names) && typeof cfg.call_names[0] === 'string' ? cfg.call_names[0] : this.opts.name;
+    const out: Array<{ who: string; bot: boolean; text: string }> = [];
+    for (const m of msgs.slice(-10)) {
+      if (m.subtype && m.subtype !== 'thread_broadcast' && m.subtype !== 'bot_message') continue;
+      const raw = ((m.text as string) ?? '').trim();
+      if (!raw) continue;
+      const self = m.user === this.selfUserId;
+      const isBot = self || !!m.bot_id;
+      const profile = m.bot_profile as { name?: string } | undefined;
+      const who = self ? me
+        : isBot ? (profile?.name || (m.username as string) || '다른 봇')
+          : (await this.displayName(client, (m.user as string) ?? '')) || '(이름 모름)';
+      out.push({ who, bot: isBot, text: (await this.plainText(client, raw)).slice(0, 400) });
+    }
+    return out;
+  }
+
+  /** `hush.py` 를 한 번 띄운다. 어떤 실패도 0 으로 돌려준다 — 판정 못 했다고 봇이 조용해지면 안 된다. */
+  private runHush(req: Record<string, unknown>): Promise<{ ans?: number; reply?: string; model?: string;
+    elapsed_s?: number; error?: string; warn?: string }> {
+    const script = path.join(path.dirname(this.opts.script), 'hush.py');
+    return new Promise((resolve) => {
+      let out = '';
+      let err = '';
+      try {
+        const child = spawn(this.opts.python, ['-X', 'utf8', script], {
+          cwd: path.dirname(script), env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, windowsHide: true,
+        });
+        child.stdout.setEncoding('utf-8');
+        child.stdout.on('data', (c: string) => { out += c; });
+        child.stderr.setEncoding('utf-8');
+        child.stderr.on('data', (c: string) => { err += c; if (err.length > 20000) err = err.slice(-10000); });
+        child.on('error', (e) => resolve({ ans: 0, error: `hush.py 를 못 띄웠다: ${e.message}` }));
+        // 파이썬이 읽기 전에 끝나면 쓰기가 EPIPE 를 낸다 — 받지 않으면 호스트가 통째로 죽는다(검토 2026-10-20). 결과는 'close' 가 낸다.
+        child.stdin.on('error', () => {});
+        child.on('close', (code) => {
+          const last = out.trim().split('\n').pop() || '';
+          try {
+            resolve(JSON.parse(last));
+          } catch {
+            resolve({ ans: 0, error: `hush.py rc ${code} · ${err.trim().slice(-200)}` });
+          }
+        });
+        child.stdin.end(JSON.stringify(req));
+      } catch (e) {
+        resolve({ ans: 0, error: `hush.py 를 못 띄웠다: ${String(e)}` });
+      }
+    });
+  }
+
+  /**
+   * 만든 답을 버릴까. 모델이 판정하는 방은 **이 방의 판정이 다 끝나길 기다린 뒤**, 이 묶음의 첫 글이나 그 뒤의 말이 「대답하지 마」로
+   * 판정됐으면 부른 답이라도 버린다(「@봇 넌 신경 안 써도 돼」에 답이 나가면 안 된다). 그 밖의 방은 예전 그대로 — 답을 만드는 사이
+   * 낱말이 걸렸으면 먼저 나선 답만 버린다.
+   */
+  private async hushDrops(waiting: Waiting, forced: boolean, began: number): Promise<boolean> {
+    const channel = waiting.channel;
+    if (!this.judgeOn(channel)) return !forced && (this.noReplyAt.get(channel) ?? 0) >= began * 1000;
+    await Promise.all([...(this.hushInFlight.get(channel) ?? [])]);
+    const stop = this.noReplyTs.get(channel) ?? 0;
+    const first = Number(waiting.firstTs ?? waiting.lastTs ?? 0);
+    return stop > 0 && first > 0 && stop >= first;
   }
 
   // ── DM ────────────────────────────────────────────────────────────────
@@ -1190,7 +1355,10 @@ export class ChatHost {
       ?? { channel: item.channel, texts: [], reactTs: [], toldBusy: false };
     waiting.channel = item.channel;
     // 인사처럼 **슬랙에 없는 글**은 표시를 붙일 자리가 없다(`greet:` 는 지어낸 열쇠다).
-    if (!item.ts.startsWith('greet:')) waiting.lastTs = item.ts;
+    if (!item.ts.startsWith('greet:')) {
+      waiting.lastTs = item.ts;
+      waiting.firstTs ??= item.ts;
+    }
     if (item.threadTs) waiting.threadTs = item.threadTs;
     // 답을 기다리는 동안 말이 계속 쌓일 수 있다. 최근 것만 남긴다 — 끝없이 합치면
     // agy 를 띄우는 명령줄 길이 한도에 걸려 답하는 대신 실패한다.
@@ -1320,8 +1488,7 @@ export class ChatHost {
           } else {
             this.logger.info(`Stayed quiet in ${key}`);
           }
-        } else if (!forced && (this.noReplyAt.get(waiting.channel) ?? 0) >= began * 1000) {
-          // 답을 만드는 사이 「대답하지 마」가 왔다 — 먼저 나선 답은 버린다(부른 답은 그대로 낸다).
+        } else if (await this.hushDrops(waiting, forced, began)) {
           this.logger.info(`「대답하지 마」가 와서 만든 답을 버립니다 (${key})`);
         } else {
           this.logger.info(`Answered ${key} in ${result.elapsed_s ?? '?'}s`);
