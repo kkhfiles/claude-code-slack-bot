@@ -115,6 +115,17 @@ const wait = (h, ch) => Promise.all([...(h['hushInFlight'].get(ch) ?? [])]);
   await wait(h, TEST);
 }
 {
+  // 물러나며 한 한 줄은 형제 봇이 받아치지 않게 적힌다(2026-10-20 커피콩 「네, 조용히 있을게요!」에 소인이 맞장구)
+  process.env.HUSH_JUDGE = 'on';
+  const h = make([{ ans: 1, reply: '네, 조용히 & 있을게요!' }]);
+  h['say'] = async () => {};
+  h['startJudge'](null, TEST, 'U1', '100.000000', undefined, '@커피콩 넌 지금은 신경 안써도 돼');
+  await wait(h, TEST);
+  check('물러나며 한 한 줄은 형제 봇이 받아치지 않는다(슬랙이 바꿔 적은 글도)',
+    ChatHost['isHushAck'](TEST, '네, 조용히 &amp; 있을게요!') && !ChatHost['isHushAck'](TEST, '다른 말')
+    && !ChatHost['isHushAck'](ROOM, '네, 조용히 & 있을게요!'));
+}
+{
   process.env.HUSH_JUDGE = 'on';
   const h = make([{ ans: 0 }]);
   const said = [];

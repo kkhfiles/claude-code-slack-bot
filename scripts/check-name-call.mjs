@@ -37,6 +37,8 @@ function profileFor(cfg) {
   const root = path.join(tmp, `p${Math.random().toString(36).slice(2, 8)}`);
   fs.mkdirSync(path.join(root, 'bots', 'lunch'), { recursive: true });
   fs.writeFileSync(path.join(root, 'bots', 'lunch', 'config.json'), JSON.stringify(cfg), 'utf-8');
+  fs.mkdirSync(path.join(root, 'bots', 'letter'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'bots', 'letter', 'config.json'), JSON.stringify({ call_names: ['커피콩', '콩아'] }), 'utf-8');
   return path.join(root, 'turn.py');
 }
 
@@ -73,6 +75,11 @@ check('설정에 이름이 없는 봇은 이름으로 안 불림',
     h['isCalledIn'](TEST, MGR, '물어봐') === true);
   check('이어 받기도 시험 방 · 주인만', h['isCalledIn'](TEST, 'U2', '물어봐') === false
     && (h['lastSpoke'].set(PLAY, Date.now()), h['isCalledIn'](PLAY, MGR, '물어봐')) === false);
+  // 2026-10-20 — 「@커피콩 넌 지금은 신경 안써도 돼」를 소인이 1분 전에 말했다는 이유로 제 말로 받아 답했다
+  check('다른 봇을 멘션한 말은 이어 받지 않는다(그쪽에 한 말)',
+    h['isCalledIn'](TEST, MGR, '<@ULETTERBOT> 넌 지금은 신경 안써도 돼') === false);
+  check('다른 봇 이름을 부른 말도 이어 받지 않는다', h['isCalledIn'](TEST, MGR, '콩아 넌 신경 안 써도 돼') === false);
+  check('내 멘션과 남의 멘션이 같이 있으면 부른 말', h['isCalledIn'](TEST, MGR, `<@${ME}> <@ULETTERBOT> 둘이 정리해`) === true);
   h['siblingSpoke'].set(TEST, Date.now());
   check('그 뒤 형제 봇이 끼었으면 이어 받지 않는다(그 봇에게 한 말일 수 있다)', h['isCalledIn'](TEST, MGR, '물어봐') === false);
   h['siblingSpoke'].delete(TEST);

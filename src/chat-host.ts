@@ -134,6 +134,16 @@ export interface BotTalkRule {
  * 빠뜨리면 그 봇의 말만 조용히 안 들린다(에러도 로그도 없이 기능만 사라지는 종류).
  */
 const siblingIds = new Set<string>();
+/**
+ * 「대답하지 마」를 듣고 봇이 올린 한 줄(`judgeHush`) — 방 · 글 → 지울 시각. 형제 봇은 이 한 줄을 받아치지 않는다.
+ * 2026-10-20 시험 방에서 커피콩이 「네, 조용히 있을게요!」라고 물러나자 소인이 「소인 또한 함께 숨을 죽이고…」라고 받았다.
+ * 두 봇이 한 프로세스에 살아서 여기 한 곳에 적으면 둘 다 본다(이벤트가 올리기 응답보다 먼저 와도 되게 올리기 **전에** 적는다).
+ */
+const hushAcks = new Map<string, number>();
+const HUSH_ACK_MS = 2 * 60 * 1000;
+// 슬랙은 돌려주는 글에서 & < > 를 바꿔 적는다 — 올린 글과 맞추려면 되돌려 본다
+const hushAckKey = (channel: string, text: string) =>
+  `${channel}\n${text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').trim()}`;
 
 /** 봇끼리 길어졌을 때 붙이는 한마디. **스스로 맺게 먼저 해 본다** — 끊는 것은 그다음이다. */
 /**
@@ -636,6 +646,8 @@ export class ChatHost {
     let say: string | null = text;
     // 형제 봇이 마지막으로 말한 때 — 시험 방 「이어 받기」(`isCalledIn`)가 그 뒤로는 내 차례가 아니라고 본다.
     if (fromSibling) this.siblingSpoke.set(channel, Date.now());
+    // 형제 봇이 「대답하지 마」를 듣고 물러나며 한 한 줄 — 받아치지 않는다(`hushAcks`)
+    if (fromSibling && ChatHost.isHushAck(channel, text)) return;
     if (fromSibling) say = this.botTalkTurn(channel, text);
     else this.humanSpoke(channel, text);
     // **답 턴보다 먼저 건다** — 이 말에 대한 턴은 답을 올리기 전에 이 판정을 기다린다(`hushDrops`).
@@ -754,6 +766,9 @@ export class ChatHost {
       this.logger.info(`「대답하지 마」로 판정 — ${NO_REPLY_MS / 60000}분 동안 먼저 말 걸지 않고 그 뒤 답은 버립니다 (${channel} · ${out.model})`);
       // 이미 멈춰 있던 방이면 한 줄을 또 하지 않는다. 그 말 뒤로 답을 올렸어도 안 한다 — 답하고 나서 「알겠습니다」가 되면 두 번 말한 꼴이다.
       if (!stopped && out.reply && (this.lastSpoke.get(channel) ?? 0) < Number(ts) * 1000) {
+        const now = Date.now();
+        for (const [k, until] of hushAcks) if (until < now) hushAcks.delete(k);
+        hushAcks.set(hushAckKey(channel, out.reply), now + HUSH_ACK_MS);
         await this.say(client, channel, out.reply, threadTs);
       }
       return;
@@ -1132,8 +1147,36 @@ export class ChatHost {
       { call_names?: unknown; rooms?: Record<string, { rules?: unknown } | undefined> } | null;
     if (!cfg?.rooms?.[channel]?.rules || !Array.isArray(cfg.call_names)) return false;
     if (cfg.call_names.some((n) => typeof n === 'string' && n.length > 0 && text.includes(n))) return true;
+    // **이어 받기는 남을 부른 말에는 안 건다** — 2026-10-20 시험 방에서 주인이 「@커피콩 넌 지금은 신경 안써도 돼」라고 했는데
+    // 소인이 1분 전에 말했다는 이유로 제 말로 받아 답했다. 다른 사람·봇을 멘션했거나 다른 봇 이름을 부른 말은 그쪽에 한 말이다.
+    if (/<@[A-Z0-9]+>/.test(text.replace(new RegExp(`<@${this.selfUserId}>`, 'g'), ''))) return false;
+    if (this.otherBotNames().some((n) => text.includes(n))) return false;
     const mine = this.lastSpoke.get(channel) ?? 0;
     return Date.now() - mine < FOLLOW_UP_MS && (this.siblingSpoke.get(channel) ?? 0) < mine;
+  }
+
+  /** 형제 봇이 「대답하지 마」를 듣고 올린 한 줄인가(`hushAcks` · 두 봇이 한 프로세스라 함께 본다). */
+  private static isHushAck(channel: string, text: string): boolean {
+    return (hushAcks.get(hushAckKey(channel, text)) ?? 0) > Date.now();
+  }
+
+  /** 다른 봇들의 부르는 이름(`bots/<다른 봇>/config.json` 의 `call_names`). 못 읽으면 빈 목록. */
+  private otherBotNames(): string[] {
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(path.join(path.dirname(this.opts.script), 'bots'));
+    } catch {
+      return [];
+    }
+    const out: string[] = [];
+    for (const bot of names) {
+      if (bot === this.opts.name || bot.startsWith('_')) continue;
+      const cfg = this.readNear('bots', bot, 'config.json') as { call_names?: unknown } | null;
+      if (Array.isArray(cfg?.call_names)) {
+        out.push(...cfg.call_names.filter((n): n is string => typeof n === 'string' && n.length > 0));
+      }
+    }
+    return out;
   }
 
   private shouldButtIn(channel: string, text: string): boolean {
