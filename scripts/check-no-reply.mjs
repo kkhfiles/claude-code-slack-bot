@@ -17,6 +17,9 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'noreply-'));
 process.env.BOT_ACTIVITY_DIR = path.join(tmp, 'activity');
 
 const { ChatHost } = await import('../dist/chat-host.js');
+// 이 검사는 낱말 규칙 경로를 잰다 — 운영 `.env` 의 `HUSH_JUDGE`(모델 판정)를 읽어 오면 그 길로 돌아 거짓 실패가 난다
+// (불러오기가 `.env` 를 읽으므로 그 뒤에 지운다 · 판정은 부를 때마다 환경값을 본다)
+delete process.env.HUSH_JUDGE;
 
 let pass = 0;
 const fails = [];
