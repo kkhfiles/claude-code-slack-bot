@@ -155,6 +155,13 @@ const WRAP_UP = '\n---\n[안내] 봇끼리 이야기가 길어졌습니다. 이�
  */
 const HUSH = /(그만|멈춰|멈춰라|조용히?\s*해|입\s*다)/;
 const UNHUSH = /(다시\s*(해|시작|얘기|이야기)|계속\s*해)/;
+/**
+ * **「대답하지 마」** — 이 봇에게 한 말이면(`noReplyFrom`) 그 방에서 한동안 먼저 끼어들지 않고, 그때 만들던 답도 버린다.
+ * 2026-10-20 한 방에서 사람이 「소인아 대답하지마」·「으아악 대답하지마」라고 했는데 봇이 두 번 다 답했다 — 그 말은 봇이
+ * 답을 만드는 도중에 와서 턴에 실리지도 않았고, 위 HUSH 는 이 꼴을 몰랐다.
+ */
+const NO_REPLY = /(?:대답|답장|답|대꾸|말|참견)\s*(?:을|은|도)?\s*하지\s*(?:마|말)|끼(?:어들)?지\s*(?:마|말)|나서지\s*(?:마|말)/;
+const NO_REPLY_MS = 60 * 60 * 1000;
 
 export interface ChatBotOptions {
   name: string;           // turn.py 의 봇 이름이자 로그 이름
@@ -353,6 +360,8 @@ export class ChatHost {
    * 잘못 재워졌을 때 부르지 않고도 깨울 수 있어야 한다.
    */
   private buttInHushed = new Set<string>();
+  /** 「대답하지 마」를 들은 때(`NO_REPLY`) — 방마다. 그 뒤 `NO_REPLY_MS` 동안 먼저 말 걸지 않고, 그때 돌던 턴의 답은 버린다. */
+  private noReplyAt = new Map<string, number>();
   /** 채널에서 우리가 마지막으로 입을 연 시각·횟수. */
   private lastSpoke = new Map<string, number>();
   private spokenToday = new Map<string, { day: string; count: number }>();
@@ -662,7 +671,24 @@ export class ChatHost {
       // 푸는 것은 부르지 않아도 듣는다 — 잘못 재워졌을 때 깨울 길이 있어야 한다.
       this.hushed.delete(channel);
       this.buttInHushed.delete(channel);
+      this.noReplyAt.delete(channel);
     }
+    if (NO_REPLY.test(text) && this.toMe(channel, text)) {
+      this.noReplyAt.set(channel, Date.now());
+      this.logger.info(`「대답하지 마」 — ${NO_REPLY_MS / 60000}분 동안 먼저 말 걸지 않고 만들던 답도 버립니다 (${channel})`);
+    }
+  }
+
+  /**
+   * 이 봇에게 한 말인가(「대답하지 마」 판정용) — 멘션, 봇 이름(`call_names`), 이 봇이 방금(`FOLLOW_UP_MS` 안) 그 방에서
+   * 말했거나 지금 그 방 답을 만드는 중. 사람끼리 한 「말하지 마」에 봇이 멋대로 조용해지지 않게 넷 중 하나는 있어야 한다.
+   */
+  private toMe(channel: string, text: string): boolean {
+    if (this.isCalled(text) || this.active.has(channel)) return true;
+    if (Date.now() - (this.lastSpoke.get(channel) ?? 0) < FOLLOW_UP_MS) return true;
+    const cfg = this.readNear('bots', this.opts.name, 'config.json') as { call_names?: unknown } | null;
+    return Array.isArray(cfg?.call_names)
+      && cfg.call_names.some((n) => typeof n === 'string' && n.length > 0 && text.includes(n));
   }
 
   // ── DM ────────────────────────────────────────────────────────────────
@@ -963,6 +989,7 @@ export class ChatHost {
     const rule = this.opts.buttIn;
     if (!rule || this.active.has(channel)) return false;
     if (this.buttInHushed.has(channel)) return false;
+    if (Date.now() - (this.noReplyAt.get(channel) ?? 0) < NO_REPLY_MS) return false;
     const since = Date.now() - (this.lastSpoke.get(channel) ?? 0);
     if (since < rule.quietMinutes * 60 * 1000) return false;
     const day = new Date().toISOString().slice(0, 10);
@@ -1293,6 +1320,9 @@ export class ChatHost {
           } else {
             this.logger.info(`Stayed quiet in ${key}`);
           }
+        } else if (!forced && (this.noReplyAt.get(waiting.channel) ?? 0) >= began * 1000) {
+          // 답을 만드는 사이 「대답하지 마」가 왔다 — 먼저 나선 답은 버린다(부른 답은 그대로 낸다).
+          this.logger.info(`「대답하지 마」가 와서 만든 답을 버립니다 (${key})`);
         } else {
           this.logger.info(`Answered ${key} in ${result.elapsed_s ?? '?'}s`);
           await this.say(client, waiting.channel, result.reply, waiting.threadTs);
