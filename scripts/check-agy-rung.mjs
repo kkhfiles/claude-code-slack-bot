@@ -1007,11 +1007,11 @@ try {
     // 실제 표(있으면) — 사용자 결정의 대응이 그대로 앉았나
     const real = path.resolve(ROOT, '..', 'llm-playbook', 'llm_playbook', 'models.json');
     if (fs.existsSync(real) && JSON.parse(fs.readFileSync(real, 'utf-8')).service_fallback) {
-      // 사용자 대응표(2026-10-14 정본) 15칸 — 1차 모델 · 깊이마다 GPT 「별칭 깊이」
+      // 사용자 대응표(2026-10-14 정본, haiku high 는 2026-10-20 에 luna high 로 낮춤) 15칸 — 1차 모델 · 깊이마다 GPT 「별칭 깊이」
       const WANT = {
         opus: { low: 'sol low', medium: 'sol high', high: 'sol high', xhigh: 'sol xhigh', max: 'sol max' },
         sonnet: { low: 'sol low', medium: 'sol low', high: 'sol medium', xhigh: 'sol high', max: 'sol xhigh' },
-        haiku: { low: 'luna medium', medium: 'luna high', high: 'luna xhigh', xhigh: 'sol low', max: 'sol low' },
+        haiku: { low: 'luna medium', medium: 'luna high', high: 'luna high', xhigh: 'sol low', max: 'sol low' },
       };
       const got = Object.fromEntries(Object.entries(WANT).map(([f, row]) => [f, Object.fromEntries(Object.keys(row)
         .map((e) => { const r = ml.serviceCodex(f, e, real); return [e, r ? `${r.alias} ${r.effort}` : null]; }))]));

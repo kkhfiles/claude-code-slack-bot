@@ -238,9 +238,10 @@
 |---|---|---|---|---|---|
 | opus | sol-low | sol-high | sol-high | sol-xhigh | sol-max |
 | sonnet | sol-low | sol-low | sol-medium | sol-high | sol-xhigh |
-| haiku | luna-medium | luna-high | luna-xhigh | sol-low | sol-low |
+| haiku | luna-medium | luna-high | luna-high | sol-low | sol-low |
 
 - **깊이를 모르면** — high 줄(Claude 기본 깊이 · `PRIMARY_DEFAULT_EFFORT`)
+- **xhigh 와 max 는 1차가 명시할 때만** — 사람이 시키지 않은 깊이를 대응표가 고르지 않는다(2026-10-20 사용자 결정). haiku 의 high 줄이 luna-xhigh 였던 것을 luna-high 로 낮췄다. 회의 알림 판단(`calendar-poller.ts`)처럼 깊이를 안 넘기는 호출이 이 줄을 읽는다
 - **옛 모양**(집안마다 별칭 하나 + `effort_up`) — 그 표가 오면 예전처럼 1차 깊이를 `effort_up` 만큼 올림. 지금 정본은 위 대응표
 - **쓰는 곳** — DM 의 GPT 칸, 예약 일 폴백(`spawnOrFallback`), 도구 없는 사다리의 codex 칸, 판의 좁은 길
   - 좁은 길은 `BOARD_NARROW_CODEX_MODEL`, `BOARD_NARROW_CODEX_EFFORT` 가 먼저
