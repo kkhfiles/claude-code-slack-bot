@@ -4210,7 +4210,8 @@ export class AssistantScheduler {
     // 데다 $3/$15 로 **50% 더 비쌌다**(Sonnet 5 는 $2/$10 · 2026-09-08).
     //
     // 등급은 `config.analysis.types[type].model`·`.effort` 로 종마다 정한다.
-    // 폭은 sonnet+low ~ opus+xhigh 이고 haiku 는 쓰지 않는다(2026-09-08 사용자).
+    // 폭은 sonnet+low ~ opus+high 이고 haiku 는 쓰지 않는다(2026-09-08 사용자).
+    // xhigh 와 max 는 사람이 명시할 때만 — ai-practice, competitors 도 high 로 내림(2026-10-20 사용자).
     const analysisModel = (typeConfig as any)?.model
       ?? process.env.ANALYSIS_MODEL
       ?? 'sonnet';
