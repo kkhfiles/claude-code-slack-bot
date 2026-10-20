@@ -201,6 +201,31 @@ for (const [name, stopTs, forced, dropped] of [
   check('판정 프로세스가 입력을 읽기 전에 끝나도 호스트가 안 죽고 0', !crashed && out.ans === 0, { crashed: String(crashed), out });
 }
 
+// ── 훑기로 주운 말 — 연결이 흘린 「대답하지 마」도 판정에 걸린다 · 이미 건 말과 한 시간 넘은 말은 안 건다 ──
+{
+  process.env.HUSH_JUDGE = 'on';
+  const h = make([{ ans: 1, reply: '' }]);
+  h['say'] = async () => {};
+  h['kick'] = () => {};
+  const now = Date.now() / 1000;
+  const msgs = [
+    { user: 'U1', ts: (now - 2 * 3600).toFixed(6), text: '두 시간 전 말' },
+    { user: 'U1', ts: (now - 30).toFixed(6), text: '소인 대답하지 마' },
+    { user: 'U2', ts: (now - 10).toFixed(6), text: '이미 판정에 건 말' },
+  ];
+  h['hushSeen'].add(`${ROOM}:${msgs[2].ts}`);
+  const client = { conversations: { history: async () => ({ messages: msgs.slice().reverse() }) } };
+  await h['sweepChannel'](client, ROOM);
+  await wait(h, ROOM);
+  check('훑기로 주운 말도 판정에 건다(이미 건 말 · 한 시간 넘은 말은 빼고)',
+    (h.__reqs ?? []).length === 1 && h.__reqs[0].last.text === '소인 대답하지 마', h.__reqs);
+  check('늦게 주운 말의 멈춤은 그 말을 한 때부터 센다',
+    Math.abs((h['noReplyAt'].get(ROOM) ?? 0) - Number(msgs[1].ts) * 1000) < 5, h['noReplyAt'].get(ROOM));
+  await h['sweepChannel'](client, ROOM);
+  await wait(h, ROOM);
+  check('다음 훑기에서 같은 말을 다시 걸지 않는다', h.__reqs.length === 1, h.__reqs.length);
+}
+
 delete process.env.HUSH_JUDGE;
 console.log(`\n${pass} 통과 · ${fails.length} 실패`);
 if (fails.length) process.exitCode = 1;

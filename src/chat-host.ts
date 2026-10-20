@@ -390,6 +390,8 @@ export class ChatHost {
    */
   private hushChain = new Map<string, Promise<void>>();
   private hushInFlight = new Map<string, Set<Promise<void>>>();
+  /** 판정에 건 말(`방:ts`) — 살아 있는 길과 훑기가 같은 말을 두 번 걸지 않게. 넣은 순서대로 오래된 것부터 지운다. */
+  private hushSeen = new Set<string>();
   /** 채널에서 우리가 마지막으로 입을 연 시각·횟수. */
   private lastSpoke = new Map<string, number>();
   private spokenToday = new Map<string, { day: string; count: number }>();
@@ -737,9 +739,13 @@ export class ChatHost {
 
   /** 판정을 그 방 줄 끝에 세우고, 그 방의 「아직 안 끝난 판정」에 올린다. 실패는 안에서 삼킨다(줄이 안 막히게). */
   private startJudge(client: App['client'], channel: string, user: string, ts: string,
-                     threadTs: string | undefined, text: string): void {
+                     threadTs: string | undefined, text: string, heardAt?: number): void {
+    const seen = `${channel}:${ts}`;
+    if (this.hushSeen.has(seen)) return;
+    this.hushSeen.add(seen);
+    while (this.hushSeen.size > TAKEN_MEMORY) this.hushSeen.delete(this.hushSeen.values().next().value as string);
     const run = (this.hushChain.get(channel) ?? Promise.resolve())
-      .then(() => this.judgeHush(client, channel, user, ts, threadTs, text))
+      .then(() => this.judgeHush(client, channel, user, ts, threadTs, text, heardAt))
       .catch((error) => this.logger.warn('「대답하지 마」 판정 실패', error));
     this.hushChain.set(channel, run);
     const set = this.hushInFlight.get(channel) ?? new Set<Promise<void>>();
@@ -749,7 +755,7 @@ export class ChatHost {
   }
 
   private async judgeHush(client: App['client'], channel: string, user: string, ts: string,
-                          threadTs: string | undefined, text: string): Promise<void> {
+                          threadTs: string | undefined, text: string, heardAt?: number): Promise<void> {
     const stopped = Date.now() - (this.noReplyAt.get(channel) ?? 0) < NO_REPLY_MS;
     const req = {
       bot: this.opts.name, key: channel, busy: this.active.has(channel),
@@ -761,7 +767,8 @@ export class ChatHost {
     const out = await this.runHush({ ...req, mode: 'stop' });
     this.noteJudge(channel, 'stop', out);
     if (out.ans === 1) {
-      this.noReplyAt.set(channel, Date.now());
+      // 한 시간은 그 말을 들은 때부터 — 훑기로 늦게 주운 말은 그 말을 한 때(`heardAt`)부터 센다
+      this.noReplyAt.set(channel, heardAt ?? Date.now());
       this.noReplyTs.set(channel, Number(ts));
       this.logger.info(`「대답하지 마」로 판정 — ${NO_REPLY_MS / 60000}분 동안 먼저 말 걸지 않고 그 뒤 답은 버립니다 (${channel} · ${out.model})`);
       // 이미 멈춰 있던 방이면 한 줄을 또 하지 않는다. 그 말 뒤로 답을 올렸어도 안 한다 — 답하고 나서 「알겠습니다」가 되면 두 번 말한 꼴이다.
@@ -1306,6 +1313,17 @@ export class ChatHost {
       after.push(m);
     }
     if (after.length === 0) return;
+
+    // **훑기로 주운 사람 말도 판정에 건다** — 연결이 흘린 말이 여기로만 들어오는데, 판정을 켠 방은 낱말 규칙도 꺼져 있어
+    // 그 말의 「대답하지 마」를 아무도 못 본다(검토 2026-10-20). 이미 건 말은 다시 안 건다 · 멈춤 시간(한 시간)보다 오래된 말은 안 건다.
+    if (this.judgeOn(channel)) {
+      for (const m of after) {
+        const t = Number(m.ts);
+        if (!t || Date.now() - t * 1000 > NO_REPLY_MS || this.hushSeen.has(`${channel}:${m.ts}`)) continue;
+        this.startJudge(client, channel, (m.user as string) ?? '', m.ts as string,
+          m.thread_ts as string | undefined, (m.text as string) ?? '', t * 1000);
+      }
+    }
 
     // **새로 온 말이 없으면 묻지 않는다.** 위 경계는 봇이 입을 열어야만 앞으로 가므로,
     // 안 끼기로 한 자리에서는 같은 글이 계속 남는다. 그 글을 다시 물어도 답은 같고,
