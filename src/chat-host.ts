@@ -42,6 +42,8 @@ const ROOMS_RECENT_TIMEOUT_MS = 4000;
 const OWN_THREADS_POSTS = 3;
 const OWN_THREADS_REPLIES = 30;
 const OWN_THREAD_WORDS = /스레드|쓰레드|답글|댓글|thread/i;
+/** 시험 방 이어 받기(`isCalledIn`) — 이 봇이 말한 뒤 이 시간 안의 주인 말은 이 봇에게 한 말로 본다. */
+const FOLLOW_UP_MS = 10 * 60 * 1000;
 /** 실장께 알리기(`tellManager`) — 같은 방에서 이 시간 안에는 한 번만. */
 const TELL_MANAGER_GAP_MS = 30 * 60 * 1000;
 /** 한 방에서 「이미 집어 갔다」를 기억해 둘 글 수. 넘으면 오래된 것부터 버린다. */
@@ -362,6 +364,8 @@ export class ChatHost {
   private toldMuteBot = new Set<string>();
   /** **허락 안 한 방**인데 불려 간 곳. 주인에게 방마다 한 번만 알린다. */
   private toldStranger = new Set<string>();
+  /** 형제 봇이 방마다 마지막으로 말한 때(`isCalledIn` 의 이어 받기). */
+  private siblingSpoke = new Map<string, number>();
   /** 방 사람이 짚은 잘못을 실장께 마지막으로 알린 때(`tellManager`) — 방마다. */
   private toldManagerAt = new Map<string, number>();
   /**
@@ -603,6 +607,8 @@ export class ChatHost {
     }
     // 사람이 한 마디 하면 봇끼리 세던 것이 처음으로 돌아간다. 멈춤·풀기도 여기서 본다.
     let say: string | null = text;
+    // 형제 봇이 마지막으로 말한 때 — 시험 방 「이어 받기」(`isCalledIn`)가 그 뒤로는 내 차례가 아니라고 본다.
+    if (fromSibling) this.siblingSpoke.set(channel, Date.now());
     if (fromSibling) say = this.botTalkTurn(channel, text);
     else this.humanSpoke(channel, text);
     if (say === null) return;
@@ -854,7 +860,7 @@ export class ChatHost {
     client: App['client'], user: string, channel: string, ts: string,
     threadTs: string | undefined, text: string, fromSibling = false,
   ): Promise<void> {
-    const called = this.isCalled(text);
+    const called = this.isCalledIn(channel, user, text);
     // **바로 반응할 자리에서만 담는다.** 나머지는 훑기가 채널에서 직접 읽어 온다 —
     // 여기서 다 쌓아 두면 재시작 한 번에 통째로 사라지고, 소켓이 흘린 말은 애초에
     // 담기지도 않는다. 둘 다 실제로 겪었다.
@@ -918,6 +924,25 @@ export class ChatHost {
   /** 나를 부른 글인가. **판정은 여기 한 곳** — 세 곳에 흩어져 있었고 하나는 조건이 달랐다. */
   private isCalled(text: string): boolean {
     return Boolean(this.selfUserId && text.includes(`<@${this.selfUserId}>`));
+  }
+
+  /**
+   * 맡은 방에서 **부른 말**인가 — @멘션, 또는 **시험 방(봇 설정 `rooms[방].rules`)에서 주인이 봇 이름(`call_names`)을 넣어 한 말.**
+   *
+   * 2026-10-20 시험 방에서 주인이 「소인아 … 물어보거나 해야 하지 않겠니?」 「물어봐」라고 했는데 멘션이 없어 「끼어들지 말지」
+   * 턴으로 갔다. 그 턴에는 다른 방에 글을 올리는 행동이 안 열려 봇은 「카드를 올리겠다」고 말만 했다. 시험 방은 주인이 봇에게
+   * 시키는 방이라 이름으로 부른 말은 부른 것이다. **이어 받기도** — 이 봇이 방금(`FOLLOW_UP_MS` 안) 말했고 그 뒤 형제 봇이 안
+   * 끼었으면 주인의 다음 말(「물어봐」)도 이 봇에게 한 말이다. 그 밖에는 그대로 — 두 봇이 같이 있어 모든 말을 부른 것으로 치면 둘 다 답한다.
+   */
+  private isCalledIn(channel: string, user: string, text: string): boolean {
+    if (this.isCalled(text)) return true;
+    if (!user || user !== this.opts.managerUserId) return false;
+    const cfg = this.readNear('bots', this.opts.name, 'config.json') as
+      { call_names?: unknown; rooms?: Record<string, { rules?: unknown } | undefined> } | null;
+    if (!cfg?.rooms?.[channel]?.rules || !Array.isArray(cfg.call_names)) return false;
+    if (cfg.call_names.some((n) => typeof n === 'string' && n.length > 0 && text.includes(n))) return true;
+    const mine = this.lastSpoke.get(channel) ?? 0;
+    return Date.now() - mine < FOLLOW_UP_MS && (this.siblingSpoke.get(channel) ?? 0) < mine;
   }
 
   private shouldButtIn(channel: string, text: string): boolean {
@@ -1062,7 +1087,7 @@ export class ChatHost {
     // **@로 불러도 모델이 「낄 자리 아님」 하면 조용히 넘어갔다**(2026-08-19 커피콩).
     // 부르는 것은 굴레를 건너뛴다는 규칙이 살아 있는 길과 훑는 길에서 달랐던 셈이다.
     const mine = (m: Record<string, unknown>) =>
-      !!this.selfUserId && ((m.text as string) ?? '').includes(`<@${this.selfUserId}>`);
+      this.isCalledIn(channel, (m.user as string) ?? '', (m.text as string) ?? '');
     const called = after.some(mine);
 
     // **조용한 방은 훑기에서도 부른 것만 집는다.** 살아 있는 길에만 굴레를 걸고 훑는
