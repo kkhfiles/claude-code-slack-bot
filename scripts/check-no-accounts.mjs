@@ -118,10 +118,60 @@ try {
     if (extra.env) ok('SDK: 넘긴 토큰이 빠졌다', sdkOptions.env?.CLAUDE_CODE_OAUTH_TOKEN === 'oauth-check');
   }
 
+  // ── ④ 월 API 크레딧 칸(2026-10-21) — 키는 `billing: 'api'` 한 길에서만 들어간다 ──────────
+  const keyFile = path.join(os.tmpdir(), `check-noaccounts-key-${process.pid}`);
+  // 가짜 키 — 소스에 키 모양 글자를 두지 않는다(공개 저장소 검사가 자격 증명으로 본다).
+  const KEY = ['sk', 'ant', 'check', 'only', 'x'.repeat(40)].join('-');
+  const beforeFile = process.env.CLAUDE_API_KEY_FILE;
+  process.env.CLAUDE_API_KEY_FILE = keyFile;
+  const realQuery = SdkHandler.queryFn;
+  let spawned = 0;
+  SdkHandler.queryFn = () => { spawned += 1; return (async function* () { /* 띄운 척 */ })(); };
+  try {
+    fs.writeFileSync(keyFile, KEY + '\n');
+    const env = { CLAUDE_CODE_OAUTH_TOKEN: 'oauth-check', ANTHROPIC_AUTH_TOKEN: 'auth-check' };
+    const { sdkOptions } = h.buildOptions('확인', { workingDirectory: os.tmpdir(), env, billing: 'api' });
+    ok('API 칸: 키 파일의 키가 안 들어갔다', sdkOptions.env?.ANTHROPIC_API_KEY === KEY);
+    ok('API 칸: 키가 한 벌이 아니다(대소문자 겹침)', leaks(sdkOptions.env).length === 1);
+    ok('API 칸: 구독 토큰이 남았다 — Claude Code 가 키보다 그것을 먼저 쓸 수 있다',
+       !('CLAUDE_CODE_OAUTH_TOKEN' in sdkOptions.env) && !('ANTHROPIC_AUTH_TOKEN' in sdkOptions.env));
+    ok('API 칸: 나머지 환경(PATH)이 빠졌다', hasPath(sdkOptions.env));
+
+    h.prewarm({ workingDirectory: os.tmpdir(), billing: 'api' });
+    ok(`API 칸: 미리 띄웠다 — 키를 든 프로세스가 대기 자리에 남는다(띄움 ${spawned} · 자리 ${h.warmCount})`,
+       spawned === 0 && h.warmCount === 0);
+    const proc = h.runQuery('확인', { workingDirectory: os.tmpdir(), billing: 'api' });
+    ok(`API 칸: 엔진 상태를 claude-api 에 안 적는다(${proc.engine})`, proc.engine === 'claude-api');
+    ok('보통 차례: 엔진 상태를 claude 에 안 적는다', h.runQuery('확인', { workingDirectory: os.tmpdir() }).engine === 'claude');
+
+    fs.writeFileSync(keyFile, 'not-a-key-but-secret-looking');
+    let threw = null;
+    try { h.buildOptions('확인', { workingDirectory: os.tmpdir(), billing: 'api' }); } catch (e) { threw = e; }
+    ok('API 칸: 모양이 틀린 키 파일로 띄웠다', threw?.name === 'Error' || threw instanceof Error);
+    ok('API 칸: 오류 글에 키 파일 내용이 실렸다', !String(threw?.message ?? '').includes('secret-looking'));
+  } finally {
+    SdkHandler.queryFn = realQuery;
+    fs.rmSync(keyFile, { force: true });
+    if (beforeFile === undefined) delete process.env.CLAUDE_API_KEY_FILE;
+    else process.env.CLAUDE_API_KEY_FILE = beforeFile;
+  }
+
 } finally {
   if (before === undefined) delete process.env.ANTHROPIC_API_KEY;
   else process.env.ANTHROPIC_API_KEY = before;
 }
+
+// 키를 넣는 함수는 SDK 처리기의 `billing: 'api'` 한 곳에서만 — 다른 곳에서 부르면 그 길이 구독 대신 과금된다.
+const addAt = files.filter((f) => f !== HELPER && /withApiKey\(/.test(all[f]));
+ok(`키를 넣는 함수(withApiKey)를 sdk-handler.ts 밖에서 부른다 — ${addAt.join(' · ')}`,
+   addAt.length === 1 && addAt[0] === 'sdk-handler.ts');
+ok('sdk-handler.ts 가 키를 넣는 함수를 `billing === \'api\'` 갈래 밖에서 부른다',
+   /opts\.billing === 'api'\s*\n\s*\? withApiKey\(/.test(all['sdk-handler.ts'] ?? '')
+   && (all['sdk-handler.ts'].match(/withApiKey\(/g) ?? []).length === 1);
+// 객체 속성으로 쓴 것만 센다 — 주석의 `billing: 'api'` 는 띄우는 곳이 아니다.
+const billAt = files.filter((f) => /[{,]\s*billing: 'api'/.test(all[f]));
+ok(`API 크레딧 세션(billing: 'api')을 slack-handler.ts 밖에서 띄운다 — ${billAt.join(' · ')}`,
+   billAt.every((f) => f === 'slack-handler.ts'));
 
 if (fails.length) {
   console.log(`실패 ${fails.length}건\n`);

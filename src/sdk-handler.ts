@@ -12,8 +12,9 @@ import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
 import { errorCollector } from './error-collector';
 import { event as recordEvent } from './board-queue';
-import { withoutApiKey } from './child-env';
+import { withApiKey, withoutApiKey } from './child-env';
 import { ClaudeTap } from './engine-tap';
+import { engineState, type Engine } from './engine-state';
 import { afterFirstToolResult, claudeDrill, claudeDrillEvents, drillQuery, limitTail, type DrillScope } from './engine-drill';
 import type {
   CliEvent,
@@ -108,14 +109,15 @@ export class SdkProcess {
   private done = false;
   private logger = new Logger('SdkProcess');
 
-  constructor(q: Query, abortController: AbortController) {
+  /** `engine` — 엔진 상태를 어느 열쇠에 적나. 월 API 크레딧 세션은 `claude-api`(`billing: 'api'`). */
+  constructor(q: Query, abortController: AbortController, private engine: Engine = 'claude') {
     this.query = q;
     this.abortController = abortController;
   }
 
   async *[Symbol.asyncIterator](): AsyncIterableIterator<CliEvent> {
     // 엔진 상태를 적는 곳 — 내보내는 이벤트를 하나도 빼지 않고 본다(`engine-tap.ts`).
-    const tap = new ClaudeTap();
+    const tap = new ClaudeTap(engineState, this.engine);
     try {
       for await (const sdkMsg of this.query) {
         const event = interpretSdkMessage(sdkMsg);
@@ -218,6 +220,12 @@ export interface SdkRunOptions {
   skills?: 'all' | string[];
   /** 엔진 연습을 받는 차례인가 — 대화 차례는 `interactive`(생략하면 예약 일 · `engine-drill.ts`). */
   drillScope?: DrillScope;
+  /**
+   * `'api'` — 구독 토큰 대신 월 API 크레딧 키로 띄운다(`claude-api` 칸 · 2026-10-21 사용자 결정). 미리 띄운 세션과
+   * 엔진 연습을 안 쓰고(둘 다 구독 환경으로 뜬다) 엔진 상태는 `claude-api` 에 적는다. 키 파일을 못 읽으면 던진다
+   * (`ApiKeyFileError`).
+   */
+  billing?: 'api';
 }
 
 export class SdkHandler {
@@ -301,6 +309,8 @@ export class SdkHandler {
    * 반영의 일부가 아니다.
    */
   prewarm(opts: SdkRunOptions, ttlMs: number = SdkHandler.WARM_TTL_MS): void {
+    // 월 API 크레딧 세션은 미리 띄우지 않는다 — 키를 든 프로세스가 대기 자리에 남지 않게. 폴백 차례는 드물어 맞을 일도 없다.
+    if (opts.billing === 'api') return;
     // 메모리를 잴 수단이 있으면 재고 띄운다(비동기) · 없으면 곧바로(시험이 이 길이다).
     if (this.memorySample) {
       this.memorySample()
@@ -367,6 +377,10 @@ export class SdkHandler {
   get warmCount(): number { return this.warms.size; }
 
   runQuery(prompt: string, opts: SdkRunOptions): SdkProcess {
+    if (opts.billing === 'api') {
+      const built = this.buildOptions(prompt, opts);
+      return new SdkProcess(SdkHandler.queryFn({ prompt, options: built.sdkOptions }), built.abortController, 'claude-api');
+    }
     // 엔진 연습(`engine-drill.ts`) — 막힌 모양을 재생한다. 처음부터 막힌 갈래는 진짜를 안 띄우고,
     // `usage-after-tool` 은 진짜 차례(미리 띄운 것 포함)를 첫 도구 결과까지 돌린 뒤 꼬리를 끼운다.
     const drill = claudeDrill(opts.drillScope);
@@ -472,7 +486,9 @@ export class SdkHandler {
     // subprocess keeps standard env and only opts.env overrides on top.
     // **`opts.env` 가 없어도 늘 넘긴다** — 안 넘기면 SDK 가 `process.env` 를 그대로 써서
     // PC 에 남은 API 키가 세션으로 샌다(`child-env.ts`).
-    sdkOptions.env = withoutApiKey({ ...process.env, ...opts.env });
+    sdkOptions.env = opts.billing === 'api'
+      ? withApiKey({ ...process.env, ...opts.env })
+      : withoutApiKey({ ...process.env, ...opts.env });
     if (opts.canUseTool) sdkOptions.canUseTool = opts.canUseTool;
 
     if (opts.effort) sdkOptions.effort = opts.effort;
