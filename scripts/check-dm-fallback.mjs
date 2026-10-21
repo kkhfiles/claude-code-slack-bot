@@ -139,6 +139,8 @@ const SCRIPTS = {
   'api-ok': () => [ev.init, ev.text('API 답'), ev.ok('API 답')],
   'api-credit': () => [ev.init, { type: 'result', subtype: 'success', is_error: true, session_id: SID, total_cost_usd: 0,
     duration_ms: 1, permission_denials: [], result: 'Credit balance too low · Add funds: https://platform.claude.com/settings/billing' }],
+  'api-auth': () => [ev.init, { type: 'result', subtype: 'success', is_error: true, session_id: SID, total_cost_usd: 0,
+    duration_ms: 1, permission_denials: [], result: 'Invalid API key · Fix external API key' }],
   'api-budget': () => [ev.init, ev.tool('a1', CMD1), ev.res('a1'), { type: 'result', subtype: 'error_max_budget_usd', is_error: true,
     session_id: SID, total_cost_usd: 1.2, duration_ms: 1, permission_denials: [], result: '' }],
 };
@@ -924,6 +926,13 @@ try {
       const p = apiCalls()[0]?.prompt ?? '';
       ok('쓰기 뒤 막힘 — API 칸 프롬프트에 이미 한 것', p.includes('이미 한 것') && p.includes(CMD1));
       ok('쓰기 뒤 막힘 — 표시 줄이 넘겨받은 건수를 말함', allText(s.posts).includes('이어서 마무리했습니다(이미 한 것: 2건)'));
+
+      // 키가 거부됨(401) → 인증 막힘 · GPT · 다음 차례는 건너뜀
+      apiScript = 'api-auth';
+      s = await scenario({ claude: 'ok', before: blockClaude });
+      eq('키 거부 — GPT 가 받고 API 칸은 인증 막힘', [apiCalls().length, s.codex.length, engineState.blocked('claude-api')?.kind], [1, 1, 'auth']);
+      ok('키 거부 — 구독 Claude 막힘은 사용량 그대로', engineState.blocked('claude')?.kind === 'usage');
+      apiScript = 'api-ok';
 
       // 키 파일이 없음 → 띄우지 않고 인증 막힘 · GPT
       fs.rmSync(keyFile, { force: true });

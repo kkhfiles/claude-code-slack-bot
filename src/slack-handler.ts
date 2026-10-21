@@ -90,6 +90,8 @@ const INTERACTIVE_EFFORT = 'low' as const;
  */
 const CLAUDE_API_TURN_BUDGET_USD = 1;
 const CLAUDE_API_TIMEOUT_MS = 6 * 60_000;
+/** API 키 거부 — 「Invalid API key」 · 「invalid x-api-key」 · `authentication_error` · `permission_error` · 「Failed to authenticate」 · 401 · 403. */
+const API_KEY_REJECTED = /invalid (?:x-)?api[ -]key|authentication_error|permission_error|failed to authenticate|\b40[13]\b/i;
 
 /**
  * 대화 세션에 **자기가 슬랙에 있다는 것**을 알린다.
@@ -2962,7 +2964,12 @@ export class SlackHandler {
         appendLedger({ channel, engine: 'claude-api', model: 'sonnet', captureId, outcome: 'ok' });
         return { result: 'ok', steps, writeRan };
       }
-      const kind = engineState.isBlocked('claude-api') ? 'usage' : 'fail';
+      // 키가 거부됨(폐기 · 오타) — 전송 탭은 사용량 · 과부하만 가르므로 여기서 인증 막힘으로 적는다. 안 적으면 차례마다
+      // 한 번씩 헛시도한다. **이 칸에만 건다** — 구독 Claude 에 걸면 토큰이 죽은 날 모든 차례가 크레딧으로 흐른다.
+      if (!engineState.isBlocked('claude-api') && API_KEY_REJECTED.test(failure)) {
+        engineState.recordBlocked('claude-api', { kind: 'auth' });
+      }
+      const kind = engineState.isBlocked('claude-api') ? engineState.blocked('claude-api')?.kind ?? 'usage' : 'fail';
       appendLedger({ channel, engine: 'claude-api', model: 'sonnet', captureId, outcome: kind });
       // 이 칸이 돌린 도구는 다음 칸(GPT)에 「이미 한 것」으로 넘어간다.
       const next = await a.nextAfter('claude-api');
