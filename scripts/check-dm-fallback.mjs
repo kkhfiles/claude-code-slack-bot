@@ -856,10 +856,11 @@ try {
     } });
     const reply = s.posts.find((p) => (p.text ?? '').startsWith('🔧'))?.text ?? '';
     const lines = reply.split('\n');
-    eq('-engines — 머리 한 줄 + 엔진 넷', lines.length, 5);
+    eq('-engines — 머리 한 줄 + 엔진 다섯', lines.length, 6);
     ok(`-engines 머리 — ${lines[0]}`, lines[0].includes('DM 폴백 켜짐') && lines[0].includes('연습 중(Claude usage'));
     ok(`-engines Claude 줄 — ${lines[1]}`, /^• Claude — 막힘\(사용량 소진 · 풀림 .+\) · 마지막 성공 없음$/.test(lines[1] ?? ''));
-    ok(`-engines agy 줄 — ${lines[3]}`, (lines[3] ?? '').includes('DM 사다리 밖'));
+    ok(`-engines Claude API 줄 — ${lines[2]}`, (lines[2] ?? '').startsWith('• Claude API — ') && lines[2].includes('DM 사다리 밖'));
+    ok(`-engines agy 줄 — ${lines[4]}`, (lines[4] ?? '').includes('DM 사다리 밖'));
     eq('-engines — 세션을 안 띄움', [claudeCalls.length, s.codex.length], [0, 0]);
   }
 

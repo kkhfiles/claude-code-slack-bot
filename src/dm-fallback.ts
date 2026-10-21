@@ -60,7 +60,9 @@ export function fallbackEnv(captureId: string): Record<string, string> {
 
 // ---------------------------------------------------------------- 표시 줄
 
-const SHORT: Record<Engine, string> = { claude: 'Claude', codex: 'GPT', 'agy-claude': 'agy Claude', 'agy-gemini': 'Gemini' };
+const SHORT: Record<Engine, string> = {
+  claude: 'Claude', 'claude-api': 'Claude API', codex: 'GPT', 'agy-claude': 'agy Claude', 'agy-gemini': 'Gemini',
+};
 
 /** 「Claude 사용량 소진(풀림 10/14(화) 16:10)」 — 왜 Claude 가 아닌가. */
 export function claudeWhy(b: Block | null): string {

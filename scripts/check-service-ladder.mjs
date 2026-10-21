@@ -108,9 +108,10 @@ try {
   let gotAgy;
   try { gotAgy = agy.agyRungOrder(path.join(TMP, 'none.json')); } catch (e) { gotAgy = `던짐: ${e?.message}`; }
   eq('③ 예약 일 agy 칸 — 표를 못 읽으면 기본', gotAgy, ['agy-gemini', 'agy-claude']);
-  eq('③ 칸 → 엔진 열쇠', ['claude', 'codex:luna-medium', 'agy:flash-high', 'agy:sonnet-low', 'agy:argon', 'agy', 'x']
+  eq('③ 칸 → 엔진 열쇠', ['claude', 'codex:luna-medium', 'agy:flash-high', 'agy:sonnet-low', 'agy:argon', 'agy', 'x',
+    'claude_api', 'claude_api:sonnet', 'claude_api:opus', 'claude_api:haiku']
     .map((r) => ml.rungEngine(r, { 'flash-high': 'Gemini 3.8 Flash (High)', 'sonnet-low': 'Claude Sonnet 5.5 (Low)', argon: 'Gemini 4 Argon (Medium)' }) ?? null),
-  ['claude', 'codex', 'agy-gemini', 'agy-claude', null, null, null]);
+  ['claude', 'codex', 'agy-gemini', 'agy-claude', null, null, null, 'claude-api', 'claude-api', null, null]);
 
   // ④ 파이썬이 보는 차례와 같은가
   const py = process.env.LADDER_PYTHON || 'python';

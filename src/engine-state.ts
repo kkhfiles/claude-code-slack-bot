@@ -33,9 +33,12 @@ import { Logger } from './logger';
 
 const logger = new Logger('EngineState');
 
-export type Engine = 'claude' | 'codex' | 'agy-claude' | 'agy-gemini';
-/** DM 을 맡는 차례 — 앞이 막히면 다음으로 내려간다. 6단계부터 Gemini 가 agy 의 Claude(Sonnet)보다 앞이다. */
-export const ENGINES: readonly Engine[] = ['claude', 'codex', 'agy-gemini', 'agy-claude'];
+export type Engine = 'claude' | 'claude-api' | 'codex' | 'agy-claude' | 'agy-gemini';
+/**
+ * DM 을 맡는 차례 — 앞이 막히면 다음으로 내려간다. 6단계부터 Gemini 가 agy 의 Claude(Sonnet)보다 앞이다.
+ * `claude-api` 는 구독자 월 API 크레딧으로 띄우는 Sonnet 세션(2026-10-21 사용자 결정) — 구독 Claude 와 막힘을 따로 센다.
+ */
+export const ENGINES: readonly Engine[] = ['claude', 'claude-api', 'codex', 'agy-gemini', 'agy-claude'];
 export type BlockKind = 'usage' | 'overload' | 'auth' | 'unknown';
 
 export interface Block {

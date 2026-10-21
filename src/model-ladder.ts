@@ -128,6 +128,8 @@ export function rungEngine(spec: string, agyLabels: Record<string, string>): Eng
   const backend = i < 0 ? spec : spec.slice(0, i);
   const alias = i < 0 ? '' : spec.slice(i + 1);
   if (backend === 'claude' || backend === 'codex') return backend;
+  // 월 API 크레딧 칸 — 봇은 Sonnet 으로만 띄운다(`runClaudeApiFallback`). 다른 별칭을 적으면 봇이 못 맡는 칸이다.
+  if (backend === 'claude_api') return !alias || alias === 'sonnet' ? 'claude-api' : undefined;
   if (backend !== 'agy' || !alias) return undefined;
   const label = (agyLabels[alias] ?? '').toLowerCase();
   if (label.startsWith('claude ')) return 'agy-claude';

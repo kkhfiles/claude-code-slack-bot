@@ -378,8 +378,8 @@ try {
     const rows = txt.split('\n');
     ok(`-engines 에 상한 표시가 없다 — ${txt}`, !txt.includes('상한'));
     ok(`-engines 머리에 agy 칸 켜짐 — ${rows[0]}`, rows[0].includes('agy 칸 켜짐'));
-    eq('-engines — 머리 + 엔진 넷 · Gemini 가 agy Claude 앞', rows.map((l) => l.split(' — ')[0]),
-      ['🔧 엔진 상태', '• Claude', '• GPT', '• Gemini', '• agy Claude']);
+    eq('-engines — 머리 + 엔진 다섯 · Gemini 가 agy Claude 앞', rows.map((l) => l.split(' — ')[0]),
+      ['🔧 엔진 상태', '• Claude', '• Claude API', '• GPT', '• Gemini', '• agy Claude']);
   }
 
   // ================================================================ ③ 계획 읽기 · 백엔드 끝 가르기

@@ -18,13 +18,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Logger } from './logger';
 import { engineState, ENGINES, type Engine, type EngineState, type EngineStateData } from './engine-state';
+import { DM_LADDER_AGY } from './engine-ladder';
 
 export type Rung = Engine | 'none';
 const RUNGS: readonly Rung[] = [...ENGINES, 'none'];
 
 /** 안내 줄에 쓰는 짧은 이름 — 판 번호 없이. */
 const SHORT: Record<Engine, string> = {
-  claude: 'Claude', codex: 'GPT', 'agy-claude': 'agy Claude', 'agy-gemini': 'Gemini',
+  claude: 'Claude', 'claude-api': 'Claude API', codex: 'GPT', 'agy-claude': 'agy Claude', 'agy-gemini': 'Gemini',
 };
 const KIND_PHRASE: Record<string, string> = {
   usage: '사용량 소진', overload: '서버 과부하', auth: '인증 오류', unknown: '응답 오류',
@@ -109,7 +110,7 @@ function activeBlock(st: EngineStateData, e: Engine, nowSec: number) {
  * 지금 DM 을 맡을 차례 — 막히지 않은 첫 엔진. 다 막혔으면 `none`.
  * `ladder` 는 실제로 붙은 칸만 넘긴다(5단계는 Claude · GPT) — 안 붙은 agy 를 「이어 갑니다」로 알리지 않게.
  */
-export function dmRung(st: EngineStateData, nowSec: number, ladder: readonly Engine[] = ENGINES): Rung {
+export function dmRung(st: EngineStateData, nowSec: number, ladder: readonly Engine[] = DM_LADDER_AGY): Rung {
   for (const e of ladder) if (!activeBlock(st, e, nowSec)) return e;
   return 'none';
 }
@@ -123,6 +124,7 @@ function rank(r: Rung): number {
 function target(to: Engine, labels: ModelLabels): string {
   switch (to) {
     case 'claude': return 'Claude 로 이어 갑니다';
+    case 'claude-api': return 'Claude API(Sonnet)로 이어 갑니다';
     case 'codex': return `${labels.codex ? `GPT(${labels.codex})` : 'GPT'}로 이어 갑니다`;
     case 'agy-claude': return `agy 의 ${labels.agyClaude || 'Claude'}로 이어 갑니다 · 업무 조회·등록·수정까지`;
     case 'agy-gemini': return `${labels.gemini || 'Gemini'}로 이어 갑니다 · 답이 느리고 업무 조회·등록·수정까지`;
@@ -146,7 +148,7 @@ function blockedOne(st: EngineStateData, e: Engine, nowSec: number): string {
  */
 export function composeTransition(
   from: Rung, to: Rung, st: EngineStateData, labels: ModelLabels, nowSec: number,
-  ladder: readonly Engine[] = ENGINES,
+  ladder: readonly Engine[] = DM_LADDER_AGY,
 ): string | null {
   if (from === to) return null;
   if (to === 'none') {
@@ -250,7 +252,7 @@ export class EngineNotice {
    * (켜져 있고 이것이 `none` 이면 ⏸ 가 이미 나갔거나 미룬 것을 놓을 때 나간다).
    */
   rungNow(): Rung {
-    return dmRung(this.store.load(), this.store.nowSec(), this.opts.ladder?.() ?? ENGINES);
+    return dmRung(this.store.load(), this.store.nowSec(), this.opts.ladder?.() ?? DM_LADDER_AGY);
   }
 
   /**
@@ -266,7 +268,7 @@ export class EngineNotice {
       }
       const st = this.store.load();
       const now = this.store.nowSec();
-      const ladder = this.opts.ladder?.() ?? ENGINES;
+      const ladder = this.opts.ladder?.() ?? DM_LADDER_AGY;
       const rung = dmRung(st, now, ladder);
       const last = (st.ladder?.rung ?? 'claude') as Rung;
       if (rung === last) return null;
