@@ -90,7 +90,7 @@ const stale = ['-apikey', '-limit', '-account', '-schedule'].filter((c) => msgs.
 ok(`도움말 · 문구에 걷은 명령이 남았다 — ${stale.join(' · ')}`, stale.length === 0);
 
 // ── ③ SDK 환경에서 API 키 제거 ─────────────────────────────────────────────
-for (const f of ['sdk-handler.ts']) {
+for (const f of ['sdk-handler.ts', 'model-ladder.ts']) {
   const src = all[f] ?? '';
   ok(`${f} 가 빼는 함수를 안 불러온다`, /import \{[^}]*\bwithoutApiKey\b[^}]*\} from '\.\/child-env'/.test(src));
   ok(`${f} 가 빼는 함수를 안 부른다`, /withoutApiKey\(/.test(src.replace(/^import .*$/gm, '')));

@@ -20,6 +20,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Logger } from './logger';
+import { withoutApiKey } from './child-env';
 import { modelsFile } from './engine-notice';
 import type { Engine } from './engine-state';
 import { DM_LADDER_AGY } from './engine-ladder';
@@ -243,7 +244,8 @@ function runLadder(args: string[], timeoutMs: number): Promise<{ code: number; s
       proc = spawn(process.env.LADDER_PYTHON || 'python', ['-X', 'utf8', '-m', 'llm_playbook.ladder', ...args], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
-        env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8', CLAUDE_SCHEDULED: '1' },
+        // 사다리의 claude 칸은 Claude Code 를 띄운다 — 키가 넘어가면 구독 대신 그 키로 과금된다.
+        env: withoutApiKey({ ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8', CLAUDE_SCHEDULED: '1' }),
       });
     } catch (err) {
       resolve({ code: -1, stdout: '', stderr: String(err) });
