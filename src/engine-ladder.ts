@@ -46,6 +46,11 @@ export function isAgyRung(e: Engine | LadderPick): e is 'agy-claude' | 'agy-gemi
   return e === 'agy-claude' || e === 'agy-gemini';
 }
 
+/** Claude 다음 칸(월 API 크레딧 · GPT · agy) 중 하나인가 — 사다리를 내려가는 반복이 이것으로 돈다. */
+export function isFallbackRung(e: LadderPick): e is Exclude<Engine, 'claude'> {
+  return e !== 'claude' && e !== 'hold';
+}
+
 export interface PickInput {
   origin: DmOrigin;
   planMode: boolean;

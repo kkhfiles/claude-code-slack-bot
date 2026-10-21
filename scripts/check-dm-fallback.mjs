@@ -72,7 +72,7 @@ const drill = require(path.join(ROOT, 'dist', 'engine-drill.js'));
 const wa = require(path.join(ROOT, 'dist', 'work-assistant.js'));
 const pg = require(path.join(ROOT, 'dist', 'privacy-guard.js'));
 const { engineState, EngineState } = require(path.join(ROOT, 'dist', 'engine-state.js'));
-const { EngineNotice } = require(path.join(ROOT, 'dist', 'engine-notice.js'));
+const { EngineNotice, modelsFile } = require(path.join(ROOT, 'dist', 'engine-notice.js'));
 const { ChannelGate } = require(path.join(ROOT, 'dist', 'hold-replay.js'));
 const { SdkHandler } = require(path.join(ROOT, 'dist', 'sdk-handler.js'));
 const { CliProcess } = require(path.join(ROOT, 'dist', 'cli-handler.js'));
@@ -135,12 +135,20 @@ const SCRIPTS = {
   'limited-after-private-write': () => [ev.init, ev.tool('t1', `${CMD1} 비밀조각`), ev.res('t1'), ...drill.limitTail(SID)],
   // 오래 도는 차례 — `-stop` 으로 끊는다(끊으면 진짜 SDK 처럼 AbortError 를 던진다)
   slow: () => [ev.init, { sleep: 4000 }, ev.text('끝까지 갔음'), ev.ok()],
+  // 월 API 크레딧 칸 — 답함 · 크레딧 소진(공식 문서의 Claude Code 문구) · 차례 상한
+  'api-ok': () => [ev.init, ev.text('API 답'), ev.ok('API 답')],
+  'api-credit': () => [ev.init, { type: 'result', subtype: 'success', is_error: true, session_id: SID, total_cost_usd: 0,
+    duration_ms: 1, permission_denials: [], result: 'Credit balance too low · Add funds: https://platform.claude.com/settings/billing' }],
+  'api-budget': () => [ev.init, ev.tool('a1', CMD1), ev.res('a1'), { type: 'result', subtype: 'error_max_budget_usd', is_error: true,
+    session_id: SID, total_cost_usd: 1.2, duration_ms: 1, permission_denials: [], result: '' }],
 };
 let claudeScript = 'ok';
+/** 월 API 크레딧 칸(키를 실은 세션)이 받을 흐름 — 구독 세션과 따로 정한다. */
+let apiScript = 'api-ok';
 const claudeCalls = [];
 SdkHandler.queryFn = ({ prompt, options }) => {
   claudeCalls.push({ prompt: typeof prompt === 'string' ? prompt : '(흐름)', options });
-  const events = SCRIPTS[claudeScript]();
+  const events = SCRIPTS[options?.env?.ANTHROPIC_API_KEY ? apiScript : claudeScript]();
   return (async function* () {
     for (const e of events) {
       if (options?.abortController?.signal?.aborted) return;
@@ -846,6 +854,86 @@ try {
       before: () => writeDrill({ claude: 'usage', codex: 'usage', expiresAt: nowSec() + 600 }) });
     eq('D4 — GPT 를 안 띄우고 모아 둠', [s4.codex.length, bridge.failed.map((f) => f[1]), s4.sink.outcome], [0, ['limit'], 'limited']);
     reset();
+  }
+
+  // ================================================================ ⑫-2 월 API 크레딧 칸(2026-10-21) — Claude → Claude API → GPT
+  {
+    const before = process.env.LLM_PLAYBOOK_MODELS;
+    delete process.env.LLM_PLAYBOOK_MODELS;
+    const real = JSON.parse(fs.readFileSync(modelsFile(), 'utf-8'));
+    real.ladders.dm.rungs = ['claude', 'claude_api', ...real.ladders.dm.rungs.filter((r) => r !== 'claude')];
+    const table = path.join(TMP, 'models-claude-api.json');
+    fs.writeFileSync(table, JSON.stringify(real), 'utf-8');
+    process.env.LLM_PLAYBOOK_MODELS = table;
+    const keyFile = path.join(TMP, 'api-key');
+    // 가짜 키 — 소스에 키 모양 글자를 두지 않는다(공개 저장소 검사가 자격 증명으로 본다).
+    const KEY = ['sk', 'ant', 'check', 'only', 'k'.repeat(40)].join('-');
+    fs.writeFileSync(keyFile, KEY, 'utf-8');
+    process.env.CLAUDE_API_KEY_FILE = keyFile;
+    const apiCalls = () => claudeCalls.filter((c) => c.options?.env?.ANTHROPIC_API_KEY);
+    try {
+      eq('API 칸 — 사다리가 표에서 읽힘', dmf.dmLadder({ DM_FALLBACK: 'on' }), ['claude', 'claude-api', 'codex']);
+
+      // 띄우기 전에 Claude 가 막혀 있음 → 구독 세션은 안 띄우고 API 칸이 답함
+      apiScript = 'api-ok';
+      let s = await scenario({ claude: 'ok', before: blockClaude });
+      const c = apiCalls()[0]?.options ?? {};
+      eq('API 칸 — 구독 세션은 안 띄우고 API 세션 하나', [claudeCalls.length, apiCalls().length, s.codex.length], [1, 1, 0]);
+      eq('API 칸 — 모델 sonnet · 차례 상한 $1 · 새 세션', [c.model, c.maxBudgetUsd, c.resume ?? null, c.continue ?? null],
+        ['sonnet', 1, null, null]);
+      ok('API 칸 — 구독 토큰이 세션에 안 남는다', !('CLAUDE_CODE_OAUTH_TOKEN' in (c.env ?? {})));
+      eq('API 칸 — 캡처 id 를 값으로 · 봇 세션 표시', [c.env?.WORK_ASSISTANT_CAPTURE, c.env?.CLAUDE_BOT_SESSION], ['cap-1', '1']);
+      ok('API 칸 — 같은 규칙 파일(설정 출처 셋) · 슬랙 표면 안내', JSON.stringify(c.settingSources) === '["user","project","local"]'
+        && String(c.systemPrompt?.append ?? '').includes('슬랙 DM'));
+      ok('API 칸 — 답과 표시 줄', allText(s.posts).includes('API 답') && allText(s.posts).includes('↪ Claude API(Sonnet) 가 답함'));
+      eq('API 칸 — 맡은 엔진 · 엔진 상태(구독 Claude 막힘은 그대로)',
+        [s.sink.engine, engineState.isBlocked('claude'), engineState.load().engines['claude-api'].lastOkAt !== null], ['claude-api', true, true]);
+      eq('API 칸 — 쓰기가 없으면 캡처를 닫음', bridge.dropped.map((d) => d[0]), ['cap-1']);
+
+      // 세션이 있는 두 번째 차례 — API 칸은 그 세션을 잇지 않는다(긴 세션을 통째로 다시 보내면 크레딧이 그만큼 든다)
+      s = await scenario({ claude: 'ok' });
+      blockClaude();
+      claudeCalls.length = 0;
+      await s.dm('두 번째 말');
+      const c2 = apiCalls()[0]?.options ?? {};
+      eq('API 칸 — 세션이 있어도 새 세션', [apiCalls().length, c2.resume ?? null, c2.continue ?? null], [1, null, null]);
+
+      // Claude 가 돌다 막힘 → API 칸이 크레딧 소진 → GPT
+      apiScript = 'api-credit';
+      s = await scenario({ claude: 'limited' });
+      eq('크레딧 소진 — 구독 · API 세션 각 하나 · GPT 가 받음', [claudeCalls.length - apiCalls().length, apiCalls().length, s.codex.length, s.sink.engine],
+        [1, 1, 1, 'codex']);
+      eq('크레딧 소진 — API 칸만 사용량 막힘(시각 모름)',
+        [engineState.blocked('claude-api')?.kind, engineState.blocked('claude-api')?.untilKnown], ['usage', false]);
+      ok('크레딧 소진 — 한도 글은 안 올림', !allText(s.posts).includes('Credit balance'));
+
+      // 막힌 API 칸은 다음 차례에 건너뜀
+      s = await scenario({ claude: 'ok', before: () => { blockClaude(); engineState.recordBlocked('claude-api', { kind: 'usage' }); } });
+      eq('API 칸이 막혀 있으면 건너뛰고 GPT', [claudeCalls.length, s.codex.length], [0, 1]);
+
+      // 쓰기 뒤 차례 상한 → GPT 에 「이미 한 것」으로 넘김
+      apiScript = 'api-budget';
+      s = await scenario({ claude: 'ok', before: blockClaude });
+      ok('차례 상한 — GPT 프롬프트에 API 칸이 돌린 명령', (s.codex[0]?.prompt ?? '').includes(CMD1));
+      eq('차례 상한 — 막힘은 아님(다음 차례에 다시 씀)', engineState.isBlocked('claude-api'), false);
+
+      // Claude 가 쓰기 뒤 막힘 → API 칸 프롬프트에 넘겨줄 메모
+      apiScript = 'api-ok';
+      s = await scenario({ claude: 'limited-after-write' });
+      const p = apiCalls()[0]?.prompt ?? '';
+      ok('쓰기 뒤 막힘 — API 칸 프롬프트에 이미 한 것', p.includes('이미 한 것') && p.includes(CMD1));
+      ok('쓰기 뒤 막힘 — 표시 줄이 넘겨받은 건수를 말함', allText(s.posts).includes('이어서 마무리했습니다(이미 한 것: 2건)'));
+
+      // 키 파일이 없음 → 띄우지 않고 인증 막힘 · GPT
+      fs.rmSync(keyFile, { force: true });
+      s = await scenario({ claude: 'ok', before: blockClaude });
+      eq('키 파일 없음 — 안 띄우고 GPT · 인증 막힘', [claudeCalls.length, s.codex.length, engineState.blocked('claude-api')?.kind], [0, 1, 'auth']);
+    } finally {
+      apiScript = 'api-ok';
+      delete process.env.CLAUDE_API_KEY_FILE;
+      if (before === undefined) delete process.env.LLM_PLAYBOOK_MODELS;
+      else process.env.LLM_PLAYBOOK_MODELS = before;
+    }
   }
 
   // ================================================================ ⑬ -engines

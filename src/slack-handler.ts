@@ -51,10 +51,10 @@ import { ChannelGate, HOLD_SWEEP_MS, REPLAY_FRAME, buildHoldExtra, drainHeld, dr
   leadText, markChoice, needsCanary, oldListMessage, receivedSec, replayNote, replayTarget,
   type HeldFile, type HeldItem } from './hold-replay';
 import { StepLog, isHeldOutcome, isWriteTool, outcomeFrom, type TurnOutcome, type TurnStep } from './turn-outcome';
-import { fallbackEligible, isAgyRung, pickAfter, pickEngine, type DmOrigin, type LadderPick, type PickInput } from './engine-ladder';
+import { fallbackEligible, isAgyRung, isFallbackRung, pickAfter, pickEngine, type DmOrigin, type LadderPick, type PickInput } from './engine-ladder';
 import { CODEX_INFLIGHT_STEP, FALLBACK_TIMEOUT_MS, INCOMPLETE_LINE, NEEDS_FULL_LINE, agyMarkerLines, agyRunningStep,
   appendLedger, codexSteps, dmFallbackOn, fallbackEnv, dmLadder, engineStatusText, filesNote, handoverNote, isQuietReply,
-  ladderBlockedMap, ledgerActiveSince, ledgerNote, ledgerServedSince, markerLines, notRunSteps } from './dm-fallback';
+  ladderBlockedMap, ledgerActiveSince, ledgerNote, ledgerServedSince, markerLines, notRunSteps, claudeApiMarkerLines } from './dm-fallback';
 import { codexQuota } from './codex-quota';
 import { sameTier, serviceCodex } from './model-ladder';
 import { readDrill } from './engine-drill';
@@ -82,6 +82,14 @@ import {
  * 2~3/6 에 20~26초). 표와 해석은 work-assistant `docs/design.md`.
  */
 const INTERACTIVE_EFFORT = 'low' as const;
+
+/**
+ * 월 API 크레딧 칸(`claude-api`) 한 차례의 지출 상한 · 시간 상한(2026-10-21 사용자 확인). 상한은 호출이 끝난 뒤에
+ * 재므로 한 호출만큼 넘을 수 있다(실측 — $0.05 상한에 $0.115). 봇과 같은 설정의 세션은 첫 호출에 시스템 지시
+ * 약 11만 5천 토큰을 캐시에 쓴다(2026-10-21 실측 · Haiku).
+ */
+const CLAUDE_API_TURN_BUDGET_USD = 1;
+const CLAUDE_API_TIMEOUT_MS = 6 * 60_000;
 
 /**
  * 대화 세션에 **자기가 슬랙에 있다는 것**을 알린다.
@@ -174,6 +182,8 @@ interface FallbackArgs {
   locale: Locale; say: (msg: any) => Promise<{ ts?: string }>; status: (text: string) => void;
   /** 이 칸이 못 했을 때 그다음 칸 — `hold` 면 이 칸이 모아 두고 한도 안내를 낸다. */
   nextAfter: (failed: Engine) => Promise<LadderPick>;
+  /** 이 차례의 Claude 세션 옵션 — 월 API 크레딧 칸이 같은 규칙 · 도구 · 권한으로 새 세션을 띄운다. */
+  claudeOpts?: SdkRunOptions | null;
 }
 
 /**
@@ -2047,7 +2057,7 @@ export class SlackHandler {
             claudeOutcome: claudeBlock.kind === 'overload' ? 'overload' : 'limited', writeRan: stepLog.writeRan,
           }), ladder);
         }
-        if (pick === 'codex' || isAgyRung(pick)) {
+        if (isFallbackRung(pick)) {
           // **같은 방은 한 줄로 — 사다리 전체를 한 번 잡는다**(칸을 옮기는 사이에 새 차례가 끼어들지 않게).
           // 새 차례는 문에서 기다리고 이 차례를 끊지 않는다. 다시 돌리는 차례는 드레인이 이미 문을 잡았다.
           const release = event.replay ? () => { /* 드레인이 잡은 문 */ } : await this.holdGate.acquire(channel);
@@ -2057,17 +2067,19 @@ export class SlackHandler {
             // 칸이 못 하면 그다음 칸으로(6단계 · `pickAfter`) — 마지막 칸이 못 하면 그 칸이 모아 둔다.
             const nextAfter = async (failed: Engine) => pickAfter(await pickInput(), failed, ladder);
             let prior: TurnStep[] = stepLog.steps;
-            while (pick === 'codex' || isAgyRung(pick)) {
+            while (isFallbackRung(pick)) {
               const rung: Engine = pick;
               const common = {
                 event, channel, sessionKey, replyTs, ts, thread_ts, captureId, surfaceNote, slotMap, finalPrompt,
                 files: processedFiles, claudeSteps: prior, claudeModel: channelModel, block: claudeBlock,
-                sessionId: session?.sessionId, locale, say, nextAfter,
+                sessionId: session?.sessionId, locale, say, nextAfter, claudeOpts: sdkOptsForWarm,
                 status: (s: string) => { if (statusMessageTs) this.queueStatus(sessionKey, channel, statusMessageTs, s); },
               };
               const fb: FallbackResult = isAgyRung(rung)
                 ? await this.runAgyFallback({ ...common, rung, ladder })
-                : await this.runDmFallback(common);
+                : rung === 'claude-api'
+                  ? await this.runClaudeApiFallback(common)
+                  : await this.runDmFallback(common);
               fallbackDone = true;
               fallbackSteps = [...fallbackSteps, ...fb.steps];
               fallbackWrote = fallbackWrote || fb.writeRan;
@@ -2870,6 +2882,101 @@ export class SlackHandler {
    * - 됐으면 답 + 작은 표시 줄 · 쓰기가 없었으면 캡처를 닫음. 못 했으면 다음 칸(6단계 agy)이 있으면 그리로,
    *   없으면 모아 두고 예전 한도 안내(한 번만) — codex 의 오류 글은 안 올린다
    */
+  /**
+   * 월 API 크레딧 칸 한 차례(2026-10-21 사용자 결정) — 구독 Claude 가 막힌 DM 차례를 같은 계열의 Sonnet 이 이어 받는다.
+   * 키는 `billing: 'api'` 가 키 파일에서 넣고(`child-env.ts` `withApiKey`) 엔진 상태는 `claude-api` 에 적힌다.
+   *
+   * - 세션 — 이 차례의 Claude 옵션 그대로(규칙 파일 · 도구 · 권한)에 **새 세션** · 모델 `sonnet` · 차례당 상한
+   *   `CLAUDE_API_TURN_BUDGET_USD`. 원래 세션을 잇지 않는 까닭 — 긴 세션을 통째로 다시 보내면 그 길이만큼 크레딧이 든다
+   * - 프롬프트 — 넘겨줄 메모(앞 칸이 한 것) + 못 본 대화방 글 + 사람 말(GPT 칸과 같다)
+   * - 못 했으면(크레딧 소진 · 키 파일 · 상한 · 시간 · 오류 · 빈 답) 다음 칸으로 · 없으면 모아 둔다(예전 한도 안내)
+   */
+  private async runClaudeApiFallback(a: FallbackArgs): Promise<FallbackResult> {
+    const { event, channel, sessionKey, captureId } = a;
+    let proc: SdkProcess | null = null;
+    let stopped = false;
+    let failure = '';
+    const handle: TurnHandle = { interrupt: () => { stopped = true; proc?.interrupt(); } };
+    this.activeProcesses.set(sessionKey, handle);
+    patchInflight(sessionKey, { engine: 'claude-api', steps: [...a.claudeSteps], sessionId: a.sessionId });
+    a.status('↪ Claude API(Sonnet) 가 이어 받는 중');
+    const stepLog = new StepLog();
+    const timer = setTimeout(() => { failure = '시간 초과'; proc?.interrupt(); }, CLAUDE_API_TIMEOUT_MS);
+    try {
+      const claudeWrites = a.claudeSteps.filter((s) => s.write).length;
+      const context = event.replay ? (event.replayNote ?? '') : await this.getBotUserId()
+        .then((botUserId) => readUnseen(this.app.client as any, channel, {
+          currentTs: a.ts, threadTs: a.thread_ts, isNewSession: true, botUserId, isPrivate: containsPrivate,
+        })).catch(() => '');
+      const prompt = [handoverNote(a.claudeSteps), context, a.finalPrompt].filter(Boolean).join('\n');
+      this.logger.warn('DM 폴백 — Claude API 가 이어 받습니다', { claudeWrites, origin: event.replay ? 'replay' : 'dm' });
+      let text = '';
+      if (!a.claudeOpts) {
+        failure = 'Claude 세션 옵션이 없음';
+      } else {
+        try {
+          proc = this.sdkHandler.runQuery(prompt, {
+            ...a.claudeOpts,
+            session: undefined, resumeSessionId: undefined, continueLastSession: undefined, drillScope: undefined,
+            model: 'sonnet', billing: 'api', maxBudgetUsd: CLAUDE_API_TURN_BUDGET_USD,
+            env: { ...(a.claudeOpts.env ?? {}), ...fallbackEnv(captureId) },
+          });
+        } catch (err: any) {
+          // 키 파일을 못 읽음 · 모양이 틀림 — 띄우지도 않았다. 한 시간 뒤에 다시 본다(auth).
+          engineState.recordBlocked('claude-api', { kind: 'auth' });
+          failure = String(err?.message ?? err);
+        }
+        if (stopped) proc?.interrupt();
+        for await (const ev of (proc ?? []) as AsyncIterable<any>) {
+          if (stepLog.see(ev)) patchInflight(sessionKey, { steps: [...a.claudeSteps, ...stepLog.steps], sessionId: a.sessionId });
+          if (ev?.type !== 'result') continue;
+          if (ev.is_error) {
+            failure = failure || (ev.subtype === 'error_max_budget_usd'
+              ? `차례 상한 $${CLAUDE_API_TURN_BUDGET_USD}` : String(ev.result || ev.subtype || '오류').slice(0, 200));
+          } else {
+            text = String(ev.result ?? '');
+          }
+        }
+      }
+      const steps = stepLog.steps;
+      const writeRan = stepLog.writeRan;
+      if (stopped) {
+        appendLedger({ channel, engine: 'claude-api', model: 'sonnet', captureId, outcome: 'stopped' });
+        return { result: 'stopped', steps, writeRan };
+      }
+      const reply = text.trim();
+      if (!failure && reply) {
+        await a.say({ text: this.formatMessage(reply, true), thread_ts: a.replyTs });
+        // 판에서 온 차례가 「조용히」로 답했으면 답이 안 보이므로 표시 줄도 안 올린다.
+        if (!((event as any).pushed && isQuietReply(reply))) {
+          const marker = claudeApiMarkerLines({ block: a.block, ...(claudeWrites ? { handover: claudeWrites } : {}) }).join('\n');
+          await a.say({ text: marker, blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: marker }] }], thread_ts: a.replyTs });
+        }
+        // 쓰기가 하나도 없었으면(조회 · 잡담) 캡처를 닫는다 — 쓰기가 있었으면 `tasks.py` 가 스스로 닫았다.
+        if (captureId && !writeRan && !claudeWrites) await dropCapture(captureId, '대체 엔진이 답함');
+        appendLedger({ channel, engine: 'claude-api', model: 'sonnet', captureId, outcome: 'ok' });
+        return { result: 'ok', steps, writeRan };
+      }
+      const kind = engineState.isBlocked('claude-api') ? 'usage' : 'fail';
+      appendLedger({ channel, engine: 'claude-api', model: 'sonnet', captureId, outcome: kind });
+      // 이 칸이 돌린 도구는 다음 칸(GPT)에 「이미 한 것」으로 넘어간다.
+      const next = await a.nextAfter('claude-api');
+      if (next !== 'hold' && next !== 'claude') {
+        this.logger.warn(`DM 폴백 — Claude API 도 못 했습니다(${kind}) · ${next} 로 넘깁니다`, { detail: failure || '빈 답' });
+        return { result: 'next', steps, writeRan, next };
+      }
+      this.logger.warn(`DM 폴백 — Claude API 도 못 했습니다(${kind}) · 모아 둡니다`, { detail: failure || '빈 답' });
+      const markDone = this.markTurnFailed(captureId, 'limit', { steps: [...a.claudeSteps, ...steps] },
+        a.sessionId, event, a.files);
+      const quietHold = this.holdToldByNotice(channel);
+      if (!quietHold) await this.handleRateLimitUI(channel, a.thread_ts || a.ts, a.finalPrompt, a.block, a.locale, a.say, a.ts, captureId);
+      return { result: 'failed', steps, writeRan, markDone, ...(quietHold ? { quietHold } : {}) };
+    } finally {
+      clearTimeout(timer);
+      if (this.activeProcesses.get(sessionKey) === handle) this.activeProcesses.delete(sessionKey);
+    }
+  }
+
   private async runDmFallback(a: FallbackArgs): Promise<FallbackResult> {
     const { event, channel, sessionKey, captureId } = a;
     let kill: (() => void) | null = null;

@@ -85,6 +85,16 @@ export function markerLines(o: { model: string; block: Block | null; handover?: 
   return lines;
 }
 
+/** 월 API 크레딧 칸(`claude-api`)이 답했다는 작은 줄 — 「↪ Claude API(Sonnet) 가 답함 · <왜 Claude 가 아닌가>」. */
+export function claudeApiMarkerLines(o: { block: Block | null; handover?: number }): string[] {
+  const lines: string[] = [];
+  if (o.handover !== undefined) {
+    lines.push(`↪ Claude 가 하다 끊겨 Claude API(Sonnet)가 이어서 마무리했습니다(이미 한 것: ${o.handover}건)`);
+  }
+  lines.push(`↪ Claude API(Sonnet) 가 답함 · ${claudeWhy(o.block)}`);
+  return lines;
+}
+
 /** GPT 는 막힘이 아니라 실패로 끝났을 수 있다 — 그때는 「응답 실패」. */
 function engineWhy(e: Engine, b: Block | null, nowSec: number): string {
   if (!b || b.until === null || b.until <= nowSec) return `${SHORT[e]} 응답 실패`;
