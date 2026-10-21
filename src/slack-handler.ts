@@ -2908,7 +2908,12 @@ export class SlackHandler {
         .then((botUserId) => readUnseen(this.app.client as any, channel, {
           currentTs: a.ts, threadTs: a.thread_ts, isNewSession: true, botUserId, isPrivate: containsPrivate,
         })).catch(() => '');
-      const prompt = [handoverNote(a.claudeSteps), context, a.finalPrompt].filter(Boolean).join('\n');
+      // 캡처 id 를 글로 준다 — 미리 띄운 세션을 안 쓰므로 옵션이 굳을 걱정이 없다. id 없이 `inbox resolve --drop` 만 보내면
+      // 자동 권한 판정이 「지울 대상을 확인할 수 없음」으로 거부했다(2026-10-22 시험 차례).
+      const captureLine = captureId
+        ? `[이 차례의 캡처 id: ${captureId} — 쓰기 없이 끝났으면 \`tasks.py inbox resolve --id ${captureId} --drop "사유"\` 로 닫는다]`
+        : '';
+      const prompt = [handoverNote(a.claudeSteps), context, captureLine, a.finalPrompt].filter(Boolean).join('\n');
       this.logger.warn('DM 폴백 — Claude API 가 이어 받습니다', { claudeWrites, origin: event.replay ? 'replay' : 'dm' });
       let text = '';
       if (!a.claudeOpts) {

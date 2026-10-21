@@ -889,6 +889,7 @@ try {
       eq('API 칸 — 맡은 엔진 · 엔진 상태(구독 Claude 막힘은 그대로)',
         [s.sink.engine, engineState.isBlocked('claude'), engineState.load().engines['claude-api'].lastOkAt !== null], ['claude-api', true, true]);
       eq('API 칸 — 쓰기가 없으면 캡처를 닫음', bridge.dropped.map((d) => d[0]), ['cap-1']);
+      ok('API 칸 — 프롬프트에 캡처 id 와 닫는 명령', (apiCalls()[0]?.prompt ?? '').includes('inbox resolve --id cap-1 --drop'));
 
       // 세션이 있는 두 번째 차례 — API 칸은 그 세션을 잇지 않는다(긴 세션을 통째로 다시 보내면 크레딧이 그만큼 든다)
       s = await scenario({ claude: 'ok' });
