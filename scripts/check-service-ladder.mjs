@@ -37,6 +37,8 @@ const eq = (label, got, want) => {
 };
 
 const TODAY = ['claude', 'codex', 'agy-gemini', 'agy-claude'];
+/** DM 은 Claude 다음에 월 API 크레딧 칸이 있다(2026-10-22) — 예약 일과 표를 못 읽을 때의 기본 차례에는 없다. */
+const DM_TODAY = ['claude', 'claude-api', 'codex', 'agy-gemini', 'agy-claude'];
 const ON = { DM_FALLBACK: 'on', DM_FALLBACK_AGY: 'on' };
 const REAL = modelsFile();
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'service-ladder-'));
@@ -52,23 +54,25 @@ const variant = (mutate) => {
 
 try {
   // ① 지금 표
-  eq('① DM 차례 — 표에서', ml.serviceLadder('dm', REAL), TODAY);
+  eq('① DM 차례 — 표에서', ml.serviceLadder('dm', REAL), DM_TODAY);
   eq('① 예약 일 차례 — 표에서', ml.serviceLadder('scheduled', REAL), TODAY);
   eq('① 예약 일의 agy 칸 — Gemini 먼저', agy.agyRungOrder(REAL), ['agy-gemini', 'agy-claude']);
   eq('① 켜는 문 — 꺼짐 · GPT 까지 · agy 까지 · agy 만 켬',
     [dmf.dmLadder({}, REAL), dmf.dmLadder({ DM_FALLBACK: 'on' }, REAL), dmf.dmLadder(ON, REAL),
       dmf.dmLadder({ DM_FALLBACK_AGY: 'on' }, REAL)],
-    [['claude'], ['claude', 'codex'], TODAY, ['claude']]);
-  eq('① 기본 인자(운영 경로)도 같은 표', dmf.dmLadder(ON), TODAY);
-  eq('① 표를 못 읽을 때의 값도 오늘 차례', [ml.LADDER_DEFAULT.dm, ml.LADDER_DEFAULT.scheduled], [TODAY, TODAY]);
+    [['claude'], ['claude', 'claude-api', 'codex'], DM_TODAY, ['claude']]);
+  eq('① 기본 인자(운영 경로)도 같은 표', dmf.dmLadder(ON), DM_TODAY);
+  eq('① 표를 못 읽을 때의 값 — API 칸 없는 예전 차례', [ml.LADDER_DEFAULT.dm, ml.LADDER_DEFAULT.scheduled], [TODAY, TODAY]);
 
   // ② 표를 고치면 따라온다
   const noSonnet = variant((t) => { t.ladders.dm.rungs = t.ladders.dm.rungs.filter((r) => r !== 'agy:sonnet-low'); });
-  eq('② DM 에서 agy Claude 칸을 빼면 빠진다', ml.serviceLadder('dm', noSonnet), ['claude', 'codex', 'agy-gemini']);
-  eq('② 그 표로 켜는 문도', dmf.dmLadder(ON, noSonnet), ['claude', 'codex', 'agy-gemini']);
+  eq('② DM 에서 agy Claude 칸을 빼면 빠진다', ml.serviceLadder('dm', noSonnet), ['claude', 'claude-api', 'codex', 'agy-gemini']);
+  eq('② 그 표로 켜는 문도', dmf.dmLadder(ON, noSonnet), ['claude', 'claude-api', 'codex', 'agy-gemini']);
   eq('② DM 칸을 빼도 예약 일은 그대로', agy.agyRungOrder(noSonnet), ['agy-gemini', 'agy-claude']);
   const noCodex = variant((t) => { t.ladders.dm.rungs = t.ladders.dm.rungs.filter((r) => r !== 'codex'); });
-  eq('② DM 에서 GPT 칸을 빼면 빠진다', dmf.dmLadder(ON, noCodex), ['claude', 'agy-gemini', 'agy-claude']);
+  eq('② DM 에서 GPT 칸을 빼면 빠진다', dmf.dmLadder(ON, noCodex), ['claude', 'claude-api', 'agy-gemini', 'agy-claude']);
+  const noApi = variant((t) => { t.ladders.dm.rungs = t.ladders.dm.rungs.filter((r) => r !== 'claude_api'); });
+  eq('② DM 에서 API 칸을 빼면 빠진다(끄는 법)', dmf.dmLadder(ON, noApi), TODAY);
   const swapped = variant((t) => { t.ladders.scheduled.rungs = ['claude', 'codex', 'agy:sonnet-low', 'agy:flash-high']; });
   eq('② 예약 일의 agy 칸 순서를 바꾸면 바뀐다', agy.agyRungOrder(swapped), ['agy-claude', 'agy-gemini']);
   const schedNoGemini = variant((t) => { t.ladders.scheduled.rungs = ['claude', 'codex', 'agy:sonnet-low']; });
@@ -76,7 +80,7 @@ try {
 
   // 같은 파일을 고치면 다시 읽는다(고친 시각으로 견줌)
   const live = variant(() => {});
-  eq('② 고치기 전', ml.serviceLadder('dm', live), TODAY);
+  eq('② 고치기 전', ml.serviceLadder('dm', live), DM_TODAY);
   const t = JSON.parse(fs.readFileSync(live, 'utf-8'));
   t.ladders.dm.rungs = ['claude', 'codex'];
   fs.writeFileSync(live, JSON.stringify(t));

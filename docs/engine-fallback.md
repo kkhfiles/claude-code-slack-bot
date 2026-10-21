@@ -69,6 +69,8 @@
 - **비용** — Max 구독에 딸린 월 API 크레딧(Max 5x 는 $100, 이월 없음)
 
 - **켜는 법** — `models.json` 의 `ladders.dm` 에서 `claude` 바로 다음에 `claude_api` 칸을 넣음. 표에 없으면 이 칸은 안 돎
+  - 2026-10-22 에 켬(실제 DM 한 차례 시험 뒤 사용자 결정). 끄려면 그 칸을 빼면 다음 차례부터 따라옴(재시작 불필요)
+- **첫 실제 차례**(2026-10-22) — 29초, 모델 호출 3번, $0.49. 이 차례에서 번호 없는 `inbox resolve --drop` 이 자동 권한 판정에 거부되어, 프롬프트에 캡처 번호와 닫는 명령을 적어 줌
 - **세션** — 이 차례의 Claude 옵션(규칙 파일, 도구, 권한, 슬랙 표면 안내)을 그대로 쓰는 새 세션
   - 모델은 `sonnet` 고정(Opus 를 쓰던 차례도 Sonnet)
   - 원래 세션을 잇지 않음. 긴 세션을 다시 보내면 그 길이만큼 크레딧이 듦
@@ -236,7 +238,9 @@
 - **정본** — llm-playbook `models.json` 의 `ladders`. 봇은 그 가운데 `dm` 과 `scheduled` 를 읽음(`src/model-ladder.ts` 의 `serviceLadder`)
   - `dm` — DM 차례(`dmLadder`, 엔진 안내와 `-engines`, 드레인이 이것을 봄)
   - `scheduled` — 예약 일의 agy 칸 차례(`agyRungOrder`, 카드 요약과 아침 브리핑과 지금 집중할 것과 회의 알림 판단)
-- **지금 값** — 두 사다리 모두 `claude` → `codex` → `agy:flash-high` → `agy:sonnet-low`
+- **지금 값**(2026-10-22)
+  - `dm` — `claude` → `claude_api` → `codex` → `agy:flash-high` → `agy:sonnet-low`
+  - `scheduled` — `claude` → `codex` → `agy:flash-high` → `agy:sonnet-low`(API 칸 없음)
   - 별칭 없는 `claude` 와 `codex` 칸의 모델은 `service_fallback` 대응표가 정함(아래 「폴백 모델」 절)
 - **칸 → 엔진 열쇠** — `claude`, `codex` 는 그대로. `claude_api`(별칭 없음 또는 `sonnet`)는 `claude-api`. agy 칸은 별칭의 표시 이름(`agy.models`)으로 가름
   - 「Claude …」 → `agy-claude`

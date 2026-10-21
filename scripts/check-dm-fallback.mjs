@@ -861,7 +861,7 @@ try {
     const before = process.env.LLM_PLAYBOOK_MODELS;
     delete process.env.LLM_PLAYBOOK_MODELS;
     const real = JSON.parse(fs.readFileSync(modelsFile(), 'utf-8'));
-    real.ladders.dm.rungs = ['claude', 'claude_api', ...real.ladders.dm.rungs.filter((r) => r !== 'claude')];
+    real.ladders.dm.rungs = ['claude', 'claude_api', ...real.ladders.dm.rungs.filter((r) => r !== 'claude' && r !== 'claude_api')];
     const table = path.join(TMP, 'models-claude-api.json');
     fs.writeFileSync(table, JSON.stringify(real), 'utf-8');
     process.env.LLM_PLAYBOOK_MODELS = table;

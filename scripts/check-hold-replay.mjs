@@ -580,6 +580,8 @@ try {
         const m0 = marks.length;
         await sched.runMailPoll();
         eq('메일 — 폴백이 켜져 있으면 Claude 만 막혀도 넘기고 표시를 옮김', [asked.length - a0, marks.length - m0], [1, 1]);
+        // 사다리의 Claude 다음 칸 전부 — 월 API 크레딧 칸(2026-10-22)과 GPT
+        engineState.recordBlocked('claude-api', { kind: 'usage', until: nowSec() + 3600 });
         engineState.recordBlocked('codex', { kind: 'usage', until: nowSec() + 3600 });
         await sched.runMailPoll();
         eq('메일 — 사다리가 다 막혔으면 안 읽음', [asked.length - a0, marks.length - m0], [1, 1]);
