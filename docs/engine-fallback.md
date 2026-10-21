@@ -63,6 +63,33 @@
 - **재시작에 끊김** — 처리 중 기록에 「GPT 명령 — 무엇을 했는지 모름」(쓰기)을 넣어 둠, 보류 v2 가 `partial` 로 이어 감
   - 지난 기동의 처리 중 기록은 생성자에서 떠 둠(`snapshotBootInflight`) — 알림(기동 12초 뒤) 전에 같은 열쇠(DM 맨 위는 `direct`)의 새 차례가 덮어도 끊긴 차례를 잃지 않음
 
+## 월 API 크레딧 칸 — `runClaudeApiFallback`(2026-10-21 사용자 결정)
+
+- **무엇** — 구독 Claude 가 막힌 DM 차례를 GPT 보다 먼저 받는 칸. 모델은 Claude API 의 Sonnet
+- **비용** — Max 구독에 딸린 월 API 크레딧(Max 5x 는 $100, 이월 없음)
+
+- **켜는 법** — `models.json` 의 `ladders.dm` 에서 `claude` 바로 다음에 `claude_api` 칸을 넣음. 표에 없으면 이 칸은 안 돎
+- **세션** — 이 차례의 Claude 옵션(규칙 파일, 도구, 권한, 슬랙 표면 안내)을 그대로 쓰는 새 세션
+  - 모델은 `sonnet` 고정(Opus 를 쓰던 차례도 Sonnet)
+  - 원래 세션을 잇지 않음. 긴 세션을 다시 보내면 그 길이만큼 크레딧이 듦
+  - 미리 띄운 세션과 엔진 연습은 안 씀(둘 다 구독 환경으로 뜸)
+  - 프롬프트는 GPT 칸과 같음(넘겨줄 메모, 못 본 대화방 글, 사람 말)
+- **키** — `~/.config/llm-playbook/.anthropic-api-key`(llm-playbook 과 같은 파일, 시험은 `CLAUDE_API_KEY_FILE`)
+  - `withApiKey()` 가 키를 넣고 `CLAUDE_CODE_OAUTH_TOKEN` 과 `ANTHROPIC_AUTH_TOKEN` 을 뺌
+  - 키를 넣는 위치는 `sdk-handler.ts` 의 `billing: 'api'` 갈래 하나, 세션을 띄우는 위치는 이 함수 하나(검사 `check:noaccounts`)
+- **엔진 상태** — `claude-api` 열쇠에 따로 적음(`ClaudeTap` 의 엔진 인자). 구독 Claude 의 막힘을 지우지 않음
+- **상한** — 차례당 $1(`maxBudgetUsd`)과 6분. 지출 상한은 호출이 끝난 뒤에 재므로 한 호출만큼 넘을 수 있음
+- **못 했을 때** — 다음 칸(GPT)으로 넘기고, 이 칸이 돌린 도구는 「이미 한 것」으로 함께 넘김
+  - 크레딧 소진(「Credit balance too low」) — 사용량 막힘, 시각 모름(한 시간 뒤 다시 봄)
+  - 키 파일 없음 또는 모양이 틀림 — 띄우지 않고 인증 막힘
+  - 차례 상한, 시간 초과, 오류, 빈 답 — 막힘으로 적지 않음(다음 차례에 다시 씀)
+- **표시 줄** — 「↪ Claude API(Sonnet) 가 답함 · <왜 Claude 가 아닌가>」
+- **크레딧 적용 확인**(2026-10-21) — API 키로 띄운 Agent SDK 세션이 `apiKeySource: ANTHROPIC_API_KEY` 로 답함. 공식 문서는 Agent SDK 를 적용 대상, Claude Code 를 제외 대상으로 적음
+- **비용 실측**(2026-10-21) — 봇과 같은 설정의 세션은 첫 호출에 약 11만 5천 토큰을 1시간 캐시에 씀
+  - Haiku 진단 1건 $0.115(프롬프트 10만 토큰 초과 단가 $0.50 에 캐시 기록 2배)
+  - Sonnet 5.5 추정 — 첫 호출 약 $0.46(입력 $2/MTok 에 2배), 뒤 호출은 캐시 읽기로 약 $0.02씩
+- **검사** — `check:dmfallback` 「월 API 크레딧 칸」 장면(답함, 크레딧 소진 뒤 GPT, 막힌 칸 건너뜀, 상한 뒤 넘겨줄 메모, 키 파일 없음, 세션을 잇지 않음)
+
 ## 결과
 
 - **됨**
@@ -201,7 +228,7 @@
 ## `-engines`
 
 - **머리 한 줄** — DM 폴백, agy 칸, 엔진 안내, 연습 상태
-- **엔진 네 줄** — 막힘, 풀리는 시각, 마지막 성공, 5시간과 7일 사용률, 사다리 밖 표시(순서는 사다리 순서)
+- **엔진 다섯 줄** — 막힘, 풀리는 시각, 마지막 성공, 5시간과 7일 사용률, 사다리 밖 표시(순서는 사다리 순서)
 - 버튼 없음
 
 ## 칸 차례 — 사다리 표 `ladders`(2026-10-19)
@@ -211,7 +238,7 @@
   - `scheduled` — 예약 일의 agy 칸 차례(`agyRungOrder`, 카드 요약과 아침 브리핑과 지금 집중할 것과 회의 알림 판단)
 - **지금 값** — 두 사다리 모두 `claude` → `codex` → `agy:flash-high` → `agy:sonnet-low`
   - 별칭 없는 `claude` 와 `codex` 칸의 모델은 `service_fallback` 대응표가 정함(아래 「폴백 모델」 절)
-- **칸 → 엔진 열쇠** — `claude`, `codex` 는 그대로. agy 칸은 별칭의 표시 이름(`agy.models`)으로 가름
+- **칸 → 엔진 열쇠** — `claude`, `codex` 는 그대로. `claude_api`(별칭 없음 또는 `sonnet`)는 `claude-api`. agy 칸은 별칭의 표시 이름(`agy.models`)으로 가름
   - 「Claude …」 → `agy-claude`
   - 「Gemini …」(Argon 제외) → `agy-gemini`
   - Argon 과 모르는 별칭은 봇이 맡지 못하는 칸이라 아래 「못 읽으면」으로 감
