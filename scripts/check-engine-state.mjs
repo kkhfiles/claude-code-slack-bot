@@ -63,6 +63,9 @@ const LOG = {
   overload: 'API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment. If it persists, check status.claude.com.',
   overloadWrapped: 'Claude Code returned an error result: API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment.',
   rate429: 'Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}}',
+  // 월 API 크레딧 소진 — platform.claude.com 「API credits for Max and Team plans」 원문 두 가지
+  credit: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.',
+  creditCli: 'Credit balance too low · Add funds: https://platform.claude.com/settings/billing',
 };
 /** 같은 차례(2026-08-31 16:04 KST)의 거절 이벤트가 실어 온 `resetsAt`. */
 const SESSION_RESETS_AT = 1788160200;
@@ -221,6 +224,8 @@ try {
     eq('529 Overloaded 는 과부하(시각은 상태가 정함)', classifyClaudeErrorText(LOG.overload), { kind: 'overload' });
     eq('감싼 과부하도 과부하', classifyClaudeErrorText(LOG.overloadWrapped), { kind: 'overload' });
     eq('429 rate_limit_error 는 사용량(시각 모름)', classifyClaudeErrorText(LOG.rate429), { kind: 'usage' });
+    eq('API 크레딧 소진은 사용량(시각 모름)', classifyClaudeErrorText(LOG.credit), { kind: 'usage' });
+    eq('Claude Code 가 낸 크레딧 소진도 사용량', classifyClaudeErrorText(LOG.creditCli), { kind: 'usage' });
     for (const plain of ['ENOENT: no such file or directory', 'aborted', 'CLI process exited with code 1', '']) {
       eq(`평범한 오류는 막힘이 아니다 — ${plain || '(빈 글)'}`, classifyClaudeErrorText(plain), null);
     }
@@ -233,7 +238,7 @@ try {
       const at = src.indexOf('async *[Symbol.asyncIterator]()');
       ok(`${f}: 이벤트를 내보내는 곳을 못 찾았다`, at >= 0);
       const body = src.slice(at, src.indexOf('\n  }\n', at));
-      ok(`${f}: 흐름마다 탭을 만든다`, body.includes('new ClaudeTap()'));
+      ok(`${f}: 흐름마다 탭을 만든다`, body.includes('new ClaudeTap('));
       const yields = [...body.matchAll(/yield ([^;]+);/g)];
       ok(`${f}: 내보내는 곳이 없다`, yields.length > 0);
       for (const y of yields) {
@@ -257,6 +262,15 @@ try {
     eq('탭: 막힌 흐름의 결과가 막힘을 안 지운다', s.isBlocked('claude'), true);
     new ClaudeTap(s).see({ type: 'result', subtype: 'success', is_error: false, result: '답' });
     eq('탭: 다음 차례가 되면 지운다', s.isBlocked('claude'), false);
+
+    // 월 API 크레딧 세션 — 같은 탭을 지나되 자기 열쇠에만 적는다. 구독 Claude 의 막힘을 지우면 안 된다.
+    const a = fresh();
+    a.recordBlocked('claude', { kind: 'usage', until: nowSec() + 4000 });
+    new ClaudeTap(a, 'claude-api').see({ type: 'result', subtype: 'success', is_error: false, result: '답' });
+    eq('탭(claude-api): 된 것이 구독 Claude 의 막힘을 안 지운다', [a.isBlocked('claude'), a.load().engines['claude-api'].lastOkAt !== null], [true, true]);
+    new ClaudeTap(a, 'claude-api').see({ type: 'result', subtype: 'success', is_error: true, result: LOG.credit });
+    eq('탭(claude-api): 크레딧 소진 → 그 열쇠만 막힘(시각 모름)', [a.isBlocked('claude-api'), a.blocked('claude-api')?.untilKnown, a.blockedUntil('claude') - nowSec()],
+       [true, false, 4000]);
 
     // 과부하 한 번 = 결과 둘(세션 결과 + SDK 가 감싼 것) — 한 단계로만 센다.
     const o = fresh();

@@ -15,7 +15,7 @@
  * **절대 안 던진다** — 이것은 기록이지 차례의 일부가 아니다. 터지면 WARN 한 줄만 남긴다.
  */
 import { Logger } from './logger';
-import { engineState, type Block, type EngineState } from './engine-state';
+import { engineState, type Block, type Engine, type EngineState } from './engine-state';
 import { classifyClaudeErrorText, classifyClaudeEvent } from './rate-limit-utils';
 
 const logger = new Logger('EngineTap');
@@ -24,30 +24,34 @@ export class ClaudeTap {
   /** 이 흐름에서 이미 막힘을 적었나. */
   private blockedHere = false;
 
-  constructor(private store: EngineState = engineState) {}
+  /**
+   * `engine` — 이 흐름이 어느 엔진의 것인가. 월 API 크레딧 세션(`claude-api`)은 같은 SDK 를 지나지만 구독 Claude 와
+   * 막힘을 따로 센다 — 같은 열쇠에 적으면 API 세션이 된 것이 구독 Claude 의 막힘을 지운다.
+   */
+  constructor(private store: EngineState = engineState, private engine: Engine = 'claude') {}
 
   see(ev: any): void {
     try {
       if (ev?.type === 'rate_limit_event') {
         const v = classifyClaudeEvent(ev);
-        if (v.util) this.store.recordUtil('claude', v.util);
+        if (v.util) this.store.recordUtil(this.engine, v.util);
         if (v.block && !this.blockedHere) {
           this.blockedHere = true;
-          this.store.recordBlocked('claude', v.block);
+          this.store.recordBlocked(this.engine, v.block);
         }
         return;
       }
       if (ev?.type !== 'result') return;
       if (ev.is_error !== true) {
         // ⚠️ 막힌 흐름의 결과는 「됐다」가 아니다 — 거절 이벤트 뒤에도 `subtype: success` 가 온다.
-        if (!this.blockedHere) this.store.recordOk('claude');
+        if (!this.blockedHere) this.store.recordOk(this.engine);
         return;
       }
       if (this.blockedHere) return;
       const c = classifyClaudeErrorText(String(ev.result ?? ''));
       if (c) {
         this.blockedHere = true;
-        this.store.recordBlocked('claude', c);
+        this.store.recordBlocked(this.engine, c);
       }
     } catch (err: any) {
       logger.warn('엔진 상태를 못 적었습니다 — 차례는 그대로 갑니다', { err: String(err?.message ?? err) });

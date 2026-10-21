@@ -58,7 +58,10 @@ export function isRateLimitError(error: any): boolean {
  * 「You've hit your limit · resets 1pm (Asia/Seoul)」 ·
  * 「You've hit your weekly limit · resets Oct 5, 10am (Asia/Seoul)」.
  */
-const USAGE_PATTERN = /hit your (?:[a-z]+ )?limit|usage limit|session limit|weekly limit|spending.?cap/i;
+// 「Your credit balance is too low to access the Anthropic API.」 · 「Credit balance too low · Add funds」 — 월 API
+// 크레딧이 바닥난 세션(`claude-api` · platform.claude.com 「API credits for Max and Team plans」 원문). 크레딧은 다음 결제
+// 주기에 들어오므로 시각이 없다 — 한 시간 뒤에 다시 본다.
+const USAGE_PATTERN = /hit your (?:[a-z]+ )?limit|usage limit|session limit|weekly limit|spending.?cap|credit balance (?:is )?too low/i;
 /** 서버 과부하 — 「API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment.」 */
 const OVERLOAD_PATTERN = /overloaded|\b529\b|capacity/i;
 /**
