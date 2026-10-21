@@ -9,6 +9,7 @@
  *   ① 아직 반영 안 된 사람 말(지금 도는 차례)이 있으면 멈추는가
  *   ①-c 오래 열린 캡처(차례가 끝난 질문·조회)는 막지 않고 알리기만 하는가 — 2026-09-23 오탐
  *   ①-d 오래됐어도 포인터에 있으면(긴 차례가 도는 중) 멈추는가
+ *   ①-e 방금 붙은 메일 후보 캡처는 포인터가 없으면 막지 않는가(끝난 차례) · 포인터에 있으면 멈추는가 — 2026-10-21 오탐
  *   ② 큐가 방금 움직였으면 기다리는가
  *   ③ 아무것도 안 걸리면 통과시키는가 (막기만 하는 문도 고장이다)
  *   ④ 처리 제안 세션(report-log 작업 잡기 표시)이 도는 중이면 멈추는가 · 시간 지난 표시는 막지 않는가
@@ -117,6 +118,26 @@ if (stale.code !== 0) {
 const liveOld = run({ WORK_ASSISTANT_ROOT: staleRoot, BOT_LOG_PATH: quietLog, WORK_CAPTURE_STATE_DIR: liveC3 });
 if (liveOld.code === 0) {
   fails.push('포인터에 있는(지금 도는) 캡처를 오래됐다는 이유로 그냥 재시작한다');
+}
+
+// ①-e 메일 폴러의 후보 차례는 바로 돌고 끝까지 기다린다 — 방금 붙었어도 포인터가 없으면 끝난 차례다(2026-10-21 오탐:
+//      판에 쓸 것이 없던 후보가 열린 채 남아 20~40분마다 30분씩 재시작을 막았다). 포인터에 있으면 그대로 멈춘다.
+const mailRoot = path.join(tmp, 'mail');
+fs.mkdirSync(mailRoot);
+fs.writeFileSync(path.join(mailRoot, 'inbox.jsonl'), JSON.stringify({
+  id: 'm4', ts: new Date().toISOString(), status: 'open', source: 'slack',
+  text: '[메일] 후보 2건\n최근 2일 · 메일 117건 → 거르개 통과 25건 → 낼 스레드 2개',
+}) + '\n');
+const mailDone = run({ WORK_ASSISTANT_ROOT: mailRoot, BOT_LOG_PATH: quietLog });
+if (mailDone.code !== 0) {
+  fails.push('끝난 메일 후보 차례(포인터 없음)로 재시작을 막는다 — 2026-10-21 의 오탐');
+}
+const liveM4 = path.join(tmp, 'state-live-mail');
+fs.mkdirSync(liveM4);
+fs.writeFileSync(path.join(liveM4, 'work-capture-D9.json'), JSON.stringify({ id: 'm4', at: new Date().toISOString() }));
+const mailLive = run({ WORK_ASSISTANT_ROOT: mailRoot, BOT_LOG_PATH: quietLog, WORK_CAPTURE_STATE_DIR: liveM4 });
+if (mailLive.code === 0) {
+  fails.push('지금 도는 메일 후보 차례(포인터에 있음)를 그냥 재시작한다');
 }
 
 // ①-b `--force` 는 뚫려야 한다. 못 뚫으면 급할 때 스크립트를 우회하게 되고,

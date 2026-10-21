@@ -49,6 +49,13 @@ const APP = 'claude-slack-bot';
  * 그보다 오래된 차례는 쓰기를 해도 그 캡처를 못 닫으므로 시스템 스스로 끝난 것으로 본다.
  */
 const IN_FLIGHT_MS = 30 * 60_000;
+/**
+ * 메일 폴러가 넘긴 차례(`[메일] 후보 N건` · `agy-actions.ts` 의 `isMailTurn` 과 같은 머리). 폴러는 차례를 **바로 돌리고 끝까지
+ * 기다리므로** 도는 중이면 포인터가 반드시 있다 — 위 `IN_FLIGHT_MS`(차례를 기다리는 사람 말을 지키는 시간)를 걸면 안 된다.
+ * 판에 쓸 것이 없던 후보는 캡처가 열린 채 남는데, 20~40분마다 오는 후보가 30분씩 재시작을 막았다(2026-10-21 오탐 —
+ * 스탠리는 쉬고 있었다).
+ */
+const MAIL_TURN = /(^|\n)\s*\[메일\] 후보 \d+건/;
 /** 큐가 이 안에 움직였으면 도는 중으로 본다. 한 건 처리에 20~30초 걸린다. */
 const QUEUE_QUIET_MS = 45_000;
 /** 조용해지기를 이만큼까지 기다린다. 넘으면 사람에게 넘긴다. */
@@ -129,7 +136,8 @@ function openCaptures() {
   const stale = [];
   for (const r of open) {
     const at = Date.parse(r.ts || '');
-    if (live.has(r.id) || (Number.isFinite(at) && now - at < IN_FLIGHT_MS)) inFlight.push(r);
+    const waiting = Number.isFinite(at) && now - at < IN_FLIGHT_MS && !MAIL_TURN.test(r.text || '');
+    if (live.has(r.id) || waiting) inFlight.push(r);
     else stale.push(r);
   }
   return { inFlight, stale };
