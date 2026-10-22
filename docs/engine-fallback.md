@@ -321,11 +321,6 @@
 | `recurring_done` | id(목록의 정기 업무), as_of, note | 목록에 없는 id |
 | `focus` | note, pick(열린 업무 3개까지) 또는 off | 목록에 없는 번호 |
 | `mail_judge` | subject, from, proposed, decided, by, task, note | 이 차례에 온 메일 제목이 아닌 것, 혼자 정했는데 decided 를 채운 것 |
-| `credits_set` | key(max 또는 team), usd(0~10000), expires | 다른 키 이름, 키 파일, 오늘이나 지난 만료일 |
-
-- **크레딧 등록**(`credits_set`, 2026-10-22 사용자 결정) — Claude 와 GPT 가 다 막힌 때가 곧 새 크레딧을 알려 줄 때라 agy 칸도 알아들어야 함
-  - 실행은 `python -X utf8 -m llm_playbook.credits set --key=… --usd=… --expires=…`. 캡처는 안 닫히므로 규칙이 `inbox_resolve` drop 을 같이 내게 함
-  - Claude 세션과 GPT 칸은 work-assistant `CLAUDE.md` 「API 크레딧 등록」을 읽고 같은 명령을 직접 돌림. GPT 칸이 장부에 쓸 수 있게 장부 폴더를 쓰기 허용 폴더에 넣음(`codexWritableDirs`)
 
 - **메일 후보 차례**(`[메일] 후보 N건`, 2026-10-19) — 전에는 agy 가 메일함을 못 읽어 이 차례를 보류(10/16 1건)
   - 봇이 후보 글에서 제목을 뽑아 `mail.py show`(읽기 전용, 셸 없이)로 스레드마다 최근 세 통의 앞부분을 읽고 `[메일 본문]` 덩이로 붙임(9,000자 상한, 실측 7.2초)

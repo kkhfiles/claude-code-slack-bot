@@ -2,12 +2,9 @@
  * agy 칸의 명령 허용 목록 · 실행 · 프롬프트 재료(2026-10-14 · 엔진 폴백 6단계).
  *
  * agy 는 도구가 없다 — 「무엇을 할지」를 JSON 으로만 내고, 봇이 여기서 **모양을 엄격히 본 뒤** `tasks.py` 를
- * **셸 없이**(인자 배열) 부른다. 받는 명령은 열뿐이다.
+ * **셸 없이**(인자 배열) 부른다. 받는 명령은 아홉뿐이다.
  *
- *   add · update · log · defer · quick · inbox_resolve · recurring_done · focus · mail_judge · credits_set
- *
- * `credits_set` 만 `tasks.py` 가 아니라 `python -m llm_playbook.credits set` 이다 — Claude 와 GPT 가 다 막힌 때가
- * 곧 새 크레딧을 알려 줄 때라 이 칸이 알아들어야 한다(2026-10-22 사용자 결정).
+ *   add · update · log · defer · quick · inbox_resolve · recurring_done · focus · mail_judge
  *
  * 메일 후보 차례(`[메일] 후보 …`)에는 봇이 스레드 본문 앞부분을 읽어 붙인다(`mailBodies` → `mail.py show` · 읽기
  * 전용 · 2026-10-19). `mail_judge` 는 **그 차례에 온 제목만** 받는다 — 제목은 밖에서 온 글이라 셸 없이 넘긴다.
@@ -124,11 +121,8 @@ export const AGY_DM_RULES = [
   '- Mycelium · 파일 고치기 · 다른 저장소 · 첨부 · 웹이 있어야 하는 요청이면 needs_full 을 true 로,',
   '  needs_full_reason 에 무엇이 필요한지 한 줄. 할 수 있는 부분만 actions 에 넣는다.',
   '- 조회 · 잡담은 actions 없이 reply 만.',
-  '- API 크레딧(키 max = Max 구독 키 · team = 팀 키): 사람이 새로 받은 크레딧이나 지금 잔액을 금액 · 만료일과 함께',
-  '  말하면 credits_set 과 inbox_resolve drop 「API 크레딧 등록」. 업무가 아니다(add 안 함).',
-  '  어느 키인지 · 만료일이 말에 없으면 actions 를 비우고 묻는다. 연도가 없으면 오늘 이후 가장 가까운 그 날짜.',
   '',
-  '명령(이 열 말고는 실행되지 않는다):',
+  '명령(이 아홉 말고는 실행되지 않는다):',
   '{"op":"add","title":"…","est":2,"importance":"H|M|L","size":"XS|S|M|L","soft":"YYYY-MM-DD","hard":"YYYY-MM-DD","next":"…","remind":"YYYY-MM-DD HH:MM","jira":"KEY-1"}',
   '  — title · est 필수. 모르면 est 2 · soft 다음 영업일+5일 · importance M · size M',
   '{"op":"update","id":"TSK-5","sets":{"칸":"값"}}',
@@ -142,8 +136,6 @@ export const AGY_DM_RULES = [
   '{"op":"focus","note":"지금 집중할 것 한 줄","pick":["TSK-5"]}  또는  {"op":"focus","off":true}',
   '{"op":"mail_judge","subject":"[메일 본문]의 ■ 제목 그대로","from":"발신","proposed":"등록|갱신|회신|버림|물음","decided":"","by":"session","task":"TSK-5","note":"…"}',
   '  — 이 차례에 온 메일 제목만 받는다. task 는 갱신일 때만 · decided 는 비우거나 갈래 · 「아니다」만 들었으면 "?"',
-  '{"op":"credits_set","key":"max|team","usd":500,"expires":"YYYY-MM-DD"}',
-  '  — 받은 금액(또는 사람이 알려 준 잔액)과 만료일. 쓴 금액은 0 으로 다시 센다',
 ].join('\n');
 
 /**
@@ -302,8 +294,6 @@ export interface ValidAction {
   env?: Record<string, string>;
   /** `bin/` 아래 스크립트 — 기본 `tasks.py`. */
   script?: 'tasks.py' | 'mail.py';
-  /** 스크립트 대신 `python -m` 으로 부를 모듈 — 크레딧 장부(`llm_playbook.credits`)만. */
-  module?: 'llm_playbook.credits';
 }
 
 export interface RejectedAction {
@@ -405,13 +395,6 @@ const IMPORTANCE = ['H', 'M', 'L'] as const;
 const SIZE = ['XS', 'S', 'M', 'L'] as const;
 const STATUS = ['대기', '진행중', '완료', '취소'] as const;
 const EXEC_TYPE = ['L0 수동', 'L1 AI보조', 'L2 AI실행+승인', 'L3 자동'] as const;
-/** 크레딧 장부의 키 이름 — `credits.py` 의 `DEFAULT_KEY_FILES` 와 같다(새 키는 키 파일이 있어야 해서 여기서 안 받는다). */
-const CREDIT_KEYS = ['max', 'team'] as const;
-
-function kstToday(): string {
-  return new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
-}
-
 /** 메일 판정 갈래 — `mail.py` 의 `BRANCHES` 와 같다. 「?」는 틀렸는데 정답 모름(`WRONG`). */
 const MAIL_BRANCHES = ['등록', '갱신', '회신', '버림', '물음'] as const;
 
@@ -579,16 +562,6 @@ function validateOne(a: Record<string, unknown>, ctx: ActionContext): ValidActio
       return { op, argv, script: 'mail.py',
         summary: `메일 판정 기록 「${short}」 — ${proposed}${decided ? ` → ${decided}` : ''}` };
     }
-    case 'credits_set': {
-      onlyKeys(a, ['key', 'usd', 'expires']);
-      const key = oneOf(a.key, CREDIT_KEYS, '키');
-      const usd = num(a.usd, '금액(USD)', 10_000);
-      const d = date(a.expires, '만료일');
-      // 만료일 0시(한국 시각)에 멈추므로 오늘이나 지난 날은 등록해도 바로 못 쓴다 — 연도를 잘못 고른 것이다.
-      if (d <= kstToday()) throw new Reject('만료일: 오늘 이후 날짜가 아님');
-      return { op, argv: ['set', `--key=${key}`, `--usd=${usd}`, `--expires=${d}`], module: 'llm_playbook.credits',
-        summary: `API 크레딧 등록 — ${key} $${usd} · ${md(d)} 0시 만료` };
-    }
     default:
       throw new Reject('허용 목록에 없는 명령');
   }
@@ -642,8 +615,7 @@ function runOne(root: string, a: ValidAction, captureId: string, timeoutMs: numb
     let proc: ReturnType<typeof spawn>;
     try {
       // ⚠️ **셸 없이 인자 배열로** — 값에 `&` · `|` · `"` · `$(…)` 가 있어도 글자 그대로 간다.
-      const entry = a.module ? ['-m', a.module] : [path.join('bin', a.script ?? 'tasks.py')];
-      proc = spawn(python(), ['-X', 'utf8', ...entry, ...a.argv], {
+      proc = spawn(python(), ['-X', 'utf8', path.join('bin', a.script ?? 'tasks.py'), ...a.argv], {
         cwd: root,
         shell: false,
         windowsHide: true,

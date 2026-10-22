@@ -26,7 +26,6 @@ import { STEP_INPUT_MAX, STEP_MAX } from './turn-outcome';
 import type { HeldItem, HoldExtra } from './hold-replay';
 import { codexDrill, drillBlockUntil, type DrillScope } from './engine-drill';
 import { serviceCodex } from './model-ladder';
-import { ledgerFile } from './api-credits';
 
 export type { HoldExtra };
 
@@ -1482,8 +1481,6 @@ export function codexWritableDirs(): string[] {
   // 상태 파일 — `tasks.py` 의 `STATE` 와 같은 규칙으로 찾는다.
   add(process.env.WORK_ASSISTANT_STATE
     || path.join(os.homedir(), '.claude', 'state'));
-  // API 크레딧 장부 — 새 크레딧을 DM 으로 알려 주는 때가 곧 Claude 가 막힌 때다(`credits set` 이 잠금 · 임시 파일을 옆에 쓴다).
-  add(path.dirname(ledgerFile()));
   const root = workAssistantRoot();
   if (root) {
     try {
