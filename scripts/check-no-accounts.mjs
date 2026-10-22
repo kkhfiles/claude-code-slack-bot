@@ -108,7 +108,7 @@ try {
   ok(`빼는 함수가 키를 남긴다(대소문자 무관) — ${JSON.stringify(Object.keys(out))}`,
      JSON.stringify(Object.keys(out)) === JSON.stringify(['PATH']));
 
-  const { SdkHandler } = require(path.join(DIST, 'sdk-handler.js'));
+  const { SdkHandler, CREDIT_RESUME_NOTE } = require(path.join(DIST, 'sdk-handler.js'));
   const h = new SdkHandler({ getServerConfiguration: () => ({}), getDefaultAllowedTools: () => [] });
   for (const [label, extra] of [['env 없음', {}], ['env 있음', { env: { CLAUDE_CODE_OAUTH_TOKEN: 'oauth-check' } }]]) {
     const { sdkOptions } = h.buildOptions('확인', { workingDirectory: os.tmpdir(), ...extra });
@@ -178,6 +178,69 @@ try {
       ok('크레딧 세션: 크레딧 부족인데 키를 안 막았다', !!st.keys.max.blocked);
       o = h.buildOptions('확인', { workingDirectory: os.tmpdir(), env });
       ok('막힌 키: 그래도 키가 들어갔다 — 구독으로 돌아가야 한다', leaks(o.sdkOptions.env).length === 0);
+
+      // ── ⑥ 크레딧이 도중에 바닥난 차례는 다음 키나 구독으로 한 번 더(2026-10-22 사용자 결정) ──────────
+      // 첫 띄우기는 SDK 가 대신 만든 오류 메시지(billing_error)와 오류 결과, 다음 띄우기는 성공 — 부른 옵션을 적어 둔다.
+      const billing = [
+        { type: 'assistant', error: 'billing_error', message: { content: [{ type: 'text', text: 'Credit balance too low · Add funds' }] } },
+        { type: 'result', subtype: 'success', is_error: true, total_cost_usd: 0, session_id: 's1', result: 'Credit balance too low · Add funds' },
+      ];
+      const scripted = (first) => {
+        const calls = [];
+        SdkHandler.queryFn = ({ prompt, options }) => {
+          calls.push({ prompt, resume: options.resume, key: leaks(options.env).length > 0 });
+          const evs = calls.length === 1 ? first
+            : [{ type: 'result', subtype: 'success', is_error: false, result: '다시 한 답', total_cost_usd: 0, session_id: 's2' }];
+          return (async function* () { for (const e of evs) yield e; })();
+        };
+        return calls;
+      };
+      const drain = async (proc) => { const out = []; for await (const e of proc) out.push(e); return out; };
+      const texts = (evs) => evs.map((e) => e.result ?? e.message?.content?.[0]?.text ?? '').join(' | ');
+
+      writeLedger(true);
+      let calls = scripted(billing);
+      let evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env }));
+      ok(`도중 소진(도구 안 돎): 다시 안 띄웠다 · 같은 말로 · 구독으로(${JSON.stringify(calls)})`,
+        calls.length === 2 && calls[1].prompt === '확인' && calls[0].key && !calls[1].key);
+      ok(`도중 소진: 오류 글이 밖으로 나갔다 — 다시 한 답만 나가야 한다(${texts(evs)})`,
+        texts(evs) === '다시 한 답' && !evs.some((e) => e.error));
+      st = JSON.parse(fs.readFileSync(ledger, 'utf-8'));
+      ok('도중 소진: 그 키를 안 막았다', !!st.keys.max.blocked);
+
+      writeLedger(true);
+      const withTool = [
+        { type: 'system', subtype: 'init', session_id: 's1' },
+        { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] } },
+        ...billing,
+      ];
+      calls = scripted(withTool);
+      evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env }));
+      ok(`도중 소진(도구 돎): 그 세션을 「이미 한 일은 다시 하지 말라」로 잇지 않았다(${JSON.stringify(calls)})`,
+        calls.length === 2 && calls[1].resume === 's1' && calls[1].prompt === CREDIT_RESUME_NOTE && !calls[1].key);
+      ok('도중 소진(도구 돎): 앞서 낸 이벤트를 다시 냈거나 빠뜨렸다', evs.length === 3 && evs[2].result === '다시 한 답');
+
+      writeLedger(true);
+      calls = scripted(withTool);
+      evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env, noSessionPersistence: true }));
+      ok(`도중 소진(도구 돎 · 저장 안 함): 다시 띄웠다 — 같은 쓰기가 두 번 들어간다(${calls.length})`,
+        calls.length === 1 && evs.some((e) => e.is_error));
+
+      writeLedger(true);
+      calls = scripted(billing);
+      evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env, billing: 'subscription' }));
+      ok(`구독 세션: 크레딧 글에 다시 띄웠다(${calls.length})`, calls.length === 1);
+
+      // 다시 띄운 세션도 소진이면 다음으로 — 상한(두 번)을 넘으면 원래 오류를 낸다
+      writeLedger(true);
+      let n = 0;
+      SdkHandler.queryFn = () => { n++; return (async function* () { for (const e of billing) yield e; })(); };
+      const fs2 = fs.readFileSync(ledger, 'utf-8');
+      fs.writeFileSync(ledger, JSON.stringify({ ...JSON.parse(fs2), keys: { ...JSON.parse(fs2).keys,
+        team: { key_file: keyFile, grant_usd: 10, expires: future, spent_usd: 0, daily: {} } } }));
+      evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env }));
+      ok(`연달아 소진: max → team → 구독 세 번이 아니다(${n})`, n === 3);
+      ok('연달아 소진: 마지막 구독 세션의 오류는 그대로 나가야 한다', evs.some((e) => e.is_error));
     } finally {
       fs.rmSync(ledger, { force: true });
       if (beforeLedger === undefined) delete process.env.LLM_PLAYBOOK_CREDITS;
