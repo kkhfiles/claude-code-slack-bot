@@ -470,6 +470,40 @@ try {
     eq('모르는 칸', one({ subject: '검토 요청 잘린', proposed: '버림', apply: true }).rejected[0]?.why, '모르는 칸 apply');
   }
 
+  // ================================================================ ④-2 API 크레딧 등록 — 모양 · 실제 장부에 써짐
+  {
+    reset();
+    const ctx = { tasks: acts.parseTaskList(JSON.stringify(SLIM)).tasks };
+    const one = (a) => acts.validateActions([{ op: 'credits_set', ...a }], ctx);
+    const kst = (days) => new Date(Date.now() + 9 * 3600_000 + days * 86400_000).toISOString().slice(0, 10);
+    const later = kst(30);
+    const v = one({ key: 'team', usd: 500, expires: later });
+    eq('통과 — python -m llm_playbook.credits set', [v.ok[0]?.module, v.ok[0]?.argv],
+      ['llm_playbook.credits', ['set', '--key=team', '--usd=500', `--expires=${later}`]]);
+    eq('문자 금액도 받음', one({ key: 'max', usd: '96.35', expires: later }).ok[0]?.argv[2], '--usd=96.35');
+    eq('모르는 키', one({ key: 'org', usd: 5, expires: later }).rejected[0]?.why, '키: max/team 중 하나만');
+    eq('금액 0', one({ key: 'team', usd: 0, expires: later }).rejected[0]?.why, '금액(USD): 0~10000 사이 숫자가 아님');
+    eq('오늘 만료 — 연도를 잘못 고름', one({ key: 'team', usd: 5, expires: kst(0) }).rejected[0]?.why, '만료일: 오늘 이후 날짜가 아님');
+    eq('날짜 모양', one({ key: 'team', usd: 5, expires: '12/5' }).rejected[0]?.why, '만료일: 날짜 모양(YYYY-MM-DD)이 아님');
+    eq('키 파일은 안 받음', one({ key: 'team', usd: 5, expires: later, key_file: 'C:/x' }).rejected[0]?.why, '모르는 칸 key_file');
+    ok('프롬프트 — 크레딧 명령과 규칙', acts.AGY_DM_RULES.includes('{"op":"credits_set"') && acts.AGY_DM_RULES.includes('명령(이 열 말고는'));
+
+    // 진짜 `credits.py` 가 임시 장부에 쓰는가 — 모듈 경로(`-m`)가 실제로 도는 것까지(장부는 격리)
+    const ledger = path.join(TMP, 'api-credits.json');
+    const saved = process.env.LLM_PLAYBOOK_CREDITS;
+    process.env.LLM_PLAYBOOK_CREDITS = ledger;
+    try {
+      // 봇 PC 에는 llm_playbook 이 늘 깔려 있다 — 못 부르면 실패로 낸다(DM 에서 같은 일이 난다)
+      const r = await acts.runActions(v.ok, { root: WA_ROOT, captureId: 'cap-c' });
+      const st = fs.existsSync(ledger) ? JSON.parse(fs.readFileSync(ledger, 'utf-8')) : {};
+      eq(`장부에 써짐 — 받은 금액 · 만료 · 쓴 금액 0 (${r.runs[0]?.error ?? ''})`,
+        [r.runs[0]?.ok, st.keys?.team?.grant_usd, st.keys?.team?.expires, st.keys?.team?.spent_usd], [true, 500, later, 0]);
+      eq('tasks.py 는 안 불림', writes().length, 0);
+    } finally {
+      if (saved === undefined) delete process.env.LLM_PLAYBOOK_CREDITS; else process.env.LLM_PLAYBOOK_CREDITS = saved;
+    }
+  }
+
   // ================================================================ ⑤ 실행 — 셸 없이 · 캡처 환경 · 앞이 실패하면 멈춤
   {
     reset();
@@ -1078,7 +1112,7 @@ if (fails.length) {
   process.exitCode = 1;
 } else {
   console.log('통과 — agy 칸 (사다리 Gemini → agy Sonnet · 첨부 · Claude·GPT 몫 · 개인 글도 넘김 · 막힘만 건너뜀(횟수 상한 없음) · 대응표 모델 · luna 깊이 한 단계 위 · '
-    + '계획 너그럽게 읽기 · 쿼터는 끝 줄로 · 허용 목록 아홉 · 메일 차례는 봇이 본문을 붙이고 그 제목만 판정 기록 · 셸 없이 인자 배열 · 캡처 환경 · 앞이 실패하면 멈춤 · '
+    + '계획 너그럽게 읽기 · 쿼터는 끝 줄로 · 허용 목록 열(크레딧 등록 포함) · 메일 차례는 봇이 본문을 붙이고 그 제목만 판정 기록 · 셸 없이 인자 배열 · 캡처 환경 · 앞이 실패하면 멈춤 · '
     + '실행한 것 · 실행하지 않은 명령 · 표시 이름은 표에서 · needs_full 은 모아 둠(partial) · 조용히 · GPT 가 한 것을 넘김 · '
     + '-stop · 드레인은 어느 칸이든 · 남긴 건은 시도 안 셈 · 예약 일 넷 · 판 번호 없음 · 일부 실패는 「됨」 아님 · 명령마다 기록 · 명령 사이 끊김 · 보낼 글의 개인 글도 넘김 · 안내 GPT 이름은 DM 방 모델 · 한 차례에 안내 하나 · 다 막히면 「⏸ 모아 둠」)');
 }
