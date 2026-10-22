@@ -58,3 +58,12 @@ if (src > dist + 1000) {
 if (!process.env.LLM_PLAYBOOK_CREDITS) {
   process.env.LLM_PLAYBOOK_CREDITS = path.join(os.tmpdir(), `check-no-credits-${process.pid}.json`);
 }
+
+// **검사는 운영 엔진 상태에 안 쓴다**(2026-10-23) — SDK 처리기를 지나는 검사(`check:noaccounts` 등)는 전송 탭이 막힘과
+// 성공을 기본 자리(저장소 루트 `.engine-state.json`)에 적었다. 구독이 멀쩡한데 「Claude 사용량 소진」 안내가 나간 원인이다
+// (같은 초에 성공과 막힘 · 검사를 돌린 시각마다). 엔진 상태 자리를 직접 정하는 검사는 이 값을 덮어쓴다 — 옛 검사처럼
+// `RATE_LIMIT_UNTIL_FILE` 만 옮기는 검사도 그 옆으로 가게 그 값이 있으면 건드리지 않는다.
+if (!process.env.ENGINE_STATE_FILE && !process.env.RATE_LIMIT_UNTIL_FILE) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'check-engine-state-'));
+  process.env.ENGINE_STATE_FILE = path.join(dir, '.engine-state.json');
+}
