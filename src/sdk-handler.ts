@@ -15,7 +15,7 @@ import { event as recordEvent } from './board-queue';
 import { withApiKey, withoutApiKey } from './child-env';
 import { ClaudeTap } from './engine-tap';
 import { engineState, type Engine } from './engine-state';
-import { blockCreditKey, pickCreditKey, recordCreditSpend, type CreditKey } from './api-credits';
+import { blockCreditKey, ledgerFile, pickCreditKey, recordCreditSpend, type CreditKey } from './api-credits';
 import { afterFirstToolResult, claudeDrill, claudeDrillEvents, drillQuery, limitTail, type DrillScope } from './engine-drill';
 import type {
   CliEvent,
@@ -147,6 +147,8 @@ export class SdkProcess {
   private child: SdkProcess | null = null;
   /** 크레딧이 도중에 바닥나면 다음 키나 구독으로 한 번 더 띄운다(2026-10-22 사용자 결정 · `SdkHandler.runQuery`). */
   retry: CreditRetry | null = null;
+  /** 시작 이벤트가 알려 준 것 — 크레딧 사용 내역에 같이 남긴다(정말 API 키로 돌았나 · 어느 세션인가). */
+  private init: { session: string | null; auth: string | null; model: string | null } = { session: null, auth: null, model: null };
 
   /**
    * `engine` — 엔진 상태를 어느 열쇠에 적나. `credit` — 이 세션을 띄운 크레딧 키(있으면 엔진은 `claude-api` 이고 결과마다
@@ -164,7 +166,11 @@ export class SdkProcess {
     if (!this.credit || ev?.type !== 'result') return;
     try {
       const cost = Number(ev.total_cost_usd ?? 0);
-      if (cost > 0) recordCreditSpend(this.credit.name, cost);
+      if (cost > 0) {
+        recordCreditSpend(this.credit.name, cost, Date.now(), ledgerFile(), {
+          session: ev.session_id || this.init.session, auth: this.init.auth, model: this.init.model, caller: 'sdk-handler',
+        });
+      }
       const text = String(ev.result ?? '');
       if (ev.is_error && (CREDIT_EXHAUSTED.test(text) || KEY_REJECTED.test(text))) {
         blockCreditKey(this.credit.name, text.slice(0, 120));
@@ -184,6 +190,10 @@ export class SdkProcess {
     let ranTools = false;
     try {
       for await (const sdkMsg of this.query) {
+        const raw = sdkMsg as any;
+        if (raw?.type === 'system' && raw.subtype === 'init') {
+          this.init = { session: raw.session_id ?? null, auth: raw.apiKeySource ?? null, model: raw.model ?? null };
+        }
         const event = interpretSdkMessage(sdkMsg);
         if (event) {
           if (event.type === 'system' && (event as any).session_id) sessionId = (event as any).session_id;

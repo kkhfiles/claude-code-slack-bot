@@ -131,13 +131,35 @@ function mutate(fn: (st: Ledger) => void, file = ledgerFile()): boolean {
   }
 }
 
+/** 사용 내역 한 줄에 같이 남길 것 — 세션 번호(같은 세션이 여러 번 더해졌나) · 인증 출처(정말 API 키로 돌았나). */
+export interface SpendNote { session?: string | null; auth?: string | null; model?: string | null; caller?: string | null }
+
+/**
+ * 사용 내역 — 장부 옆 `<장부 이름>.history.jsonl` 에 더할 때마다 한 줄(파이썬 `credits.record` 와 같은 모양).
+ * 2026-10-23: 장부가 하루 $226 을 셌는데 Console 은 $10 이었고, 합계만 있어 누가 더했는지 못 갈랐다. **안 던진다.**
+ */
+function noteSpend(name: string, usd: number, nowMs: number, file: string, note: SpendNote): void {
+  try {
+    const d = new Date(nowMs + KST_OFFSET_MS).toISOString().slice(0, 19);
+    const line = {
+      at: `${d}+09:00`, by: 'bot', pid: process.pid, key: name, usd,
+      session: note.session ?? null, auth: note.auth ?? null, model: note.model ?? null, caller: note.caller ?? null,
+    };
+    fs.appendFileSync(file.replace(/\.json$/, '') + '.history.jsonl', JSON.stringify(line) + '\n');
+  } catch (err: any) {
+    logger.warn('크레딧 사용 내역을 못 적었습니다', { err: String(err?.message ?? err) });
+  }
+}
+
 /** 쓴 금액을 더한다(날짜별 합도 · 한국 날짜). */
-export function recordCreditSpend(name: string, usd: number, nowMs: number = Date.now(), file = ledgerFile()): void {
+export function recordCreditSpend(name: string, usd: number, nowMs: number = Date.now(), file = ledgerFile(),
+  note: SpendNote = {}): void {
   if (!(usd > 0)) return;
   const day = new Date(nowMs + KST_OFFSET_MS).toISOString().slice(0, 10);
   mutate((st) => {
     const rec = st.keys[name];
     if (!rec) return;
+    noteSpend(name, usd, nowMs, file, note);
     rec.spent_usd = Math.round((Number(rec.spent_usd ?? 0) + usd) * 1e6) / 1e6;
     const daily = (rec.daily ??= {});
     daily[day] = Math.round((Number(daily[day] ?? 0) + usd) * 1e6) / 1e6;

@@ -19,6 +19,7 @@ import * as path from 'path';
 import { Logger } from './logger';
 import { engineState, ENGINES, type Engine, type EngineState, type EngineStateData } from './engine-state';
 import { DM_LADDER_AGY } from './engine-ladder';
+import { pickCreditKey } from './api-credits';
 
 export type Rung = Engine | 'none';
 const RUNGS: readonly Rung[] = [...ENGINES, 'none'];
@@ -110,8 +111,13 @@ function activeBlock(st: EngineStateData, e: Engine, nowSec: number) {
  * 지금 DM 을 맡을 차례 — 막히지 않은 첫 엔진. 다 막혔으면 `none`.
  * `ladder` 는 실제로 붙은 칸만 넘긴다(5단계는 Claude · GPT) — 안 붙은 agy 를 「이어 갑니다」로 알리지 않게.
  */
-export function dmRung(st: EngineStateData, nowSec: number, ladder: readonly Engine[] = DM_LADDER_AGY): Rung {
-  for (const e of ladder) if (!activeBlock(st, e, nowSec)) return e;
+export function dmRung(st: EngineStateData, nowSec: number, ladder: readonly Engine[] = DM_LADDER_AGY,
+  credit = false): Rung {
+  for (const e of ladder) {
+    if (!activeBlock(st, e, nowSec)) return e;
+    // 구독이 막혀도 크레딧 키가 있으면 그 차례는 API 키로 뜬다(`api-credits.ts` `claudeBlocked`) — GPT 로 안내하지 않는다.
+    if (e === 'claude' && credit && !activeBlock(st, 'claude-api', nowSec)) return 'claude-api';
+  }
   return 'none';
 }
 
@@ -124,7 +130,8 @@ function rank(r: Rung): number {
 function target(to: Engine, labels: ModelLabels): string {
   switch (to) {
     case 'claude': return 'Claude 로 이어 갑니다';
-    case 'claude-api': return 'Claude API(Sonnet)로 이어 갑니다';
+    // DM 사다리에 이 칸은 없다 — 구독이 막히고 크레딧 키가 있을 때만 이 차례가 된다(`dmRung` 의 `credit`).
+    case 'claude-api': return 'Claude API(크레딧)로 이어 갑니다';
     case 'codex': return `${labels.codex ? `GPT(${labels.codex})` : 'GPT'}로 이어 갑니다`;
     case 'agy-claude': return `agy 의 ${labels.agyClaude || 'Claude'}로 이어 갑니다 · 업무 조회·등록·수정까지`;
     case 'agy-gemini': return `${labels.gemini || 'Gemini'}로 이어 갑니다 · 답이 느리고 업무 조회·등록·수정까지`;
@@ -162,10 +169,13 @@ export function composeTransition(
   if (rank(to) < rank(from) && to === 'claude') return '✅ Claude 회복 — 돌아왔습니다';
   // Claude 가 아닌 칸으로 올라가면(모두 막힘 → GPT 가 풀림 · 폴백을 켬) 「회복」이라 하지 않고 지금 모양을
   // 그대로 말한다 — 폴백을 켜는 순간에는 GPT 가 막힌 적이 없는데 「✅ GPT 회복」이 나갔다(5단계 검토).
-  const above = ladder.slice(0, Math.max(0, ladder.indexOf(to)));
+  const above = to === 'claude-api' ? ['claude' as const] : ladder.slice(0, Math.max(0, ladder.indexOf(to)));
   let what: string;
-  if (above.length === 1) {
+  if (to === 'claude-api') {
+    what = blockedOne(st, 'claude', nowSec).replace(/^Claude /, 'Claude 구독 ');
+  } else if (above.length === 1) {
     what = blockedOne(st, above[0], nowSec);
+    if (from === 'claude-api') what += ' · API 크레딧 없음';
   } else {
     const allUsage = above.every((e) => activeBlock(st, e, nowSec)?.kind === 'usage');
     what = `${above.map((e) => SHORT[e]).join('·')} ${above.length === 2 && allUsage ? '사용량 소진' : '소진'}`;
@@ -184,7 +194,9 @@ export interface EngineNoticeOptions {
   labels?: () => ModelLabels;
   /** DM 을 맡는 칸 — 기본은 네 엔진 전부. 봇은 실제로 붙은 칸만 넘긴다(`dm-fallback.ts` `dmLadder`). */
   ladder?: () => readonly Engine[];
-  log?: { info: (msg: string, data?: any) => void; warn: (msg: string, data?: any) => void };
+  /** 쓸 수 있는 크레딧 키가 있나 — 기본은 장부(`pickCreditKey`). 시험이 바꿔 끼운다. */
+  credit?: () => boolean;
+  log?:{ info: (msg: string, data?: any) => void; warn: (msg: string, data?: any) => void };
 }
 
 /**
@@ -251,8 +263,16 @@ export class EngineNotice {
    * 지금 엔진 상태로 본 DM 차례 — 알린 차례가 아니라 지금 값. **⏸ 가 이 보류를 말하나**를 가르는 데 쓴다
    * (켜져 있고 이것이 `none` 이면 ⏸ 가 이미 나갔거나 미룬 것을 놓을 때 나간다).
    */
+  private credit(): boolean {
+    try {
+      return this.opts.credit ? this.opts.credit() : pickCreditKey() !== null;
+    } catch {
+      return false;
+    }
+  }
+
   rungNow(): Rung {
-    return dmRung(this.store.load(), this.store.nowSec(), this.opts.ladder?.() ?? DM_LADDER_AGY);
+    return dmRung(this.store.load(), this.store.nowSec(), this.opts.ladder?.() ?? DM_LADDER_AGY, this.credit());
   }
 
   /**
@@ -269,7 +289,7 @@ export class EngineNotice {
       const st = this.store.load();
       const now = this.store.nowSec();
       const ladder = this.opts.ladder?.() ?? DM_LADDER_AGY;
-      const rung = dmRung(st, now, ladder);
+      const rung = dmRung(st, now, ladder, this.credit());
       const last = (st.ladder?.rung ?? 'claude') as Rung;
       if (rung === last) return null;
       // **Claude 로 올라가는 것은 실제로 된 뒤에만 알린다**(2026-10-15 검토) — 막힘 시각이 지난 것만으로는 된 것이

@@ -37,7 +37,7 @@ export class ClaudeTap {
         if (v.util) this.store.recordUtil(this.engine, v.util);
         if (v.block && !this.blockedHere) {
           this.blockedHere = true;
-          this.store.recordBlocked(this.engine, v.block);
+          this.store.recordBlocked(this.engine, { ...v.block, why: `rate_limit_event ${JSON.stringify(ev.rate_limit_info ?? {})}` });
         }
         return;
       }
@@ -51,7 +51,7 @@ export class ClaudeTap {
       const c = classifyClaudeErrorText(String(ev.result ?? ''));
       if (c) {
         this.blockedHere = true;
-        this.store.recordBlocked(this.engine, c);
+        this.store.recordBlocked(this.engine, { ...c, why: `result ${String(ev.result ?? '')}` });
       }
     } catch (err: any) {
       logger.warn('엔진 상태를 못 적었습니다 — 차례는 그대로 갑니다', { err: String(err?.message ?? err) });
@@ -71,7 +71,7 @@ export function currentClaudeBlock(
   const b = store.blocked('claude');
   if (b && store.isBlocked('claude')) return b;
   const c = resetsAt ? { kind: 'usage' as const, until: resetsAt } : classifyClaudeErrorText(text ?? '', store.nowSec() * 1000);
-  return store.recordBlocked('claude', c ?? { kind: 'unknown' });
+  return store.recordBlocked('claude', { ...(c ?? { kind: 'unknown' as const }), why: `notice ${text ?? ''}` });
 }
 
 /**
@@ -87,5 +87,5 @@ export function thrownClaudeBlock(error: any, store: EngineState = engineState):
   const b = store.blocked('claude');
   if (b && store.isBlocked('claude')) return b;
   const c = classifyClaudeErrorText(String(error?.message ?? error ?? ''), store.nowSec() * 1000);
-  return c ? store.recordBlocked('claude', c) : null;
+  return c ? store.recordBlocked('claude', { ...c, why: `thrown ${String(error?.message ?? error ?? '')}` }) : null;
 }

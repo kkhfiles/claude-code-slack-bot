@@ -33,6 +33,15 @@ import { Logger } from './logger';
 
 const logger = new Logger('EngineState');
 
+/** 사람이 읽는 현지 시각(초 · 시간대 포함) — 출처 기록 한 줄에 쓴다. */
+function localIso(sec: number): string {
+  const d = new Date(sec * 1000);
+  const off = -d.getTimezoneOffset();
+  const pad = (n: number) => String(Math.floor(Math.abs(n))).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+    + `${off >= 0 ? '+' : '-'}${pad(off / 60)}:${pad(off % 60)}`;
+}
+
 export type Engine = 'claude' | 'claude-api' | 'codex' | 'agy-claude' | 'agy-gemini';
 /**
  * DM 을 맡는 차례 — 앞이 막히면 다음으로 내려간다. 6단계부터 Gemini 가 agy 의 Claude(Sonnet)보다 앞이다.
@@ -77,7 +86,8 @@ export interface EngineStateData {
   [extra: string]: unknown;
 }
 
-export interface BlockInput { kind: BlockKind; until?: number; limitType?: string; }
+/** `why` — 막힘으로 가른 근거 글(앞 200자). 막힘 출처 기록(`.engine-blocks.jsonl`)에만 남고 상태에는 안 들어간다. */
+export interface BlockInput { kind: BlockKind; until?: number; limitType?: string; why?: string; }
 
 /** 과부하 첫 대기 · 상한 — 두 배씩 늘다가 상한에서 멈춘다. */
 export const OVERLOAD_FIRST_SEC = 10 * 60;
@@ -364,7 +374,7 @@ export class EngineState {
    * 「바뀌었나」는 **마지막으로 본 지문**(`seen`)과 견준다 — 남(파이썬)이 그 사이 쓴 막힘도 이 쓰기에서 알림이
    * 나가게. 아직 본 적이 없으면 읽은 값과 견준다.
    */
-  private mutate<T>(fn: (st: EngineStateData) => T): T {
+  private mutate<T>(fn: (st: EngineStateData) => T, saved?: (out: T) => void): T {
     let out: T | undefined;
     let ran = false;
     let changed = false;
@@ -379,6 +389,7 @@ export class EngineState {
       ran = true;
       out = fn(st);
       if (!this.save(st)) return;
+      saved?.(out);
       const after = blockPrint(st);
       changed = after !== before;
       this.seen = after;
@@ -531,7 +542,27 @@ export class EngineState {
       }
       r.blocked = next;
       return next;
-    });
+    }, (next) => this.noteBlock(engine, input, next));
+  }
+
+  /**
+   * 막힘 출처 한 줄 — 상태 파일 옆 `.engine-blocks.jsonl`(파이썬 `engine_state.record_block` 과 같은 모양).
+   * 2026-10-23: 구독이 멀쩡한데 `claude` 막힘이 세 번 적혔고 누가 적었는지 못 찾았다. **안 던진다.**
+   */
+  private noteBlock(engine: Engine, input: BlockInput, next: Block): void {
+    try {
+      const frames = String(new Error().stack ?? '').split('\n').slice(1)
+        .map((l) => l.trim().replace(/^at\s+/, ''))
+        .filter((l) => !/engine-state\.(ts|js)/.test(l));
+      const caller = frames.slice(0, 2).map((l) => l.replace(/\(?[A-Za-z]:[\\/][^)]*[\\/]([^\\/)]+)\)?/, '$1')).join(' <- ');
+      const line = {
+        at: localIso(this.nowSec()), by: 'bot', pid: process.pid, engine, kind: next.kind,
+        until: next.until, untilKnown: next.untilKnown, caller, why: input.why ? input.why.slice(0, 200) : null,
+      };
+      fs.appendFileSync(path.join(path.dirname(this.file), '.engine-blocks.jsonl'), JSON.stringify(line) + '\n');
+    } catch (err: any) {
+      logger.warn('막힘 출처를 못 적었습니다', { err: String(err?.message ?? err) });
+    }
   }
 
   /** 지금 막혀 있나. 다시 볼 시각을 모르면 **안 막힌 것으로 본다.** */

@@ -474,6 +474,31 @@ try {
     eq('Claude 회복', composeTransition('none', 'claude', s.load(), L, nowSec()), '✅ Claude 회복 — 돌아왔습니다');
     eq('차례가 같으면 안내 없음', composeTransition('codex', 'codex', s.load(), L, nowSec()), null);
 
+    // 2026-10-23 — 구독이 막혀도 크레딧 키가 있으면 그 차례는 API 키로 뜬다. 「GPT 로 이어 갑니다」가 나갔다.
+    const k = fresh();
+    k.recordBlocked('claude', { kind: 'usage', until: U });
+    eq('크레딧이 있으면 Claude API 차례', dmRung(k.load(), nowSec(), undefined, true), 'claude-api');
+    eq('크레딧이 없으면 그대로 GPT 차례', dmRung(k.load(), nowSec(), undefined, false), 'codex');
+    eq('구독 소진 → 크레딧',
+       composeTransition('claude', 'claude-api', k.load(), L, nowSec()),
+       '🔁 Claude 구독 사용량 소진(풀림 10/19(월) 10:00) — Claude API(크레딧)로 이어 갑니다');
+    eq('크레딧도 없으면 → GPT',
+       composeTransition('claude-api', 'codex', k.load(), L, nowSec()),
+       '🔁 Claude 사용량 소진(풀림 10/19(월) 10:00) · API 크레딧 없음 — GPT(gpt-T1-astra)로 이어 갑니다');
+    eq('크레딧에서 Claude 로 돌아옴', composeTransition('claude-api', 'claude', k.load(), L, nowSec()), '✅ Claude 회복 — 돌아왔습니다');
+    k.recordBlocked('claude-api', { kind: 'usage', why: 'x'.repeat(300) });
+    eq('크레딧 칸이 막히면 GPT 차례', dmRung(k.load(), nowSec(), undefined, true), 'codex');
+
+    // 막힘 출처 — 상태 파일 옆 한 줄(누가 적었나 · 왜). 상태에는 근거 글이 안 들어간다.
+    const blockLog = path.join(path.dirname(k.file), '.engine-blocks.jsonl');
+    const lines = fs.readFileSync(blockLog, 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+    const last = lines[lines.length - 1];
+    eq('출처 한 줄의 칸', Object.keys(last), ['at', 'by', 'pid', 'engine', 'kind', 'until', 'untilKnown', 'caller', 'why']);
+    eq('출처 — 누가 · 무엇을', [last.by, last.pid, last.engine, last.kind], ['bot', process.pid, 'claude-api', 'usage']);
+    ok('출처 — 부른 곳', last.caller.includes('check-engine-state'));
+    eq('출처 — 근거는 200자까지', last.why.length, 200);
+    ok('근거 글은 상태에 안 들어간다', !JSON.stringify(k.load()).includes('xxxxx'));
+
     const o = fresh();
     o.recordBlocked('claude', { kind: 'overload' });
     eq('과부하는 「서버 과부하 · 다시 확인」',

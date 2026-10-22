@@ -68,6 +68,16 @@ try {
   eq('막힘 표시', !!st.keys.max.blocked, true);
   eq('남이 쓴 칸은 그대로', [st.v, st.margin], [1, 0.03]);
 
+  // 사용 내역 — 더할 때마다 장부 옆 한 줄(파이썬 credits.record 와 같은 칸). 2026-10-23: 합계만 있어 누가 더했는지 못 갈랐다.
+  const HISTORY = path.join(TMP, 'api-credits.history.jsonl');
+  ac.recordCreditSpend('team', 0.5, KST('2026-10-23'), LEDGER, { session: 's-1', auth: 'ANTHROPIC_API_KEY', model: 'm', caller: 'sdk-handler' });
+  ac.recordCreditSpend('nobody', 1, KST('2026-10-23'));
+  const hist = fs.readFileSync(HISTORY, 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+  const h = hist[hist.length - 1];
+  eq('내역 한 줄의 칸', Object.keys(h), ['at', 'by', 'pid', 'key', 'usd', 'session', 'auth', 'model', 'caller']);
+  eq('내역 — 값', [h.at, h.by, h.key, h.usd, h.session, h.auth], ['2026-10-23T12:00:00+09:00', 'bot', 'team', 0.5, 's-1', 'ANTHROPIC_API_KEY']);
+  eq('더한 것만 남긴다(없는 키 · 깨진 장부는 안 남김)', hist.map((x) => x.usd), [0.25, 0.25, 0.5]);
+
   // Claude 막힘 — 구독이 막혔어도 크레딧이 있으면 띄울 수 있다
   const es = new EngineState(process.env.ENGINE_STATE_FILE);
   const now = Date.now();
