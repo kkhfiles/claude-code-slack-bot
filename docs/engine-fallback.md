@@ -63,7 +63,19 @@
 - **재시작에 끊김** — 처리 중 기록에 「GPT 명령 — 무엇을 했는지 모름」(쓰기)을 넣어 둠, 보류 v2 가 `partial` 로 이어 감
   - 지난 기동의 처리 중 기록은 생성자에서 떠 둠(`snapshotBootInflight`) — 알림(기동 12초 뒤) 전에 같은 열쇠(DM 맨 위는 `direct`)의 새 차례가 덮어도 끊긴 차례를 잃지 않음
 
-## 월 API 크레딧 칸 — `runClaudeApiFallback`(2026-10-21 사용자 결정)
+## 크레딧 먼저 — 모든 Claude 세션(2026-10-22 사용자 결정)
+
+- **무엇** — 봇이 띄우는 Claude 세션 전부(DM, 예약 일, 좁은 길, 달력 판정)가 월 API 크레딧이 있는 동안 API 키로 먼저 뜸. 크레딧이 소진되거나 만료되면 구독 토큰으로 뜸
+- **장부** — llm-playbook 과 같은 파일 `~/.config/llm-playbook/api-credits.json`(`src/api-credits.ts`, 기준 규칙은 `llm_playbook/credits.py`)
+  - 켜는 문 `enabled`(기본 꺼짐). 켜고 끄기와 새 크레딧 등록은 `python -m llm_playbook.credits on`, `off`, `set --key … --usd … --expires …`
+  - 만료가 이른 키부터 사용. 만료일 0시(한국 시각), 받은 금액의 97% 사용, 서버의 「credit balance too low」 또는 키 거부 중 하나면 그 키는 사용 불가
+- **고르는 위치** — `SdkHandler.buildOptions` 한 곳. `billing` 을 생략하면 장부 키, 없으면 구독. `'subscription'` 은 항상 구독
+- **기록** — 크레딧 세션의 결과마다 `total_cost_usd` 를 장부에 더하고, 엔진 상태는 `claude-api` 열쇠에 적음(구독 Claude 의 막힘을 안 지움)
+- **띄울지 말지** — 「구독이 막혔고 크레딧도 없음」일 때만 Claude 를 건너뜀(`claudeBlocked`). DM 사다리의 막힘 표, 좁은 길, 예약 세션, 달력 판정, 한도 재시도, 메일 폴러, 보류 드레인이 이 판단을 봄
+- **DM 사다리의 `claude_api` 칸은 뺌** — 1차 Claude 칸이 크레딧을 먼저 쓰므로 같은 크레딧을 두 번 시도하는 칸이 됨. 아래 「월 API 크레딧 칸」은 표에 `claude_api` 를 다시 넣을 때만 도는 옛 경로
+- **검사** — `check:apicredits`(고르는 규칙을 파이썬 기준 구현과 같은 장부, 같은 시각에서 대조), `check:noaccounts`(켜짐, 꺼짐, 구독 고정, 사용액 기록, 소진 시 막기). 모든 검사는 진짜 장부를 안 읽음(`scripts/lib/fresh-dist.mjs`)
+
+## 월 API 크레딧 칸 — `runClaudeApiFallback`(2026-10-21 사용자 결정, 10-22 사다리에서 뺌)
 
 - **무엇** — 구독 Claude 가 막힌 DM 차례를 GPT 보다 먼저 받는 칸. 모델은 Claude API 의 Sonnet
 - **비용** — Max 구독에 딸린 월 API 크레딧(Max 5x 는 $100, 이월 없음)

@@ -105,12 +105,12 @@ const REPLACE_TRIES = 25;
 /** 남이 쓴 것을 들여다보는 간격 — 안내 · 회복 타이머용이라 급하지 않다(고르기는 매번 파일을 읽는다). */
 export const WATCH_MS = 30_000;
 
-function sleepSync(ms: number): void {
+export function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 /** 잠금 파일을 만들어 잡는다(안에 pid). 못 잡으면 `false` — 묵은 잠금은 지우고 바로 다시 해 본다. */
-function takeLock(lock: string, waitMs: number): boolean {
+export function takeLock(lock: string, waitMs: number): boolean {
   const deadline = Date.now() + waitMs;
   for (;;) {
     try {

@@ -1,3 +1,4 @@
+import { claudeBlocked } from './api-credits';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -2102,8 +2103,8 @@ export class AssistantScheduler {
     // DM 폴백이 켜져 있으면 사다리로 본다(2026-10-15 검토) — Claude 하나가 막혀도 GPT · agy 가 넘긴 차례를 받는다.
     if (dmFallbackOn()) await codexQuota.refresh();
     const blocked = dmFallbackOn()
-      ? dmLadder().every((e) => engineState.isBlocked(e))
-      : engineState.isBlocked('claude');
+      ? dmLadder().every((e) => (e === 'claude' ? claudeBlocked() : engineState.isBlocked(e)))
+      : claudeBlocked();
     if (blocked) {
       const since = engineState.blocked('claude')?.since ?? 0;
       if (this.mailBlockedLogged !== since) {
@@ -2963,7 +2964,7 @@ export class AssistantScheduler {
     let why = '';
     // **Claude 가 막혔다고 엔진 상태가 말하면 1차를 안 띄운다**(2026-10-19) — 띄워도 한도 글만 받고 끝난다.
     // 곧장 아래 codex 칸으로 간다(예약 세션의 `spawnOrFallback` 과 같은 규칙).
-    if (engineState.isBlocked('claude')) {
+    if (claudeBlocked()) {
       why = 'claude-blocked';
       this.logger.warn('좁은 길 — Claude 가 막혀 있어(엔진 상태) 1차를 안 띄우고 codex 로 갑니다');
     } else {
@@ -3059,7 +3060,7 @@ export class AssistantScheduler {
   ): Promise<SessionResult> {
     let result: SessionResult | null = null;
     let why = '';
-    if (engineState.isBlocked('claude')) {
+    if (claudeBlocked()) {
       why = 'claude-blocked';
       this.logger.warn(`${label} — Claude 가 막혀 있어 1차를 안 띄웁니다(엔진 상태)`);
       result = {
@@ -3980,7 +3981,7 @@ export class AssistantScheduler {
    * 또한 데일리 재시도가 새벽 쿼터 보호 구간에 깨어나면 06:05 로 미룬다.
    */
   private async runRetryPlanIfClear(id: string, why: string, nowMs: number = Date.now()): Promise<boolean> {
-    if (engineState.isBlocked('claude')) {
+    if (claudeBlocked()) {
       this.logger.info(`한도 재시도를 미룹니다 — Claude 가 아직 막혀 있음 (${why})`, { id });
       return false;
     }
@@ -4023,7 +4024,7 @@ export class AssistantScheduler {
     this.retryBusy = true;
     try {
       for (const p of this.loadRetryPlans().filter((x) => x.due <= now)) {
-        if (!(await this.runRetryPlanIfClear(p.id, why, now)) && engineState.isBlocked('claude')) break;
+        if (!(await this.runRetryPlanIfClear(p.id, why, now)) && claudeBlocked()) break;
       }
     } finally {
       this.retryBusy = false;

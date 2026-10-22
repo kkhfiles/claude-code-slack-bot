@@ -1,3 +1,4 @@
+import { claudeBlocked } from './api-credits';
 import { App } from '@slack/bolt';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -1827,7 +1828,7 @@ export class SlackHandler {
       // **DM 폴백 — 띄우기 전**: 엔진 상태가 Claude 가 막혔다고 하면 안 띄운다(띄워도 한도 글만 받는다).
       // 다음 칸(GPT)이 비었으면 스트림 뒤에서 그리로 넘기고, 다 막혔으면 예전 한도 길로 모아 둔다.
       let pick: LadderPick = 'claude';
-      if (engineState.isBlocked('claude') && fbBase) {
+      if (claudeBlocked() && fbBase) {
         pick = pickEngine(await pickInput(), dmLadder());
         claudeSkipped = pick !== 'claude';
         if (claudeSkipped) this.logger.warn('Claude 가 막혀 있어 띄우지 않습니다(DM 폴백)', { next: pick });

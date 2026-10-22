@@ -12,6 +12,7 @@
  * ~/.config/google-calendar-mcp/tokens.json
  */
 
+import { claudeBlocked } from './api-credits';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -714,7 +715,7 @@ export class CalendarPoller {
     // 전에는 이 판단만 자체 「다음 정시」 멈춤을 들고 있어 엔진 상태를 안 봤다. 10/19 08:00 · 09:55 에 이미 막힌
     // Claude 를 불러 한도 글을 받고서야 멈췄고, 정시가 되면 또 불렀다. 풀리는 시각도 엔진 상태가 서버 값으로 안다.
     // 막혀 있어도 판단은 한다 — 예전에는 여기서 [] 로 끝나 그 시간의 일정 변경 알림이 사라졌다(2026-09-23).
-    if (engineState.isBlocked('claude')) {
+    if (claudeBlocked()) {
       this.logger.debug('회의 알림 판단 — Claude 가 막혀 있어(엔진 상태) 사다리로 판단');
       return this.judgeByLadder(prompt, diff, config.reminders.beforeMinutes, 'Claude 막힘(엔진 상태)');
     }

@@ -15,6 +15,7 @@ import { event as recordEvent } from './board-queue';
 import { withApiKey, withoutApiKey } from './child-env';
 import { ClaudeTap } from './engine-tap';
 import { engineState, type Engine } from './engine-state';
+import { blockCreditKey, pickCreditKey, recordCreditSpend, type CreditKey } from './api-credits';
 import { afterFirstToolResult, claudeDrill, claudeDrillEvents, drillQuery, limitTail, type DrillScope } from './engine-drill';
 import type {
   CliEvent,
@@ -103,16 +104,41 @@ export function interpretSdkMessage(msg: SDKMessage): CliEvent | null {
 
 // --- SdkProcess: mirrors CliProcess interface -----------------------------
 
+/** 크레딧 소진 — 「Your credit balance is too low …」 · 「Credit balance too low · Add funds」(공식 문서 원문). */
+const CREDIT_EXHAUSTED = /credit balance (?:is )?too low/i;
+/** 키 거부 — 「Invalid API key」 · 「invalid x-api-key」 · `authentication_error` · 「Failed to authenticate」 · 401. */
+const KEY_REJECTED = /invalid (?:x-)?api[ -]key|authentication_error|failed to authenticate|\b401\b/i;
+
 export class SdkProcess {
   private query: Query;
   private abortController: AbortController;
   private done = false;
   private logger = new Logger('SdkProcess');
 
-  /** `engine` — 엔진 상태를 어느 열쇠에 적나. 월 API 크레딧 세션은 `claude-api`(`billing: 'api'`). */
-  constructor(q: Query, abortController: AbortController, private engine: Engine = 'claude') {
+  /**
+   * `engine` — 엔진 상태를 어느 열쇠에 적나. `credit` — 이 세션을 띄운 크레딧 키(있으면 엔진은 `claude-api` 이고 결과마다
+   * 쓴 금액을 장부에 적는다 · 크레딧 부족 · 키 거부면 그 키를 막는다).
+   */
+  constructor(q: Query, abortController: AbortController, private engine: Engine = 'claude',
+              private credit: CreditKey | null = null) {
     this.query = q;
     this.abortController = abortController;
+    if (credit) this.engine = 'claude-api';
+  }
+
+  /** 크레딧 세션의 결과 — 쓴 금액을 적고, 크레딧이 바닥났거나 키가 거부됐으면 그 키를 막는다. 안 던진다. */
+  private seeCredit(ev: any): void {
+    if (!this.credit || ev?.type !== 'result') return;
+    try {
+      const cost = Number(ev.total_cost_usd ?? 0);
+      if (cost > 0) recordCreditSpend(this.credit.name, cost);
+      const text = String(ev.result ?? '');
+      if (ev.is_error && (CREDIT_EXHAUSTED.test(text) || KEY_REJECTED.test(text))) {
+        blockCreditKey(this.credit.name, text.slice(0, 120));
+      }
+    } catch (err: any) {
+      this.logger.warn('크레딧 장부에 못 적었습니다 — 차례는 그대로 갑니다', { err: String(err?.message ?? err) });
+    }
   }
 
   async *[Symbol.asyncIterator](): AsyncIterableIterator<CliEvent> {
@@ -123,6 +149,7 @@ export class SdkProcess {
         const event = interpretSdkMessage(sdkMsg);
         if (event) {
           tap.see(event);
+          this.seeCredit(event);
           yield event;
         }
       }
@@ -221,11 +248,12 @@ export interface SdkRunOptions {
   /** 엔진 연습을 받는 차례인가 — 대화 차례는 `interactive`(생략하면 예약 일 · `engine-drill.ts`). */
   drillScope?: DrillScope;
   /**
-   * `'api'` — 구독 토큰 대신 월 API 크레딧 키로 띄운다(`claude-api` 칸 · 2026-10-21 사용자 결정). 미리 띄운 세션과
-   * 엔진 연습을 안 쓰고(둘 다 구독 환경으로 뜬다) 엔진 상태는 `claude-api` 에 적는다. 키 파일을 못 읽으면 던진다
+   * 어느 돈으로 띄우나 — **생략하면 크레딧 먼저**(2026-10-22 사용자 결정): 크레딧 장부(`api-credits.ts`)에 쓸 키가 있으면
+   * 그 키로, 없으면(꺼짐 · 소진 · 만료) 구독 토큰으로. `'subscription'` 은 늘 구독, `'api'` 는 늘 API 키(장부 키가 없으면
+   * 기본 키 파일 · 미리 띄운 세션과 엔진 연습을 안 씀 — 구독이 막혔을 때의 `claude-api` 칸). 키 파일을 못 읽으면 던진다
    * (`ApiKeyFileError`).
    */
-  billing?: 'api';
+  billing?: 'api' | 'subscription';
 }
 
 export class SdkHandler {
@@ -379,7 +407,8 @@ export class SdkHandler {
   runQuery(prompt: string, opts: SdkRunOptions): SdkProcess {
     if (opts.billing === 'api') {
       const built = this.buildOptions(prompt, opts);
-      return new SdkProcess(SdkHandler.queryFn({ prompt, options: built.sdkOptions }), built.abortController, 'claude-api');
+      return new SdkProcess(SdkHandler.queryFn({ prompt, options: built.sdkOptions }), built.abortController, 'claude-api',
+        built.credit);
     }
     // 엔진 연습(`engine-drill.ts`) — 막힌 모양을 재생한다. 처음부터 막힌 갈래는 진짜를 안 띄우고,
     // `usage-after-tool` 은 진짜 차례(미리 띄운 것 포함)를 첫 도구 결과까지 돌린 뒤 꼬리를 끼운다.
@@ -389,10 +418,10 @@ export class SdkHandler {
       const ac = new AbortController();
       return new SdkProcess(drillQuery(claudeDrillEvents(drill, sid), ac.signal) as unknown as Query, ac);
     }
-    const wrap = (q: Query, ac: AbortController): SdkProcess => (drill === 'usage-after-tool'
-      ? new SdkProcess(afterFirstToolResult(q, () => ac.abort(), () => limitTail(sid)) as unknown as Query, ac)
-      : new SdkProcess(q, ac));
     const built = this.buildOptions(prompt, opts);
+    const wrap = (q: Query, ac: AbortController): SdkProcess => (drill === 'usage-after-tool'
+      ? new SdkProcess(afterFirstToolResult(q, () => ac.abort(), () => limitTail(sid)) as unknown as Query, ac, 'claude', built.credit)
+      : new SdkProcess(q, ac, 'claude', built.credit));
     const key = this.keyOf(built.sdkOptions);
 
     // **미리 띄운 것이 맞으면 그것을 쓴다.** 지문이 같은 자리만 본다 — 남의 옵션으로 뜬
@@ -432,7 +461,7 @@ export class SdkHandler {
   }
 
   private buildOptions(prompt: string, opts: SdkRunOptions):
-      { sdkOptions: any; abortController: AbortController } {
+      { sdkOptions: any; abortController: AbortController; credit: CreditKey | null } {
     const abortController = new AbortController();
 
     // 'default' would prompt the user for risky tool calls, but background
@@ -486,8 +515,11 @@ export class SdkHandler {
     // subprocess keeps standard env and only opts.env overrides on top.
     // **`opts.env` 가 없어도 늘 넘긴다** — 안 넘기면 SDK 가 `process.env` 를 그대로 써서
     // PC 에 남은 API 키가 세션으로 샌다(`child-env.ts`).
-    sdkOptions.env = opts.billing === 'api'
-      ? withApiKey({ ...process.env, ...opts.env })
+    // 크레딧 먼저 — 장부에 쓸 키가 있으면 그 키로(`api-credits.ts`). 미리 띄운 세션의 지문에 키 파일이 들어가므로
+    // 키가 바뀌면 그 자리는 안 맞고 새로 뜬다.
+    const credit = opts.billing === 'subscription' ? null : pickCreditKey();
+    sdkOptions.env = opts.billing === 'api' || credit
+      ? withApiKey({ ...process.env, ...opts.env }, credit?.keyFile)
       : withoutApiKey({ ...process.env, ...opts.env });
     if (opts.canUseTool) sdkOptions.canUseTool = opts.canUseTool;
 
@@ -572,7 +604,7 @@ export class SdkHandler {
       effort: sdkOptions.effort,
     });
 
-    return { sdkOptions, abortController };
+    return { sdkOptions, abortController, credit };
   }
 }
 

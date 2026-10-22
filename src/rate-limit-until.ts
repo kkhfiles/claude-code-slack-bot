@@ -10,6 +10,7 @@
  * 둘이면 한쪽이 조용히 낡는다.** 밀린 것의 정본은 캡처 큐 하나다(`inbox.jsonl`) — 여기 남은
  * 몫은 **언제 다시 해 볼지**뿐이다.
  */
+import { claudeBlocked } from './api-credits';
 import { engineState } from './engine-state';
 
 /** 한도가 풀리는 시각(epoch 초). 모르면 `null`. */
@@ -28,7 +29,8 @@ export function setUntil(until: number): void {
 /** 지금도 막혀 있나. 시각을 모르면 **안 막힌 것으로 본다** — 모른다고 멈추면 한 번 잘못 적힌
  *  값이 드레인을 영영 재운다. */
 export function stillBlocked(now = Date.now()): boolean {
-  return engineState.isBlocked('claude', Math.floor(now / 1000));
+  // 크레딧이 있으면 막힌 것이 아니다 — 그 차례는 API 키로 뜬다(2026-10-22 · `api-credits.ts` `claudeBlocked`).
+  return claudeBlocked(engineState, now);
 }
 
 /** 풀렸다 — 막힘을 지운다(된 것과 같다). */

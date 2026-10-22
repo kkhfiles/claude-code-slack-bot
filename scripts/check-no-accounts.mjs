@@ -144,6 +144,46 @@ try {
     ok(`API 칸: 엔진 상태를 claude-api 에 안 적는다(${proc.engine})`, proc.engine === 'claude-api');
     ok('보통 차례: 엔진 상태를 claude 에 안 적는다', h.runQuery('확인', { workingDirectory: os.tmpdir() }).engine === 'claude');
 
+    // ── ⑤ 크레딧 먼저(2026-10-22) — 장부가 켜져 있고 쓸 키가 있을 때만 그 키 · 아니면 구독 ──────────
+    const ledger = path.join(os.tmpdir(), `check-noaccounts-ledger-${process.pid}.json`);
+    const beforeLedger = process.env.LLM_PLAYBOOK_CREDITS;
+    process.env.LLM_PLAYBOOK_CREDITS = ledger;
+    const future = new Date(Date.now() + 10 * 86400_000).toISOString().slice(0, 10);
+    const writeLedger = (enabled) => fs.writeFileSync(ledger, JSON.stringify({ v: 1, enabled, margin: 0.03,
+      keys: { max: { key_file: keyFile, grant_usd: 10, expires: future, spent_usd: 0, daily: {} } } }));
+    try {
+      writeLedger(false);
+      let o = h.buildOptions('확인', { workingDirectory: os.tmpdir(), env });
+      ok('크레딧 꺼짐: 키가 들어갔다 — 구독이어야 한다', leaks(o.sdkOptions.env).length === 0 && o.credit === null);
+      writeLedger(true);
+      o = h.buildOptions('확인', { workingDirectory: os.tmpdir(), env });
+      ok('크레딧 켜짐: 장부 키가 안 들어갔다', o.sdkOptions.env?.ANTHROPIC_API_KEY === KEY && o.credit?.name === 'max');
+      ok('크레딧 켜짐: 구독 토큰이 남았다', !('CLAUDE_CODE_OAUTH_TOKEN' in o.sdkOptions.env));
+      o = h.buildOptions('확인', { workingDirectory: os.tmpdir(), env, billing: 'subscription' });
+      ok('구독 고정: 키가 들어갔다', leaks(o.sdkOptions.env).length === 0 && o.credit === null);
+
+      // 결과마다 쓴 금액을 적고, 크레딧 부족이면 그 키를 막는다
+      SdkHandler.queryFn = () => (async function* () {
+        yield { type: 'result', subtype: 'success', is_error: false, result: '답', total_cost_usd: 0.5, session_id: 's' };
+      })();
+      for await (const _ of h.runQuery('확인', { workingDirectory: os.tmpdir() })) { /* 끝까지 */ }
+      let st = JSON.parse(fs.readFileSync(ledger, 'utf-8'));
+      ok(`크레딧 세션: 쓴 금액을 장부에 안 적었다(${st.keys.max.spent_usd})`, st.keys.max.spent_usd === 0.5);
+      SdkHandler.queryFn = () => (async function* () {
+        yield { type: 'result', subtype: 'success', is_error: true, total_cost_usd: 0, session_id: 's',
+          result: 'Credit balance too low · Add funds: https://platform.claude.com/settings/billing' };
+      })();
+      for await (const _ of h.runQuery('확인', { workingDirectory: os.tmpdir() })) { /* 끝까지 */ }
+      st = JSON.parse(fs.readFileSync(ledger, 'utf-8'));
+      ok('크레딧 세션: 크레딧 부족인데 키를 안 막았다', !!st.keys.max.blocked);
+      o = h.buildOptions('확인', { workingDirectory: os.tmpdir(), env });
+      ok('막힌 키: 그래도 키가 들어갔다 — 구독으로 돌아가야 한다', leaks(o.sdkOptions.env).length === 0);
+    } finally {
+      fs.rmSync(ledger, { force: true });
+      if (beforeLedger === undefined) delete process.env.LLM_PLAYBOOK_CREDITS;
+      else process.env.LLM_PLAYBOOK_CREDITS = beforeLedger;
+    }
+
     fs.writeFileSync(keyFile, 'not-a-key-but-secret-looking');
     let threw = null;
     try { h.buildOptions('확인', { workingDirectory: os.tmpdir(), billing: 'api' }); } catch (e) { threw = e; }
@@ -165,8 +205,8 @@ try {
 const addAt = files.filter((f) => f !== HELPER && /withApiKey\(/.test(all[f]));
 ok(`키를 넣는 함수(withApiKey)를 sdk-handler.ts 밖에서 부른다 — ${addAt.join(' · ')}`,
    addAt.length === 1 && addAt[0] === 'sdk-handler.ts');
-ok('sdk-handler.ts 가 키를 넣는 함수를 `billing === \'api\'` 갈래 밖에서 부른다',
-   /opts\.billing === 'api'\s*\n\s*\? withApiKey\(/.test(all['sdk-handler.ts'] ?? '')
+ok('sdk-handler.ts 가 키를 넣는 함수를 `billing === \'api\'` 또는 장부 키 갈래 밖에서 부른다',
+   /opts\.billing === 'api' \|\| credit\s*\n\s*\? withApiKey\(/.test(all['sdk-handler.ts'] ?? '')
    && (all['sdk-handler.ts'].match(/withApiKey\(/g) ?? []).length === 1);
 // 객체 속성으로 쓴 것만 센다 — 주석의 `billing: 'api'` 는 띄우는 곳이 아니다.
 const billAt = files.filter((f) => /[{,]\s*billing: 'api'/.test(all[f]));

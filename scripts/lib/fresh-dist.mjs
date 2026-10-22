@@ -15,6 +15,7 @@
  * 새 검사가 이것을 빠뜨리면 `check:fresh` 가 잡는다(사람 기억에 안 맡긴다).
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -50,4 +51,10 @@ if (!dist) {
 if (src > dist + 1000) {
   console.error('dist 가 src 보다 낡았습니다 — `npm run build` 뒤에 다시 도세요');
   process.exit(1);
+}
+
+// **검사는 진짜 크레딧 장부를 안 읽는다**(2026-10-22) — 장부(`~/.config/llm-playbook/api-credits.json`)가 켜져 있으면
+// SDK 처리기가 세션을 API 키로 띄우므로, 장부를 켜는 순간 검사의 동작이 바뀐다. 따로 지정하지 않았으면 없는 파일로 돌린다.
+if (!process.env.LLM_PLAYBOOK_CREDITS) {
+  process.env.LLM_PLAYBOOK_CREDITS = path.join(os.tmpdir(), `check-no-credits-${process.pid}.json`);
 }

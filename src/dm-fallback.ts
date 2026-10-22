@@ -10,6 +10,7 @@
  * 모델 · 캡처 id · 결과만. Claude 가 돌아온 첫 차례가 「막힌 동안 다른 엔진이 몇 건 처리했나」를
  * 여기서 센다(내용은 세션 앞에 붙는 「못 본 대화방 글」이 이미 싣는다).
  */
+import { claudeBlocked } from './api-credits';
 import * as fs from 'fs';
 import * as path from 'path';
 import { ENGINES, engineState, type Block, type Engine, type EngineState, type EngineStateData } from './engine-state';
@@ -42,7 +43,8 @@ export function dmLadder(env: NodeJS.ProcessEnv = process.env, file?: string): r
  * 엔진별 「지금 못 맡나」 — 엔진 상태의 막힘(진짜 · 연습)뿐. codex 는 부르는 쪽이 한도 조회를 먼저 옮겨 둔다.
  */
 export function ladderBlockedMap(store: EngineState = engineState): Partial<Record<Engine, boolean>> {
-  return Object.fromEntries(ENGINES.map((e) => [e, store.isBlocked(e)])) as Record<Engine, boolean>;
+  // Claude 칸은 크레딧이 있으면 막힌 것이 아니다 — 그 세션은 API 키로 뜬다(2026-10-22).
+  return Object.fromEntries(ENGINES.map((e) => [e, e === 'claude' ? claudeBlocked(store) : store.isBlocked(e)])) as Record<Engine, boolean>;
 }
 
 /** 대체 차례 하나의 상한 — 실측 16초 안팎(2026-10-14) · 넘으면 트리째 죽이고 모아 둔다. */

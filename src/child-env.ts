@@ -38,8 +38,8 @@ const OTHER_AUTH = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE
  * 실측 · `apiKeySource: ANTHROPIC_API_KEY`). **이 함수를 부르는 곳은 `sdk-handler.ts` 의 `billing: 'api'` 하나**
  * — 다른 곳에서 부르면 그 길이 구독 대신 과금된다(`npm run check:noaccounts`).
  */
-export function withApiKey(env: Record<string, string | undefined>): Record<string, string> {
-  const file = apiKeyFile();
+export function withApiKey(env: Record<string, string | undefined>, keyFile?: string): Record<string, string> {
+  const file = keyFile || apiKeyFile();
   let key: string;
   try {
     key = fs.readFileSync(file, 'utf-8').trim();
