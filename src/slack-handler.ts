@@ -58,6 +58,7 @@ import { CODEX_INFLIGHT_STEP, FALLBACK_TIMEOUT_MS, INCOMPLETE_LINE, NEEDS_FULL_L
 import { codexQuota } from './codex-quota';
 import { sameTier, serviceCodex } from './model-ladder';
 import { readDrill } from './engine-drill';
+import { waitForFreshToken } from './token-wait';
 import { agyDisplay, agyModel, agyRungsOn, agyTurn, type AgyRung } from './agy-turn';
 import {
   AGY_DM_RULES, actionReport, actionSteps, agyDmPrompt, fetchTaskList, isMailTurn, mailBodies, mailBodiesBlock,
@@ -3811,6 +3812,19 @@ export class SlackHandler {
   }
 
   private async runAssistantSession(prompt: string, opts: SpawnOpts): Promise<SessionResult> {
+    // **토큰이 이 세션보다 먼저 끝나면 갱신을 기다렸다 띄운다**(2026-10-22) — 쥐고 띄운 토큰이 도중에 폐기되면
+    // 쓰기 도구가 돈 뒤 「OAuth token revoked」로 넘어진다(22:00 분석이 사흘 내리). 상세는 `token-wait.ts`.
+    this.accountManager.syncFromCredentialsFile();
+    const waited = await waitForFreshToken(opts.maxDurationMs, {
+      expiresAt: () => this.accountManager.tokenExpiresAt?.() ?? null,
+      refresh: async () => { this.accountManager.syncFromCredentialsFile(); await this.accountManager.getAccessToken(); },
+      onWait: (ms) => this.logger.warn('토큰이 세션 상한 안에 끝나 갱신을 기다립니다',
+        { expiresInMin: Math.round(ms / 60_000), maxMin: Math.round((opts.maxDurationMs ?? 0) / 60_000) }),
+    });
+    if (waited === 'refreshed' || waited === 'gave-up') {
+      this.logger.warn(waited === 'refreshed' ? '토큰 갱신을 기다렸다 띄웁니다' : '기다려도 토큰이 안 바뀌어 그대로 띄웁니다',
+        { maxMin: Math.round((opts.maxDurationMs ?? 0) / 60_000) });
+    }
     // OAuth token injection — handleMessage pattern (line 494-506)
     this.accountManager.syncFromCredentialsFile();
     const oauthToken = await this.accountManager.getAccessToken();

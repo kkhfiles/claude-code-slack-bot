@@ -266,6 +266,11 @@ export class AccountManager {
    * Reads email from ~/.claude.json and only absorbs tokens of the same account.
    * Call before CLI spawn to pick up terminal's token refreshes.
    */
+  /** 지금 토큰의 만료 시각(epoch 밀리초) — 없으면 null. 예약 세션이 상한 안에 토큰이 끝나는지 본다(`token-wait.ts`). */
+  tokenExpiresAt(): number | null {
+    return this.loadAccounts().accounts[SLOT]?.expiresAt ?? null;
+  }
+
   syncFromCredentialsFile(): void {
     try {
       const credData = JSON.parse(fs.readFileSync(this.credentialsFile, 'utf-8'));
