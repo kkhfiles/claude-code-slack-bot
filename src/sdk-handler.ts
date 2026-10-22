@@ -186,19 +186,17 @@ export class SdkProcess {
       for await (const sdkMsg of this.query) {
         const event = interpretSdkMessage(sdkMsg);
         if (event) {
+          if (event.type === 'system' && (event as any).session_id) sessionId = (event as any).session_id;
+          const hold = !!(this.credit && this.retry && (held.length || creditFailure(event)));
+          // 결과 글이 다른 모양이어도 다음 띄우기가 같은 키를 다시 고르지 않게 여기서 막는다(장부 쓰기는 안 던진다)
+          if (hold && !held.length) {
+            try { blockCreditKey(this.credit!.name, `${(event as any).error ?? 'result'}: credit failure`); } catch { /* 장부 못 씀 */ }
+          }
+          if (!hold && event.type === 'assistant'
+              && ((event as any).message?.content ?? []).some((b: any) => b?.type === 'tool_use')) ranTools = true;
           tap.see(event);
           this.seeCredit(event);
-          if (event.type === 'system' && (event as any).session_id) sessionId = (event as any).session_id;
-          if (this.credit && this.retry && (held.length || creditFailure(event))) {
-            // 결과 글이 다른 모양이어도 다음 띄우기가 같은 키를 다시 고르지 않게 여기서 막는다(장부 쓰기는 안 던진다)
-            if (!held.length) {
-              try { blockCreditKey(this.credit.name, `${(event as any).error ?? 'result'}: credit failure`); } catch { /* 장부 못 씀 */ }
-            }
-            held.push(event);
-            continue;
-          }
-          if (event.type === 'assistant'
-              && ((event as any).message?.content ?? []).some((b: any) => b?.type === 'tool_use')) ranTools = true;
+          if (hold) { held.push(event); continue; }
           yield event;
         }
       }
@@ -237,7 +235,8 @@ export class SdkProcess {
       }
     }
     if (!next) {
-      for (const e of held) yield e;
+      // 들고 있던 것은 받을 때 이미 탭이 봤다(위 반복문) — 여기서 다시 보이면 막힘이 두 번 적힌다
+      yield* held;
       return;
     }
     this.logger.warn('크레딧이 도중에 바닥나 다시 띄웁니다', { key: this.credit?.name, next: next.credit?.name ?? 'subscription', ranTools });
