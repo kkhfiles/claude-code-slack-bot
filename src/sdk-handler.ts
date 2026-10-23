@@ -15,7 +15,7 @@ import { event as recordEvent } from './board-queue';
 import { withApiKey, withoutApiKey } from './child-env';
 import { ClaudeTap } from './engine-tap';
 import { engineState, type Engine } from './engine-state';
-import { blockCreditKey, ledgerFile, pickCreditKey, recordCreditSpend, type CreditKey } from './api-credits';
+import { blockCreditKey, ledgerFile, pickCreditKey, recordCreditSpend, turnCost, type CreditKey } from './api-credits';
 import { afterFirstToolResult, claudeDrill, claudeDrillEvents, drillQuery, limitTail, type DrillScope } from './engine-drill';
 import type {
   CliEvent,
@@ -147,6 +147,8 @@ export class SdkProcess {
   private child: SdkProcess | null = null;
   /** 크레딧이 도중에 바닥나면 다음 키나 구독으로 한 번 더 띄운다(2026-10-22 사용자 결정 · `SdkHandler.runQuery`). */
   retry: CreditRetry | null = null;
+  /** 옛 세션을 이어 받아 띄웠나 — 처음 보는 이어 받은 세션의 누적 비용은 크레딧 몫을 몰라 안 센다(`turnCost`). */
+  resumed = false;
   /** 시작 이벤트가 알려 준 것 — 크레딧 사용 내역에 같이 남긴다(정말 API 키로 돌았나 · 어느 세션인가). */
   private init: { session: string | null; auth: string | null; model: string | null } = { session: null, auth: null, model: null };
 
@@ -165,10 +167,12 @@ export class SdkProcess {
   private seeCredit(ev: any): void {
     if (!this.credit || ev?.type !== 'result') return;
     try {
-      const cost = Number(ev.total_cost_usd ?? 0);
+      // `total_cost_usd` 는 그 세션의 누적 비용이라 늘어난 만큼만 더한다(`turnCost` · 2026-10-23 27~29배로 부풀었다).
+      const session = ev.session_id || this.init.session;
+      const cost = turnCost(session, Number(ev.total_cost_usd ?? 0), this.resumed);
       if (cost > 0) {
         recordCreditSpend(this.credit.name, cost, Date.now(), ledgerFile(), {
-          session: ev.session_id || this.init.session, auth: this.init.auth, model: this.init.model, caller: 'sdk-handler',
+          session, auth: this.init.auth, model: this.init.model, caller: 'sdk-handler',
         });
       }
       const text = String(ev.result ?? '');
@@ -507,8 +511,10 @@ export class SdkHandler {
   private start(prompt: string, opts: SdkRunOptions, depth: number): SdkProcess {
     if (opts.billing === 'api') {
       const built = this.buildOptions(prompt, opts);
-      return new SdkProcess(SdkHandler.queryFn({ prompt, options: built.sdkOptions }), built.abortController, 'claude-api',
+      const p = new SdkProcess(SdkHandler.queryFn({ prompt, options: built.sdkOptions }), built.abortController, 'claude-api',
         built.credit);
+      p.resumed = !!built.sdkOptions.resume;
+      return p;
     }
     // 엔진 연습(`engine-drill.ts`) — 막힌 모양을 재생한다. 처음부터 막힌 갈래는 진짜를 안 띄우고,
     // `usage-after-tool` 은 진짜 차례(미리 띄운 것 포함)를 첫 도구 결과까지 돌린 뒤 꼬리를 끼운다.
@@ -524,6 +530,7 @@ export class SdkHandler {
         ? new SdkProcess(afterFirstToolResult(q, () => ac.abort(), () => limitTail(sid)) as unknown as Query, ac, 'claude', built.credit)
         : new SdkProcess(q, ac, 'claude', built.credit);
       if (built.credit) p.retry = this.creditRetry(prompt, opts, depth);
+      p.resumed = !!built.sdkOptions.resume;
       return p;
     };
     const key = this.keyOf(built.sdkOptions);

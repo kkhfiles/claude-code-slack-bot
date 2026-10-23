@@ -7,10 +7,13 @@
  *
  * **고르는 규칙**(파이썬과 같다 — 바꾸면 둘을 같이 바꾼다)
  *   - 장부의 `enabled` 가 참일 때만(기본 꺼짐 — 과금 경로를 켜는 것은 사람이 정한다)
- *   - 만료가 이른 키부터 · 못 쓰는 키 = 막힘 표시 · 만료일 0시(한국 시각) 지남 · 쓴 금액 ≥ 받은 금액 × (1 − 여유)
+ *   - 만료가 이른 키부터 · 못 쓰는 키 = 막힘 표시(서버가 잔액 부족이라 했거나 사람이 막음), 만료일 0시(한국 시각) 지남
  *   - **장부를 못 읽거나 깨졌으면 쓸 키가 없다** — 이상한 장부로 과금 쪽에 가지 않는다(구독으로 띄운다)
  *
- * 쓴 금액은 SDK 가 결과에 실어 주는 `total_cost_usd` 다. 서버가 「credit balance is too low」를 내면 그 키를 막는다.
+ * **쓴 금액은 참고 값이다 — 이 값으로 멈추지 않는다**(2026-10-23 사용자 결정 「실제 값과 같다고 보장이 안 되니 멈추면 중단」).
+ * 전에는 결과의 `total_cost_usd`(그 세션의 **누적** 비용, 이어 받은 세션은 옛 비용까지)를 차례마다 통째로 더해 27~29배로
+ * 부풀었고, 두 키가 「소진(추정)」으로 잠겨 하루 동안 크레딧을 안 썼다(실제 team $19.34 · max $3.67). 지금은 세션마다
+ * 앞 차례보다 늘어난 만큼만 더한다(`turnCost`). 멈추는 신호는 서버의 「credit balance is too low」 하나다(`blockCreditKey`).
  */
 import * as fs from 'fs';
 import * as os from 'os';
@@ -20,7 +23,6 @@ import { engineState, sleepSync, takeLock, type EngineState } from './engine-sta
 
 const logger = new Logger('ApiCredits');
 
-const DEFAULT_MARGIN = 0.03;
 const KST_OFFSET_MS = 9 * 3600 * 1000;
 const RECORD_LOCK_WAIT_MS = 3_000;
 const REPLACE_TRIES = 25;
@@ -67,21 +69,20 @@ export function stopAt(expires: string | undefined): number {
   return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) - KST_OFFSET_MS : NaN;
 }
 
-function usable(rec: KeyRecord, margin: number, nowMs: number): boolean {
+/** 쓸 수 있나 — 막힘 · 만료 · 받은 금액 없음만 본다. 쓴 금액(추정)은 안 본다(머리말). */
+function usable(rec: KeyRecord, nowMs: number): boolean {
   if (rec.blocked) return false;
   const grant = Number(rec.grant_usd ?? 0);
   const stop = stopAt(rec.expires);
-  if (!(grant > 0) || !Number.isFinite(stop) || nowMs >= stop) return false;
-  return Number(rec.spent_usd ?? 0) < grant * (1 - margin);
+  return grant > 0 && Number.isFinite(stop) && nowMs < stop;
 }
 
 /** 지금 쓸 키 — 없으면 null(꺼짐 포함). 만료가 이른 것부터. */
 export function pickCreditKey(nowMs: number = Date.now(), file = ledgerFile()): CreditKey | null {
   const st = load(file);
   if (!st || st.enabled !== true) return null;
-  const margin = Number(st.margin ?? DEFAULT_MARGIN);
   const ok = Object.entries(st.keys)
-    .filter(([, rec]) => rec && typeof rec === 'object' && usable(rec, margin, nowMs))
+    .filter(([, rec]) => rec && typeof rec === 'object' && usable(rec, nowMs))
     .sort(([, a], [, b]) => stopAt(a.expires) - stopAt(b.expires));
   if (!ok.length) return null;
   const [name, rec] = ok[0];
@@ -167,6 +168,47 @@ export function recordCreditSpend(name: string, usd: number, nowMs: number = Dat
     daily[day] = Math.round((Number(daily[day] ?? 0) + usd) * 1e6) / 1e6;
   }, file);
   if (wrote && added) noteSpend(name, usd, nowMs, file, note);
+}
+
+/** 세션마다 마지막으로 본 누적 비용 — 장부 옆 `<장부 이름>.sessions.json`(봇만 씀). 오래된 것은 걷는다. */
+const SESSION_KEEP_MS = 14 * 86_400_000;
+
+function sessionsFile(file: string): string {
+  return file.replace(/\.json$/, '') + '.sessions.json';
+}
+
+/**
+ * 이번 차례에 실제로 쓴 몫 — 결과의 `total_cost_usd` 는 그 세션의 **누적** 비용이다(이어 받은 세션은 옛 차례까지 ·
+ * 2026-10-23 실측: 같은 세션이 $44.00 → $44.20 → $46.36 으로 적혀 셋 다 더해졌다). 마지막으로 본 값과의 차이만 낸다.
+ *
+ * - 처음 보는 세션 — 새로 띄운 것이면 그 값 전부(0 에서 시작했다). **이어 받은 것이면 0** 을 내고 기준만 적는다: 그 누적에
+ *   구독으로 돈 옛 차례가 섞여 있어 얼마가 크레딧 몫인지 모른다(조금 덜 세는 쪽을 고름 · 이 값은 참고용)
+ * - 누적이 줄었으면(다른 프로세스가 0 부터 다시 셈) 그 값 전부
+ * - 기준 파일을 못 읽거나 못 쓰면 0 — 장부를 부풀리지 않는다
+ */
+export function turnCost(session: string | null | undefined, cumulative: number, resumed: boolean,
+  nowMs: number = Date.now(), file = ledgerFile()): number {
+  if (!(cumulative > 0) || !session) return 0;
+  const sf = sessionsFile(file);
+  let seen: Record<string, { c: number; at: number }> = {};
+  try {
+    seen = JSON.parse(fs.readFileSync(sf, 'utf-8')) ?? {};
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') return 0;
+  }
+  const last = seen[session]?.c;
+  const delta = last === undefined ? (resumed ? 0 : cumulative) : (cumulative >= last ? cumulative - last : cumulative);
+  seen[session] = { c: cumulative, at: nowMs };
+  for (const [k, v] of Object.entries(seen)) if (!v || nowMs - Number(v.at) > SESSION_KEEP_MS) delete seen[k];
+  try {
+    const tmp = `${sf}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(seen));
+    fs.renameSync(tmp, sf);
+  } catch (err: any) {
+    logger.warn('세션 누적 비용 기준을 못 적었습니다 — 이번 차례는 안 셉니다', { err: String(err?.message ?? err) });
+    return 0;
+  }
+  return Math.round(delta * 1e6) / 1e6;
 }
 
 /** 그 키를 막는다 — 서버가 크레딧 부족 · 키 거부를 냈다. 새로 `set` 하면 풀린다. */

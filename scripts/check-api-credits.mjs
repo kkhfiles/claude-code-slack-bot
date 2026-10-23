@@ -47,8 +47,9 @@ try {
   eq('만료일 전날 밤까지', name(KST('2026-10-31', 23)), 'max');
   eq('만료일 0시에 다음 키', name(KST('2026-11-01', 0)), 'team');
   eq('둘 다 만료 — 없음', name(KST('2026-11-05', 0)), null);
-  write({ enabled: true, keys: { ...base, max: { ...base.max, spent_usd: 96.35 * 0.97 } } });
-  eq('여유 앞에서 멈춤', name(KST('2026-10-22')), 'team');
+  // 쓴 금액(추정)으로는 멈추지 않는다 — 멈추는 것은 서버의 잔액 부족(막힘)뿐(2026-10-23 사용자 결정)
+  write({ enabled: true, keys: { ...base, max: { ...base.max, spent_usd: 500 } } });
+  eq('추정 사용액이 받은 금액을 넘어도 그 키', name(KST('2026-10-22')), 'max');
   write({ enabled: true, keys: { ...base, max: { ...base.max, blocked: { why: 'x', at: 1 } } } });
   eq('막힌 키 건너뜀', name(KST('2026-10-22')), 'team');
   fs.writeFileSync(LEDGER, '{깨짐');
@@ -77,6 +78,17 @@ try {
   eq('내역 한 줄의 칸', Object.keys(h), ['at', 'by', 'pid', 'key', 'usd', 'session', 'auth', 'model', 'caller']);
   eq('내역 — 값', [h.at, h.by, h.key, h.usd, h.session, h.auth], ['2026-10-23T12:00:00+09:00', 'bot', 'team', 0.5, 's-1', 'ANTHROPIC_API_KEY']);
   eq('더한 것만 남긴다(없는 키 · 깨진 장부는 안 남김)', hist.map((x) => x.usd), [0.25, 0.25, 0.5]);
+
+  // 세션 누적 비용 → 이번 차례 몫 — 2026-10-23 같은 세션이 $44.00 → $44.20 → $46.36 으로 적혀 셋 다 더해졌다
+  eq('새로 띄운 세션의 첫 차례는 전부', ac.turnCost('s-new', 0.3, false, KST('2026-10-23'), LEDGER), 0.3);
+  eq('다음 차례는 늘어난 만큼', ac.turnCost('s-new', 0.5, false, KST('2026-10-23'), LEDGER), 0.2);
+  eq('이어 받은 세션을 처음 보면 0(크레딧 몫을 모름)', ac.turnCost('s-old', 44.0, true, KST('2026-10-23'), LEDGER), 0);
+  eq('그 뒤로는 늘어난 만큼', [ac.turnCost('s-old', 44.2, true, KST('2026-10-23'), LEDGER),
+    ac.turnCost('s-old', 46.36, true, KST('2026-10-23'), LEDGER)], [0.2, 2.16]);
+  eq('누적이 줄면 그 값 전부(다른 프로세스가 0부터)', ac.turnCost('s-new', 0.1, true, KST('2026-10-23'), LEDGER), 0.1);
+  eq('세션 id 가 없으면 안 셈', ac.turnCost(null, 1, false, KST('2026-10-23'), LEDGER), 0);
+  eq('보름 넘은 기준은 걷음', (ac.turnCost('s-x', 1, false, KST('2026-11-10'), LEDGER),
+    Object.keys(JSON.parse(fs.readFileSync(LEDGER.replace(/\.json$/, '') + '.sessions.json', 'utf-8')))), ['s-x']);
 
   // Claude 막힘 — 구독이 막혔어도 크레딧이 있으면 띄울 수 있다
   const es = new EngineState(process.env.ENGINE_STATE_FILE);
@@ -126,5 +138,5 @@ if (fails.length) {
   for (const f of fails) console.log('  ✗ ' + f);
   process.exitCode = 1;
 } else {
-  console.log('통과 — API 크레딧 장부 (꺼짐 · 만료가 이른 키부터 · 만료일 0시 · 여유 · 막힘 · 깨진 장부 · 날짜별 합 · Claude 막힘 판단 · 파이썬과 같은 키)');
+  console.log('통과 — API 크레딧 장부 (꺼짐 · 만료가 이른 키부터 · 만료일 0시 · 추정 사용액으로 안 멈춤 · 막힘 · 깨진 장부 · 날짜별 합 · 세션 누적에서 늘어난 만큼 · Claude 막힘 판단 · 파이썬과 같은 키)');
 }
