@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import { spawn } from 'child_process';
+import { pythonCommand } from './python-command';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
 import { coffeechatMessage } from './coffeechat-message';
@@ -770,7 +771,8 @@ export class LetterCoffeechat {
     if (!this.opts.notionDb || !this.opts.notionScript) return Promise.resolve(null);
     return new Promise((resolve) => {
       try {
-        const proc = spawn(this.opts.notionPython ?? 'python',
+        const py = pythonCommand(this.opts.notionPython ?? 'python');
+        const proc = spawn(py,
           ['-X', 'utf8', this.opts.notionScript!, '--profile', 'personal', ...args],
           { windowsHide: true });
         let out = ''; let err = '';

@@ -3,6 +3,7 @@ import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
+import { pythonCommand } from './python-command';
 import type { TurnAsk, TurnResult } from './chat-host';
 
 /**
@@ -310,7 +311,8 @@ export class LetterInitiative {
 
   private pulse(): { workday: boolean; brief: string } | null {
     const args = this.opts.pulseArgs ?? ['--room', this.opts.room ?? ''];
-    const r = spawnSync(this.opts.python, ['-X', 'utf8', this.opts.script, ...args], {
+    const py = pythonCommand(this.opts.python);
+    const r = spawnSync(py, ['-X', 'utf8', this.opts.script, ...args], {
       encoding: 'utf-8', windowsHide: true, timeout: 30_000,
     });
     if (r.status !== 0) {

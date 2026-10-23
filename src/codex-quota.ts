@@ -19,6 +19,7 @@
  * 못 읽었을 때는 막힘을 지우지도 않는다. 읽었고 남은 양이 있으면 사용량 소진 막힘만 지운다(`applyQuota`).
  */
 import { spawn, execSync } from 'child_process';
+import { pythonCommand } from './python-command';
 import { Logger } from './logger';
 import { engineState, type EngineState } from './engine-state';
 
@@ -97,7 +98,7 @@ export function fetchCodexQuota(timeoutMs: number = QUOTA_TIMEOUT_MS): Promise<C
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>;
     try {
-      proc = spawn(quotaPython(),
+      proc = spawn(pythonCommand(quotaPython()),
         ['-X', 'utf8', '-m', 'llm_playbook.backends.codex_sdk', '--quota', '--json'], {
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
@@ -113,7 +114,7 @@ export function fetchCodexQuota(timeoutMs: number = QUOTA_TIMEOUT_MS): Promise<C
     const killTimer = setTimeout(() => {
       // app-server 까지 트리째 — 파이썬만 죽이면 codex 프로세스가 고아로 남는다.
       try {
-        if (process.platform === 'win32' && proc.pid) execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+        if (process.platform === 'win32' && proc.pid) execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore', windowsHide: true });
         else proc.kill('SIGKILL');
       } catch { /* 이미 끝났다 */ }
     }, timeoutMs);

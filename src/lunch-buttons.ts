@@ -4,6 +4,7 @@ import * as path from 'path';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
 import { tagApp, tagToken } from './activity-log';
+import { pythonCommand } from './python-command';
 
 /**
  * Listens for button clicks on the lunch bot's recruitment message.
@@ -133,7 +134,8 @@ export class LunchButtons {
    * while the click must be acknowledged immediately.
    */
   private run(command: string, timeoutMs: number, args: string[] = []): void {
-    const child = spawn(this.pythonPath, [this.scriptPath, command, ...args], {
+    const py = pythonCommand(this.pythonPath);
+    const child = spawn(py, [this.scriptPath, command, ...args], {
       cwd: path.dirname(this.scriptPath),
       // The script prints Korean; without this Windows defaults to cp949.
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },

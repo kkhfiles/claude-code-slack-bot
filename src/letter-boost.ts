@@ -14,6 +14,7 @@
  */
 import { spawn } from 'child_process';
 import type { App } from '@slack/bolt';
+import { pythonCommand } from './python-command';
 
 const PICK = 'boost_pick';
 const DROP = 'boost_drop';
@@ -86,7 +87,8 @@ export class LetterBoost {
 
   private run(args: string[]): Promise<{ ok: boolean; text: string }> {
     return new Promise((resolve) => {
-      const child = spawn(this.opts.python, ['-X', 'utf8', this.opts.script, ...args], {
+      const py = pythonCommand(this.opts.python);
+      const child = spawn(py, ['-X', 'utf8', this.opts.script, ...args], {
         env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
         windowsHide: true,
       });

@@ -22,6 +22,7 @@ import { Logger } from './logger';
 import { errorCollector } from './error-collector';
 import { isSessionRateLimited } from './rate-limit-utils';
 import { quoteForShell } from './work-assistant';
+import { pythonCommand } from './python-command';
 import type { SessionResult, SpawnOpts } from './assistant-scheduler';
 
 export const ACTION_ID_RE = /^a-\d{8}-\d{2,}$/;
@@ -270,15 +271,14 @@ function shellSafe(text: string): string {
 
 export function runReportLog(script: 'flow' | 'report_log', args: string[],
                              timeoutMs = 300_000): Promise<any> {
-  const useShell = process.platform === 'win32';
-  const argv = useShell ? args.map(quoteForShell) : args;
   return new Promise((resolve) => {
     let proc: ChildProcess;
     try {
-      proc = spawn('python', ['-X', 'utf8', `tools/${script}.py`, ...argv], {
+      const py = pythonCommand('python');
+      proc = spawn(py, ['-X', 'utf8', `tools/${script}.py`, ...args], {
         cwd: reportLogRepo(),
         stdio: ['ignore', 'pipe', 'pipe'],
-        shell: useShell,
+        shell: false,
         env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
         windowsHide: true,
       });
@@ -294,7 +294,7 @@ export function runReportLog(script: 'flow' | 'report_log', args: string[],
       try {
         // shell:true 래퍼(cmd.exe)만 죽이면 python 자식이 고아로 남아 잠금을 쥔다 — 트리 kill.
         if (process.platform === 'win32' && proc.pid) {
-          execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+          execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore', windowsHide: true });
         } else {
           proc.kill('SIGKILL');
         }

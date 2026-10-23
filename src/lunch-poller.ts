@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import Holidays from 'date-holidays';
 import { Logger } from './logger';
+import { pythonCommand } from './python-command';
 
 /**
  * Periodically runs the lunch bot script (`lunch_bot.py tick`).
@@ -93,7 +94,8 @@ export class LunchPoller {
 
   private runScript(): Promise<void> {
     return new Promise((resolve) => {
-      const child = spawn(this.pythonPath, [this.scriptPath, 'tick'], {
+      const py = pythonCommand(this.pythonPath);
+      const child = spawn(py, [this.scriptPath, 'tick'], {
         cwd: path.dirname(this.scriptPath),
         env: {
           ...process.env,

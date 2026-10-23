@@ -1,4 +1,4 @@
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -6,8 +6,10 @@ import { promisify } from 'util';
 import { Logger } from './logger';
 import { errorCollector } from './error-collector';
 import { t, Locale } from './messages';
+import { pythonCommand } from './python-command';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /** Process info from OS query */
 interface ProcessInfo {
@@ -445,8 +447,9 @@ export class ProcessMemoryWatchdog {
   /** 읽기 전용 측정 한 번 — `windows-health-latest.json` 을 지금 상태로 바꾼다. */
   private refreshHealthSnapshot(): Promise<void> {
     const repo = process.env.MYCELIUM_REPO || 'P:/github/claude-workflow';
+    const py = pythonCommand('python');
     const argv = ['-X', 'utf8', '-m', 'mycelium.batch.windows_health_check', '--brief', '--exit-zero'];
-    return execAsync(`python ${argv.join(' ')}`, { cwd: repo, timeout: 180_000 })
+    return execFileAsync(py, argv, { cwd: repo, timeout: 180_000, windowsHide: true })
       .then(() => { this.logger.info('정리 뒤 재측정 완료'); });
   }
 
@@ -479,10 +482,11 @@ export class ProcessMemoryWatchdog {
 
   private runHealthFix(action: string, apply: boolean): Promise<string> {
     const repo = process.env.MYCELIUM_REPO || 'P:/github/claude-workflow';
+    const py = pythonCommand('python');
     const argv = ['-X', 'utf8', '-m', 'mycelium.batch.windows_health_fix', action];
     if (apply) argv.push('--apply');
     return new Promise((resolve, reject) => {
-      execAsync(`python ${argv.join(' ')}`, { cwd: repo, timeout: 180_000 })
+      execFileAsync(py, argv, { cwd: repo, timeout: 180_000, windowsHide: true })
         .then(({ stdout }) => resolve(stdout.trim() || '(출력 없음)'))
         .catch(err => reject(err));
     });
@@ -1120,6 +1124,7 @@ export class ProcessMemoryWatchdog {
         require('child_process').execSync(`taskkill /PID ${pid} /F`, {
           timeout: 10_000,
           stdio: 'ignore',
+          windowsHide: true,
         });
         return true;
       } catch {

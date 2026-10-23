@@ -21,6 +21,7 @@ import { spawn, execSync } from 'child_process';
 import * as path from 'path';
 import { withoutApiKey } from './child-env';
 import { runTasks } from './work-assistant';
+import { pythonCommand } from './python-command';
 
 // ---------------------------------------------------------------- 업무 목록(재료)
 
@@ -606,7 +607,7 @@ export interface ActionRun {
 
 /** 실행체 — 기본 PATH 의 파이썬. 검사가 바꿔 끼운다(`AGY_ACTIONS_PYTHON`). */
 function python(): string {
-  return process.env.AGY_ACTIONS_PYTHON || 'python';
+  return pythonCommand(process.env.AGY_ACTIONS_PYTHON || 'python');
 }
 
 function runOne(root: string, a: ValidAction, captureId: string, timeoutMs: number):
@@ -638,7 +639,7 @@ function runOne(root: string, a: ValidAction, captureId: string, timeoutMs: numb
     proc.stderr?.on('data', (c: string) => { if (stderr.length < 20_000) stderr += c; });
     const timer = setTimeout(() => {
       try {
-        if (process.platform === 'win32' && proc.pid) execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+        if (process.platform === 'win32' && proc.pid) execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore', windowsHide: true });
         else proc.kill('SIGKILL');
       } catch { /* 이미 끝남 */ }
     }, timeoutMs);

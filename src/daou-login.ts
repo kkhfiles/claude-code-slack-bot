@@ -1,10 +1,11 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
 import { Logger } from './logger';
+import { pythonCommand } from './python-command';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 type SendMessageFn = (text: string, blocks?: any[]) => Promise<string>;
 type UpdateMessageFn = (ts: string, text: string, blocks?: any[]) => Promise<void>;
@@ -206,8 +207,12 @@ export class DaouLoginNotifier {
 
   private async probeAlive(): Promise<boolean> {
     try {
-      const { stdout } = await execAsync(
-        'python -X utf8 -m mycelium.utils.daou_auth alive', { cwd: this.repo, timeout: 60_000 });
+      const py = pythonCommand('python');
+      const { stdout } = await execFileAsync(
+        py,
+        ['-X', 'utf8', '-m', 'mycelium.utils.daou_auth', 'alive'],
+        { cwd: this.repo, timeout: 60_000, windowsHide: true },
+      );
       return Boolean(JSON.parse(stdout.trim().split('\n').pop() || '{}').alive);
     } catch {
       return false;   // rc 1 = 만료. 예외도 만료로 본다 — 창을 띄우는 쪽이 안전하다.
@@ -220,8 +225,12 @@ export class DaouLoginNotifier {
    */
   private async runLogin(): Promise<{ ok: boolean; timedOut?: boolean; error?: string; cookies?: number }> {
     try {
-      const { stdout } = await execAsync(
-        'python -X utf8 -m mycelium.utils.daou_auth login', { cwd: this.repo, timeout: 360_000 });
+      // 창을 숨기는 것은 콘솔뿐이다 — 로그인 브라우저는 그대로 뜬다.
+      const { stdout } = await execFileAsync(
+        pythonCommand('python'),
+        ['-X', 'utf8', '-m', 'mycelium.utils.daou_auth', 'login'],
+        { cwd: this.repo, timeout: 360_000, windowsHide: true },
+      );
       const m = /Saved (\d+) cookies/.exec(stdout);
       return { ok: /로그인 성공/.test(stdout), cookies: m ? Number(m[1]) : undefined,
                error: /로그인 성공/.test(stdout) ? undefined : stdout.trim().slice(-200) };
@@ -235,8 +244,12 @@ export class DaouLoginNotifier {
   /** 로그인 뒤 그날 몫을 바로 적재하고 마커를 걷는다. 러너와 같은 cwd·모듈 경로. */
   private async runCatchUp(): Promise<string> {
     try {
-      const { stdout } = await execAsync('python -X utf8 -m sync.groupware_daily --json',
-        { cwd: path.join(this.repo, 'mycelium'), timeout: 900_000 });
+      const py = pythonCommand('python');
+      const { stdout } = await execFileAsync(
+        py,
+        ['-X', 'utf8', '-m', 'sync.groupware_daily', '--json'],
+        { cwd: path.join(this.repo, 'mycelium'), timeout: 900_000, windowsHide: true },
+      );
       const r = JSON.parse(stdout.trim().split('\n').pop() || '{}');
       if (r.session_expired) return '⚠️ 적재 단계에서 세션이 다시 만료로 읽혔습니다 — 다음 회차에 확인';
       return `적재 새 글 ${r.fetched_new ?? 0}건 · 문서 ${r.ingested_docs ?? 0}건 · 알림 해소`;
@@ -249,8 +262,12 @@ export class DaouLoginNotifier {
 
   private async clearAlert(): Promise<void> {
     try {
-      await execAsync('python -X utf8 -m sync.groupware_daily --keepalive --json',
-        { cwd: path.join(this.repo, 'mycelium'), timeout: 120_000 });
+      const py = pythonCommand('python');
+      await execFileAsync(
+        py,
+        ['-X', 'utf8', '-m', 'sync.groupware_daily', '--keepalive', '--json'],
+        { cwd: path.join(this.repo, 'mycelium'), timeout: 120_000, windowsHide: true },
+      );
     } catch (e) {
       this.logger.warn('마커 해소(keepalive) 실패 — 다음 정기 핑이 걷는다', e as Error);
     }

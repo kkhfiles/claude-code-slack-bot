@@ -21,6 +21,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { Logger } from './logger';
 import { withoutApiKey } from './child-env';
+import { pythonCommand } from './python-command';
 import { modelsFile } from './engine-notice';
 import type { Engine } from './engine-state';
 import { DM_LADDER_AGY } from './engine-ladder';
@@ -243,7 +244,8 @@ function runLadder(args: string[], timeoutMs: number): Promise<{ code: number; s
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>;
     try {
-      proc = spawn(process.env.LADDER_PYTHON || 'python', ['-X', 'utf8', '-m', 'llm_playbook.ladder', ...args], {
+      const py = pythonCommand(process.env.LADDER_PYTHON || 'python');
+      proc = spawn(py, ['-X', 'utf8', '-m', 'llm_playbook.ladder', ...args], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
         // 사다리의 claude 칸은 Claude Code 를 띄운다 — 키가 넘어가면 구독 대신 그 키로 과금된다.
@@ -260,7 +262,7 @@ function runLadder(args: string[], timeoutMs: number): Promise<{ code: number; s
     const killTimer = setTimeout(() => {
       // 자식(codex·agy)까지 트리째 — 파이썬만 죽이면 모델 프로세스가 고아로 남는다.
       try {
-        if (process.platform === 'win32' && proc.pid) execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+        if (process.platform === 'win32' && proc.pid) execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore', windowsHide: true });
         else proc.kill('SIGKILL');
       } catch { /* 이미 끝났다 */ }
     }, timeoutMs);

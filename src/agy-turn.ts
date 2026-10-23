@@ -22,6 +22,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { withoutApiKey } from './child-env';
+import { pythonCommand } from './python-command';
 import { agyDrill, drillBlockUntil, type DrillScope } from './engine-drill';
 import { modelsFile } from './engine-notice';
 import { isAgyRung } from './engine-ladder';
@@ -118,7 +119,8 @@ function agyCommand(): string[] {
       /* 깨진 값 — 기본으로 */
     }
   }
-  return [process.env.AGY_PYTHON || process.env.LADDER_PYTHON || 'python', '-X', 'utf8', '-m', 'llm_playbook.backends.agy'];
+  const py = pythonCommand(process.env.AGY_PYTHON || process.env.LADDER_PYTHON || 'python');
+  return [py, '-X', 'utf8', '-m', 'llm_playbook.backends.agy'];
 }
 
 /** 백엔드가 「쓸 만한 답이 아님 · 쿼터」로 가르는 글 — `agy.py` 의 `_QUOTA_RE` 와 같은 갈래. */
@@ -210,7 +212,7 @@ function runBackend(argv: string[], o: { timeoutMs: number; env?: Record<string,
     const kill = () => {
       // 트리째 — 파이썬만 죽이면 그 아래 agy(노드)가 고아로 남는다.
       try {
-        if (process.platform === 'win32' && proc.pid) execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+        if (process.platform === 'win32' && proc.pid) execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore', windowsHide: true });
         else proc.kill('SIGKILL');
       } catch { /* 이미 끝났다 */ }
     };

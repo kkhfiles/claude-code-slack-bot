@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { spawn, execSync } from 'child_process';
+import { pythonCommand } from './python-command';
 import Holidays from 'date-holidays';
 import { Logger } from './logger';
 import { CalendarPoller } from './calendar-poller';
@@ -2727,14 +2728,15 @@ export class AssistantScheduler {
     timeoutMs: number,
   ): Promise<{ code: number; stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
-      const proc = spawn('python', ['-X', 'utf8', script], {
+      const py = pythonCommand('python');
+      const proc = spawn(py, ['-X', 'utf8', script], {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-        shell: process.platform === 'win32',
+        shell: false,
         env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
         // 콘솔 창이 화면에 깜빡이지 않게 한다. 이 프로세스에는 콘솔이 없어서
-        // 윈도우가 자식마다 새 콘솔을 만들어 주고, `shell: true` 는 cmd.exe 를
-        // 거치므로 특히 필요하다. 출력은 이미 파이프로 받고 있어 잃는 것이 없다.
+        // 윈도우가 자식마다 새 콘솔을 만들어 준다(`check:windowshide`). 출력은 이미
+        // 파이프로 받고 있어 잃는 것이 없다.
         windowsHide: true,
       });
       let stdout = '';
@@ -2744,7 +2746,7 @@ export class AssistantScheduler {
       const killTimer = setTimeout(() => {
         try {
           if (process.platform === 'win32' && proc.pid) {
-            execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+            execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore', windowsHide: true });
           } else {
             proc.kill('SIGKILL');
           }
@@ -2800,13 +2802,14 @@ export class AssistantScheduler {
     // 회차(`REPORT_*`)와 예정일(`--date`)을 넘긴다 — `runnerLaunch` 주석.
     const launch = runnerLaunch(spec, this.workingDir, ctx);
     return new Promise((resolve) => {
+      const py = pythonCommand('python');
       const proc = spawn(
-        'python',
+        py,
         launch.args,
         {
           cwd: launch.cwd,
           stdio: ['ignore', 'pipe', 'pipe'],
-          shell: process.platform === 'win32',
+          shell: false,
           env: launch.env,
           windowsHide: true,
         },
@@ -2819,7 +2822,7 @@ export class AssistantScheduler {
       const killTimer = setTimeout(() => {
         try {
           if (process.platform === 'win32' && proc.pid) {
-            execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+            execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore', windowsHide: true });
           } else {
             proc.kill('SIGKILL');
           }
@@ -2853,17 +2856,18 @@ export class AssistantScheduler {
    */
   private runDaouKeepAlive(): Promise<void> {
     return new Promise((resolve) => {
+      const py = pythonCommand('python');
       const proc = spawn(
-        'python',
+        py,
         ['-X', 'utf8', '-m', 'mycelium.sync.groupware_daily', '--keepalive', '--json'],
         {
           cwd: this.workingDir,
           stdio: ['ignore', 'pipe', 'pipe'],
-          shell: process.platform === 'win32',
+          shell: false,
           env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
           // 콘솔 창이 화면에 깜빡이지 않게 한다. 이 프로세스에는 콘솔이 없어서
-          // 윈도우가 자식마다 새 콘솔을 만들어 주고, `shell: true` 는 cmd.exe 를
-          // 거치므로 특히 필요하다. 출력은 이미 파이프로 받고 있어 잃는 것이 없다.
+          // 윈도우가 자식마다 새 콘솔을 만들어 준다(`check:windowshide`). 출력은 이미
+          // 파이프로 받고 있어 잃는 것이 없다.
           windowsHide: true,
         },
       );
@@ -2874,7 +2878,7 @@ export class AssistantScheduler {
       const killTimer = setTimeout(() => {
         try {
           if (process.platform === 'win32' && proc.pid) {
-            execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+            execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore', windowsHide: true });
           } else {
             proc.kill('SIGKILL');
           }

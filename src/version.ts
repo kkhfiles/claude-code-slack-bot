@@ -37,6 +37,7 @@ export function getVersionInfo(): VersionInfo {
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
     }).trim();
 
     gitDate = execSync('git log -1 --format=%cs', {
@@ -44,6 +45,7 @@ export function getVersionInfo(): VersionInfo {
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
     }).trim();
   } catch {
     // git not available or not a git repo — that's fine
@@ -67,6 +69,7 @@ export async function checkForUpdates(): Promise<UpdateCheckResult | null> {
       encoding: 'utf-8',
       timeout: 15000,
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
     });
 
     // Count commits we're behind
@@ -75,6 +78,7 @@ export async function checkForUpdates(): Promise<UpdateCheckResult | null> {
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
     }).trim();
 
     const behindBy = parseInt(behindStr, 10);
@@ -87,6 +91,7 @@ export async function checkForUpdates(): Promise<UpdateCheckResult | null> {
         encoding: 'utf-8',
         timeout: 5000,
         stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
       }).trim();
     }
 

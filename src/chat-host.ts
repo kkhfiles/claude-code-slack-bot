@@ -6,6 +6,7 @@ import { App } from '@slack/bolt';
 import { Logger } from './logger';
 import { tagApp, tagToken, tagRooms, note, FORWARD_HEAD } from './activity-log';
 import { rememberPrivate } from './privacy-guard';
+import { pythonCommand } from './python-command';
 
 /**
  * agy 위에 얹은 슬랙 대화 계층. **봇 여러 개가 이 한 클래스를 같이 쓴다.**
@@ -839,7 +840,8 @@ export class ChatHost {
       let out = '';
       let err = '';
       try {
-        const child = spawn(this.opts.python, ['-X', 'utf8', script], {
+        const py = pythonCommand(this.opts.python);
+        const child = spawn(py, ['-X', 'utf8', script], {
           cwd: path.dirname(script), env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, windowsHide: true,
         });
         child.stdout.setEncoding('utf-8');
@@ -1832,7 +1834,8 @@ export class ChatHost {
       return live;
     }
     try {
-      const child = spawn(this.opts.python, ['-X', 'utf8', this.opts.script, '--serve'], {
+      const py = pythonCommand(this.opts.python);
+      const child = spawn(py, ['-X', 'utf8', this.opts.script, '--serve'], {
         cwd: path.dirname(this.opts.script),
         env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
         windowsHide: true,
@@ -1966,7 +1969,8 @@ export class ChatHost {
     return new Promise<TurnResult>((resolve) => {
       let child: ChildProcessWithoutNullStreams;
       try {
-        child = spawn(this.opts.python, ['-X', 'utf8', this.opts.script], {
+        const py = pythonCommand(this.opts.python);
+        child = spawn(py, ['-X', 'utf8', this.opts.script], {
           cwd: path.dirname(this.opts.script),
           env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
           windowsHide: true,

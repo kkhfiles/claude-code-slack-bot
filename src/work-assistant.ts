@@ -20,6 +20,7 @@ import * as path from 'path';
 import { config } from './config';
 import { Logger } from './logger';
 import { withoutApiKey } from './child-env';
+import { pythonCommand } from './python-command';
 import { engineState, type EngineState } from './engine-state';
 import { classifyCodexErrorText } from './rate-limit-utils';
 import { STEP_INPUT_MAX, STEP_MAX } from './turn-outcome';
@@ -411,14 +412,13 @@ export function runTasks(
   extraEnv: Record<string, string> = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const root = workAssistantRoot();
-  const useShell = process.platform === 'win32';
-  const argv = useShell ? args.map(quoteForShell) : args;
   return new Promise((resolve, reject) => {
     if (!root) { reject(new Error('work-assistant root not found')); return; }
-    const proc = spawn('python', ['-X', 'utf8', script, ...argv], {
+    const py = pythonCommand('python');
+    const proc = spawn(py, ['-X', 'utf8', script, ...args], {
       cwd: root,
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: useShell,
+      shell: false,
       env: { ...process.env, ...extraEnv, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
       windowsHide: true,
     });
@@ -427,10 +427,9 @@ export function runTasks(
     proc.stdout?.on('data', (c: Buffer) => { stdout += c.toString('utf-8'); });
     proc.stderr?.on('data', (c: Buffer) => { stderr += c.toString('utf-8'); });
     const killTimer = setTimeout(() => {
-      // shell:true 래퍼(cmd.exe)만 죽이면 python 자식이 고아로 남는다 — 트리 kill.
       try {
         if (process.platform === 'win32' && proc.pid) {
-          execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+          execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore', windowsHide: true });
         } else {
           proc.kill('SIGKILL');
         }
@@ -1319,7 +1318,7 @@ function runCodex(
     const kill = () => {
       try {
         if (process.platform === 'win32' && proc.pid) {
-          execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+          execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore', windowsHide: true });
         } else {
           proc.kill('SIGKILL');
         }

@@ -27,6 +27,8 @@
     "check:bookingwatch": "node scripts/check-bookingwatch.mjs",
     "check:proboard": "node scripts/check-pro-board.mjs",
     "check:summary": "node scripts/check-summary.mjs",
+    "check:pythoncmd": "node scripts/check-python-command.mjs",
+    "check:windowshide": "node scripts/check-windows-hide.mjs",
     "restart": "node scripts/restart.mjs",
     "check:restart": "node scripts/check-restart.mjs",
     "test": "node scripts/check-all.mjs",

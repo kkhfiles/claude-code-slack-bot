@@ -13,6 +13,7 @@
  */
 import { spawn, execSync } from 'child_process';
 import * as path from 'path';
+import { pythonCommand } from './python-command';
 import { config } from './config';
 
 export interface NasShareReview {
@@ -67,17 +68,18 @@ export function idPrefix(id: string): string {
 
 function runConfirmNas(args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
+    const py = pythonCommand('python');
     const proc = spawn(
-      'python',
+      py,
       ['-X', 'utf8', '-m', 'mycelium.auto_classify.confirm_nas', ...args],
       {
         cwd: workflowRoot(),
         stdio: ['ignore', 'pipe', 'pipe'],
-        shell: process.platform === 'win32',
+        shell: false,
         env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' },
         // 콘솔 창이 화면에 깜빡이지 않게 한다. 이 프로세스에는 콘솔이 없어서
-        // 윈도우가 자식마다 새 콘솔을 만들어 주고, `shell: true` 는 cmd.exe 를
-        // 거치므로 특히 필요하다. 출력은 이미 파이프로 받고 있어 잃는 것이 없다.
+        // 윈도우가 자식마다 새 콘솔을 만들어 준다(`check:windowshide`). 출력은 이미
+        // 파이프로 받고 있어 잃는 것이 없다.
         windowsHide: true,
       },
     );
@@ -90,7 +92,7 @@ function runConfirmNas(args: string[], timeoutMs: number): Promise<{ code: numbe
         if (process.platform === 'win32' && proc.pid) {
           // shell:true 래퍼(cmd.exe)만 죽이면 python 자식이 고아로 계속 실행되며
           // acquire_job 락을 쥔다 — 트리 전체 kill
-          execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+          execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore', windowsHide: true });
         } else {
           proc.kill('SIGKILL');
         }

@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
 import { BookingVersion, afterBookingTick, bookingTickReason, initialWatch } from './booking-watch';
+import { pythonCommand } from './python-command';
 
 /**
  * Premium 좌석 관리 — 슬랙 표면.
@@ -432,7 +433,8 @@ export class PremiumSeatSlack {
    */
   private run(command: string, payload: Record<string, unknown>, timeoutMs = TIMEOUT_STATE_MS): Promise<Envelope> {
     return new Promise((resolve) => {
-      const child = spawn(this.opts.python, ['-X', 'utf8', '-m', 'premium_seat_manager.cli', ...command.split(' ')], {
+      const py = pythonCommand(this.opts.python);
+      const child = spawn(py, ['-X', 'utf8', '-m', 'premium_seat_manager.cli', ...command.split(' ')], {
         cwd: this.opts.workerDir,
         env: { ...process.env, ...this.opts.env, PYTHONIOENCODING: 'utf-8' },
         windowsHide: true,
