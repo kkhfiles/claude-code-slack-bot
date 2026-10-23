@@ -8,7 +8,8 @@
  *   - 켜는 값 셋(on · test · 없음) · 켜진 방에서는 낱말 규칙이 안 걸린다
  *   - 1 이면 멈추고 한 줄을 그 자리에 올린다 · 이미 답했으면 한 줄을 안 덧붙인다 · 0 이면 아무것도 안 한다
  *   - 판정이 끝나길 기다렸다가, 그 말 뒤로 쌓인 묶음의 답은 부른 답이라도 버린다 · 그 앞 말의 답은 낸다
- *   - 멈춘 방에서도 「멈추라는 말인가」부터 묻고(거듭하면 멈춤을 늘림 · 한 줄은 또 안 함) 0 이면 「다시 말해도 되나」 · 1 이면 풀린다
+ *   - 물음은 하나(0 · 1 · 2) — 멈춘 방에서 1 은 멈춤을 늘리고(한 줄은 또 안 함) 2 면 풀리고 0 이면 그대로(2026-10-23)
+ *   - 실장의 멘션 없는 말은 판정을 기다려 2 면 부른 말 · 0 이면 이름이 있어도 안 부른 말 · 판정 실패면 이름 규칙 · 실원 말은 안 기다림
  *   - 방마다 따로 줄을 선다 · 판정 프로세스를 못 띄우면 0
  */
 import './lib/fresh-dist.mjs';
@@ -80,12 +81,11 @@ const wait = (h, ch) => Promise.all([...(h['hushInFlight'].get(ch) ?? [])]);
   check('1 이면 먼저 말 걸지 않는다', h['withinLimits'](ROOM) === false);
   check('1 이면 그 한 줄을 그 말이 있던 스레드에 올린다',
     said.length === 1 && said[0].text === '예, 물러나 있겠사옵니다.' && said[0].th === '99.000000', said);
-  check('판정에 「멈추라는 말인가」로 물었다', h.__reqs[0].mode === 'stop' && h.__reqs[0].key === ROOM);
+  check('판정은 그 방 · 그 말로 물었다', h.__reqs[0].key === ROOM && h.__reqs[0].last.text === '소인아 대답하지마', h.__reqs[0]);
 
   h['startJudge'](null, ROOM, 'U2', '101.000000', undefined, '그럼 갓잇으로 갈까');
   await wait(h, ROOM);
-  check('멈춘 방에서도 「멈추라는 말인가」부터 묻고, 0 이면 「다시 말해도 되나」를 잇는다',
-    h.__reqs[1].mode === 'stop' && h.__reqs[2].mode === 'resume', h.__reqs.map((r) => r.mode));
+  check('멈춘 방도 물음은 하나 — 「다시 말해도 되나」를 따로 묻지 않는다', h.__reqs.length === 2, h.__reqs.length);
   check('그 답이 0 이면 그대로 멈춰 있다', h['withinLimits'](ROOM) === false);
 }
 {
@@ -97,8 +97,7 @@ const wait = (h, ch) => Promise.all([...(h['hushInFlight'].get(ch) ?? [])]);
   h['startJudge'](null, ROOM, 'U1', '100.000000', undefined, '소인 대답하지 마');
   h['startJudge'](null, ROOM, 'U1', '150.000000', undefined, '@소인 아니 진짜 대답하지 마');
   await wait(h, ROOM);
-  check('거듭한 「대답하지 마」는 멈춤을 그 말까지 늘린다', h['noReplyTs'].get(ROOM) === 150 && h.__reqs.length === 2
-    && h.__reqs.every((r) => r.mode === 'stop'), h.__reqs);
+  check('거듭한 「대답하지 마」는 멈춤을 그 말까지 늘린다', h['noReplyTs'].get(ROOM) === 150 && h.__reqs.length === 2, h.__reqs);
   check('이미 멈춘 방이면 한 줄을 또 하지 않는다', said.length === 1, said);
 }
 {
@@ -136,7 +135,7 @@ const wait = (h, ch) => Promise.all([...(h['hushInFlight'].get(ch) ?? [])]);
 }
 {
   process.env.HUSH_JUDGE = 'on';
-  const h = make([{ ans: 1, reply: '' }, { ans: 0 }, { ans: 1 }]);
+  const h = make([{ ans: 1, reply: '' }, { ans: 2 }]);
   const said = [];
   h['say'] = async (_c, _ch, text) => { said.push(text); };
   h['startJudge'](null, ROOM, 'U1', '100.000000', undefined, '소인 대답하지 마');
@@ -144,7 +143,7 @@ const wait = (h, ch) => Promise.all([...(h['hushInFlight'].get(ch) ?? [])]);
   check('한 줄이 빈 글이면 말없이 빠진다', said.length === 0 && h['withinLimits'](ROOM) === false);
   h['startJudge'](null, ROOM, 'U1', '102.000000', undefined, '소인 이제 말해도 돼');
   await wait(h, ROOM);
-  check('「다시 말해도 된다」가 1 이면 풀린다', h['withinLimits'](ROOM) === true);
+  check('멈춘 방에서 2(다시 말하라거나 직접 시키는 말)면 풀린다', h['withinLimits'](ROOM) === true);
 }
 {
   process.env.HUSH_JUDGE = 'on';
@@ -175,6 +174,45 @@ for (const [name, stopTs, forced, dropped] of [
   h['enqueue'](ROOM, { channel: ROOM, text: '실원: @소인 이거 알려줘', ts: '280.000000', react: forced, user: 'U1' });
   await h['pump'](null, ROOM, forced);
   check(name, dropped ? !said.includes('답입니다') : said.includes('답입니다'), said);
+}
+
+// ── 실장의 멘션 없는 말 — 판정을 기다려 2 면 부른 말(2026-10-23) ──
+for (const [name, user, text, judged, want] of [
+  ['실장 · 멘션 없음 · 판정 2 → 부른 말(넌지시 시킨 말)', 'U_MGR', '실데이 준비해야 하지 않을까?', { ans: 2 }, true],
+  ['실장 · 이름이 있어도 판정 0 이면 안 부른 말(남에게 그 봇 이야기)', 'U_MGR', '소인이 올린 거 보셨어요?', { ans: 0 }, false],
+  ['판정이 실패하면 이름 규칙 — 이름이 있으면 부른 말', 'U_MGR', '소인 실데이 준비해야 하지 않을까?', { ans: 0, error: 'x' }, true],
+  ['판정이 실패하고 이름도 없으면 안 부른 말', 'U_MGR', '실데이 준비해야 하지 않을까?', { ans: 0, error: 'x' }, false],
+  ['실원 말은 판정을 안 기다리고 예전 규칙(2 여도)', 'U2', '소인 이거 알려줘', { ans: 2 }, false],
+  ['멘션은 판정 없이 부른 말', 'U2', `<@${ME}> 점심 뭐야`, { ans: 0 }, true],
+]) {
+  process.env.HUSH_JUDGE = 'on';
+  const h = make([judged]);
+  h['say'] = async () => {};
+  h['startJudge'](null, ROOM, user, '500.000000', undefined, text);
+  const got = await h['calledBy'](ROOM, user, '500.000000', text);
+  check(name, got === want, { got, want });
+}
+{
+  process.env.HUSH_JUDGE = 'on';
+  const h = make([{ ans: 2 }]);
+  const kicked = [];
+  h['kick'] = (_c, _k, _ch, forced) => kicked.push(forced);
+  h['say'] = async () => {};
+  h['startJudge'](null, ROOM, 'U_MGR', '600.000000', undefined, '실데이 준비해야 하지 않을까?');
+  await h['onChannelMessage'](null, 'U_MGR', ROOM, '600.000000', undefined, '실데이 준비해야 하지 않을까?');
+  check('살아 있는 길 — 판정 2 인 실장 말은 부른 턴으로 띄운다', JSON.stringify(kicked) === '[true]', kicked);
+}
+{
+  process.env.HUSH_JUDGE = 'on';
+  const h = make([{ ans: 2 }]);
+  const kicked = [];
+  h['kick'] = (_c, _k, _ch, forced) => kicked.push(forced);
+  h['say'] = async () => {};
+  const now = Date.now() / 1000;
+  const msgs = [{ user: 'U_MGR', ts: (now - 20).toFixed(6), text: '의견을 좀 취합해야 할텐데' }];
+  const client = { conversations: { history: async () => ({ messages: msgs.slice().reverse() }) } };
+  await h['sweepChannel'](client, ROOM);
+  check('훑는 길 — 판정 2 인 실장 말은 부른 턴으로 띄운다', JSON.stringify(kicked) === '[true]', kicked);
 }
 
 // ── 판정 프로세스를 못 띄우면 0 ──

@@ -389,10 +389,12 @@ export class ChatHost {
    * 판정은 **방마다** 한 줄로 선다 — 같은 방의 말은 차례대로(멈춤 → 풀림 순서가 뒤집히지 않게), 다른 방은 나란히. 봇 하나에
    * 줄 하나로 두면 이 방 답이 다른 방 판정 뒤에서 기다린다(검토 2026-10-20). 방마다 아직 안 끝난 판정 — 답을 올리기 전에 기다린다.
    */
-  private hushChain = new Map<string, Promise<void>>();
-  private hushInFlight = new Map<string, Set<Promise<void>>>();
+  private hushChain = new Map<string, Promise<unknown>>();
+  private hushInFlight = new Map<string, Set<Promise<unknown>>>();
   /** 판정에 건 말(`방:ts`) — 살아 있는 길과 훑기가 같은 말을 두 번 걸지 않게. 넣은 순서대로 오래된 것부터 지운다. */
   private hushSeen = new Set<string>();
+  /** 말마다 판정 결과(`방:ts` → 0 · 1 · 2, 실패면 null) — 실장의 멘션 없는 말이 부른 말인지 이것을 기다려 정한다(`calledBy`). */
+  private judged = new Map<string, Promise<number | null>>();
   /** 채널에서 우리가 마지막으로 입을 연 시각·횟수. */
   private lastSpoke = new Map<string, number>();
   private spokenToday = new Map<string, { day: string; count: number }>();
@@ -745,28 +747,44 @@ export class ChatHost {
     if (this.hushSeen.has(seen)) return;
     this.hushSeen.add(seen);
     while (this.hushSeen.size > TAKEN_MEMORY) this.hushSeen.delete(this.hushSeen.values().next().value as string);
-    const run = (this.hushChain.get(channel) ?? Promise.resolve())
+    const run: Promise<number | null> = (this.hushChain.get(channel) ?? Promise.resolve())
       .then(() => this.judgeHush(client, channel, user, ts, threadTs, text, heardAt))
-      .catch((error) => this.logger.warn('「대답하지 마」 판정 실패', error));
+      .catch((error) => { this.logger.warn('사람 말 판정 실패', error); return null; });
     this.hushChain.set(channel, run);
-    const set = this.hushInFlight.get(channel) ?? new Set<Promise<void>>();
+    this.judged.set(seen, run);
+    while (this.judged.size > TAKEN_MEMORY) this.judged.delete(this.judged.keys().next().value as string);
+    const set = this.hushInFlight.get(channel) ?? new Set<Promise<unknown>>();
     set.add(run);
     this.hushInFlight.set(channel, set);
     void run.finally(() => set.delete(run));
   }
 
+  /**
+   * 사람 말 한 줄 판정 — 0 그 밖 · 1 「빠져 있어라」 · 2 이 봇에게 묻거나 시키거나 다시 말하라는 말(`chatbot/hush.py`).
+   * 돌려주는 값은 판정(실패면 null) — 실장의 멘션 없는 말은 이것을 기다려 부른 말인지 정한다(`calledBy`).
+   *
+   * **멈춘 방도 같은 물음 하나다.** 거듭한 「대답하지 마」는 1 이라 멈춤을 늘리고, 2 면 풀린다. 예전에는 0 일 때 「다시 말해도
+   * 되나」를 한 번 더 물었는데 그 물음의 1(다시 말해도 된다거나 직접 묻거나 시키는 말)이 2 와 뜻이 같아 합쳤다(2026-10-23).
+   */
   private async judgeHush(client: App['client'], channel: string, user: string, ts: string,
-                          threadTs: string | undefined, text: string, heardAt?: number): Promise<void> {
+                          threadTs: string | undefined, text: string, heardAt?: number): Promise<number | null> {
     const stopped = Date.now() - (this.noReplyAt.get(channel) ?? 0) < NO_REPLY_MS;
     const req = {
       bot: this.opts.name, key: channel, busy: this.active.has(channel),
       lines: await this.hushLines(client, channel, ts, threadTs),
       last: { who: (await this.displayName(client, user)) || '(이름 모름)', text: await this.plainText(client, text) },
     };
-    // **멈춘 방에서도 「멈추라는 말인가」부터 묻는다.** 「다시 말해도 되나」만 물으면 거듭한 「대답하지 마」가 멈춤을 늘리지
-    // 못하고, 「시키는 말」로 읽혀 거꾸로 풀 수도 있다(검토 2026-10-20). 0 일 때만 「다시 말해도 되나」를 잇는다.
-    const out = await this.runHush({ ...req, mode: 'stop' });
-    this.noteJudge(channel, 'stop', out);
+    const out = await this.runHush(req);
+    this.noteJudge(channel, 'judge', out);
+    if (out.error) return null;
+    if (out.ans === 2) {
+      if (stopped) {
+        this.noReplyAt.delete(channel);
+        this.noReplyTs.delete(channel);
+        this.logger.info(`「다시 말해도 된다」로 판정 — 먼저 말 걸기를 다시 엽니다 (${channel} · ${out.model})`);
+      }
+      return 2;
+    }
     if (out.ans === 1) {
       // 한 시간은 그 말을 들은 때부터 — 훑기로 늦게 주운 말은 그 말을 한 때(`heardAt`)부터 센다
       this.noReplyAt.set(channel, heardAt ?? Date.now());
@@ -779,15 +797,27 @@ export class ChatHost {
         hushAcks.set(hushAckKey(channel, out.reply), now + HUSH_ACK_MS);
         await this.say(client, channel, out.reply, threadTs);
       }
-      return;
+      return 1;
     }
-    if (!stopped) return;
-    const again = await this.runHush({ ...req, mode: 'resume' });
-    this.noteJudge(channel, 'resume', again);
-    if (again.ans !== 1) return;
-    this.noReplyAt.delete(channel);
-    this.noReplyTs.delete(channel);
-    this.logger.info(`「다시 말해도 된다」로 판정 — 먼저 말 걸기를 다시 엽니다 (${channel} · ${again.model})`);
+    return 0;
+  }
+
+  /**
+   * 부른 말인가 — @멘션이면 바로 참. **실장의 멘션 없는 말은 판정을 기다려** 2 면 부른 말이다(2026-10-23 실장: 넌지시 시킨
+   * 말도 나서서 하게 · 한 달 131줄 시험에서 멘션으로 답이 정해진 줄 41개는 어긋남 0 · Flash 중앙 9초). 판정이 꺼졌거나 실패했거나
+   * 판정에 안 건 말(한 시간 넘게 지난 훑기 말)이면 예전 규칙(`isCalledIn` — 이름 · 시험 방 이어 받기)으로 간다.
+   * 실원 말은 기다리지 않는다 — 실원 턴에서는 어차피 행동이 안 열려 늦출 까닭이 없다.
+   */
+  private async calledBy(channel: string, user: string, ts: string, text: string): Promise<boolean> {
+    if (this.isCalled(text)) return true;
+    if (user && user === this.opts.managerUserId && this.judgeOn(channel)) {
+      const got = await this.judged.get(`${channel}:${ts}`);
+      if (got !== undefined && got !== null) {
+        if (got === 2) this.logger.info(`판정 2 — 멘션 없는 실장 말을 부른 말로 받습니다 (${channel})`);
+        return got === 2;
+      }
+    }
+    return this.isCalledIn(channel, user, text);
   }
 
   /** 판정 한 줄을 활동 기록에 — 실원 말은 안 적는다. 무엇을 물었고 어느 모델이 얼마나 걸렸는지만. */
@@ -1075,7 +1105,7 @@ export class ChatHost {
     client: App['client'], user: string, channel: string, ts: string,
     threadTs: string | undefined, text: string, fromSibling = false,
   ): Promise<void> {
-    const called = this.isCalledIn(channel, user, text);
+    const called = await this.calledBy(channel, user, ts, text);
     // **바로 반응할 자리에서만 담는다.** 나머지는 훑기가 채널에서 직접 읽어 온다 —
     // 여기서 다 쌓아 두면 재시작 한 번에 통째로 사라지고, 소켓이 흘린 말은 애초에
     // 담기지도 않는다. 둘 다 실제로 겪었다.
@@ -1346,9 +1376,14 @@ export class ChatHost {
     // 유일한 길인데, 예전에는 훑기로 들어온 말이 전부 「먼저 말 걸까?」로만 처리돼서
     // **@로 불러도 모델이 「낄 자리 아님」 하면 조용히 넘어갔다**(2026-08-19 커피콩).
     // 부르는 것은 굴레를 건너뛴다는 규칙이 살아 있는 길과 훑는 길에서 달랐던 셈이다.
-    const mine = (m: Record<string, unknown>) =>
-      this.isCalledIn(channel, (m.user as string) ?? '', (m.text as string) ?? '');
-    const called = after.some(mine);
+    const calledTs = new Set<string>();
+    for (const m of after) {
+      if (await this.calledBy(channel, (m.user as string) ?? '', m.ts as string, (m.text as string) ?? '')) {
+        calledTs.add(m.ts as string);
+      }
+    }
+    const mine = (m: Record<string, unknown>) => calledTs.has(m.ts as string);
+    const called = calledTs.size > 0;
 
     // **조용한 방은 훑기에서도 부른 것만 집는다.** 살아 있는 길에만 굴레를 걸고 훑는
     // 길을 비워 두면, 이벤트가 안 오는 앱에서는 그 방이 그냥 열린 방이 된다.
