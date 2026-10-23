@@ -1148,14 +1148,19 @@ export class ChatHost {
    * 턴으로 갔다. 그 턴에는 다른 방에 글을 올리는 행동이 안 열려 봇은 「카드를 올리겠다」고 말만 했다. 시험 방은 주인이 봇에게
    * 시키는 방이라 이름으로 부른 말은 부른 것이다. **이어 받기도** — 이 봇이 방금(`FOLLOW_UP_MS` 안) 말했고 그 뒤 형제 봇이 안
    * 끼었으면 주인의 다음 말(「물어봐」)도 이 봇에게 한 말이다. 그 밖에는 그대로 — 두 봇이 같이 있어 모든 말을 부른 것으로 치면 둘 다 답한다.
+   *
+   * **주인이 이름을 넣은 말은 사람들이 쓰는 방에서도 부른 말이다**(2026-10-23 주인: 그 방에서 「소인 … 준비해야 하지 않을까?」라고
+   * 하면 나서서 진행하게). 멘션 없이 끼어들기 턴으로 가면 새 일을 못 열고 정한 것도 못 적는다. 이어 받기는 시험 방에만 —
+   * 사람들이 쓰는 방에서 주인이 이름 없이 한 말은 대개 사람들에게 한 말이다.
    */
   private isCalledIn(channel: string, user: string, text: string): boolean {
     if (this.isCalled(text)) return true;
     if (!user || user !== this.opts.managerUserId) return false;
     const cfg = this.readNear('bots', this.opts.name, 'config.json') as
       { call_names?: unknown; rooms?: Record<string, { rules?: unknown } | undefined> } | null;
-    if (!cfg?.rooms?.[channel]?.rules || !Array.isArray(cfg.call_names)) return false;
+    if (!Array.isArray(cfg?.call_names)) return false;
     if (cfg.call_names.some((n) => typeof n === 'string' && n.length > 0 && text.includes(n))) return true;
+    if (!cfg?.rooms?.[channel]?.rules) return false;
     // **이어 받기는 남을 부른 말에는 안 건다** — 2026-10-20 시험 방에서 주인이 「@커피콩 넌 지금은 신경 안써도 돼」라고 했는데
     // 소인이 1분 전에 말했다는 이유로 제 말로 받아 답했다. 다른 사람·봇을 멘션했거나 다른 봇 이름을 부른 말은 그쪽에 한 말이다.
     if (/<@[A-Z0-9]+>/.test(text.replace(new RegExp(`<@${this.selfUserId}>`, 'g'), ''))) return false;
