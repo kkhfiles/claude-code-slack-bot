@@ -172,7 +172,9 @@ export function composeTransition(
   const above = to === 'claude-api' ? ['claude' as const] : ladder.slice(0, Math.max(0, ladder.indexOf(to)));
   let what: string;
   if (to === 'claude-api') {
-    what = blockedOne(st, 'claude', nowSec).replace(/^Claude /, 'Claude 구독 ');
+    // 「구독」은 사용량 소진일 때만 붙인다 — 과부하 · 인증 오류는 구독의 일이 아니라 「Claude 구독 서버 과부하」가 어색하다.
+    const one = blockedOne(st, 'claude', nowSec);
+    what = activeBlock(st, 'claude', nowSec)?.kind === 'usage' ? one.replace(/^Claude /, 'Claude 구독 ') : one;
   } else if (above.length === 1) {
     what = blockedOne(st, above[0], nowSec);
     if (from === 'claude-api') what += ' · API 크레딧 없음';

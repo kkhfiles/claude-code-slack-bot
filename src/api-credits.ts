@@ -156,14 +156,17 @@ export function recordCreditSpend(name: string, usd: number, nowMs: number = Dat
   note: SpendNote = {}): void {
   if (!(usd > 0)) return;
   const day = new Date(nowMs + KST_OFFSET_MS).toISOString().slice(0, 10);
-  mutate((st) => {
+  let added = false;
+  // 내역은 장부에 실제로 들어간 뒤에만 — 바꿔 끼우기가 실패하면 내역만 남아 장부와 어긋난다.
+  const wrote = mutate((st) => {
     const rec = st.keys[name];
     if (!rec) return;
-    noteSpend(name, usd, nowMs, file, note);
+    added = true;
     rec.spent_usd = Math.round((Number(rec.spent_usd ?? 0) + usd) * 1e6) / 1e6;
     const daily = (rec.daily ??= {});
     daily[day] = Math.round((Number(daily[day] ?? 0) + usd) * 1e6) / 1e6;
   }, file);
+  if (wrote && added) noteSpend(name, usd, nowMs, file, note);
 }
 
 /** 그 키를 막는다 — 서버가 크레딧 부족 · 키 거부를 냈다. 새로 `set` 하면 풀린다. */

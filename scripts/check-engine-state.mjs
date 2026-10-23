@@ -486,6 +486,11 @@ try {
        composeTransition('claude-api', 'codex', k.load(), L, nowSec()),
        '🔁 Claude 사용량 소진(풀림 10/19(월) 10:00) · API 크레딧 없음 — GPT(gpt-T1-astra)로 이어 갑니다');
     eq('크레딧에서 Claude 로 돌아옴', composeTransition('claude-api', 'claude', k.load(), L, nowSec()), '✅ Claude 회복 — 돌아왔습니다');
+    const ko = fresh();
+    ko.recordBlocked('claude', { kind: 'overload' });
+    ok('과부하에는 「구독」을 안 붙인다',
+       /^🔁 Claude 서버 과부하\(다시 확인 .+\) — Claude API\(크레딧\)로 이어 갑니다$/.test(
+         composeTransition('claude', 'claude-api', ko.load(), L, nowSec())));
     k.recordBlocked('claude-api', { kind: 'usage', why: 'x'.repeat(300) });
     eq('크레딧 칸이 막히면 GPT 차례', dmRung(k.load(), nowSec(), undefined, true), 'codex');
 
