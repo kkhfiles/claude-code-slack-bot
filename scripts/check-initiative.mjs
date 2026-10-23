@@ -6,7 +6,7 @@
  * 말은 가짜 호스트가 돌려주고, 현황판은 임시 파이썬 파일이 낸다. 보는 것 — 꺼짐 조건 ·
  * 시각·창·하루 한 번 · 공휴일 · **주 첫 업무일이 아니면 안 돎** · 실장이 말로 끈 것 · 현황판
  * 실패 · **방의 지난 7일을 글쓴이 없이 들고 감** · **방에 직접 올리는 길이 없음**(카드로만) ·
- * 실장 DM 인사 · 이름 빗장 · 길이 · 조용한 주.
+ * 실장 DM 인사 · 이름 빗장 · 길이 · 조용한 주 · **그 주 판단 뒤의 업무일에는 하루 한 번 기한 확인(`wake`)**(2026-10-23).
  */
 import './lib/fresh-dist.mjs';
 import fs from 'node:fs';
@@ -37,10 +37,17 @@ function fakeHost() {
   const calls = [];
   let next = { reply: '방이 조용해서 오늘 가볍게 말 걸어 볼게요.', speak: true, error: null,
                ask: [{ name: 'pulse', text: PROPOSAL }] };
+  // 기한 확인 턴 — 기본은 「기한이 된 일 없음」(파이썬이 모델 없이 끝낸 모양)
+  let wakeNext = { reply: '', speak: false, error: null, initiate: true, wake_due: 0 };
   return {
     calls,
     set: (r) => { next = r; },
-    initiate: async (_c, key, brief, name) => { calls.push({ key, brief, name }); return next; },
+    setWake: (r) => { wakeNext = r; },
+    weekly: () => calls.filter((c) => !c.wake).length,
+    initiate: async (_c, key, brief, name, extra = {}) => {
+      calls.push({ key, brief, name, wake: Boolean(extra.wake) });
+      return extra.wake ? wakeNext : next;
+    },
   };
 }
 // 방의 이력 — ts 는 실제 슬랙 꼴(초). 지난주 월요일(9/14) 0시를 기준으로 그 뒤 것이 「말」이고,
@@ -127,18 +134,59 @@ ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 �
     (await it.tick(fakeClient(), new Date(2026, 8, 21, 15, 0))) === 'not-time' && host.calls.length === 0);
   const first = await it.tick(fakeClient(), MON);
   ok('시각이 되면 돈다', first === 'proposed' && offered.length === 1, first);
-  ok('같은 날 다시는 안 돈다 (도중에 깨져도 두 번 안 돌게 먼저 적는다)',
-    (await it.tick(fakeClient(), new Date(2026, 8, 21, 13, 5))) === 'done-this-week' && offered.length === 1);
-  ok('같은 주 화요일에도 안 돈다 — 한 주에 한 번',
-    (await it.tick(fakeClient(), new Date(2026, 8, 22, 13, 0))) === 'done-this-week' && offered.length === 1);
-  ok('다음 주 월요일에는 다시 돈다',
-    (await it.tick(fakeClient(), new Date(2026, 8, 28, 13, 0))) === 'proposed' && offered.length === 2);
+  ok('같은 날 다시는 안 돈다 (도중에 깨져도 두 번 안 돌게 먼저 적는다 · 주간 판단 한 날은 기한 확인도 안 함)',
+    (await it.tick(fakeClient(), new Date(2026, 8, 21, 13, 5))) === 'done-today' && offered.length === 1
+    && host.calls.length === 1);
+  const tue = await it.tick(fakeClient(), new Date(2026, 8, 22, 13, 0));
+  ok('같은 주 화요일에는 주간 판단 대신 기한 확인 — 기한이 된 일이 없으면 nothing-due · 카드 없음',
+    tue === 'nothing-due' && offered.length === 1 && host.weekly() === 1 && host.calls.at(-1).wake === true, tue);
+  ok('기한 확인은 하루 한 번', (await it.tick(fakeClient(), new Date(2026, 8, 22, 13, 30))) === 'done-today'
+    && host.calls.length === 2);
+  ok('다음 주 월요일에는 다시 주간 판단',
+    (await it.tick(fakeClient(), new Date(2026, 8, 28, 13, 0))) === 'proposed' && offered.length === 2 && host.weekly() === 2);
 }
 {
   // 월요일 창을 통째로 놓쳤다(PC 꺼짐) — 화요일 같은 창에서 돈다. 한 주 손해가 안 되게(검토 2026-09-21).
   const { it, host, offered } = make();
   ok('월요일을 놓치면 화요일 13:00 에 돈다', (await it.tick(fakeClient(), new Date(2026, 8, 22, 13, 0))) === 'proposed' && offered.length === 1);
-  ok('그 뒤 수요일에는 안 돈다', (await it.tick(fakeClient(), new Date(2026, 8, 23, 13, 0))) === 'done-this-week' && host.calls.length === 1);
+  ok('그 뒤 수요일에는 주간 판단을 다시 안 한다(기한 확인만)',
+    (await it.tick(fakeClient(), new Date(2026, 8, 23, 13, 0))) === 'nothing-due' && host.weekly() === 1);
+}
+{
+  // 기한이 된 일이 있는 날 — 같은 꼴(실장 DM · 카드)로 제안한다
+  const host = fakeHost();
+  host.setWake({ reply: '실데이 장소 의견을 다시 청하려 하옵니다.', speak: true, error: null, initiate: true,
+                 ask: [{ name: 'pulse', text: PROPOSAL }] });
+  const { it, offered } = make({}, host);
+  await it.tick(fakeClient(), MON);
+  const client = fakeClient();
+  const out = await it.tick(client, new Date(2026, 8, 22, 13, 0));
+  ok('기한이 된 일이 있으면 실장 DM 과 확인 카드(방에 바로 안 나감)',
+    out === 'proposed' && offered.length === 2 && client.dm.some((m) => /실데이 장소 의견/.test(m.text || '')), out);
+  host.setWake({ reply: '멈춘 맡은 일 — 〔노는거〕 실데이: …', speak: true, error: null, initiate: true, wake_due: 0 });
+  const client2 = fakeClient();
+  ok('기한 확인에서 멈춘 일 알림만 있어도 실장에게 그 한 줄',
+    (await it.tick(client2, new Date(2026, 8, 23, 13, 0))) === 'quiet' && client2.dm.some((m) => /멈춘 맡은 일/.test(m.text || '')));
+}
+{
+  // 기한 확인 날 현황판 실패 — 표시를 되돌려 다음 분에 다시
+  const { it, host } = make();
+  await it.tick(fakeClient(), MON);
+  process.env.FAKE_PULSE_FAIL = '1';
+  ok('기한 확인 날 현황판 실패는 no-brief', (await it.tick(fakeClient(), new Date(2026, 8, 22, 13, 0))) === 'no-brief');
+  delete process.env.FAKE_PULSE_FAIL;
+  ok('다음 분에 다시 기한을 본다', (await it.tick(fakeClient(), new Date(2026, 8, 22, 13, 1))) === 'nothing-due'
+    && host.calls.filter((c) => c.wake).length === 1);
+}
+{
+  // 기한 확인 날이 쉬는 날 — 그날은 매분 파이썬을 안 부른다
+  const { it, host } = make();
+  await it.tick(fakeClient(), MON);
+  process.env.FAKE_WORKDAY = '0';
+  ok('쉬는 날의 기한 확인은 holiday', (await it.tick(fakeClient(), new Date(2026, 8, 22, 13, 0))) === 'holiday');
+  ok('그날은 다시 안 본다', (await it.tick(fakeClient(), new Date(2026, 8, 22, 13, 1))) === 'done-today'
+    && host.calls.filter((c) => c.wake).length === 0);
+  delete process.env.FAKE_WORKDAY;
 }
 {
   // 월요일이 쉬는 날 — 그날은 매분 파이썬을 안 부르고, 화요일에 돈다.
@@ -164,7 +212,8 @@ ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 �
   await it.tick(fakeClient(), MON);
   await it.tick(fakeClient(), new Date(2026, 8, 21, 13, 1));
   await it.tick(fakeClient(), new Date(2026, 8, 22, 13, 0));
-  ok('상태 파일을 못 써도 한 주에 한 번만 돈다 (메모리 표시)', offered.length === 1 && host.calls.length === 1, host.calls.length);
+  ok('상태 파일을 못 써도 한 주에 한 번만 돈다 (메모리 표시 · 화요일은 기한 확인 한 번)',
+    offered.length === 1 && host.weekly() === 1 && host.calls.length === 2, host.calls.length);
 }
 
 // ── 공휴일 · 실장이 끈 것 · 현황판 실패 ────────────────────────────────────

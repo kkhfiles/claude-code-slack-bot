@@ -295,6 +295,8 @@ export interface TurnResult {
   tell_manager?: string;
   /** 아침 턴(`initiate`)이었다는 표시. */
   initiate?: boolean;
+  /** 기한 확인 턴(`wake`)에서 기한이 된 맡은 일이 없어 모델을 안 불렀다는 표시(0). */
+  wake_due?: number;
 }
 
 export class ChatHost {
@@ -461,13 +463,15 @@ export class ChatHost {
    * (`letter-initiative.ts`)이 그것을 확인 카드로 띄운다. **여기서 방에 올리지 않는다.**
    * 상주 turn.py 를 같이 쓰므로 사람 턴과 줄을 서고, 실장 DM 대화 기억에 남는다.
    */
-  async initiate(client: App['client'], key: string, brief: string, name: string): Promise<TurnResult> {
+  async initiate(client: App['client'], key: string, brief: string, name: string,
+                 extra: Record<string, unknown> = {}): Promise<TurnResult> {
     void client;
     // 실장 턴으로 돈다 — 열쇠는 실장 DM 이 아니라 주간 전용 대화(`U…-morning`)라 열쇠로 실장을
     // 못 알아보므로 부르는 쪽이 정한다. 이 진입점은 주간 시계만 부른다.
     // **상주 turn.py 가 아니라 단발로 돈다** — 주간 판단은 웹을 찾아 몇 분이 걸린다(실측 한 번에 170초). 상주
     // 프로세스는 한 번에 하나씩이라 그동안 사람 말이 뒤에 줄 서고, 줄 선 말은 제 시한(300초)에 걸려 버려진다.
-    return this.runTurnOnce(this.turnBody(key, name, brief, false, true, { initiate: true }), TURN_TIMEOUT_WEEKLY_MS);
+    return this.runTurnOnce(this.turnBody(key, name, brief, false, true, { ...extra, initiate: true }),
+                            TURN_TIMEOUT_WEEKLY_MS);
   }
 
   async start(): Promise<void> {

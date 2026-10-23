@@ -52,8 +52,9 @@ const HISTORY_PAGES = 5;
 const PULSE = 'pulse';
 
 export interface InitiativeHost {
-  /** `key` 대화에서 실장 턴으로 현황판을 넣는다. `name` 은 실장 표시 이름. */
-  initiate(client: App['client'], key: string, brief: string, name: string): Promise<TurnResult>;
+  /** `key` 대화에서 실장 턴으로 현황판을 넣는다. `name` 은 실장 표시 이름. `extra` 는 턴 요청에 더할 칸(`wake`). */
+  initiate(client: App['client'], key: string, brief: string, name: string,
+           extra?: Record<string, unknown>): Promise<TurnResult>;
 }
 
 export interface LetterInitiativeOptions {
@@ -78,7 +79,7 @@ export interface LetterInitiativeOptions {
   python: string;
   /** `comm_pulse.py` */
   script: string;
-  /** 이번 주 돌았는지(`week`) · 오늘 쉬는 날로 봤는지(`day`) `initiative-state.json` */
+  /** 이번 주 돌았는지(`week`) · 오늘 쉬는 날로 봤는지(`day`) · 오늘 기한 확인을 했는지(`wake`) `initiative-state.json` */
   statePath: string;
   /** 실장이 말로 끄는 값이 적히는 파일(`control.json` · `always.initiative === false` 면 꺼짐). */
   controlPath: string;
@@ -91,7 +92,9 @@ export interface LetterInitiativeOptions {
 
 export type Outcome =
   | 'off' | 'not-time' | 'done-today' | 'done-this-week' | 'holiday' | 'no-brief'
-  | 'quiet' | 'proposed' | 'error';
+  | 'quiet' | 'proposed' | 'error' | 'nothing-due';
+
+type State = { week?: string; day?: string; wake?: string };
 
 export class LetterInitiative {
   private logger: Logger;
@@ -100,6 +103,8 @@ export class LetterInitiative {
   private ranWeek = '';
   /** 오늘을 쉬는 날로 봤다는 표시 — 쉬는 날에 두 시간 동안 매분 파이썬을 부르지 않게. */
   private restDay = '';
+  /** 오늘 기한 확인을 했다는 표시 — 상태 파일을 못 써도 하루 한 번. */
+  private wokeDay = '';
 
   constructor(private readonly opts: LetterInitiativeOptions) {
     this.logger = opts.logger ?? new Logger('Letter:initiative');
@@ -125,7 +130,8 @@ export class LetterInitiative {
       void this.tick(app.client).catch((error) => this.logger.warn('주간 턴에서 넘어졌습니다', error));
     }, 60 * 1000);
     this.timer.unref?.();
-    this.logger.info(`준비됨 — 월요일(못 돌면 다음 업무일) ${this.opts.at} 실장 DM 으로 「이번 주 이렇게 할까요」 · 방에는 카드를 거쳐야만`);
+    this.logger.info(`준비됨 — 월요일(못 돌면 다음 업무일) ${this.opts.at} 실장 DM 으로 「이번 주 이렇게 할까요」`
+      + ` · 그 밖의 업무일 같은 시각에는 기한이 된 맡은 일만 · 방에는 카드를 거쳐야만`);
   };
 
   /**
@@ -136,6 +142,10 @@ export class LetterInitiative {
    * 같은 창에서 돈다 — 하루 한 번이던 때는 하루 손해였는데 주 한 번이 되면서 한 주 손해가
    * 됐다(검토 2026-09-21). 아무 일도 안 한 결과(현황판 실패 · 쉬는 날)는 표시를 되돌리고,
    * 모델을 부른 뒤의 결과는 되돌리지 않는다 — 되돌리면 매분 모델을 부른다.
+   *
+   * **그 주 판단이 끝난 뒤의 업무일에는 기한을 본다**(실장 2026-10-23 「목표 일정에 깨는 것도」) — 같은 창에서 하루 한 번
+   * `wake` 로 부르면 파이썬이 기한이 된 맡은 일만 골라 같은 꼴(제안 · 확인 카드)로 돈다. 고를 일이 없으면 모델 없이 끝난다
+   * (`nothing-due`). 주간 판단을 한 날은 그 판단이 기한도 함께 봤으므로 다시 안 돈다.
    */
   async tick(client: App['client'], now = new Date()): Promise<Outcome> {
     const [h, m] = this.opts.at.split(':').map((x) => parseInt(x, 10));
@@ -145,27 +155,42 @@ export class LetterInitiative {
     const today = localDay(now);
     const week = localDay(mondayOf(now));
     const st = this.state();
-    if (this.ranWeek === week || st.week === week) return 'done-this-week';
     if (this.restDay === today || st.day === today) return 'done-today';
+    if (this.ranWeek === week || st.week === week) {
+      if (this.wokeDay === today || st.wake === today) return 'done-today';
+      this.wokeDay = today;
+      this.saveState({ week, wake: today });
+      const woke = await this.runOnce(client, now, true);
+      if (woke === 'no-brief') {
+        this.wokeDay = '';
+        this.saveState({ week });
+      } else if (woke === 'holiday') {
+        this.restDay = today;
+      }
+      return woke;
+    }
     // **먼저 적고 돈다** — 도중에 넘어져도 같은 주에 두 번 돌지 않는다.
     this.ranWeek = week;
-    this.saveState({ week });
+    this.wokeDay = today;
+    this.saveState({ week, wake: today });
     const out = await this.runOnce(client, now);
     if (out === 'holiday') {
       // 오늘은 쉬는 날 — 이번 주 표시는 되돌리고(다음 업무일에 돈다) 오늘 표시만 남긴다.
       this.ranWeek = '';
+      this.wokeDay = '';
       this.restDay = today;
       this.saveState({ day: today });
     } else if (out === 'no-brief') {
       // 현황판을 못 만들었다 — 모델도 DM 도 없었으니 되돌려 다음 분에 다시 해 본다.
       this.ranWeek = '';
+      this.wokeDay = '';
       this.saveState({});
     }
     return out;
   }
 
-  /** 한 번 돈다. 시각·「오늘 했나」는 안 본다(검사에서 바로 부른다). */
-  async runOnce(client: App['client'], now = new Date()): Promise<Outcome> {
+  /** 한 번 돈다. 시각·「오늘 했나」는 안 본다(검사에서 바로 부른다). `wake` — 기한이 된 맡은 일만 보는 턴. */
+  async runOnce(client: App['client'], now = new Date(), wake = false): Promise<Outcome> {
     if (!this.enabled) return 'off';
     if (this.switchedOff(now)) {
       this.logger.info('실장이 말로 꺼 두었습니다 — 안 돕니다');
@@ -183,15 +208,17 @@ export class LetterInitiative {
     try {
       // ⑧ 실장 DM 대화(`U…`)가 아니라 주간 전용 대화(`U…-morning`)에서 돈다.
       result = await this.opts.host.initiate(client, `${this.opts.managerUserId}-morning`, brief,
-                                             this.opts.managerName);
+                                             this.opts.managerName, wake ? { wake: true } : undefined);
     } catch (error) {
-      this.logger.warn('주간 턴이 깨졌습니다', error);
+      this.logger.warn(wake ? '기한 확인 턴이 깨졌습니다' : '주간 턴이 깨졌습니다', error);
       return 'error';
     }
     if (result.error) {
-      this.logger.warn(`주간 턴 실패: ${result.error}`);
+      this.logger.warn(`${wake ? '기한 확인' : '주간'} 턴 실패: ${result.error}`);
       return 'error';
     }
+    // 기한이 된 맡은 일이 없었다 — 파이썬이 모델을 안 불렀다(멈춘 일 알림이 있으면 그 한 줄은 아래에서 간다).
+    if (wake && result.wake_due === 0 && !(result.reply || '').trim()) return 'nothing-due';
     // 실장에게 하는 말 — 그 자체는 카드가 아니다. 방에 걸 글은 아래 `ask` 로만 간다.
     const said = (result.reply || '').trim();
     if (said) await this.tell(client, `${this.opts.prefix ?? ':coffee: '}${said}`);
@@ -201,12 +228,13 @@ export class LetterInitiative {
     // 실장이 고친 뒤 보낼 때 둘 다.
     const asks = (result.ask || []).filter((a) => a && typeof a.name === 'string');
     if (!asks.length) {
-      this.logger.info(said ? '이번 주는 방에 걸 글 없이 실장에게 말만' : '이번 주는 조용히');
+      const when = wake ? '오늘 기한 확인은' : '이번 주는';
+      this.logger.info(said ? `${when} 방에 걸 글 없이 실장에게 말만` : `${when} 조용히`);
       return 'quiet';
     }
     // ⑤ 사람 층 — 카드. 실장이 「보내기」를 눌러야 방에 오른다.
     await this.opts.offer!(client, asks, { user: this.opts.managerUserId, channel: 'DM' });
-    this.logger.info(`이번 주 제안 ${asks.length}건 — 카드로 실장에게`);
+    this.logger.info(`${wake ? '기한이 된 일' : '이번 주'} 제안 ${asks.length}건 — 카드로 실장에게`);
     return 'proposed';
   }
 
@@ -338,7 +366,7 @@ export class LetterInitiative {
     }
   }
 
-  private state(): { week?: string; day?: string } {
+  private state(): State {
     try {
       return JSON.parse(fs.readFileSync(this.opts.statePath, 'utf-8'));
     } catch {
@@ -346,7 +374,7 @@ export class LetterInitiative {
     }
   }
 
-  private saveState(s: { week?: string; day?: string }): void {
+  private saveState(s: State): void {
     try {
       fs.mkdirSync(path.dirname(this.opts.statePath), { recursive: true });
       const tmp = `${this.opts.statePath}.tmp`;
