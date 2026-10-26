@@ -1007,17 +1007,17 @@ try {
     // 실제 표(있으면) — 사용자 결정의 대응이 그대로 앉았나
     const real = path.resolve(ROOT, '..', 'llm-playbook', 'llm_playbook', 'models.json');
     if (fs.existsSync(real) && JSON.parse(fs.readFileSync(real, 'utf-8')).service_fallback) {
-      // 사용자 대응표(2026-10-14 정본, 2026-10-27 에 luna 를 빼고 sol low 칸을 terra 로) 15칸 — 1차 모델 · 깊이마다 GPT 「별칭 깊이」
+      // 사용자 대응표(2026-10-14 정본, 2026-10-27 에 luna 를 빼고 sonnet 줄과 sol low 칸을 terra 로) 15칸 — 1차 모델 · 깊이마다 GPT 「별칭 깊이」
       const WANT = {
         opus: { low: 'sol low', medium: 'sol high', high: 'sol high', xhigh: 'sol xhigh', max: 'sol max' },
-        sonnet: { low: 'terra low', medium: 'terra medium', high: 'sol medium', xhigh: 'sol high', max: 'sol xhigh' },
+        sonnet: { low: 'terra low', medium: 'terra medium', high: 'terra high', xhigh: 'terra xhigh', max: 'terra max' },
         haiku: { low: 'terra low', medium: 'terra low', high: 'terra low', xhigh: 'terra medium', max: 'terra high' },
       };
       const got = Object.fromEntries(Object.entries(WANT).map(([f, row]) => [f, Object.fromEntries(Object.keys(row)
         .map((e) => { const r = ml.serviceCodex(f, e, real); return [e, r ? `${r.alias} ${r.effort}` : null]; }))]));
       eq('실제 표 — 대응표 15칸', got, WANT);
       eq('실제 표 — 깊이를 모르면 high 줄 · 전체 id 도', [ml.serviceCodex('sonnet', undefined, real)?.effort,
-        ml.serviceCodex('claude-opus-5-5', 'medium', real)?.model], ['medium', 'gpt-6.1-sol']);
+        ml.serviceCodex('claude-opus-5-5', 'medium', real)?.model], ['high', 'gpt-6.1-sol']);
     }
   }
 
