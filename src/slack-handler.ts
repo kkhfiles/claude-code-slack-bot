@@ -652,7 +652,8 @@ export class SlackHandler {
         script: path.join(path.dirname(turnScript), 'comm_pulse.py'),
         statePath: path.join(letterData, 'initiative-state.json'),
         controlPath: path.join(letterData, 'control.json'),
-        host: { initiate: (client, key, brief, name) => letterHost!.initiate(client, key, brief, name) },
+        // `extra`(기한 확인 `wake`)까지 넘긴다 — 빠뜨리면 기한 확인 날마다 주간 판단이 통째로 돈다(2026-10-23 실제로 그랬다)
+        host: { initiate: (client, key, brief, name, extra) => letterHost!.initiate(client, key, brief, name, extra) },
         offer: letterNotice.enabled ? letterNotice.offer : undefined,
       });
       // 소인의 주간 시계 — 같은 장치를 커피콩 앱에 얹는다(실장 DM 과 카드가 이 앱으로 간다). 읽을 방은 시험 방 뺀
@@ -673,8 +674,8 @@ export class SlackHandler {
         statePath: path.join(lunchData, 'initiative-state.json'),
         controlPath: path.join(lunchData, 'control.json'),
         host: {
-          initiate: (client, key, brief, name) => (lunchHost
-            ? lunchHost.initiate(client, key, brief, name)
+          initiate: (client, key, brief, name, extra) => (lunchHost
+            ? lunchHost.initiate(client, key, brief, name, extra)
             : Promise.resolve({ reply: '', error: '소인 대화 호스트가 없습니다' })),
         },
         offer: letterNotice.enabled ? letterNotice.offer : undefined,

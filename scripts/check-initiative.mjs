@@ -388,6 +388,15 @@ ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 �
 }
 ok('방도 방 여럿도 없으면 꺼진다', make({ room: undefined, rooms: [] }).it.enabled === false);
 
+// 실제 연결부가 `extra`(기한 확인 `wake`)를 넘기나 — 위 검사들은 가짜 호스트라 이 연결을 안 거친다. 2026-10-23 두 연결 모두
+// 넷째 칸을 버려서 기한 확인 날에 주간 판단이 통째로 돌았다(커피콩 카드 3장 · 소인 DM).
+{
+  const src = fs.readFileSync(new URL('../src/slack-handler.ts', import.meta.url), 'utf-8');
+  const wires = [...src.matchAll(/initiate:\s*\(([^)]*)\)\s*=>[\s\S]{0,80}?\.initiate\(([^)]*)\)/g)];
+  ok('실제 연결부(slack-handler.ts)가 둘 다 넷째 칸(extra)을 받아 그대로 넘긴다',
+    wires.length >= 2 && wires.every((m) => /extra/.test(m[1]) && /extra/.test(m[2])), wires.map((m) => m[0].slice(0, 80)));
+}
+
 console.log(`\n${fail ? `실패 ${fail}건` : '모두 통과.'}`);
 fs.rmSync(dir, { recursive: true, force: true });
 process.exitCode = fail ? 1 : 0;
