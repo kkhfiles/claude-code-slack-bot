@@ -233,6 +233,112 @@ const TOP = [
   ok('판정 · 취소 · 자동 종료가 기록에 남는다', ['decide', 'cancel', 'auto-kill'].every((p) => lines.some((l) => l.phase === p)));
 }
 
+// ── 분석과 대안 버튼 (2026-10-27) ─────────────────────────────────────
+//   ⑧ AI 가 무엇을 쓰든 실행할 수 있는 것만 남는다 — 보호 대상 · 스냅샷에 없는 pid · 자손에 보호 대상이 있는 통째 종료는 버린다
+//   ⑨ 대화형 세션은 대안이 될 수 있다(사람이 눌러야 실행) · 끄는 버튼은 확인 창을 단다 · 직접 할 일은 버튼이 없다
+//   ⑩ 버튼을 누르면 같은 프로세스인지 보고 끄고 · 결과를 그 줄에 붙이고 · 그 버튼만 걷는다
+const A = require(path.join(ROOT, 'dist', 'memory-analysis.js'));
+const SNAP = {
+  summary: {
+    measured_at: '2026-10-27T10:00:00', boot: '2026-10-26T18:00:00', committed: 44 * 2 ** 30, limit: 48 * 2 ** 30,
+    available: 2 * 2 ** 30, pct: 91.7, process_private: 20 * 2 ** 30, kernel_pools: 18 * 2 ** 30, remainder: 6 * 2 ** 30,
+    ai_total: 3 * 2 ** 30,
+    ai_sessions: [{ pid: 42, name: 'claude', host: 'windowsterminal', tag: 'korean', created: '2026-10-27T08:00:00',
+      ticks: '639286000000000000', procs: 3, priv: 2 ** 30, cpu: 100, children: {} }],
+    non_ai_by_exe: [], pool_tags: [],
+  },
+  top_procs: [
+    { pid: 40, ppid: 5, name: 'chrome.exe', parent: 'explorer.exe', priv: 2 ** 30, created: '', ticks: '639286000000000001', cmd: 'chrome.exe' },
+    { pid: 32, ppid: 31, name: 'python.exe', parent: 'python.exe', priv: 4 * 2 ** 30, created: '', ticks: '639286000000000002', cmd: 'sync' },
+    { pid: 5, ppid: 1, name: 'explorer.exe', parent: 'wininit.exe', priv: 2 ** 29, created: '', ticks: '639286000000000003', cmd: '' },
+    { pid: 41, ppid: 5, name: 'WindowsTerminal.exe', parent: 'explorer.exe', priv: 4 * 2 ** 30, created: '', ticks: '639286000000000004', cmd: '' },
+  ],
+  baseline: { file: 'b.json', from: '2026-10-27T09:00:00', to: '2026-10-27T10:00:00', minutes: 60,
+    deltas: { committed: 22 * 2 ** 30, process_private: 6 * 2 ** 30, kernel_pools: 13 * 2 ** 30, remainder: 3 * 2 ** 30, ai_total: 0 },
+    sessions: [], exe_growth: [], pool_tag_growth: [{ tag: 'FMfn', hint: '필터 관리자 파일 이름', delta: 5 * 2 ** 30, now: 6 * 2 ** 30 }] },
+  previous: { file: 'p.json', from: '', to: '', minutes: 30, deltas: {}, exe_growth: [], pool_tag_growth: [],
+    sessions: [{ pid: 42, name: 'claude', host: 'windowsterminal', tag: 'korean', priv: 2 ** 30, priv_delta: 0, cpu_delta: 0.4 }] },
+  file: 'now.json',
+};
+{
+  const roles = W.classifyRoles(ROWS, { botPid: BOT, pipelinePid: 30 });
+  const kids = new Map([[5, [40, 41, 42]], [41, [42]], [30, [31, 32]]]);
+  const descendants = (pid) => { const out = []; const st = [...(kids.get(pid) || [])]; while (st.length) { const c = st.pop(); out.push(c); st.push(...(kids.get(c) || [])); } return out; };
+  const answer = JSON.stringify({ action: 'wait', pid: null, reason: 'x', analysis: '커널 풀이 13GB 늘었다',
+    options: [
+      { action: 'kill_tree', pid: 42, label: '쉬는 korean 세션', reason: 'CPU 0', expect_gb: 1, loss: 'claude -r korean' },
+      { action: 'kill', pid: 32, label: '동기화', reason: '큼', expect_gb: 4 },
+      { action: 'kill', pid: 999, label: '없는 것', reason: '' },
+      { action: 'kill_tree', pid: 30, label: '러너', reason: '' },
+      { action: 'kill', pid: 5, label: '탐색기', reason: '' },
+      { action: 'shell', label: '아무 명령', reason: '' },
+      { action: 'reboot', label: '재시작', reason: '커널 풀', expect_gb: 13 },
+      { action: 'manual', label: '검색 중단', reason: '홈 전체 검색' },
+      { action: 'kill', pid: 40, label: '크롬', reason: '' },
+      { action: 'kill', pid: 41, label: '터미널', reason: '' },
+    ] });
+  const v = A.vetOptions(answer, { snap: SNAP, roles, botPid: BOT, descendants });
+  eq('⑧ 남는 대안(보호 · 없는 pid · 시스템 · 모르는 갈래 버림 · 넷까지)', v.options.map((o) => o.label), ['쉬는 korean 세션', '재시작', '검색 중단', '크롬']);
+  ok(`⑧ 버린 사유가 남는다 (${v.dropped.join(' / ')})`, v.dropped.some((d) => d.includes('보호')) && v.dropped.some((d) => d.includes('스냅샷에 없는')));
+  eq('⑧ 세션 대안은 이름과 생성 시각을 스냅샷에서 받는다', [v.options[0].name, v.options[0].ticks], ['claude', '639286000000000000']);
+  const tree5 = A.vetOptions(JSON.stringify({ options: [{ action: 'kill_tree', pid: 41, label: '터미널 통째', reason: '' }] }),
+    { snap: SNAP, roles: new Map([...roles, [42, 'stanley']]), botPid: BOT, descendants });
+  eq('⑧ 자손에 보호 대상이 있으면 통째 종료 버림', tree5.options.length, 0);
+  const wz = W.classifyRoles([{ pid: 60, ppid: 1, name: 'wezterm-gui', cmd: '' }, { pid: 61, ppid: 60, name: 'claude', cmd: 'claude -r a' }],
+    { botPid: BOT, pipelinePid: null });
+  eq('⑧ WezTerm 안의 세션도 대화형 — 시스템 경로 자동 종료 후보가 아니다', wz.get(61), 'interactive');
+  eq('⑧ 답이 JSON 이 아니면 빈 대안', A.vetOptions('모르겠음', { snap: SNAP, roles, botPid: BOT, descendants }).options.length, 0);
+
+  const btn = A.optionButtons('g1', v);
+  const els = btn.elements;
+  eq('⑨ 버튼 — 직접 할 일은 빼고 「그대로 둠」을 끝에', els.map((e) => e.value), ['g1:0', 'g1:1', 'g1:3', 'g1:x']);
+  ok('⑨ 끄는 버튼은 확인 창과 빨간색', els[0].confirm && els[0].style === 'danger' && !els[1].confirm);
+  ok('⑨ action_id 가 버튼마다 다르다', new Set(els.map((e) => e.action_id)).size === els.length);
+  const dig = A.snapshotDigest(SNAP, roles);
+  ok('⑨ 프롬프트 내역에 기준 대비 · 쉬는 세션 · 보호 표시', dig.includes('커널 풀 +13.0') && dig.includes('| 42 | claude | korean') && dig.includes('보호(pipeline)'));
+  ok('⑨ 사람에게 보이는 첫 줄', A.snapshotHeadline(SNAP).includes('커밋 +22.0GB') && A.snapshotHeadline(SNAP).includes('커널 풀 +13.0'));
+}
+{
+  process.env.MEMORY_WATCHDOG_OPTIONS_FILE = path.join(tmp, 'options.json');
+  const snapAnswer = JSON.stringify({ action: 'wait', pid: null, reason: '주범 없음', analysis: '세션이 쉼',
+    options: [{ action: 'kill_tree', pid: 42, label: '쉬는 korean 세션', reason: 'CPU 0', expect_gb: 1 },
+      { action: 'kill', pid: 40, label: '크롬', reason: '탭', expect_gb: 1 }] });
+  const sentBlocks = [];
+  const updates = [];
+  const wd = new W.ProcessMemoryWatchdog(90, 180, 600, 7168,
+    async (text, blocks) => { sentBlocks.push(blocks); return 'ts1'; },
+    async (ts, text, blocks) => { updates.push({ text, blocks }); },
+    undefined,
+    { reviewer: async () => snapAnswer, pipelineLockFile: path.join(tmp, 'nolock.json'), analysis: true, snapshotTool: 'x' });
+  wd.getSystemCommitStatus = async () => ({ committedMB: 44000, limitMB: 48914, usagePct: 91.4 });
+  wd.getTopProcesses = async () => TOP;
+  wd.getProcessTable = async () => ROWS.map((r) => (r.pid === BOT ? { ...r, pid: process.pid } : r.ppid === BOT ? { ...r, ppid: process.pid } : r));
+  wd.reportKnownIssues = async () => {};
+  wd.takeSnapshot = async () => SNAP;
+  const killed = [];
+  wd.killIfSameCreated = (pid, name, ticks, tree) => { killed.push([pid, name, tree]); return 'killed'; };
+  await wd.checkMemory();
+  const acts = (sentBlocks[0] || []).find((b) => b.type === 'actions');
+  ok(`⑩ 경고에 대안 버튼이 붙는다 (${JSON.stringify(acts?.elements?.map((e) => e.value))})`, acts && acts.elements.length === 3);
+  const realSetTimeout = global.setTimeout;
+  global.setTimeout = (fn) => realSetTimeout(fn, 0);
+  await wd.handleOptionAction(acts.elements[0].value, 'ts1');
+  global.setTimeout = realSetTimeout;
+  eq('⑩ 세션 대안은 자식까지 끈다', killed, [[42, 'claude', true]]);
+  const last = updates.at(-1);
+  const left = last.blocks.find((b) => b.type === 'actions');
+  ok(`⑩ 결과가 그 줄에 붙고 그 버튼만 걷힌다 (${left?.elements.map((e) => e.value)})`,
+    last.text.includes('종료함') && last.text.includes('커밋 91.4%') && left.elements.length === 2);
+  await wd.handleOptionAction(acts.elements[0].value, 'ts1');
+  eq('⑩ 같은 버튼을 두 번 눌러도 한 번만', killed.length, 1);
+  await wd.handleOptionAction('없는그룹:0', 'ts1');
+  ok('⑩ 모르는 그룹은 「만료」', updates.at(-1).text.includes('만료'));
+  const ev = fs.readFileSync(process.env.MEMORY_WATCHDOG_EVENTS_FILE, 'utf-8').trim().split('\n').map(JSON.parse);
+  ok('⑩ 판정 기록에 분석 · 대안 · 버튼 실행이 남는다',
+    ev.some((e) => e.phase === 'decide' && e.options?.length === 2) && ev.some((e) => e.phase === 'option' && e.pid === 42));
+  wd.stop();
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 if (fails.length) {
   console.error(`\n실패 ${fails.length}건\n\n  ✗ ${fails.join('\n\n  ✗ ')}\n`);

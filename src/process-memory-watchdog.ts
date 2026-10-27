@@ -7,6 +7,10 @@ import { Logger } from './logger';
 import { errorCollector } from './error-collector';
 import { t, Locale } from './messages';
 import { pythonCommand } from './python-command';
+import {
+  Analysis, MemSnapshot, analysisText, optionButtons, optionsInstructions, snapshotDigest, snapshotHeadline,
+  vetOptions,
+} from './memory-analysis';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -110,7 +114,8 @@ export type Path = 'runaway' | 'system';
  * 실제 부족 없이 지나갔고(사용자가 제외함) · 실제 부족은 커밋 100% 근처에서 났으며 그때 세션 주범은
  * 8~65GB 였다. 97% 부터는 남은 여유가 1.5GB 안팎이라 심각이면 유예를 1분으로 줄인다.
  */
-export const INTERACTIVE_HOSTS = new Set(['windowsterminal']);
+// WezTerm 은 2026-10-27 에 넣었다 — 세션을 그리로 옮긴 뒤 그 안의 세션이 「역할 없음」으로 보여 시스템 경로의 종료 후보가 됐다
+export const INTERACTIVE_HOSTS = new Set(['windowsterminal', 'wezterm-gui']);
 export const INTERACTIVE_SEVERE_PCT = 97;
 export const INTERACTIVE_SEVERE_MB = 16384;
 export const INTERACTIVE_SEVERE_DELAY_SEC = 60;
@@ -339,7 +344,29 @@ export interface WatchdogOptions {
    * 85% 를 넘으면 들고 있던 것을 버린다. 여기서 터져도 감시는 그대로 돈다.
    */
   onCommit?: (pct: number) => void;
+  /**
+   * 경고에 분석과 상황별 대안 버튼을 붙이나(2026-10-27 · `memory-analysis.ts`). 끄면 지금까지의 경고 그대로.
+   * 사람에게 보이는 변경이라 시안 확인 뒤에 켠다(`MEMORY_WATCHDOG_ANALYSIS=1`).
+   */
+  analysis?: boolean;
+  /** 스냅샷 도구 경로(`memory-snapshot.py`). 없으면 분석과 오르는 길의 기록을 건너뛴다. */
+  snapshotTool?: string;
 }
+
+/** 대안 버튼의 상태 — 하루 뒤에 눌러도 되도록 파일에 둔다(봇이 다시 떠도 남는다). */
+export function watchdogOptionsFile(): string {
+  return process.env.MEMORY_WATCHDOG_OPTIONS_FILE
+    || path.join(os.homedir(), '.claude', 'state', 'memory-watchdog-options.json');
+}
+
+interface OptionGroup {
+  created: string; head: string; prefix: string; analysis: Analysis; results: Record<number, string>;
+  /** 대안 앞에 있던 블록(자동 종료 확인의 Kill · Ignore · Exclude) — 그 종료가 아직 기다리는 중이면 다시 그린다 */
+  before?: any[]; pendingPid?: number;
+}
+
+/** 이 커밋 % 를 넘으면 그 봉우리에서 한 번 스냅샷을 남긴다 — 판정(90%) 전의 모습과 맞대려고 */
+export const RISE_SNAPSHOT_PCT = 85;
 
 export class ProcessMemoryWatchdog {
   private checkTimer: ReturnType<typeof setInterval> | null = null;
@@ -356,6 +383,8 @@ export class ProcessMemoryWatchdog {
   private systemEpisodeOpen = false;
   /** 폭주 경로에서 「기다림」을 받은 PID → 그때 크기. 1GB 넘게 더 커지기 전엔 다시 안 묻는다. */
   private waitedAt: Map<number, { mb: number; at: number }> = new Map();
+  /** 이번 봉우리에서 오르는 길의 스냅샷을 남겼나 — 80% 밑으로 내려오면 다시 남긴다 */
+  private riseSnapped = false;
 
   constructor(
     private thresholdPct: number,
@@ -612,6 +641,24 @@ export class ProcessMemoryWatchdog {
         ...refs,
       ].join('\n');
 
+      // 커밋 압박은 정해 둔 버튼 대신 지금 상태를 재서 고른 대안을 낸다(2026-10-27 사용자) — 유령 Explorer
+      // 정리 · 재시작도 그 대안의 한 갈래로 AI 가 고를 수 있다. 대안을 못 받으면 정해 둔 버튼 그대로.
+      if (item.id === 'winhealth-commit' && this.opts.analysis) {
+        const extra = await this.analyzeStandalone(`${item.title} — ${item.detail} (${item.summary})`).catch(() => null);
+        if (extra?.analysis.options.length) {
+          try {
+            await this.sendWithOptions(text, extra, []);
+            sentSet.add(item.key);
+            this.record({ phase: 'health-analysis', key: item.key, analysis: extra.analysis.text,
+              options: extra.analysis.options.map(o => ({ action: o.action, pid: o.pid ?? null, label: o.label })),
+              dropped: extra.dropped });
+          } catch (e) {
+            this.logger.error('Failed to report known issue', e as Error);
+          }
+          continue;
+        }
+      }
+
       const blocks: any[] = [{ type: 'section', text: { type: 'mrkdwn', text } }];
       const buttons = HEALTH_FIX_BUTTONS[item.id];
       if (buttons?.length) {
@@ -668,6 +715,12 @@ export class ProcessMemoryWatchdog {
     const status = await this.getSystemCommitStatus();
     if (!status) return;
     try { this.opts.onCommit?.(status.usagePct); } catch { /* 알림이 감시를 막지 않는다 */ }
+    if (status.usagePct < RISE_SNAPSHOT_PCT - 5) this.riseSnapped = false;
+    if (status.usagePct >= RISE_SNAPSHOT_PCT && !this.riseSnapped && this.opts.snapshotTool) {
+      // 기록만 한다 — 판정 때 「직전 장」이 되어 그 사이 쉰 세션을 가른다. 기다리지 않는다
+      this.riseSnapped = true;
+      this.takeSnapshot('rise').catch(() => {});
+    }
 
     const systemHigh = status.usagePct >= this.thresholdPct;
 
@@ -746,17 +799,23 @@ export class ProcessMemoryWatchdog {
     }).filter(c => c.role !== 'host');   // 스탠리의 조상은 후보로도 안 보인다 — 죽이면 감시기도 죽는다
 
     const delaySec = route === 'runaway' ? (this.opts.runawayDelaySec ?? 180) : this.autoKillDelaySec;
+    // 분석을 켰으면 판정 전에 한 장 잰다 — 같은 AI 호출이 판정과 대안을 함께 낸다
+    const snap = this.opts.analysis ? await this.takeSnapshot('watchdog') : null;
     let verdict: Verdict | null = null;
+    let answer: string | null = null;
     let reviewMs = 0;
     if (this.opts.reviewer && candidates.length && (route === 'runaway' || rows.length > 0)) {
       const t0 = Date.now();
-      const prompt = buildReviewPrompt({
+      let prompt = buildReviewPrompt({
         path: route, status, thresholdPct: this.thresholdPct, processThresholdMB: this.processThresholdMB,
         candidates, pipelineRunning: !!pipelinePid && byPid.has(pipelinePid), delaySec,
       });
-      verdict = parseVerdict(await this.opts.reviewer(prompt).catch(() => null));
+      if (snap) prompt += `\n\n${snapshotDigest(snap, roles)}\n\n${optionsInstructions(true)}`;
+      answer = await this.opts.reviewer(prompt).catch(() => null);
+      verdict = parseVerdict(answer);
       reviewMs = Date.now() - t0;
     }
+    const extra = snap ? this.analysisFrom(snap, answer, rows, roles) : null;
     const args = {
       path: route, candidates, systemHigh, systemPct: status.usagePct,
       processThresholdMB: this.processThresholdMB,
@@ -780,11 +839,14 @@ export class ProcessMemoryWatchdog {
       phase: 'decide', route, pct: status.usagePct, verdict, reviewMs, aiActs: acts,
       decision: brief(decision), aiWould: brief(aiWould),
       candidates: candidates.slice(0, 6).map(c => ({ pid: c.pid, name: c.name, mb: c.commitMB, role: c.role, growth: c.growthMB })),
+      ...(extra ? { snapshot: snap!.file, analysis: extra.analysis.text,
+        options: extra.analysis.options.map(o => ({ action: o.action, pid: o.pid ?? null, label: o.label, gb: o.expectGB ?? null })),
+        dropped: extra.dropped } : {}),
     });
     this.logger.info(`판정 ${route} → ${decision.kind}(${decision.source}) ${decision.target ? `${decision.target.name} PID ${decision.target.pid}` : ''} — ${decision.reason}`);
 
     if (decision.kind === 'kill' && decision.target) {
-      await this.sendKillConfirmation(decision.target, status, route, decision);
+      await this.sendKillConfirmation(decision.target, status, route, decision, extra);
       return;
     }
     if (route === 'runaway') {
@@ -793,10 +855,11 @@ export class ProcessMemoryWatchdog {
         this.waitedAt.set(c.pid, { mb: c.commitMB, at: Date.now() });
       }
     }
-    await this.sendAlert(status, decision, candidates);
+    await this.sendAlert(status, decision, candidates, extra);
   }
 
-  private async sendAlert(status: CommitStatus, decision: Decision, candidates: Candidate[]): Promise<void> {
+  private async sendAlert(status: CommitStatus, decision: Decision, candidates: Candidate[],
+                          extra: { head: string; analysis: Analysis } | null = null): Promise<void> {
     const top = candidates.slice(0, 3)
       .map(c => `\`${c.name}\` ${c.commitMB.toLocaleString()} MB${c.role ? `(${ROLE_LABEL[c.role]})` : ''}`).join(' · ');
     const text = t('watchdog.alertOnly', this.locale, {
@@ -806,11 +869,171 @@ export class ProcessMemoryWatchdog {
       review: t('watchdog.review', this.locale, { source: decision.source, reason: decision.reason }),
       top: top || '-',
     });
-    await this.sendMessage(text).catch(e => this.logger.error('Failed to send watchdog alert', e));
+    if (!extra) {
+      await this.sendMessage(text).catch(e => this.logger.error('Failed to send watchdog alert', e));
+      return;
+    }
+    await this.sendWithOptions(text, extra, []).catch(e => this.logger.error('Failed to send watchdog alert', e));
+  }
+
+  /**
+   * 분석과 대안 버튼을 붙여 보낸다. `before` 는 대안 블록 앞에 둘 블록(자동 종료 확인의 Kill · Ignore 등).
+   * 대안의 상태는 파일에 남겨 버튼이 봇 재시작 뒤에도 듣게 한다.
+   */
+  private async sendWithOptions(prefix: string, extra: { head: string; analysis: Analysis }, before: any[],
+                                pendingPid?: number): Promise<string> {
+    const groupId = `g${Date.now().toString(36)}`;
+    const body = analysisText(extra.head, extra.analysis);
+    const buttons = optionButtons(groupId, extra.analysis);
+    const blocks = [
+      { type: 'section', text: { type: 'mrkdwn', text: prefix.slice(0, 2900) } },
+      ...before,
+      { type: 'section', text: { type: 'mrkdwn', text: body.slice(0, 2900) } },
+      ...(buttons ? [buttons] : []),
+    ];
+    if (extra.analysis.options.length) {
+      this.saveGroup(groupId, { created: new Date().toISOString(), head: extra.head, prefix, analysis: extra.analysis,
+        results: {}, before, pendingPid });
+    }
+    return this.sendMessage(`${prefix}\n${body}`, blocks);
+  }
+
+  /** 스냅샷 + AI 답 → 사람에게 보일 분석과 실행할 수 있는 대안. AI 가 없거나 실패하면 숫자 한 줄만. */
+  private analysisFrom(snap: MemSnapshot, answer: string | null, rows: ProcRow[], roles: Map<number, Role>):
+      { head: string; analysis: Analysis; dropped: string[] } {
+    const children = new Map<number, number[]>();
+    for (const r of rows) {
+      if (r.ppid === r.pid) continue;
+      children.set(r.ppid, [...(children.get(r.ppid) || []), r.pid]);
+    }
+    const descendants = (pid: number) => {
+      const out: number[] = [];
+      const stack = [...(children.get(pid) || [])];
+      while (stack.length && out.length < 2000) {
+        const c = stack.pop()!;
+        out.push(c);
+        stack.push(...(children.get(c) || []));
+      }
+      return out;
+    };
+    const v = vetOptions(answer, { snap, roles, botPid: process.pid, descendants });
+    const text = v.text || (answer === null ? '(AI 분석 못 받음 — 숫자만)' : '');
+    return { head: snapshotHeadline(snap), analysis: { text, options: v.options }, dropped: v.dropped };
+  }
+
+  /** 판정 없이 분석과 대안만 — 시스템 점검 경고(커밋 압박)에 쓴다 */
+  private async analyzeStandalone(situation: string):
+      Promise<{ head: string; analysis: Analysis; dropped: string[] } | null> {
+    const snap = await this.takeSnapshot('health');
+    if (!snap) return null;
+    const rows = await this.getProcessTable();
+    const roles = classifyRoles(rows, { botPid: process.pid, pipelinePid: this.readPipelinePid() });
+    const prompt = [
+      '이 PC 의 시스템 점검이 메모리 압박을 알리려 한다. 도구 없이 아래 자료만으로 분석하고 사람이 고를 대안을 JSON 하나로 답한다.',
+      '목적: 상시 작업(스탠리 봇과 그 세션 · 자정 · 정오 동기화)이 메모리 고갈로 넘어지지 않게 하면서, 사람이 일하는 것을 덜 잃는 쪽을 먼저 낸다.',
+      `상황: ${situation}`,
+      '',
+      snapshotDigest(snap, roles),
+      '',
+      optionsInstructions(false),
+    ].join('\n');
+    const answer = this.opts.reviewer ? await this.opts.reviewer(prompt).catch(() => null) : null;
+    return this.analysisFrom(snap, answer, rows, roles);
+  }
+
+  private async takeSnapshot(label: string): Promise<MemSnapshot | null> {
+    const tool = this.opts.snapshotTool;
+    if (!tool || !fs.existsSync(tool)) return null;
+    try {
+      const { stdout } = await execFileAsync(pythonCommand('python'), ['-X', 'utf8', tool, '--json', '--label', label],
+        { timeout: 90_000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+      return JSON.parse(stdout) as MemSnapshot;
+    } catch (e) {
+      this.logger.warn('메모리 스냅샷 실패 — 분석 없이 경고', e as Error);
+      return null;
+    }
+  }
+
+  private loadGroups(): Record<string, OptionGroup> {
+    try { return JSON.parse(fs.readFileSync(watchdogOptionsFile(), 'utf-8')) || {}; } catch { return {}; }
+  }
+
+  private saveGroup(id: string, g: OptionGroup | null): void {
+    const all = this.loadGroups();
+    if (g) all[id] = g; else delete all[id];
+    const cut = Date.now() - 2 * 86_400_000;   // 이틀 지난 버튼은 버린다
+    for (const [k, v] of Object.entries(all)) if (Date.parse(v.created) < cut) delete all[k];
+    try {
+      fs.mkdirSync(path.dirname(watchdogOptionsFile()), { recursive: true });
+      fs.writeFileSync(watchdogOptionsFile(), JSON.stringify(all, null, 2), 'utf-8');
+    } catch (e) {
+      this.logger.warn('대안 버튼 상태 저장 실패 — 버튼이 「만료」로 답한다', e as Error);
+    }
+  }
+
+  /**
+   * 대안 버튼. 값은 `<그룹>:<번호>` 또는 `<그룹>:x`(그대로 둠). 실행 뒤 커밋을 다시 재서 그 줄에 붙이고
+   * 남은 버튼만 다시 그린다 — 원래 메시지를 고친다(새 메시지면 버튼이 두 번 눌린다).
+   */
+  async handleOptionAction(value: string, messageTs: string): Promise<void> {
+    const [gid, idxRaw] = value.split(':');
+    const g = this.loadGroups()[gid];
+    if (!g) {
+      await this.updateMessage(messageTs, '이 대안은 만료됐습니다(이틀이 지났거나 상태 파일을 못 읽음). 아무것도 하지 않았습니다.').catch(() => {});
+      return;
+    }
+    if (idxRaw === 'x') {
+      const text = `${g.prefix}\n${analysisText(g.head, g.analysis, g.results)}\n\n그대로 두었습니다.`;
+      await this.updateMessage(messageTs, text, [{ type: 'section', text: { type: 'mrkdwn', text: text.slice(0, 2900) } }]).catch(() => {});
+      this.saveGroup(gid, null);
+      return;
+    }
+    const idx = Number(idxRaw);
+    const o = g.analysis.options[idx];
+    if (!o || g.results[idx]) return;
+    const before = (await this.getSystemCommitStatus())?.usagePct ?? null;
+    let line: string;
+    try {
+      if (o.action === 'kill' || o.action === 'kill_tree') {
+        const r = this.killIfSameCreated(o.pid!, o.name!, o.ticks!, o.action === 'kill_tree');
+        line = r === 'killed' ? `종료함 (${o.name} PID ${o.pid}${o.action === 'kill_tree' ? ', 자식 포함' : ''})`
+          : r === 'gone' ? '이미 끝나 있었음'
+            : r === 'recycled' ? `PID ${o.pid} 이 이제 다른 프로세스라 끄지 않음`
+              : '종료 실패 — 권한이거나 확인이 안 됨';
+        if (r === 'killed') this.onProcessKilled?.(o.pid!, o.name!);
+      } else if (o.action === 'explorer' || o.action === 'watchers') {
+        line = await this.runHealthFix(o.action, true);
+      } else if (o.action === 'reboot') {
+        // 재시작은 따로 두 단계 — 그 메시지로 바뀐다
+        this.record({ phase: 'option', action: o.action, label: o.label });
+        await this.handleRebootAsk(messageTs);
+        return;
+      } else {
+        return;
+      }
+    } catch (e) {
+      line = `실패 — ${(e as Error).message}`;
+    }
+    await new Promise(r => setTimeout(r, 5_000));   // 회수가 커밋에 반영될 시간
+    const after = (await this.getSystemCommitStatus())?.usagePct ?? null;
+    g.results[idx] = `${line} · 커밋 ${before ?? '?'}% → ${after ?? '?'}%`;
+    this.saveGroup(gid, g);
+    this.record({ phase: 'option', action: o.action, pid: o.pid ?? null, label: o.label, result: line, before, after });
+    const body = analysisText(g.head, g.analysis, g.results);
+    const done = new Set(Object.keys(g.results).map(Number));
+    const buttons = optionButtons(gid, g.analysis, done);
+    const stillPending = g.pendingPid !== undefined && this.pendingKills.has(g.pendingPid);
+    await this.updateMessage(messageTs, `${g.prefix}\n${body}`, [
+      { type: 'section', text: { type: 'mrkdwn', text: g.prefix.slice(0, 2900) } },
+      ...(stillPending ? g.before || [] : []),
+      { type: 'section', text: { type: 'mrkdwn', text: body.slice(0, 2900) } },
+      ...(buttons ? [buttons] : []),
+    ]).catch(e => this.logger.error('대안 결과로 메시지를 못 고침', e as Error));
   }
 
   private async sendKillConfirmation(target: Candidate, status: CommitStatus, route: Path,
-                                     decision: Decision): Promise<void> {
+                                     decision: Decision,
+                                     extra: { head: string; analysis: Analysis } | null = null): Promise<void> {
     const delaySec = decision.delaySec;
     const text = t(route === 'runaway' ? 'watchdog.confirmProcess' : 'watchdog.confirm', this.locale, {
       committedMB: status.committedMB.toLocaleString(),
@@ -855,7 +1078,10 @@ export class ProcessMemoryWatchdog {
       },
     ];
 
-    const messageTs = await this.sendMessage(text, blocks);
+    // 분석이 있으면 Kill · Ignore · Exclude 뒤에 분석과 대안을 붙인다 — 자동 종료 흐름은 그대로
+    const messageTs = extra
+      ? await this.sendWithOptions(text, extra, [blocks[1]], target.pid)
+      : await this.sendMessage(text, blocks);
 
     // Auto-kill timer
     const timer = setTimeout(async () => {
@@ -1112,6 +1338,35 @@ export class ProcessMemoryWatchdog {
       return 'failed';   // 확인 자체가 실패했으면 쏘지 않는다
     }
     return this.killProcess(pid) ? 'killed' : 'failed';
+  }
+
+  /**
+   * 대안 버튼용 — 스냅샷의 생성 시각(CIM, 마이크로초 단위)과 지금 프로세스의 시작 시각(100ns)을 10ms 안에서
+   * 맞대 같은 프로세스일 때만 끈다. `tree` 면 자식까지(`taskkill /T`).
+   */
+  private killIfSameCreated(pid: number, name: string, ticks: string, tree: boolean):
+      'killed' | 'gone' | 'recycled' | 'failed' {
+    if (!Number.isInteger(pid) || !/^\d{10,}$/.test(ticks || '')) return 'recycled';
+    try {
+      const check = require('child_process').execSync(
+        `powershell -NoProfile -Command "$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; `
+        + `if (-not $p) { 'gone' } else { $tk = 0; try { $tk = $p.StartTime.Ticks } catch { }; `
+        + `if ($p.Name -ne '${name.replace(/\.exe$/i, '').replace(/'/g, "''")}' -or [math]::Abs($tk - ${ticks}) -gt 100000) `
+        + `{ 'recycled' } else { 'same' } }"`,
+        { timeout: 15_000, encoding: 'utf-8', windowsHide: true },
+      ).toString().trim();
+      if (check === 'gone') return 'gone';
+      if (check !== 'same') return 'recycled';
+    } catch {
+      return 'failed';
+    }
+    if (!tree) return this.killProcess(pid) ? 'killed' : 'failed';
+    try {
+      require('child_process').execSync(`taskkill /PID ${pid} /T /F`, { timeout: 20_000, stdio: 'ignore', windowsHide: true });
+      return 'killed';
+    } catch {
+      return 'failed';
+    }
   }
 
   private killProcess(pid: number): boolean {

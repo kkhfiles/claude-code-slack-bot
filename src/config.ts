@@ -90,6 +90,11 @@ export const config = {
     aiReview: process.env.MEMORY_WATCHDOG_AI_REVIEW !== '0',
     // AI 판정대로 실제로 종료하나 — 기본은 관찰(기록 · DM 만). 판정 기록으로 맞았는지 본 뒤 1 로 켠다
     aiActs: process.env.MEMORY_WATCHDOG_AI_ACT === '1',
+    // 경고에 스냅샷 분석과 상황별 대안 버튼을 붙이나(2026-10-27) — 사람에게 보이는 변경이라 시안 확인 뒤 1 로 켠다
+    analysis: process.env.MEMORY_WATCHDOG_ANALYSIS === '1',
+    // 스냅샷 도구 — 프로세스 전부 · AI 세션 묶음 · 커널 풀을 재고 평소 기준과 맞댄다. 85% 오르는 길의 기록에도 쓴다
+    snapshotTool: process.env.MEMORY_SNAPSHOT_TOOL
+      || path.join(os.homedir(), '.claude', 'assets', 'memory-snapshot.py'),
   },
   // Lunch recruitment bot. Runs an external Python script that owns its own
   // Slack token and channel — this bot only supplies the 24/7 heartbeat.

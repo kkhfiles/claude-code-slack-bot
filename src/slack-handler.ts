@@ -850,6 +850,8 @@ export class SlackHandler {
             : undefined,
           runawayDelaySec: config.memoryWatchdog.runawayKillDelaySec,
           aiActs: config.memoryWatchdog.aiActs,
+          analysis: config.memoryWatchdog.analysis,
+          snapshotTool: config.memoryWatchdog.snapshotTool,
           // 미리 띄운 세션의 메모리 문(2026-10-01) — 85% 를 넘으면 들고 있던 것을 버린다.
           onCommit: (pct) => {
             if (this.sdkHandler.memoryGate.observe(pct)) this.sdkHandler.dropAllWarm(`커밋 ${pct}%`);
@@ -4856,6 +4858,13 @@ export class SlackHandler {
         await ack();
         const ts = (body as any).message?.ts;
         if (ts) await this.memoryWatchdog?.handleHealthDismiss(ts);
+      });
+      // 경고에 붙은 상황별 대안(2026-10-27) — 값 `<그룹>:<번호|x>` · 상태는 감시기가 파일에서 읽는다
+      this.action(/^watchdog_opt_(\d+|x)$/, async ({ ack, body }) => {
+        await ack();
+        const ts = (body as any).message?.ts;
+        const value = String((body as any).actions?.[0]?.value || '');
+        if (ts && value) await this.memoryWatchdog?.handleOptionAction(value, ts);
       });
     }
 
