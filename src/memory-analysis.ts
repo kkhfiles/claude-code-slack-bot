@@ -169,7 +169,8 @@ export function vetOptions(text: string | null | undefined, ctx: {
     if (!ACTIONS.has(action) || !label) { dropped.push(`모양이 틀림: ${JSON.stringify(o).slice(0, 80)}`); continue; }
     const opt: MemOption = {
       action, label, reason: String(o?.reason || '').trim().slice(0, 200),
-      loss: o?.loss ? String(o.loss).trim().slice(0, 120) : undefined,
+      // 잃는 것에는 다시 여는 명령(세션 id)이 들어가 길다 — 잘리면 그 명령을 못 쓴다
+      loss: o?.loss ? String(o.loss).trim().slice(0, 300) : undefined,
       expectGB: Number.isFinite(Number(o?.expect_gb)) ? Math.max(0, Number(o.expect_gb)) : undefined,
     };
     if (action === 'kill' || action === 'kill_tree') {
