@@ -8,7 +8,7 @@ import { errorCollector } from './error-collector';
 import { t, Locale } from './messages';
 import { pythonCommand } from './python-command';
 import {
-  Analysis, MemSnapshot, analysisText, optionButtons, optionsInstructions, snapshotDigest, snapshotHeadline,
+  Analysis, MemOption, MemSnapshot, analysisText, optionButtons, optionsInstructions, snapshotDigest, snapshotHeadline,
   vetOptions,
 } from './memory-analysis';
 
@@ -363,6 +363,29 @@ interface OptionGroup {
   created: string; head: string; prefix: string; analysis: Analysis; results: Record<number, string>;
   /** 대안 앞에 있던 블록(자동 종료 확인의 Kill · Ignore · Exclude) — 그 종료가 아직 기다리는 중이면 다시 그린다 */
   before?: any[]; pendingPid?: number;
+  /** 그 메시지 — 자동 종료 쪽이 메시지를 고칠 때 이 묶음을 찾아 분석과 남은 버튼을 다시 붙인다 */
+  ts?: string;
+  /** 「그대로 둠」을 눌렀음 — 대안 버튼만 걷고 자동 종료 버튼은 남긴다 */
+  dismissed?: boolean;
+}
+
+/** pid → 자손 pid 목록. 통째 종료가 상시 작업을 같이 끄지 않는지 볼 때 쓴다 */
+function descendantsOf(rows: ProcRow[]): (pid: number) => number[] {
+  const children = new Map<number, number[]>();
+  for (const r of rows) {
+    if (r.ppid === r.pid) continue;
+    children.set(r.ppid, [...(children.get(r.ppid) || []), r.pid]);
+  }
+  return (pid: number) => {
+    const out: number[] = [];
+    const stack = [...(children.get(pid) || [])];
+    while (stack.length && out.length < 2000) {
+      const c = stack.pop()!;
+      out.push(c);
+      stack.push(...(children.get(c) || []));
+    }
+    return out;
+  };
 }
 
 /** 이 커밋 % 를 넘으면 그 봉우리에서 한 번 스냅샷을 남긴다 — 판정(90%) 전의 모습과 맞대려고 */
@@ -385,6 +408,8 @@ export class ProcessMemoryWatchdog {
   private waitedAt: Map<number, { mb: number; at: number }> = new Map();
   /** 이번 봉우리에서 오르는 길의 스냅샷을 남겼나 — 80% 밑으로 내려오면 다시 남긴다 */
   private riseSnapped = false;
+  /** 실행 중인 대안 버튼(`<그룹>:<번호>`) — 결과가 적히기 전에 다시 눌린 것을 막는다 */
+  private optionBusy = new Set<string>();
 
   constructor(
     private thresholdPct: number,
@@ -540,7 +565,7 @@ export class ProcessMemoryWatchdog {
           ? `PID ${pid} 은 이제 다른 프로세스입니다 — ${pending.name} 은 이미 끝났고 번호가 재사용됐습니다. 죽이지 않았습니다.`
           : `PID ${pid} (${pending.name}) 종료 실패 — 권한이거나 확인이 안 됐습니다.`;
 
-    await this.updateMessage(pending.messageTs, text).catch(e =>
+    await this.updatePendingMessage(pending.messageTs, text).catch(e =>
       this.logger.error('Failed to update watchdog message', e),
     );
 
@@ -559,7 +584,7 @@ export class ProcessMemoryWatchdog {
     this.pendingKills.delete(pid);
 
     const text = t('watchdog.ignored', this.locale, { pid: String(pid), name: pending.name });
-    await this.updateMessage(pending.messageTs, text).catch(e =>
+    await this.updatePendingMessage(pending.messageTs, text).catch(e =>
       this.logger.error('Failed to update watchdog message', e),
     );
     this.logger.info(`Process kept by user: ${pending.name} (PID ${pid})`);
@@ -576,7 +601,7 @@ export class ProcessMemoryWatchdog {
     this.excludedPids.add(pid);
 
     const text = t('watchdog.excluded', this.locale, { pid: String(pid), name: pending.name });
-    await this.updateMessage(pending.messageTs, text).catch(e =>
+    await this.updatePendingMessage(pending.messageTs, text).catch(e =>
       this.logger.error('Failed to update watchdog message', e),
     );
     this.logger.info(`PID ${pid} (${pending.name}) excluded from watchdog`);
@@ -706,7 +731,7 @@ export class ProcessMemoryWatchdog {
       if (!alive) {
         clearTimeout(pending.timer);
         this.pendingKills.delete(pid);
-        await this.updateMessage(pending.messageTs,
+        await this.updatePendingMessage(pending.messageTs,
           t('watchdog.alreadyGone', this.locale, { pid: String(pid), name: pending.name }),
         ).catch(() => {});
       }
@@ -883,40 +908,48 @@ export class ProcessMemoryWatchdog {
   private async sendWithOptions(prefix: string, extra: { head: string; analysis: Analysis }, before: any[],
                                 pendingPid?: number): Promise<string> {
     const groupId = `g${Date.now().toString(36)}`;
-    const body = analysisText(extra.head, extra.analysis);
-    const buttons = optionButtons(groupId, extra.analysis);
-    const blocks = [
-      { type: 'section', text: { type: 'mrkdwn', text: prefix.slice(0, 2900) } },
-      ...before,
+    const g: OptionGroup = { created: new Date().toISOString(), head: extra.head, prefix, analysis: extra.analysis,
+      results: {}, before, pendingPid };
+    const ts = await this.sendMessage(`${prefix}\n${analysisText(extra.head, extra.analysis)}`,
+      this.groupBlocks(groupId, g, true));
+    if (extra.analysis.options.length) this.saveGroup(groupId, { ...g, ts });
+    return ts;
+  }
+
+  /** 대안 묶음의 메시지 블록 — 앞 글 · (자동 종료가 아직 기다리면) Kill · Ignore · 분석 · 남은 버튼 */
+  private groupBlocks(gid: string, g: OptionGroup, pending: boolean): any[] {
+    const body = analysisText(g.head, g.analysis, g.results) + (g.dismissed ? '\n\n그대로 두었습니다.' : '');
+    const buttons = g.dismissed ? null : optionButtons(gid, g.analysis, new Set(Object.keys(g.results).map(Number)));
+    return [
+      { type: 'section', text: { type: 'mrkdwn', text: g.prefix.slice(0, 2900) } },
+      ...(pending ? g.before || [] : []),
       { type: 'section', text: { type: 'mrkdwn', text: body.slice(0, 2900) } },
       ...(buttons ? [buttons] : []),
     ];
-    if (extra.analysis.options.length) {
-      this.saveGroup(groupId, { created: new Date().toISOString(), head: extra.head, prefix, analysis: extra.analysis,
-        results: {}, before, pendingPid });
+  }
+
+  /**
+   * 자동 종료 확인 메시지를 결과 글로 고친다. 그 메시지에 대안이 붙어 있으면 앞 글만 바꾸고 분석과 남은
+   * 버튼은 그대로 둔다 — Slack 은 글만 주고 블록을 빼면 블록을 지운다(chat.update 문서). 그래서 전에는
+   * Kill · Ignore 를 누르거나 타이머가 끝나는 순간 분석과 대안이 통째로 사라졌다.
+   */
+  private async updatePendingMessage(messageTs: string, text: string): Promise<void> {
+    const all = this.loadGroups();
+    const gid = Object.keys(all).find(k => all[k].ts === messageTs);
+    if (!gid) {
+      await this.updateMessage(messageTs, text);
+      return;
     }
-    return this.sendMessage(`${prefix}\n${body}`, blocks);
+    const g = { ...all[gid], prefix: text, before: undefined, pendingPid: undefined };
+    this.saveGroup(gid, g);
+    await this.updateMessage(messageTs, `${text}\n${analysisText(g.head, g.analysis, g.results)}`,
+      this.groupBlocks(gid, g, false));
   }
 
   /** 스냅샷 + AI 답 → 사람에게 보일 분석과 실행할 수 있는 대안. AI 가 없거나 실패하면 숫자 한 줄만. */
   private analysisFrom(snap: MemSnapshot, answer: string | null, rows: ProcRow[], roles: Map<number, Role>):
       { head: string; analysis: Analysis; dropped: string[] } {
-    const children = new Map<number, number[]>();
-    for (const r of rows) {
-      if (r.ppid === r.pid) continue;
-      children.set(r.ppid, [...(children.get(r.ppid) || []), r.pid]);
-    }
-    const descendants = (pid: number) => {
-      const out: number[] = [];
-      const stack = [...(children.get(pid) || [])];
-      while (stack.length && out.length < 2000) {
-        const c = stack.pop()!;
-        out.push(c);
-        stack.push(...(children.get(c) || []));
-      }
-      return out;
-    };
-    const v = vetOptions(answer, { snap, roles, botPid: process.pid, descendants });
+    const v = vetOptions(answer, { snap, roles, botPid: process.pid, descendants: descendantsOf(rows) });
     const text = v.text || (answer === null ? '(AI 분석 못 받음 — 숫자만)' : '');
     return { head: snapshotHeadline(snap), analysis: { text, options: v.options }, dropped: v.dropped };
   }
@@ -982,24 +1015,43 @@ export class ProcessMemoryWatchdog {
       await this.updateMessage(messageTs, '이 대안은 만료됐습니다(이틀이 지났거나 상태 파일을 못 읽음). 아무것도 하지 않았습니다.').catch(() => {});
       return;
     }
+    // 자동 종료가 아직 기다리면 Kill · Ignore · Exclude 를 지우지 않는다 — 지우면 타이머를 멈출 버튼이 없다
+    const stillPending = () => g.pendingPid !== undefined && this.pendingKills.has(g.pendingPid);
+    if (g.dismissed) return;
     if (idxRaw === 'x') {
-      const text = `${g.prefix}\n${analysisText(g.head, g.analysis, g.results)}\n\n그대로 두었습니다.`;
-      await this.updateMessage(messageTs, text, [{ type: 'section', text: { type: 'mrkdwn', text: text.slice(0, 2900) } }]).catch(() => {});
-      this.saveGroup(gid, null);
+      const g2 = { ...g, dismissed: true };
+      this.saveGroup(gid, g2);
+      await this.updateMessage(messageTs, `${g.prefix}\n${analysisText(g.head, g.analysis, g.results)}`,
+        this.groupBlocks(gid, g2, stillPending())).catch(() => {});
       return;
     }
     const idx = Number(idxRaw);
     const o = g.analysis.options[idx];
-    if (!o || g.results[idx]) return;
+    const busyKey = `${gid}:${idx}`;
+    // 결과는 5초 뒤에 적히므로 그 사이 다시 누른 것은 여기서 막는다
+    if (!o || g.results[idx] || this.optionBusy.has(busyKey)) return;
+    this.optionBusy.add(busyKey);
+    try {
+      await this.runOption(gid, idx, o, messageTs, stillPending);
+    } finally {
+      this.optionBusy.delete(busyKey);
+    }
+  }
+
+  private async runOption(gid: string, idx: number, o: MemOption, messageTs: string,
+                          stillPending: () => boolean): Promise<void> {
     const before = (await this.getSystemCommitStatus())?.usagePct ?? null;
     let line: string;
     try {
       if (o.action === 'kill' || o.action === 'kill_tree') {
-        const r = this.killIfSameCreated(o.pid!, o.name!, o.ticks!, o.action === 'kill_tree');
-        line = r === 'killed' ? `종료함 (${o.name} PID ${o.pid}${o.action === 'kill_tree' ? ', 자식 포함' : ''})`
-          : r === 'gone' ? '이미 끝나 있었음'
-            : r === 'recycled' ? `PID ${o.pid} 이 이제 다른 프로세스라 끄지 않음`
-              : '종료 실패 — 권한이거나 확인이 안 됨';
+        // 통째 종료는 누르는 지금의 자손을 다시 본다 — 버튼은 이틀 살아 있고 그 사이 상시 작업이 그 밑에 뜰 수 있다
+        const blocked = o.action === 'kill_tree' ? await this.protectedUnder(o.pid!) : '';
+        const r = blocked ? null : this.killIfSameCreated(o.pid!, o.name!, o.ticks!, o.action === 'kill_tree');
+        line = blocked ? `끄지 않음 — ${blocked}`
+          : r === 'killed' ? `종료함 (${o.name} PID ${o.pid}${o.action === 'kill_tree' ? ', 자식 포함' : ''})`
+            : r === 'gone' ? '이미 끝나 있었음'
+              : r === 'recycled' ? `PID ${o.pid} 이 이제 다른 프로세스라 끄지 않음`
+                : '종료 실패 — 권한이거나 확인이 안 됨';
         if (r === 'killed') this.onProcessKilled?.(o.pid!, o.name!);
       } else if (o.action === 'explorer' || o.action === 'watchers') {
         line = await this.runHealthFix(o.action, true);
@@ -1016,19 +1068,24 @@ export class ProcessMemoryWatchdog {
     }
     await new Promise(r => setTimeout(r, 5_000));   // 회수가 커밋에 반영될 시간
     const after = (await this.getSystemCommitStatus())?.usagePct ?? null;
+    // 기다리는 5초 사이에 다른 대안이나 자동 종료가 묶음을 고쳤을 수 있다 — 다시 읽어 그 위에 적는다
+    const g = this.loadGroups()[gid];
+    if (!g) return;
     g.results[idx] = `${line} · 커밋 ${before ?? '?'}% → ${after ?? '?'}%`;
     this.saveGroup(gid, g);
     this.record({ phase: 'option', action: o.action, pid: o.pid ?? null, label: o.label, result: line, before, after });
-    const body = analysisText(g.head, g.analysis, g.results);
-    const done = new Set(Object.keys(g.results).map(Number));
-    const buttons = optionButtons(gid, g.analysis, done);
-    const stillPending = g.pendingPid !== undefined && this.pendingKills.has(g.pendingPid);
-    await this.updateMessage(messageTs, `${g.prefix}\n${body}`, [
-      { type: 'section', text: { type: 'mrkdwn', text: g.prefix.slice(0, 2900) } },
-      ...(stillPending ? g.before || [] : []),
-      { type: 'section', text: { type: 'mrkdwn', text: body.slice(0, 2900) } },
-      ...(buttons ? [buttons] : []),
-    ]).catch(e => this.logger.error('대안 결과로 메시지를 못 고침', e as Error));
+    await this.updateMessage(messageTs, `${g.prefix}\n${analysisText(g.head, g.analysis, g.results)}`,
+      this.groupBlocks(gid, g, stillPending()))
+      .catch(e => this.logger.error('대안 결과로 메시지를 못 고침', e as Error));
+  }
+
+  /** 그 프로세스 밑에 지금 상시 작업(스탠리 · 동기화)이 있으면 그 사유. 프로세스 표를 못 읽으면 끄지 않는다 */
+  private async protectedUnder(pid: number): Promise<string> {
+    const rows = await this.getProcessTable();
+    if (!rows.length) return '프로세스 표를 못 읽어 자식을 확인하지 못함';
+    const roles = classifyRoles(rows, { botPid: process.pid, pipelinePid: this.readPipelinePid() });
+    const hit = descendantsOf(rows)(pid).find(c => c === process.pid || ['host', 'stanley', 'pipeline'].includes(roles.get(c) || ''));
+    return hit === undefined ? '' : `자식 PID ${hit} 이 상시 작업`;
   }
 
   private async sendKillConfirmation(target: Candidate, status: CommitStatus, route: Path,
@@ -1099,7 +1156,7 @@ export class ProcessMemoryWatchdog {
       if (!stillWarranted(route, now, { thresholdPct: this.thresholdPct, processThresholdMB: this.processThresholdMB },
                           interactive)) {
         const shown = route === 'system' ? `커밋 ${now.usagePct ?? '측정 실패'}%` : `${now.targetMB ?? '측정 실패'} MB`;
-        await this.updateMessage(pending.messageTs,
+        await this.updatePendingMessage(pending.messageTs,
           t('watchdog.cancelled', this.locale, { pid: String(target.pid), name: target.name, now: shown }),
         ).catch(() => {});
         this.record({ phase: 'cancel', route, pid: target.pid, name: target.name, now });
@@ -1117,7 +1174,7 @@ export class ProcessMemoryWatchdog {
             ? `PID ${target.pid} 은 이제 다른 프로세스입니다 — ${target.name} 은 이미 끝났습니다. 죽이지 않았습니다.`
             : `PID ${target.pid} (${target.name}) 자동 종료 실패.`;
 
-      await this.updateMessage(pending.messageTs, autoText).catch(e =>
+      await this.updatePendingMessage(pending.messageTs, autoText).catch(e =>
         this.logger.error('Failed to update watchdog auto-kill message', e),
       );
       // 자동 종료 결과를 남긴다 — 전에는 로그에 없어 「죽였나 · 스스로 끝났나」를 가를 수 없었다

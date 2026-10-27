@@ -338,6 +338,59 @@ const SNAP = {
     ev.some((e) => e.phase === 'decide' && e.options?.length === 2) && ev.some((e) => e.phase === 'option' && e.pid === 42));
   wd.stop();
 }
+// ⑪ 자동 종료 확인에 붙은 대안 — Slack 은 글만 주고 블록을 빼면 블록을 지운다(chat.update 문서).
+//   Kill · Ignore 로 메시지를 고쳐도 분석과 남은 버튼이 살아 있고 · 「그대로 둠」은 Kill · Ignore 를 안 지우고 ·
+//   통째 종료는 누르는 지금 자식에 상시 작업이 있으면 안 끄고 · 동시에 두 번 눌러도 한 번만
+{
+  process.env.MEMORY_WATCHDOG_OPTIONS_FILE = path.join(tmp, 'options11.json');
+  const sent = [];
+  const updates = [];
+  const wd = new W.ProcessMemoryWatchdog(90, 180, 600, 7168,
+    async (text, blocks) => { sent.push(blocks); return `ts${sent.length}`; },
+    async (ts, text, blocks) => { updates.push({ ts, text, blocks }); },
+    undefined, { pipelineLockFile: path.join(tmp, 'nolock.json'), analysis: true, snapshotTool: 'x' });
+  wd.getSystemCommitStatus = async () => ({ committedMB: 44000, limitMB: 48914, usagePct: 91.4 });
+  const killed = [];
+  wd.killIfSameCreated = (pid) => { killed.push(pid); return 'killed'; };
+  const extra = { head: '📊 머리', analysis: { text: '세션이 쉼', options: [
+    { action: 'kill_tree', label: '쉬는 세션', reason: 'CPU 0', pid: 42, name: 'claude', ticks: '639286000000000000' },
+    { action: 'kill', label: '크롬', reason: '탭', pid: 40, name: 'chrome', ticks: '639286000000000001' }] } };
+  const killRow = { type: 'actions', elements: [{ action_id: 'watchdog_kill', value: '77' }, { action_id: 'watchdog_ignore', value: '77' }] };
+  const pend = (pid, ts) => wd.pendingKills.set(pid, { pid, name: 'chrome', commitMB: 9000, startTicks: '1', messageTs: ts,
+    timer: setTimeout(() => {}, 60_000) });
+  const ids = (blocks) => (blocks || []).filter((b) => b.type === 'actions').flatMap((b) => b.elements.map((e) => e.action_id));
+  const gidOf = (blocks) => blocks.find((b) => b.elements?.some((e) => e.action_id === 'watchdog_opt_x')).elements[0].value.split(':')[0];
+
+  const tsA = await wd.sendWithOptions('확인 글', extra, [killRow], 77);
+  pend(77, tsA);
+  await wd.handleIgnoreAction(77);
+  const u1 = updates.at(-1);
+  ok(`⑪ Ignore 뒤에도 분석과 대안 버튼이 남는다 (${ids(u1.blocks)})`,
+    u1.text.includes('세션이 쉼') && ids(u1.blocks).includes('watchdog_opt_0') && !ids(u1.blocks).includes('watchdog_ignore'));
+
+  const tsB = await wd.sendWithOptions('확인 글', extra, [killRow], 78);
+  pend(78, tsB);
+  await wd.handleOptionAction(`${gidOf(sent.at(-1))}:x`, tsB);
+  const u2 = updates.at(-1);
+  ok(`⑪ 「그대로 둠」은 자동 종료가 기다리는 동안 Kill · Ignore 를 남긴다 (${ids(u2.blocks)})`,
+    ids(u2.blocks).includes('watchdog_ignore') && !ids(u2.blocks).includes('watchdog_opt_0'));
+  clearTimeout(wd.pendingKills.get(78).timer);
+  wd.pendingKills.delete(78);
+
+  const realSetTimeout = global.setTimeout;
+  global.setTimeout = (fn) => realSetTimeout(fn, 0);
+  await wd.sendWithOptions('경고 글', extra, []);
+  const gC = gidOf(sent.at(-1));
+  wd.getProcessTable = async () => [{ pid: 42, ppid: 1, name: 'claude', cmd: '' }, { pid: process.pid, ppid: 42, name: 'node', cmd: 'dist/index.js' }];
+  // 두 대안을 함께 누르고 같은 버튼은 두 번 — 결과가 5초 뒤에 적히는 사이의 겹침
+  await Promise.all([wd.handleOptionAction(`${gC}:0`, 'tsC'), wd.handleOptionAction(`${gC}:1`, 'tsC'),
+    wd.handleOptionAction(`${gC}:1`, 'tsC')]);
+  global.setTimeout = realSetTimeout;
+  eq('⑪ 통째 종료는 누를 때 자식에 스탠리가 있으면 안 끈다 · 같은 버튼을 동시에 두 번 눌러도 한 번만', killed, [40]);
+  const last = updates.at(-1);
+  ok('⑪ 두 대안의 결과가 다 남는다(나중 것이 앞 것을 안 덮음)', last.text.includes('끄지 않음') && last.text.includes('종료함'));
+  wd.stop();
+}
 
 fs.rmSync(tmp, { recursive: true, force: true });
 if (fails.length) {
