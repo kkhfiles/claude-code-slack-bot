@@ -13,7 +13,7 @@
  * **쓴 금액은 참고 값이다 — 이 값으로 멈추지 않는다**(2026-10-23 사용자 결정 「실제 값과 같다고 보장이 안 되니 멈추면 중단」).
  * 전에는 결과의 `total_cost_usd`(그 세션의 **누적** 비용, 이어 받은 세션은 옛 비용까지)를 차례마다 통째로 더해 27~29배로
  * 부풀었고, 두 키가 「소진(추정)」으로 잠겨 하루 동안 크레딧을 안 썼다(실제 team $19.34 · max $3.67). 지금은 세션마다
- * 앞 차례보다 늘어난 만큼만 더한다(`turnCost`). 멈추는 신호는 서버의 「credit balance is too low」 하나다(`blockCreditKey`).
+ * 앞 차례보다 늘어난 만큼만 더한다(`turnCost`). 멈추는 신호는 서버의 「credit balance is too low」와 지출 한도(「specified API usage limits」)다(`blockCreditKey`).
  */
 import * as fs from 'fs';
 import * as os from 'os';

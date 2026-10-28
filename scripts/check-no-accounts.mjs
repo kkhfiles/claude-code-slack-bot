@@ -241,8 +241,38 @@ try {
       evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env }));
       ok(`연달아 소진: max → team → 구독 세 번이 아니다(${n})`, n === 3);
       ok('연달아 소진: 마지막 구독 세션의 오류는 그대로 나가야 한다', evs.some((e) => e.is_error));
+
+      // 지출 한도(2026-10-29 실제 문구) — 사용량 소진이 아니라 그 키의 소진. 다음 키(team)로 같은 말을 다시 띄운다
+      const SPEND = 'API Error: 400 You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.';
+      const writeTwo = () => fs.writeFileSync(ledger, JSON.stringify({ v: 1, enabled: true, margin: 0.03, keys: {
+        max: { key_file: keyFile, grant_usd: 10, expires: future, spent_usd: 0, daily: {} },
+        team: { key_file: keyFile, grant_usd: 10, expires: future, spent_usd: 0, daily: {} } } }));
+      for (const [label, err] of [['error 칸 있음', 'invalid_request'], ['error 칸 없음', undefined]]) {
+        writeTwo();
+        calls = scripted([
+          { type: 'assistant', ...(err ? { error: err } : {}), message: { content: [{ type: 'text', text: SPEND }] } },
+          { type: 'result', subtype: 'success', is_error: true, total_cost_usd: 0, session_id: 's1', result: SPEND },
+        ]);
+        evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env }));
+        st = JSON.parse(fs.readFileSync(ledger, 'utf-8'));
+        ok(`지출 한도(${label}): 다음 키로 같은 말을 다시 안 띄웠다(${JSON.stringify(calls)})`,
+          calls.length === 2 && calls[1].prompt === '확인' && calls[1].key);
+        ok(`지출 한도(${label}): max 를 안 막았거나 team 까지 막았다`, !!st.keys.max.blocked && !st.keys.team.blocked);
+        ok(`지출 한도(${label}): 오류 글이 밖으로 나갔다(${texts(evs)})`, texts(evs) === '다시 한 답');
+      }
+      // 같은 문구를 Claude 가 대화 중에 인용한 것은 오류가 아니다 — error 칸도 API Error 머리도 없다
+      writeTwo();
+      calls = scripted([
+        { type: 'assistant', message: { content: [{ type: 'text', text: `오늘 받은 오류는 「${SPEND.slice(15)}」입니다` }] } },
+        { type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0, session_id: 's1', result: '답' },
+      ]);
+      evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env }));
+      st = JSON.parse(fs.readFileSync(ledger, 'utf-8'));
+      ok(`지출 한도 문구 인용: 다시 띄웠거나 키를 막았다(${calls.length})`, calls.length === 1 && !st.keys.max.blocked);
     } finally {
       fs.rmSync(ledger, { force: true });
+      // 세션별 누적 비용 파일도 — 남으면 같은 프로세스 번호가 다시 온 회차가 옛 비용을 읽어 「안 적었다」로 넘어진다(2026-10-29)
+      fs.rmSync(ledger.replace(/\.json$/, '.sessions.json'), { force: true });
       if (beforeLedger === undefined) delete process.env.LLM_PLAYBOOK_CREDITS;
       else process.env.LLM_PLAYBOOK_CREDITS = beforeLedger;
     }

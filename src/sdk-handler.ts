@@ -104,21 +104,27 @@ export function interpretSdkMessage(msg: SDKMessage): CliEvent | null {
 
 // --- SdkProcess: mirrors CliProcess interface -----------------------------
 
-/** 크레딧 소진 — 「Your credit balance is too low …」 · 「Credit balance too low · Add funds」(공식 문서 원문). */
-const CREDIT_EXHAUSTED = /credit balance (?:is )?too low/i;
+/**
+ * 크레딧 소진 — 「Your credit balance is too low …」 · 「Credit balance too low · Add funds」(공식 문서 원문)와
+ * 지출 한도 — 「API Error: 400 You have reached your specified API usage limits. You will regain access on …」.
+ * 2026-10-29 지출 한도를 몰라 사용량 소진으로 읽고 다음 키 대신 GPT 로 넘겼고 오류 글이 DM 에 나갔다(파이썬 `claude_api._SPEND` 와 같은 기준).
+ */
+const CREDIT_EXHAUSTED = /credit balance (?:is )?too low|specified API usage limits?\b/i;
+/** SDK 가 대신 만든 API 오류 글의 머리 — `error` 칸이 비어 와도 이 머리면 오류 메시지로 본다. */
+const API_ERROR_HEAD = /^\s*API Error: \d{3}\b/;
 /** 키 거부 — 「Invalid API key」 · 「invalid x-api-key」 · `authentication_error` · 「Failed to authenticate」 · 401. */
 const KEY_REJECTED = /invalid (?:x-)?api[ -]key|authentication_error|failed to authenticate|\b401\b/i;
 
 /**
  * 크레딧 세션이 크레딧 부족 · 키 거부로 못 한 것인가 — SDK 가 대신 만든 오류 메시지(`error` 칸)와 결과.
- * 보통 글에 「401」이 나와도 안 잡히게 어시스턴트 메시지는 `error` 칸이 있을 때만 본다.
+ * 보통 글에 「401」이 나와도 안 잡히게 어시스턴트 메시지는 `error` 칸이 있거나 글이 `API Error: 4xx` 로 시작할 때만 본다.
  */
 function creditFailure(ev: any): boolean {
   if (ev?.type === 'assistant') {
     const err = ev.error;
     if (err === 'billing_error' || err === 'authentication_failed') return true;
-    if (!err) return false;
     const text = (ev.message?.content ?? []).map((b: any) => b?.text ?? '').join(' ');
+    if (!err && !API_ERROR_HEAD.test(text)) return false;
     return CREDIT_EXHAUSTED.test(text) || KEY_REJECTED.test(text);
   }
   if (ev?.type === 'result' && ev.is_error) {
