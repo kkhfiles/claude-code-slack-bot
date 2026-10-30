@@ -520,11 +520,59 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   const letterBlock = handlerSrc.slice(handlerSrc.indexOf('letterHost = new ChatHost'), handlerSrc.indexOf('this.chatHosts.push(letterHost)'));
   ok('소인 카드 창구와 주간 시계는 소인 앱에만 걸리고, 소인 카드 갈래는 커피콩 창구에 없다',
     /lunchNotice\?\.register\(app\)/.test(lunchBlock) && /lunchInitiative\?\.register\(app\)/.test(lunchBlock)
-    && !/lunchInitiative/.test(letterBlock) && /kinds:\s*coffee,/.test(handlerSrc)
+    && !/lunchInitiative/.test(letterBlock) && /kinds:\s*\{ \.\.\.coffee, \.\.\.goalKinds \},/.test(handlerSrc)
     && /offer:\s*lunchNotice\?\.enabled \? lunchNotice\.offer/.test(handlerSrc), { lunch: lunchBlock.slice(0, 120) });
   ok('소인은 실장과 1:1 을 연다 (실장만 · 나머지는 실장에게 넘김)',
     /surfaces:\s*\['dm', 'channel'\]/.test(lunchBlock) && /allowUsers:\s*config\.letter\.managerUserId \?/.test(lunchBlock),
     lunchBlock.slice(0, 200));
+  ok('두 창구 모두 제안 이력을 봇 폴더 proposals.jsonl 에 적고, 두 주간 시계 모두 후속을 그 봇 호스트로 돌린다',
+    (handlerSrc.match(/historyPath: path\.join\((letterData|lunchData), 'proposals\.jsonl'\)/g) || []).length === 4
+    && /follow: \(f\) => letterHost!\.follow\(f\)/.test(handlerSrc) && /lunchHost \? lunchHost\.follow\(f\)/.test(handlerSrc));
+
+  // ── 제안 이력 · 버리기 · 목표 받아들이기 (2026-10-30 실장) ──
+  {
+    const hp = path.join(dir, 'proposals.jsonl');
+    const hk = { ...KINDS, goal: { title: '커피콩이 세운 목표', ask: '목표 제안', header: '', hint: '', rooms: [{ id: 'C_CHAT', label: '커피챗' }],
+      accept: true, submitLabel: '목표로 정하기' } };
+    const nh = make({ kinds: hk, logPath: path.join(dir, 'h.jsonl'), pendingPath: path.join(dir, 'h-pending.json'), historyPath: hp });
+    const appH = fakeApp();
+    nh.register(appH);
+    const ch = fakeClient();
+    const upd = [];
+    ch.chat.update = async (m) => { upd.push(m); return { ok: true }; };
+    await nh.offer(ch, [{ name: 'agenda', text: '이번 주 이야깃거리 하나' }], { user: 'UBOSS', channel: 'D_H' });
+    const b1 = ch.posted[0].blocks.flatMap((b) => b.elements || []).filter((e) => e.type === 'button');
+    ok('카드에 「버리기」 버튼이 붙는다', b1.length === 2 && b1[1].action_id === 'notice_discard', b1);
+    await appH.actions.notice_discard({ ack: async () => {}, client: ch,
+      body: { user: { id: 'UBOSS' }, actions: [{ value: b1[1].value }], channel: { id: 'DM_UBOSS' }, message: { ts: '1700000000.000100' } } });
+    const evs = () => fs.readFileSync(hp, 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+    ok('버리면 대기에서 빠지고 카드 글이 「버린 카드」로 · 이력에 offered → discarded',
+      !nh['pending'].has(b1[1].value) && JSON.stringify(upd[0]).includes('버린 카드')
+      && evs().map((e) => e.ev).join() === 'offered,discarded' && evs()[0].head === '이번 주 이야깃거리 하나', evs());
+    await nh.offer(ch, [{ name: 'goal', text: '목표: 첫 커피챗 두 명\n기한: 2026-11-30\n재는 법: 처음 남긴 사람 수' }],
+      { user: 'UBOSS', channel: 'DM' });
+    const gid = buttonOf(ch.posted[1]).value;
+    ok('목표 카드는 「보고 정하기」 단추', buttonOf(ch.posted[1]).text.text === '보고 정하기');
+    const cg = fakeClient();
+    await appH.views.notice_confirm({
+      ack: async () => {}, client: cg, body: { user: { id: 'UBOSS' }, view: { private_metadata: JSON.stringify({ id: gid, kind: 'goal' }) } },
+      view: { state: { values: { to: { to: { selected_option: { value: 'C_CHAT' } } },
+        body: { body: { value: '목표: 첫 커피챗 세 명\n기한: 2026-11-30\n재는 법: 처음 남긴 사람 수' } } } } },
+    });
+    const acc = evs().find((e) => e.ev === 'accepted');
+    ok('목표를 정하면 방에 안 올리고 이력에 accepted(고친 글 · 방 · 고쳤음)를 적는다',
+      cg.posted.every((m) => String(m.channel).startsWith('DM_')) && acc && acc.id === gid && acc.room === 'C_CHAT'
+      && acc.edited === true && acc.text.includes('세 명'), { posted: cg.posted.map((m) => m.channel), acc });
+    await nh.offer(ch, [{ name: 'agenda', text: '보낼 이야깃거리' }], { user: 'UBOSS', channel: 'D_SEND' });
+    const sid = buttonOf(ch.posted[2]).value;
+    const cs = fakeClient();
+    await appH.views.notice_confirm({
+      ack: async () => {}, client: cs, body: { user: { id: 'UBOSS' }, view: { private_metadata: JSON.stringify({ id: sid, kind: 'agenda' }) } },
+      view: { state: { values: { to: { to: { selected_option: { value: 'C_CHAT' } } }, body: { body: { value: '보낼 이야깃거리' } } } } },
+    });
+    const sent = evs().find((e) => e.ev === 'sent' && e.id === sid);
+    ok('그대로 보내면 이력에 sent(고치지 않음)', sent && sent.edited === false, evs().slice(-2));
+  }
 
   console.log(`\n${fail ? `실패 ${fail}건` : '모두 통과.'}`);
   fs.rmSync(dir, { recursive: true, force: true });

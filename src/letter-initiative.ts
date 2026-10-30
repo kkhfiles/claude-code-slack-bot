@@ -4,7 +4,7 @@ import { spawnSync } from 'child_process';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
 import { pythonCommand } from './python-command';
-import type { TurnAsk, TurnResult } from './chat-host';
+import type { FollowUp, TurnAsk, TurnResult } from './chat-host';
 
 /**
  * 커피콩의 **주간 시계** — 주 첫 업무일 13:00, 현황판(코드가 센 숫자)과 지난주부터 방에서 오간
@@ -55,7 +55,12 @@ export interface InitiativeHost {
   /** `key` 대화에서 실장 턴으로 현황판을 넣는다. `name` 은 실장 표시 이름. `extra` 는 턴 요청에 더할 칸(`wake`). */
   initiate(client: App['client'], key: string, brief: string, name: string,
            extra?: Record<string, unknown>): Promise<TurnResult>;
+  /** 후속 한 턴(그 방 턴 · `ChatHost.follow`). 없으면 후속을 안 돌린다. */
+  follow?(f: FollowUp): Promise<TurnResult>;
 }
+
+/** 하루에 돌리는 후속 상한 — 파이썬도 셋으로 고르지만 한 겹 더. */
+const FOLLOW_MAX = 3;
 
 export interface LetterInitiativeOptions {
   /** `LETTER_INITIATIVE=1`. 기본은 꺼짐 — 만든 것과 켠 것은 다른 일이다. */
@@ -87,6 +92,10 @@ export interface LetterInitiativeOptions {
   /** 확인 카드를 띄우는 곳(`LetterNotice.offer`). 방에 걸 글은 전부 여기로만 간다. **비면 이 시계도 꺼진다** —
    *  카드 길이 없는데 돌면 파이썬이 「카드 드리겠다」고 답해 놓고 카드는 안 온다. */
   offer?: (client: App['client'], asks: TurnAsk[], from: { user: string; channel: string }) => Promise<void>;
+  /** 제안 이력(`proposals.jsonl` · 봇 폴더) — 후속으로 올린 글을 적는다. 카드 쪽은 `LetterNotice` 가 같은 파일에 적는다. */
+  historyPath?: string;
+  /** 방 이름(후속 알림 · 이력). 없으면 `rooms` 의 이름. */
+  roomLabel?: (id: string) => string;
   logger?: Logger;
 }
 
@@ -217,6 +226,8 @@ export class LetterInitiative {
       this.logger.warn(`${wake ? '기한 확인' : '주간'} 턴 실패: ${result.error}`);
       return 'error';
     }
+    // **후속은 알아서**(실장 2026-10-30) — 파이썬이 고른 답 안 온 물음을 그 방 턴으로 다시 묻고 카드 없이 올린다. 깰 일이 없어도.
+    await this.runFollows(client, result.follow_ups ?? []);
     // 기한이 된 맡은 일이 없었다 — 파이썬이 모델을 안 불렀다(멈춘 일 알림이 있으면 그 한 줄은 아래에서 간다).
     if (wake && result.wake_due === 0 && !(result.reply || '').trim()) return 'nothing-due';
     // 실장에게 하는 말 — 그 자체는 카드가 아니다. 방에 걸 글은 아래 `ask` 로만 간다.
@@ -354,6 +365,53 @@ export class LetterInitiative {
     } catch {
       this.logger.warn('현황판이 JSON 이 아닙니다');
       return null;
+    }
+  }
+
+  /**
+   * 후속 — 하나씩 **그 방 턴**으로 돌려(`host.follow` · 그 방 이야기만 아는 턴) 말하기로 했으면 카드 없이 그 방에 올리고, 제안 이력에
+   * 적고, 실장에게 한 줄 알린다(사후 보고). 실패는 그 하나만 건너뛴다 — 후속이 주간 판단을 막으면 안 된다.
+   */
+  private async runFollows(client: App['client'], follows: FollowUp[]): Promise<void> {
+    if (!this.opts.host.follow) return;
+    const label = (id: string) => this.opts.roomLabel?.(id) || this.rooms().find((r) => r.id === id)?.label || id;
+    let n = 0;
+    for (const f of follows.filter((x) => x && typeof x.room === 'string' && x.q).slice(0, FOLLOW_MAX)) {
+      const where = label(f.room);
+      let r: TurnResult;
+      try {
+        r = await this.opts.host.follow(f);
+      } catch (error) {
+        this.logger.warn(`후속 턴이 깨졌습니다 (${where})`, error);
+        continue;
+      }
+      const text = (r.reply || '').trim();
+      if (r.error || r.speak === false || !text) {
+        this.logger.info(`후속 — 〔${where}〕 말하지 않음${r.error ? ` (${r.error})` : ''}`);
+        continue;
+      }
+      try {
+        await client.chat.postMessage({ channel: f.room, text });
+      } catch (error) {
+        this.logger.warn(`후속 글을 못 올렸습니다 (${where})`, error);
+        continue;
+      }
+      n += 1;
+      this.history({ ev: 'followed', id: `follow-${Date.now()}-${n}`, at: new Date().toISOString(), kind: 'follow',
+        room_label: where, head: text.slice(0, 80) });
+      await this.tell(client, `${this.opts.prefix ?? ':coffee: '}후속으로 〔${where}〕에 올렸습니다 — 「${f.title}」에서 답이 안 온 `
+        + `「${f.q}」를 다시 물었습니다.\n> ${text.slice(0, 400).replace(/\n/g, '\n> ')}`);
+      this.logger.info(`후속 — 〔${where}〕에 올림 (${text.length}자)`);
+    }
+  }
+
+  private history(ev: Record<string, unknown>): void {
+    if (!this.opts.historyPath) return;
+    try {
+      fs.mkdirSync(path.dirname(this.opts.historyPath), { recursive: true });
+      fs.appendFileSync(this.opts.historyPath, `${JSON.stringify(ev)}\n`, 'utf-8');
+    } catch (error) {
+      this.logger.warn('제안 이력을 못 적었습니다', error);
     }
   }
 

@@ -169,6 +169,43 @@ ok('카드 길(offer)이 없으면 꺼진다 — 「카드 드리겠다」고 �
     (await it.tick(client2, new Date(2026, 8, 23, 13, 0))) === 'quiet' && client2.dm.some((m) => /멈춘 맡은 일/.test(m.text || '')));
 }
 {
+  // **후속은 알아서**(2026-10-30 실장) — 깰 일이 없는 날에도 파이썬이 고른 후속을 그 방 턴으로 돌려 카드 없이 올리고, 이력에 적고,
+  // 실장에게 알린다. 말하지 않기로 한 것 · 실패한 것은 안 올린다.
+  const host = fakeHost();
+  const followed = [];
+  host.follow = async (f) => {
+    followed.push(f);
+    if (f.room === 'C_QUIET') return { reply: '', speak: false, error: null, follow: true };
+    if (f.room === 'C_BAD') return { reply: '', error: 'turn.py 응답 없음' };
+    return { reply: '실데이로 가고 싶은 곳 한 군데씩 더 들려주시겠사옵니까?', speak: true, error: null, follow: true };
+  };
+  const fu = [{ room: 'C_PLAY', title: '실데이', q: '가고 싶은 곳', to: '실원' },
+              { room: 'C_QUIET', title: '실데이', q: '출발 시각' }, { room: 'C_BAD', title: 'x', q: 'y' },
+              { room: 'C_4', title: 'x', q: 'y' }];
+  host.setWake({ reply: '', speak: false, error: null, initiate: true, wake_due: 0, follow_ups: fu });
+  const hp = path.join(dir, 'follow-proposals.jsonl');
+  const { it, offered } = make({ historyPath: hp, roomLabel: (id) => (id === 'C_PLAY' ? '노는거' : id) }, host);
+  await it.tick(fakeClient(), MON);
+  const client = fakeClient();
+  const out = await it.tick(client, new Date(2026, 8, 22, 13, 0));
+  const room = client.dm.filter((m) => m.channel === 'C_PLAY');
+  const evs = fs.readFileSync(hp, 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+  ok('후속 — 깰 일이 없는 날에도 돌고, 말하기로 한 것만 카드 없이 그 방에 올라가며, 하루 셋까지',
+    out === 'nothing-due' && followed.length === 3 && room.length === 1 && /가고 싶은 곳/.test(room[0].text)
+    && !client.dm.some((m) => m.channel === 'C_QUIET' || m.channel === 'C_BAD') && offered.length === 1,
+    { out, followed: followed.length, posted: client.dm.map((m) => m.channel) });
+  ok('후속 — 올린 뒤 실장에게 사후 알림(어느 방 · 무슨 물음) · 제안 이력에 followed',
+    client.dm.some((m) => m.channel === 'DM_U_BOSS' && /후속으로 〔노는거〕에 올렸습니다/.test(m.text) && /가고 싶은 곳/.test(m.text))
+    && evs.length === 1 && evs[0].ev === 'followed' && evs[0].room_label === '노는거', evs);
+  const host2 = fakeHost();
+  host2.setWake({ reply: '', speak: false, error: null, initiate: true, wake_due: 0, follow_ups: fu });
+  const { it: it2 } = make({}, host2);
+  await it2.tick(fakeClient(), MON);
+  const c2 = fakeClient();
+  ok('후속 길(host.follow)이 없으면 아무것도 안 올린다',
+    (await it2.tick(c2, new Date(2026, 8, 22, 13, 0))) === 'nothing-due' && c2.dm.length === 0);
+}
+{
   // 기한 확인 날 현황판 실패 — 표시를 되돌려 다음 분에 다시
   const { it, host } = make();
   await it.tick(fakeClient(), MON);

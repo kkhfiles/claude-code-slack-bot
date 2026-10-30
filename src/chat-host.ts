@@ -300,6 +300,22 @@ export interface TurnResult {
   initiate?: boolean;
   /** 기한 확인 턴(`wake`)에서 기한이 된 맡은 일이 없어 모델을 안 불렀다는 표시(0). */
   wake_due?: number;
+  /**
+   * 주간·기한 턴이 고른 **후속**(`turn.py` 의 `_followups_select` — 답이 안 온 물음 다시 묻기). 주간 시계가 하나씩 그 방 턴으로
+   * 돌리고(`ChatHost.follow`) 카드 없이 올린다(2026-10-30 실장 「후속은 알아서」).
+   */
+  follow_ups?: FollowUp[];
+  /** 후속 턴이었다는 표시. */
+  follow?: boolean;
+}
+
+export interface FollowUp {
+  room: string;
+  title: string;
+  q: string;
+  to?: string;
+  at?: string;
+  n?: number;
 }
 
 export class ChatHost {
@@ -475,6 +491,15 @@ export class ChatHost {
     // 프로세스는 한 번에 하나씩이라 그동안 사람 말이 뒤에 줄 서고, 줄 선 말은 제 시한(300초)에 걸려 버려진다.
     return this.runTurnOnce(this.turnBody(key, name, brief, false, true, { ...extra, initiate: true }),
                             TURN_TIMEOUT_WEEKLY_MS);
+  }
+
+  /**
+   * 후속 한 턴 — **그 방 턴으로** 돈다(`turn.py` 의 `_handle_follow` · 실장 맥락 없이 그 방 이야기만). 올리는 것은 부르는 쪽(주간 시계).
+   * 맡은 방이 아니면 돌지 않는다.
+   */
+  async follow(f: FollowUp): Promise<TurnResult> {
+    if (!(this.opts.channels ?? []).includes(f.room)) return { reply: '', error: '맡은 방이 아님' };
+    return this.runTurnOnce(this.turnBody(f.room, '', '', true, false, { follow: f }), TURN_TIMEOUT_WEEKLY_MS);
   }
 
   async start(): Promise<void> {

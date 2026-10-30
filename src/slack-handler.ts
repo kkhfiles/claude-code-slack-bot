@@ -632,12 +632,23 @@ export class SlackHandler {
           guard: 'names', speaker: '소인', poster: lunchClient,
         },
       } : {};
+      // 커피콩이 스스로 세운 목표(`goal` — 주간 판단 · 2026-10-30 실장 「스스로 목표를 세워서 나한테 제안하고 설정하도록」) —
+      // 방에 안 올리고 받아들이기만 한다(`accept`). 정하면 파이썬이 다음 턴에 커피챗 방 맡은 일로 옮긴다.
+      const goalKinds: Record<string, NoticeKind> = config.letter.chatChannel ? {
+        goal: {
+          title: '커피콩이 세운 목표', ask: '커피콩이 스스로 세운 목표를 제안합니다.', header: '',
+          hint: '고쳐서 정하면 커피콩의 맡은 일이 됩니다. 방에는 안 나갑니다.',
+          rooms: [{ id: config.letter.chatChannel, label: '커피챗' }],
+          accept: true, submitLabel: '목표로 정하기',
+        },
+      } : {};
       const letterNotice = new LetterNotice({
         managerUserId: config.letter.managerUserId,
         members: config.letter.members,
-        kinds: coffee,
+        kinds: { ...coffee, ...goalKinds },
         logPath: path.join(letterData, 'notice.jsonl'),
         pendingPath: path.join(letterData, 'notice-pending.json'),
+        historyPath: path.join(letterData, 'proposals.jsonl'),
       });
       // 소인의 카드 창구 — **소인 앱에 건다**(소인 대화 호스트의 `attach`). 카드는 버튼 핸들러를 건 앱으로 뜨므로(`home`)
       // 소인 DM 에 뜨고, 버튼도 소인 앱 소켓으로 온다. 기록은 소인 폴더에.
@@ -648,6 +659,7 @@ export class SlackHandler {
         kinds: lunchKinds,
         logPath: path.join(lunchData, 'notice.jsonl'),
         pendingPath: path.join(lunchData, 'notice-pending.json'),
+        historyPath: path.join(lunchData, 'proposals.jsonl'),
       }) : null;
       lunchAsk = lunchNotice?.enabled ? lunchNotice.offer : undefined;
       // 커피콩의 주간 시계 — 주 첫 업무일 13:00 실장 DM 에 「이번 주 이렇게 할까요」. 말은 대화 봇(아래
@@ -665,8 +677,13 @@ export class SlackHandler {
         statePath: path.join(letterData, 'initiative-state.json'),
         controlPath: path.join(letterData, 'control.json'),
         // `extra`(기한 확인 `wake`)까지 넘긴다 — 빠뜨리면 기한 확인 날마다 주간 판단이 통째로 돈다(2026-10-23 실제로 그랬다)
-        host: { initiate: (client, key, brief, name, extra) => letterHost!.initiate(client, key, brief, name, extra) },
+        host: {
+          initiate: (client, key, brief, name, extra) => letterHost!.initiate(client, key, brief, name, extra),
+          // 후속(답 안 온 물음 다시 묻기)은 그 방 턴으로 — 카드 없이 올린다(실장 2026-10-30 「후속은 알아서」)
+          follow: (f) => letterHost!.follow(f),
+        },
         offer: letterNotice.enabled ? letterNotice.offer : undefined,
+        historyPath: path.join(letterData, 'proposals.jsonl'),
       });
       // 소인의 주간 시계 — 같은 장치를 **소인 앱에** 얹는다(실장 DM 과 카드가 소인 DM 으로 간다). 읽을 방은 시험 방 뺀
       // 소인의 방 · 방 이력은 소인 토큰으로 · 현황판은 `lunch_pulse.py` · 판단 턴은 소인 대화 호스트가 단발로 돈다.
@@ -689,8 +706,11 @@ export class SlackHandler {
           initiate: (client, key, brief, name, extra) => (lunchHost
             ? lunchHost.initiate(client, key, brief, name, extra)
             : Promise.resolve({ reply: '', error: '소인 대화 호스트가 없습니다' })),
+          follow: (f) => (lunchHost ? lunchHost.follow(f) : Promise.resolve({ reply: '', error: '소인 대화 호스트가 없습니다' })),
         },
         offer: lunchNotice?.enabled ? lunchNotice.offer : undefined,
+        historyPath: path.join(lunchData, 'proposals.jsonl'),
+        roomLabel: (id) => roomLabel('lunch', id),
         logger: new Logger('Lunch:initiative'),
       });
       // 1on1 신청 창구는 대화 호스트보다 먼저 만든다 — 명단 밖 DM 을 실장에게 넘길 때

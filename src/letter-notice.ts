@@ -70,6 +70,13 @@ export interface NoticeKind {
   poster?: { chat: Pick<App['client']['chat'], 'postMessage' | 'getPermalink'> };
   /** 카드 머리에 보일 「누가 어느 방에 말을 꺼내려는지」의 봇 이름. 없으면 `ask` 한 줄. */
   speaker?: string;
+  /**
+   * **방에 올리지 않고 받아들이기만** 하는 갈래(커피콩이 스스로 세운 목표 · 2026-10-30 실장). 창의 「보내기」 대신 `submitLabel` 로
+   * 제출하면 제안 이력에 `accepted`(실장이 고친 글 · 고른 방)를 적고, 파이썬이 다음 턴에 그 방 맡은 일로 옮긴다.
+   */
+  accept?: boolean;
+  /** 창 제출 단추 글(기본 「보내기」). */
+  submitLabel?: string;
 }
 
 export interface LetterNoticeOptions {
@@ -83,7 +90,14 @@ export interface LetterNoticeOptions {
   logPath: string;
   /** 아직 안 보낸 카드. 재시작해도 카드의 버튼이 살아 있게 파일에 둔다. */
   pendingPath: string;
+  /**
+   * 제안 이력(봇 폴더 `proposals.jsonl`) — 카드마다 낸 것 · 보냄(고쳤나) · 버림 · 새 판으로 바뀜 · 목표로 정함을 적는다. 파이썬이
+   * 읽어 실장 1:1 과 주간 턴에 「제안과 그 뒤」로 싣는다(2026-10-30 실장 「반응하지 않았거나 폐기한 이력까지 기억」). 없으면 안 적는다.
+   */
+  historyPath?: string;
 }
+
+const ACTION_DISCARD = 'notice_discard';
 
 interface Pending {
   id: string;
@@ -176,6 +190,30 @@ export class LetterNotice {
       }
     });
 
+    // 「버리기」 — 카드를 닫고 제안 이력에 「실장이 버림」으로 남긴다(봇이 같은 제안을 되풀이하지 않게).
+    app.action(ACTION_DISCARD, async ({ ack, body, client }) => {
+      await ack();
+      if (body.user.id !== this.opts.managerUserId) return;
+      const id = String((body as any).actions?.[0]?.value ?? '');
+      const found = this.pending.get(id);
+      this.pending.delete(id);
+      this.save();
+      if (found) this.logProposal({ ev: 'discarded', id, at: new Date().toISOString() });
+      const where = (body as any).channel?.id ? { channel: (body as any).channel.id, ts: (body as any).message?.ts }
+        : found?.msg;
+      if (where?.channel && where.ts) {
+        try {
+          await client.chat.update({
+            channel: where.channel, ts: where.ts,
+            text: '버린 카드입니다 — 아무것도 보내지 않았습니다.',
+            blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: '~버린 카드~ — *아무것도 보내지 않았습니다.* 봇이 이 결과를 기억합니다.' }] }],
+          });
+        } catch (error) {
+          this.logger.warn('버린 카드 글을 못 고쳤습니다', error);
+        }
+      }
+    });
+
     // 창 제출 = 보내기. **화면의 칸에 있던 글을 그대로 보낸다** — 실장이 방금 고쳤을 수
     // 있으므로 카드의 글을 다시 꺼내 쓰지 않는다.
     app.view(CONFIRM, async ({ ack, body, view, client }) => {
@@ -237,7 +275,17 @@ export class LetterNotice {
           return;
         }
       }
-      await this.send(client, body.user.id, meta.kind || '', kind, room, text);
+      const edited = text !== found.text;
+      if (kind.accept) {
+        // 받아들이는 갈래(목표) — 방에 안 올린다. 이력에 적으면 파이썬이 다음 턴에 그 방 맡은 일로 옮긴다.
+        this.logProposal({ ev: 'accepted', id: found.id, at: new Date().toISOString(), edited, room: room.id, text });
+        this.logger.info(`${kind.title} 받아들임 → ${room.label} (${text.length}자)`);
+        await this.tell(client, body.user.id, `정했습니다 · ${room.label} — 다음 턴부터 이 목표로 움직입니다.\n> ${text.slice(0, 200).replace(/\n/g, '\n> ')}`);
+        return;
+      }
+      if (await this.send(client, body.user.id, meta.kind || '', kind, room, text)) {
+        this.logProposal({ ev: 'sent', id: found.id, at: new Date().toISOString(), edited, to_label: room.label });
+      }
     });
 
     const rooms = this.kinds().map((n) => `${n}→${this.opts.kinds[n].rooms.map((r) => r.label).join('·')}`);
@@ -296,6 +344,8 @@ export class LetterNotice {
       };
       this.pending.set(item.id, item);
       this.save();
+      this.logProposal({ ev: 'offered', id: item.id, at: item.at, kind: ask.name,
+        room_label: (item.room ? kind.rooms.find((r) => r.id === item.room)?.label : '') || '', head: text.slice(0, 80) });
       const n = (seen.get(ask.name) ?? 0) + 1;
       seen.set(ask.name, n);
       await this.card(client, item, kind, (total.get(ask.name) ?? 1) > 1 ? { n, of: total.get(ask.name)! } : undefined);
@@ -332,15 +382,21 @@ export class LetterNotice {
             type: 'actions',
             elements: [{
               type: 'button', action_id: ACTION_OPEN, style: 'primary', value: item.id,
-              text: { type: 'plain_text', text: '확인 창 열기' },
+              text: { type: 'plain_text', text: kind.accept ? '보고 정하기' : '확인 창 열기' },
+            }, {
+              type: 'button', action_id: ACTION_DISCARD, value: item.id,
+              text: { type: 'plain_text', text: '버리기' },
             }],
           },
           {
             type: 'context',
             elements: [{
               type: 'mrkdwn',
-              text: `창에서 방(${rooms})을 고르고 글을 고칠 수 있습니다. 「보내기」를 눌러야 나갑니다. `
-                + '안 올리려면 그냥 두세요 (하루 뒤 만료).',
+              text: kind.accept
+                ? `창에서 고쳐 「${kind.submitLabel ?? '보내기'}」를 누르면 정해집니다(방에는 안 나갑니다). `
+                  + '「버리기」나 그냥 두기(하루 뒤 만료) — 어느 쪽이든 봇이 결과를 기억하고 고쳐 다시 가져옵니다.'
+                : `창에서 방(${rooms})을 고르고 글을 고칠 수 있습니다. 「보내기」를 눌러야 나갑니다. `
+                  + '안 올리려면 「버리기」나 그냥 두세요(하루 뒤 만료) — 봇이 결과를 기억합니다.',
             }],
           },
         ],
@@ -363,6 +419,7 @@ export class LetterNotice {
     if (!old.length) return;
     for (const p of old) this.pending.delete(p.id);
     this.save();
+    for (const p of old) this.logProposal({ ev: 'retired', id: p.id, at: new Date().toISOString() });
     this.logger.info(`새 판이 나와 앞 카드 ${old.length}장을 닫습니다 (${kindName})`);
     for (const p of old) {
       if (!p.msg) continue;
@@ -391,7 +448,7 @@ export class LetterNotice {
       // 카드 ID 와 갈래만 들고 간다. 글은 화면의 칸이 정본이다 — 두 군데 두면 어긋난다.
       private_metadata: JSON.stringify({ id: item.id, kind: item.kind }),
       title: { type: 'plain_text', text: kind.title },
-      submit: { type: 'plain_text', text: '보내기' },
+      submit: { type: 'plain_text', text: kind.submitLabel ?? '보내기' },
       close: { type: 'plain_text', text: '취소' },
       blocks: [
         {
@@ -598,6 +655,17 @@ export class LetterNotice {
       }
     } catch {
       // 아직 없다 — 처음이다.
+    }
+  }
+
+  /** 제안 이력 한 줄(`historyPath`). 못 적어도 카드 일은 그대로 간다. */
+  private logProposal(ev: Record<string, unknown>): void {
+    if (!this.opts.historyPath) return;
+    try {
+      fs.mkdirSync(path.dirname(this.opts.historyPath), { recursive: true });
+      fs.appendFileSync(this.opts.historyPath, `${JSON.stringify(ev)}\n`, 'utf-8');
+    } catch (error) {
+      this.logger.warn('제안 이력을 못 적었습니다', error);
     }
   }
 
