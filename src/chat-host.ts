@@ -37,6 +37,9 @@ const TURN_SPANS_KEPT = 5;
 /** 다른 방 최근 말(`roomsRecent`) — 며칠 안 · 방마다 몇 줄 · 한 줄 몇 자 · 방 하나 읽기를 기다리는 한계. */
 const ROOMS_RECENT_DAYS = 3;
 const ROOMS_RECENT_LINES = 20;
+/** 실장 1:1 은 더 길게 — 「모든 채널과 DM 이야기를 기억 · 나랑 이야기할 때에만」(2026-10-30 실장). 시험 방은 위 값 그대로. */
+const ROOMS_RECENT_DM_DAYS = 7;
+const ROOMS_RECENT_DM_LINES = 40;
 const ROOMS_RECENT_LINE_CHARS = 200;
 const ROOMS_RECENT_TIMEOUT_MS = 4000;
 /** 자기 글 답글(`ownThreads`) — 답글 달린 봇 글 몇 개 · 글마다 답글 몇 줄. 기간·시한·한 줄 길이는 위와 같다. */
@@ -1713,11 +1716,13 @@ export class ChatHost {
     if (!inDm && !rooms[key]?.rules) return {};
     const sources = (this.opts.channels ?? []).filter((c) => c !== key && (inDm || rooms[c]?.public === true));
     if (!sources.length) return {};
-    const oldest = ((Date.now() - ROOMS_RECENT_DAYS * 86400 * 1000) / 1000).toFixed(6);
+    const days = inDm ? ROOMS_RECENT_DM_DAYS : ROOMS_RECENT_DAYS;
+    const perRoom = inDm ? ROOMS_RECENT_DM_LINES : ROOMS_RECENT_LINES;
+    const oldest = ((Date.now() - days * 86400 * 1000) / 1000).toFixed(6);
     const timeout = () => new Promise<null>((r) => { setTimeout(() => r(null), ROOMS_RECENT_TIMEOUT_MS).unref?.(); });
     const read = async (room: string) => {
       try {
-        const res = await Promise.race([client.conversations.history({ channel: room, oldest, limit: 60 }), timeout()]);
+        const res = await Promise.race([client.conversations.history({ channel: room, oldest, limit: 100 }), timeout()]);
         return (res?.messages ?? []) as Record<string, unknown>[];
       } catch {
         return null;
@@ -1731,7 +1736,7 @@ export class ChatHost {
       if (!msgs) continue;
       const picked = msgs
         .filter((m) => (!m.subtype || m.subtype === 'thread_broadcast') && ((m.text as string) ?? '').trim())
-        .slice(0, ROOMS_RECENT_LINES)
+        .slice(0, perRoom)
         .reverse();
       const lines: Array<Record<string, unknown>> = [];
       for (const m of picked) {
