@@ -589,14 +589,16 @@ export class SlackHandler {
     // 봇끼리 말 섞기는 **두 봇에 같이 건다** — 한쪽만 들으면 한쪽이 혼잣말을 한다.
     const botTalk = config.chat.botTalk.enabled ? config.chat.botTalk : null;
     // **봇의 주간 판단**(실장 2026-09-24 「봇 모두 주체적 판단은 주 1회 후 나에게 DM 으로 제안」) — 커피콩·소인 둘 다
-    // 주 첫 업무일 오후에 스스로 판단해 실장 DM 에 제안하고, 방에 걸 글은 확인 카드로만 간다. 카드 창구는 실장 DM 이
-    // 있는 커피콩 앱 하나다 — 소인의 제안도 거기 뜨고, 「보내기」를 누르면 **소인 이름으로** 그 방에 오른다(`poster`).
+    // 주 첫 업무일 오후에 스스로 판단해 실장 DM 에 제안하고, 방에 걸 글은 확인 카드로만 간다. **봇마다 제 앱의 실장 DM 으로**
+    // — 소인의 제안·카드는 소인 DM 에 뜨고, 실장이 거기서 답하면 소인이 받는다(2026-10-30 실장 「소인도 나랑 DM 대화할 수 있게」).
+    // 전에는 소인 몫도 커피콩 DM 에 떠서 실장이 그 글에 단 답(「그렇게 하시죠」)을 커피콩이 받아 엉뚱한 방 카드를 만들었다.
     // 방 이름은 봇 설정의 `rooms` 에서 읽는다. 소인 대화 호스트는 아래에서 만들어지므로 늦게 묶는다.
     let lunchHost: ChatHost | null = null;
-    // 소인이 실장 턴에서 「다른 방에 올릴 글」을 실으면 같은 카드 창구로 받는다(2026-10-02 실장 「사람 비서처럼 다른 채널에서
-    // 활동」). 카드 창구가 커피콩 앱에 있어 아래 커피콩 블록에서 정해지고, 더 아래 소인 대화 호스트가 받는다 — 전에는 소인
-    // 호스트에 이 길이 없어 주간 판단 밖에서 실은 글이 말없이 버려졌다.
+    // 소인이 실장 턴에서 「다른 방에 올릴 글」을 실으면 소인 앱의 카드 창구(`lunchNotice`)로 받는다(2026-10-02 실장 「사람 비서처럼
+    // 다른 채널에서 활동」). 카드 창구와 소인 주간 시계는 아래 커피콩 블록에서 만들고 소인 대화 호스트의 앱에 건다(`attach`).
     let lunchAsk: LetterNotice['offer'] | undefined;
+    let lunchNotice: LetterNotice | null = null;
+    let lunchInitiative: LetterInitiative | null = null;
     const roomLabel = (bot: string, id: string): string => {
       try {
         const cfg = JSON.parse(fs.readFileSync(
@@ -633,11 +635,21 @@ export class SlackHandler {
       const letterNotice = new LetterNotice({
         managerUserId: config.letter.managerUserId,
         members: config.letter.members,
-        kinds: { ...coffee, ...lunchKinds },
+        kinds: coffee,
         logPath: path.join(letterData, 'notice.jsonl'),
         pendingPath: path.join(letterData, 'notice-pending.json'),
       });
-      lunchAsk = letterNotice.enabled && lunchClient ? letterNotice.offer : undefined;
+      // 소인의 카드 창구 — **소인 앱에 건다**(소인 대화 호스트의 `attach`). 카드는 버튼 핸들러를 건 앱으로 뜨므로(`home`)
+      // 소인 DM 에 뜨고, 버튼도 소인 앱 소켓으로 온다. 기록은 소인 폴더에.
+      const lunchData = path.join(path.dirname(turnScript), 'bots', 'lunch', 'data');
+      lunchNotice = lunchClient ? new LetterNotice({
+        managerUserId: config.letter.managerUserId,
+        members: config.letter.members,
+        kinds: lunchKinds,
+        logPath: path.join(lunchData, 'notice.jsonl'),
+        pendingPath: path.join(lunchData, 'notice-pending.json'),
+      }) : null;
+      lunchAsk = lunchNotice?.enabled ? lunchNotice.offer : undefined;
       // 커피콩의 주간 시계 — 주 첫 업무일 13:00 실장 DM 에 「이번 주 이렇게 할까요」. 말은 대화 봇(아래
       // ChatHost)이 만들고, 방에 걸 글은 위 확인 카드(`letterNotice.offer`)로만 간다. 호스트는 아래에서
       // 만들어지므로 늦게 묶는다.
@@ -656,17 +668,17 @@ export class SlackHandler {
         host: { initiate: (client, key, brief, name, extra) => letterHost!.initiate(client, key, brief, name, extra) },
         offer: letterNotice.enabled ? letterNotice.offer : undefined,
       });
-      // 소인의 주간 시계 — 같은 장치를 커피콩 앱에 얹는다(실장 DM 과 카드가 이 앱으로 간다). 읽을 방은 시험 방 뺀
+      // 소인의 주간 시계 — 같은 장치를 **소인 앱에** 얹는다(실장 DM 과 카드가 소인 DM 으로 간다). 읽을 방은 시험 방 뺀
       // 소인의 방 · 방 이력은 소인 토큰으로 · 현황판은 `lunch_pulse.py` · 판단 턴은 소인 대화 호스트가 단발로 돈다.
-      const lunchData = path.join(path.dirname(turnScript), 'bots', 'lunch', 'data');
-      const lunchInitiative = new LetterInitiative({
+      lunchInitiative = new LetterInitiative({
         enabled: config.lunchBot.initiative.enabled && Boolean(lunchClient),
         at: config.lunchBot.initiative.at,
         rooms: rooms(config.lunchBot.chatChannel).filter((id) => id !== testRoom)
           .map((id) => ({ id, label: roomLabel('lunch', id) })),
         reader: lunchClient ?? undefined,
         pulseArgs: [],
-        prefix: ':cow: *소인의 이번 주 제안*\n',
+        // 소인 DM 에 뜨므로 「소인의」는 뺀다 — 기한 확인 날에도 같은 머리라 「이번 주 제안」도 안 붙인다.
+        prefix: ':cow: ',
         managerUserId: config.letter.managerUserId,
         managerName: config.letter.managerName,
         python: config.chat.python,
@@ -678,7 +690,7 @@ export class SlackHandler {
             ? lunchHost.initiate(client, key, brief, name, extra)
             : Promise.resolve({ reply: '', error: '소인 대화 호스트가 없습니다' })),
         },
-        offer: letterNotice.enabled ? letterNotice.offer : undefined,
+        offer: lunchNotice?.enabled ? lunchNotice.offer : undefined,
         logger: new Logger('Lunch:initiative'),
       });
       // 1on1 신청 창구는 대화 호스트보다 먼저 만든다 — 명단 밖 DM 을 실장에게 넘길 때
@@ -729,7 +741,6 @@ export class SlackHandler {
         attach: (app) => {
           letterNotice.register(app);
           initiative.register(app);
-          lunchInitiative.register(app);
           new LetterRelay({
             managerUserId: config.letter.managerUserId,
             members: config.letter.members,
@@ -782,7 +793,10 @@ export class SlackHandler {
           appToken: config.lunchBot.appToken,
           python: config.chat.python,
           script: turnScript,
-          surfaces: ['channel'],
+          // **실장과 1:1 도 연다**(2026-10-30 실장). 실장만 — 다른 사람 DM 은 커피콩처럼 실장에게 넘긴다(`bypassToManager`).
+          // 슬랙 앱에 `im:history` 권한과 `message.im` 구독, 앱 홈 메시지 탭이 있어야 말이 들어온다.
+          surfaces: ['dm', 'channel'],
+          allowUsers: config.letter.managerUserId ? [config.letter.managerUserId] : [],
           // 식단 알림 방(`일용할-양식`)도 **부르면 답하는 방**으로 연다. `channels` 에
           // 없으면 부름조차 안 들리고, `quietRooms` 에만 있으면 방 자체가 안 열린다.
           channels: rooms(config.lunchBot.chatChannel)
@@ -793,16 +807,16 @@ export class SlackHandler {
           managerUserId: config.letter.managerUserId,
           botTalk,
           buttIn: config.chat.buttIn.enabled ? config.chat.buttIn : null,
-          // 실장 턴에서 실은 「방에 올릴 글」 → 실장 DM 확인 카드(커피콩 앱 창구 · 「보내기」를 눌러야 소인 이름으로 나감).
+          // 실장 턴에서 실은 「방에 올릴 글」 → 소인 DM 확인 카드(소인 앱 창구 · 「보내기」를 눌러야 소인 이름으로 나감).
           onAsk: lunchAsk,
-          // **둘 중 하나라도 켜져 있으면 붙인다.** 점심 버튼 존재만 보고 정하면,
-          // 버튼을 끈 날 좌석 기능이 오류도 로그도 없이 등록되지 않는다.
-          attach: (buttons || premium)
-            ? (app) => {
-                buttons?.register(app);
-                premium?.register(app);
-              }
-            : undefined,
+          // 소인의 카드 창구와 주간 시계도 이 앱에 — 버튼은 카드를 띄운 앱 소켓으로 온다(소켓을 따로 열면 반만 닿는다).
+          // 점심 버튼·좌석 기능은 꺼져 있을 수 있어 하나씩 건다 — 존재만 보고 정하면 끈 날 나머지가 말없이 빠진다.
+          attach: (app) => {
+            buttons?.register(app);
+            premium?.register(app);
+            lunchNotice?.register(app);
+            lunchInitiative?.register(app);
+          },
         });
         this.chatHosts.push(lunchHost);
         // 대화 호스트가 버튼을 들고 가므로 자기 연결은 열지 않는다.

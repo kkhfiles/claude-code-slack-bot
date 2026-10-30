@@ -480,8 +480,19 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   const handlerSrc = fs.readFileSync(new URL('../src/slack-handler.ts', import.meta.url), 'utf-8');
   const lunchBlock = handlerSrc.slice(handlerSrc.indexOf("name: 'lunch'"), handlerSrc.indexOf('this.chatHosts.push(lunchHost)'));
   ok('소인 대화 호스트에 확인 카드 창구가 연결된다 (정하는 곳과 받는 곳 둘 다)',
-    /lunchAsk = letterNotice\.enabled && lunchClient \? letterNotice\.offer/.test(handlerSrc)
+    /lunchAsk = lunchNotice\?\.enabled \? lunchNotice\.offer/.test(handlerSrc)
     && /onAsk:\s*lunchAsk/.test(lunchBlock), lunchBlock.slice(0, 200));
+  // ── 소인의 카드·주간 시계는 소인 앱에 (2026-10-30 실장 「소인도 나랑 DM 대화할 수 있게」) ──
+  // 카드는 버튼 핸들러를 건 앱으로 뜬다(`home`). 커피콩 앱에 걸면 소인 몫이 커피콩 DM 에 뜨고, 실장이 거기 단 답을 커피콩이 받는다
+  // (그날 「그렇게 하시죠」를 커피콩이 받아 시간 초과 · 「확인 카드 달라고」는 커피챗 방 카드로 오해했다).
+  const letterBlock = handlerSrc.slice(handlerSrc.indexOf('letterHost = new ChatHost'), handlerSrc.indexOf('this.chatHosts.push(letterHost)'));
+  ok('소인 카드 창구와 주간 시계는 소인 앱에만 걸리고, 소인 카드 갈래는 커피콩 창구에 없다',
+    /lunchNotice\?\.register\(app\)/.test(lunchBlock) && /lunchInitiative\?\.register\(app\)/.test(lunchBlock)
+    && !/lunchInitiative/.test(letterBlock) && /kinds:\s*coffee,/.test(handlerSrc)
+    && /offer:\s*lunchNotice\?\.enabled \? lunchNotice\.offer/.test(handlerSrc), { lunch: lunchBlock.slice(0, 120) });
+  ok('소인은 실장과 1:1 을 연다 (실장만 · 나머지는 실장에게 넘김)',
+    /surfaces:\s*\['dm', 'channel'\]/.test(lunchBlock) && /allowUsers:\s*config\.letter\.managerUserId \?/.test(lunchBlock),
+    lunchBlock.slice(0, 200));
 
   console.log(`\n${fail ? `실패 ${fail}건` : '모두 통과.'}`);
   fs.rmSync(dir, { recursive: true, force: true });

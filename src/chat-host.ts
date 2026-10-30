@@ -637,7 +637,7 @@ export class ChatHost {
       // **봇끼리는 방에서만 말을 섞는다.** 1:1 에는 세는 자리가 없어서, 여기로 새면
       // 굴레 없는 주고받기가 된다 — 막으려고 만든 바로 그 모양이다.
       if (fromSibling) return;
-      await this.onDirectMessage(client, user, channel, ts, text);
+      await this.onDirectMessage(client, user, channel, ts, text, m.thread_ts as string | undefined);
       return;
     }
     // **방의 말만 증거로 센다 — 1:1 은 안 센다.** 구독은 자리마다 따로 켜므로
@@ -657,6 +657,9 @@ export class ChatHost {
     if (fromSibling) this.siblingSpoke.set(channel, Date.now());
     // 형제 봇이 「대답하지 마」를 듣고 물러나며 한 한 줄 — 받아치지 않는다(`hushAcks`)
     if (fromSibling && ChatHost.isHushAck(channel, text)) return;
+    // **시험 방에서는 형제 봇이 나를 부를 때만 받는다** — 실장이 한 봇에게 시키는 방이라, 형제 봇의 답에 맞장구치면 시킨 일 사이로
+    // 인사만 오간다(2026-10-30 「든든하옵니다」·「맡길게요」·「황송하옵니다」 세 줄).
+    if (fromSibling && this.isRulesRoom(channel) && !this.namesMe(text)) return;
     if (fromSibling) say = this.botTalkTurn(channel, text);
     else this.humanSpoke(channel, text);
     // **답 턴보다 먼저 건다** — 이 말에 대한 턴은 답을 올리기 전에 이 판정을 기다린다(`hushDrops`).
@@ -916,14 +919,15 @@ export class ChatHost {
 
   // ── DM ────────────────────────────────────────────────────────────────
   private async onDirectMessage(
-    client: App['client'], user: string, channel: string, ts: string, text: string,
+    client: App['client'], user: string, channel: string, ts: string, text: string, threadTs?: string,
   ): Promise<void> {
     // 명단이 비면 아무도 아니다. 실제 워크스페이스에 사는 봇이라 기본값은 침묵이어야 한다.
     if (!(this.opts.allowUsers ?? []).includes(user)) {
       await this.bypassToManager(client, user, channel, text);
       return;
     }
-    this.enqueue(user, { channel, text, ts, user });
+    // 스레드에 단 말이면 답도 그 스레드에 — 2026-10-30 실장이 제안 글 스레드에 「그렇게 하시죠」라고 했는데 답은 스레드 밖에 붙었다.
+    this.enqueue(user, { channel, text, ts, user, ...(threadTs ? { threadTs } : {}) });
     // 표시는 **턴이 시작할 때** 붙는다(`pump`) — 붙이는 곳과 떼는 곳이 갈려 있으면
     // 한쪽 길이 늘어날 때마다 안 떼지는 자리가 하나씩 생긴다.
     this.kick(client, user, channel, true);
@@ -1203,6 +1207,34 @@ export class ChatHost {
     return Date.now() - mine < FOLLOW_UP_MS && (this.siblingSpoke.get(channel) ?? 0) < mine;
   }
 
+  /** 시험 방(봇 설정 `rooms[방].rules`)인가. */
+  private isRulesRoom(channel: string): boolean {
+    const cfg = this.readNear('bots', this.opts.name, 'config.json') as
+      { rooms?: Record<string, { rules?: unknown } | undefined> } | null;
+    return Boolean(cfg?.rooms?.[channel]?.rules);
+  }
+
+  /** 이 글이 나를 부르나 — 멘션이나 내 이름(`call_names`). 누가 쓴 글이든 글자만 본다. */
+  private namesMe(text: string): boolean {
+    if (this.isCalled(text)) return true;
+    const cfg = this.readNear('bots', this.opts.name, 'config.json') as { call_names?: unknown } | null;
+    return Array.isArray(cfg?.call_names)
+      && cfg.call_names.some((n) => typeof n === 'string' && n.length > 0 && text.includes(n));
+  }
+
+  /**
+   * 시험 방에서 **지금은 형제 봇 차례**인가 — 형제 봇이 `FOLLOW_UP_MS` 안에 말했고 그 뒤로 나는 말하지 않았다.
+   *
+   * 2026-10-30 시험 방 — 실장이 소인을 불러 실데이 결정을 알리고(소인 답) 8분 뒤 이름 없이 「이 내용 노는거 채널에 공유해줘」라고
+   * 했는데, 커피콩이 먼저 끼어들기 턴으로 「제가 준비해 둘게요 · 노는거 방을 몰라요」라고 답했다. 소인에게는 같은 말이 이어 받기
+   * (`isCalledIn`)라 둘 다 답했고, 그 뒤 두 봇이 인사를 세 번 주고받았다. 실장이 이어 시키는 말은 방금 답한 봇의 것이다.
+   */
+  private othersTurn(channel: string): boolean {
+    if (!this.isRulesRoom(channel)) return false;
+    const sib = this.siblingSpoke.get(channel) ?? 0;
+    return Date.now() - sib < FOLLOW_UP_MS && sib > (this.lastSpoke.get(channel) ?? 0);
+  }
+
   /** 형제 봇이 「대답하지 마」를 듣고 올린 한 줄인가(`hushAcks` · 두 봇이 한 프로세스라 함께 본다). */
   private static isHushAck(channel: string, text: string): boolean {
     return (hushAcks.get(hushAckKey(channel, text)) ?? 0) > Date.now();
@@ -1246,6 +1278,7 @@ export class ChatHost {
     if (!rule || this.active.has(channel)) return false;
     if (this.buttInHushed.has(channel)) return false;
     if (Date.now() - (this.noReplyAt.get(channel) ?? 0) < NO_REPLY_MS) return false;
+    if (this.othersTurn(channel)) return false;
     const since = Date.now() - (this.lastSpoke.get(channel) ?? 0);
     if (since < rule.quietMinutes * 60 * 1000) return false;
     const day = new Date().toISOString().slice(0, 10);

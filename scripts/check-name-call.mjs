@@ -102,6 +102,44 @@ check('설정에 이름이 없는 봇은 이름으로 안 불림',
     JSON.stringify(kicked) === JSON.stringify([true]), kicked);
 }
 
+// 2026-10-30 시험 방 — 실장이 소인을 불러 결정을 알리고(소인 답) 8분 뒤 이름 없이 「이 내용 노는거 채널에 공유해줘」. 커피콩이
+// 끼어들기 턴으로 「제가 준비해 둘게요」라고 답했고, 두 봇이 인사를 세 번 주고받았다. 커피콩 자리에서 그 모양 그대로 잰다.
+{
+  const kicked = [];
+  const h = make({ call_names: ['커피콩'], rooms: { [TEST]: { rules: true }, [PLAY]: {} } });
+  h['opts'].buttIn = { quietMinutes: 0, dailyCap: 10 };   // 끼어들기가 열린 상태 — 막는 것은 차례 규칙뿐이어야 한다
+  h['kick'] = (_c, _k, _ch, forced) => kicked.push(forced);
+  const client = { users: { info: async () => ({ user: { profile: { display_name: '실장' } } }) } };
+  h['siblingSpoke'].set(TEST, Date.now() - 8 * 60 * 1000);     // 소인이 8분 전에 답했다 · 커피콩은 그 뒤로 말 안 함
+  await h['onChannelMessage'](client, MGR, TEST, '200.1', undefined, '이 내용 노는거 채널에 공유해줘');
+  check('시험 방 — 형제 봇이 방금 답한 뒤의 이름 없는 실장 말에는 끼어들지 않는다(그 봇 차례)', kicked.length === 0, kicked);
+  await h['onChannelMessage'](client, MGR, TEST, '200.2', undefined, '커피콩 이건 네가 해');
+  check('시험 방 — 그래도 이름으로 부르면 받는다', JSON.stringify(kicked) === JSON.stringify([true]), kicked);
+  h['siblingSpoke'].delete(TEST);
+  kicked.length = 0;
+  await h['onChannelMessage'](client, MGR, TEST, '200.3', undefined, '이 내용 노는거 채널에 공유해줘');
+  check('형제 봇이 안 끼었으면 끼어들기는 그대로 열린다(넓게 막지 않았나)', JSON.stringify(kicked) === JSON.stringify([false]), kicked);
+  h['siblingSpoke'].set(TEST, Date.now());
+  h['lastSpoke'].set(TEST, Date.now() + 1);
+  check('내가 형제 봇보다 나중에 말했으면 차례 규칙은 안 막는다', h['othersTurn'](TEST) === false);
+  h['siblingSpoke'].set(PLAY, Date.now());
+  check('사람들이 쓰는 방에는 차례 규칙을 안 건다', h['othersTurn'](PLAY) === false);
+  h['siblingSpoke'].set(TEST, Date.now() - 11 * 60 * 1000);
+  h['lastSpoke'].delete(TEST);
+  check('형제 봇이 말한 지 10분이 지나면 차례 규칙은 풀린다', h['othersTurn'](TEST) === false);
+}
+// 형제 봇 말 — 시험 방에서는 나를 부를 때만 받는다(소인의 「…준비해 둘게요」류 답에 맞장구친 줄을 막는다)
+{
+  const h = make({ call_names: ['소인'], rooms: { [TEST]: { rules: true }, [PLAY]: {} } });
+  check('나를 부르는 글 — 이름이나 멘션', h['namesMe']('소인님 혹시 같이 보실래요?') && h['namesMe'](`<@${ME}> 봐 주세요`)
+    && !h['namesMe']('네, 규황님! 노는거 채널에 공유하실 수 있게 바로 준비해 둘게요.'));
+  check('시험 방 판정', h['isRulesRoom'](TEST) === true && h['isRulesRoom'](PLAY) === false);
+  const src = fs.readFileSync(new URL('../src/chat-host.ts', import.meta.url), 'utf-8');
+  const at = src.indexOf('if (fromSibling) say = this.botTalkTurn(channel, text);');
+  check('형제 봇 말을 받기 전에 시험 방에서는 나를 부르는지 본다 (봇끼리 세기 전에)',
+    at > 0 && src.slice(Math.max(0, at - 400), at).includes('fromSibling && this.isRulesRoom(channel) && !this.namesMe(text)) return;'));
+}
+
 console.log('');
 console.log(`통과 ${pass} / 실패 ${fails.length}`);
 if (fails.length) { console.log(fails.map((f) => `  - ${f}`).join('\n')); process.exit(1); }
