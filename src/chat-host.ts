@@ -817,6 +817,11 @@ export class ChatHost {
    */
   private async calledBy(channel: string, user: string, ts: string, text: string): Promise<boolean> {
     if (this.isCalled(text)) return true;
+    // **시험 방에서 남에게 한 말 · 남의 차례인 말은 판정보다 먼저 거른다**(2026-10-30 실장 「봇테스트에서 소인에게 이야기한 건데
+    // 커피콩까지 끼어들어 대화하는 일이 없도록」). 판정은 봇마다 따로 돌아 이름 없는 지시를 두 봇 다 「내게 한 말」로 볼 수 있다.
+    if (this.isRulesRoom(channel) && !this.namesMe(text) && (this.addressesOther(text) || this.othersTurn(channel))) {
+      return false;
+    }
     if (user && user === this.opts.managerUserId && this.judgeOn(channel)) {
       const got = await this.judged.get(`${channel}:${ts}`);
       if (got !== undefined && got !== null) {
@@ -1201,10 +1206,15 @@ export class ChatHost {
     if (!cfg?.rooms?.[channel]?.rules) return false;
     // **이어 받기는 남을 부른 말에는 안 건다** — 2026-10-20 시험 방에서 주인이 「@커피콩 넌 지금은 신경 안써도 돼」라고 했는데
     // 소인이 1분 전에 말했다는 이유로 제 말로 받아 답했다. 다른 사람·봇을 멘션했거나 다른 봇 이름을 부른 말은 그쪽에 한 말이다.
-    if (/<@[A-Z0-9]+>/.test(text.replace(new RegExp(`<@${this.selfUserId}>`, 'g'), ''))) return false;
-    if (this.otherBotNames().some((n) => text.includes(n))) return false;
+    if (this.addressesOther(text)) return false;
     const mine = this.lastSpoke.get(channel) ?? 0;
     return Date.now() - mine < FOLLOW_UP_MS && (this.siblingSpoke.get(channel) ?? 0) < mine;
+  }
+
+  /** 다른 사람·봇을 멘션했거나 다른 봇 이름을 부른 말인가(내 멘션은 빼고 본다). */
+  private addressesOther(text: string): boolean {
+    if (/<@[A-Z0-9]+>/.test(text.replace(new RegExp(`<@${this.selfUserId}>`, 'g'), ''))) return true;
+    return this.otherBotNames().some((n) => text.includes(n));
   }
 
   /** 시험 방(봇 설정 `rooms[방].rules`)인가. */
@@ -1278,7 +1288,9 @@ export class ChatHost {
     if (!rule || this.active.has(channel)) return false;
     if (this.buttInHushed.has(channel)) return false;
     if (Date.now() - (this.noReplyAt.get(channel) ?? 0) < NO_REPLY_MS) return false;
-    if (this.othersTurn(channel)) return false;
+    // **시험 방에서는 먼저 끼어들지 않는다** — 실장이 봇 하나에게 시키는 방이다. 부른 말(멘션·이름·이어 받기·판정 2)만 받는다
+    // (2026-10-30 실장 「소인에게 이야기한 건데 커피콩까지 끼어들어 대화하는 일이 없도록」).
+    if (this.isRulesRoom(channel)) return false;
     const since = Date.now() - (this.lastSpoke.get(channel) ?? 0);
     if (since < rule.quietMinutes * 60 * 1000) return false;
     const day = new Date().toISOString().slice(0, 10);

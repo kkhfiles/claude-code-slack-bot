@@ -118,7 +118,23 @@ check('설정에 이름이 없는 봇은 이름으로 안 불림',
   h['siblingSpoke'].delete(TEST);
   kicked.length = 0;
   await h['onChannelMessage'](client, MGR, TEST, '200.3', undefined, '이 내용 노는거 채널에 공유해줘');
-  check('형제 봇이 안 끼었으면 끼어들기는 그대로 열린다(넓게 막지 않았나)', JSON.stringify(kicked) === JSON.stringify([false]), kicked);
+  check('시험 방에서는 형제 봇이 안 끼었어도 먼저 끼어들지 않는다 (부른 말만)', kicked.length === 0, kicked);
+  await h['onChannelMessage'](client, MGR, PLAY, '200.4', undefined, '이 내용 노는거 채널에 공유해줘');
+  check('사람들이 쓰는 방의 끼어들기는 그대로 열린다(넓게 막지 않았나)', JSON.stringify(kicked) === JSON.stringify([false]), kicked);
+  // 판정이 「내게 한 말(2)」이라 해도 — 시험 방에서 남을 부른 말 · 남의 차례인 말은 부른 말이 아니다
+  h['judgeOn'] = () => true;
+  h['judged'].set(`${TEST}:300.1`, Promise.resolve(2));
+  h['judged'].set(`${TEST}:300.2`, Promise.resolve(2));
+  h['judged'].set(`${TEST}:300.3`, Promise.resolve(2));
+  check('시험 방 — 소인을 멘션한 실장 말은 판정이 2여도 커피콩이 안 받는다',
+    await h['calledBy'](TEST, MGR, '300.1', '<@ULUNCHBOT> 실데이 회의에서 확정한 내용 공유함') === false);
+  h['siblingSpoke'].set(TEST, Date.now() - 60 * 1000);
+  check('시험 방 — 소인이 방금 답한 뒤의 이름 없는 지시는 판정이 2여도 커피콩이 안 받는다',
+    await h['calledBy'](TEST, MGR, '300.2', '이 내용 노는거 채널에 공유해줘') === false);
+  check('시험 방 — 그때도 커피콩 이름을 넣으면 받는다', await h['calledBy'](TEST, MGR, '300.3', '커피콩 이건 네가 공유해') === true);
+  h['siblingSpoke'].delete(TEST);
+  h['judged'].set(`${TEST}:300.4`, Promise.resolve(2));
+  check('시험 방 — 남의 차례가 아니면 판정 2는 그대로 부른 말', await h['calledBy'](TEST, MGR, '300.4', '이 내용 공유해줘') === true);
   h['siblingSpoke'].set(TEST, Date.now());
   h['lastSpoke'].set(TEST, Date.now() + 1);
   check('내가 형제 봇보다 나중에 말했으면 차례 규칙은 안 막는다', h['othersTurn'](TEST) === false);
