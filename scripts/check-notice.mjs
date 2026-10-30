@@ -367,12 +367,44 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
       { name: 'pulse', text: '첫째 길 — 지난주 이야기를 잇는 글입니다' },
       { name: 'pulse', text: '둘째 길 — 새 화제를 여는 글입니다' },
       { name: 'pulse', text: '셋째 길 — 한 조각을 이어 가는 글입니다' },
-    ], { user: 'UBOSS', channel: 'DM' });
+    ], { user: 'UBOSS', channel: 'DM_NEXT' });   // 다른 대화 — 같은 대화면 위 카드를 새 판으로 닫는다(아래 「앞 카드 닫기」)
     const heads = c3.posted.map((m) => JSON.stringify(m.blocks));
     ok('대안 셋이면 카드 셋 · 각각 「후보 n/3 — 하나만」', c3.posted.length === 3
       && heads[0].includes('후보 1/3') && heads[1].includes('후보 2/3') && heads[2].includes('후보 3/3')
       && heads.every((h) => h.includes('하나만')), heads.map((h) => h.slice(0, 80)));
-    ok('셋 다 실장 DM 으로만 · 셋 다 기다리는 카드', c3.posted.every((m) => m.channel === 'DM_UBOSS') && na.pendingCount() >= 3);
+    ok('셋 다 실장 DM 으로만 · 셋 다 기다리는 카드 (한 번에 낸 후보끼리는 서로 안 닫는다)',
+      c3.posted.every((m) => m.channel === 'DM_UBOSS') && na.pendingCount() >= 4);
+  }
+  // **같은 대화에서 고친 카드가 나오면 앞 카드는 닫는다**(2026-10-30 — 소인 DM 에서 글을 세 번 고치자 카드 넷이 다 살아 있었고,
+  // 그중 하나에는 실장이 「공개하지 말자」고 뺀 팀별 잔여 팀비가 있었다).
+  {
+    const nr = make({ logPath: path.join(dir, 'retire.jsonl'), pendingPath: path.join(dir, 'retire-pending.json') });
+    const appR = fakeApp();
+    nr.register(appR);
+    const cr = fakeClient();
+    const updated = [];
+    cr.chat.update = async (m) => { updated.push(m); return { ok: true }; };
+    await nr.offer(cr, [{ name: 'pulse', text: '첫 판 — 팀별로 남은 돈까지 적은 글' }], { user: 'UBOSS', channel: 'D_LUNCH' });
+    const first = buttonOf(cr.posted[0]).value;
+    await nr.offer(cr, [{ name: 'pulse', text: '둘째 판 — 금액을 뺀 글' }], { user: 'UBOSS', channel: 'D_LUNCH' });
+    const second = buttonOf(cr.posted[1]).value;
+    ok('같은 대화의 새 판이 나오면 앞 카드는 대기에서 빠지고 카드 글도 「닫힘」으로 고쳐진다',
+      !nr['pending'].has(first) && nr['pending'].has(second) && updated.length === 1
+      && updated[0].channel === 'DM_UBOSS' && updated[0].ts === '1700000000.000100'
+      && JSON.stringify(updated[0]).includes('닫') && !JSON.stringify(updated[0]).includes('button'), updated);
+    await nr.offer(cr, [{ name: 'pulse', text: '다른 대화에서 낸 글' }], { user: 'UBOSS', channel: 'C_TEST' });
+    await nr.offer(cr, [{ name: 'notice', text: '같은 대화의 다른 갈래 글' }], { user: 'UBOSS', channel: 'D_LUNCH' });
+    ok('다른 대화 · 다른 갈래 카드는 안 닫는다', nr['pending'].has(second) && updated.length === 1, updated.length);
+    const cx = fakeClient();
+    await appR.actions.notice_open({
+      ack: async () => {}, client: cx,
+      body: { user: { id: 'UBOSS' }, trigger_id: 'T', actions: [{ value: first }] },
+    });
+    ok('닫힌 앞 카드의 버튼을 눌러도 창이 안 열리고 「아무것도 보내지 않았습니다」',
+      cx.opened.length === 0 && cx.posted.some((m) => String(m.text).includes('아무것도 보내지 않았습니다')), cx.posted);
+    const reloaded = make({ logPath: path.join(dir, 'retire.jsonl'), pendingPath: path.join(dir, 'retire-pending.json') });
+    ok('재시작해도 닫힌 카드는 안 살아나고, 산 카드는 글 위치(msg)를 들고 있다',
+      !reloaded['pending'].has(first) && reloaded['pending'].get(second)?.msg?.ts === '1700000000.000100');
   }
   const btnP = buttonOf(c.posted[0]);
   c = fakeClient();

@@ -93,6 +93,8 @@ interface Pending {
   from: string;
   /** 주간 판단이 고른 방 — 창에서 먼저 골라 둔다. */
   room?: string;
+  /** 띄운 카드 글 — 새 판이 나오면 이 글을 「닫힘」으로 고친다(`retire`). */
+  msg?: { channel: string; ts: string };
 }
 
 interface Sent {
@@ -280,6 +282,10 @@ export class LetterNotice {
           continue;
         }
       }
+      // **같은 대화의 같은 갈래 카드는 새 판이 나오면 앞 판을 닫는다**(2026-10-30 — 실장이 소인 DM 에서 글을 세 번 고치자 카드
+      // 네 장이 다 살아 있었고, 그중 하나에는 실장이 「공개하지 말자」고 뺀 팀별 잔여 팀비가 그대로 있었다). 한 번에 여럿 낸
+      // 후보(「후보 n/N」)는 서로 닫지 않는다 — 이 호출 전에 있던 카드만 닫는다.
+      if (!seen.has(ask.name)) await this.retire(client, ask.name, from.channel);
       const item: Pending = {
         id: crypto.randomBytes(6).toString('hex'),
         kind: ask.name,
@@ -310,7 +316,7 @@ export class LetterNotice {
     try {
       const im = await client.conversations.open({ users: this.opts.managerUserId });
       if (!im.channel?.id) throw new Error('DM 방을 못 열었습니다');
-      await client.chat.postMessage({
+      const posted = await client.chat.postMessage({
         channel: im.channel.id,
         text: `${kind.ask} — ${item.text.slice(0, 40)}`,
         blocks: [
@@ -339,8 +345,39 @@ export class LetterNotice {
           },
         ],
       });
+      if (posted?.ts && this.pending.has(item.id)) {
+        item.msg = { channel: im.channel.id, ts: String(posted.ts) };
+        this.save();
+      }
     } catch (error) {
       this.logger.warn('확인 카드를 못 띄웠습니다', error);
+    }
+  }
+
+  /**
+   * 같은 대화(`from`)에서 낸 같은 갈래의 앞 카드를 닫는다 — 대기 목록에서 빼고(버튼을 눌러도 「만료」), 카드 글은 「새 판이 있어
+   * 닫았습니다」로 고친다. 글을 못 고쳐도(오래된 카드라 글 위치를 모름 · 슬랙 오류) 대기 목록에서는 뺀다 — 버튼이 안 먹는 쪽이 안전하다.
+   */
+  private async retire(client: App['client'], kindName: string, from: string): Promise<void> {
+    const old = [...this.pending.values()].filter((p) => p.kind === kindName && p.from === from);
+    if (!old.length) return;
+    for (const p of old) this.pending.delete(p.id);
+    this.save();
+    this.logger.info(`새 판이 나와 앞 카드 ${old.length}장을 닫습니다 (${kindName})`);
+    for (const p of old) {
+      if (!p.msg) continue;
+      try {
+        await client.chat.update({
+          channel: p.msg.channel, ts: p.msg.ts,
+          text: '더 새로 고친 카드가 있어 이 카드는 닫았습니다 — 아무것도 보내지 않았습니다.',
+          blocks: [{
+            type: 'context',
+            elements: [{ type: 'mrkdwn', text: '~이 카드는 닫혔습니다~ — 더 새로 고친 카드가 아래에 있습니다. *아무것도 보내지 않았습니다.*' }],
+          }],
+        });
+      } catch (error) {
+        this.logger.warn('앞 카드 글을 못 고쳤습니다 — 버튼은 이미 안 먹습니다', error);
+      }
     }
   }
 
