@@ -155,6 +155,32 @@ check('설정에 이름이 없는 봇은 이름으로 안 불림',
   check('형제 봇 말을 받기 전에 시험 방에서는 나를 부르는지 본다 (봇끼리 세기 전에)',
     at > 0 && src.slice(Math.max(0, at - 400), at).includes('fromSibling && this.isRulesRoom(channel) && !this.namesMe(text)) return;'));
 }
+// 후속(카드 없이 올리는 말) — 방이 먼저 말 걸지 말라고 한 상태면 안 돌고, 돌 때는 상주 turn.py 로(재검토 2026-10-30)
+{
+  const h = make({ call_names: ['소인'], rooms: { [TEST]: { rules: true }, [PLAY]: {} } });
+  const ran = [];
+  h['runTurn'] = async (key, _n, _t, decide, manager, extra) => { ran.push({ key, decide, manager, extra }); return { reply: '다시 여쭈옵니다', error: null }; };
+  h['runTurnOnce'] = async () => { ran.push({ once: true }); return { reply: '', error: null }; };
+  const f = { room: PLAY, title: '실데이', q: '가고 싶은 곳' };
+  const r1 = await h.follow(f);
+  check('후속은 상주 turn.py 로 그 방 턴(실원 · 판단 꼴)으로 돈다', r1.reply === '다시 여쭈옵니다' && ran.length === 1 && ran[0].key === PLAY
+    && ran[0].decide === true && ran[0].manager === false && ran[0].extra.follow === f, ran);
+  for (const [why, set] of [['「그만」', () => h['buttInHushed'].add(PLAY)], ['「대답하지 마」', () => h['hushed'].add(PLAY)],
+    ['방금 조용히', () => h['noReplyAt'].set(PLAY, Date.now())]]) {
+    h['buttInHushed'].clear(); h['hushed'].clear(); h['noReplyAt'].clear();
+    set();
+    ran.length = 0;
+    const r = await h.follow(f);
+    check(`후속 — ${why} 뒤에는 안 돈다`, r.speak === false && ran.length === 0, { r, ran });
+  }
+  h['buttInHushed'].clear(); h['hushed'].clear(); h['noReplyAt'].clear();
+  h['opts'].quietRooms = [PLAY];
+  ran.length = 0;
+  check('후속 — 부르면 답하는 방(조용한 방)에서는 안 돈다', (await h.follow(f)).speak === false && ran.length === 0);
+  check('맡지 않은 방은 안 돈다', (await h.follow({ ...f, room: 'C_ELSE' })).error === '맡은 방이 아님');
+  check('실장 턴 요청에는 실장 ID 가 따로 실린다 (채널 턴은 user 가 비어 온다)',
+    h['turnBody'](TEST, '실장', '말', false, true).manager === MGR && h['turnBody'](TEST, '누구', '말', false, false).manager === undefined);
+}
 
 console.log('');
 console.log(`통과 ${pass} / 실패 ${fails.length}`);

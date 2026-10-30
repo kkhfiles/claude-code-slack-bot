@@ -496,10 +496,18 @@ export class ChatHost {
   /**
    * 후속 한 턴 — **그 방 턴으로** 돈다(`turn.py` 의 `_handle_follow` · 실장 맥락 없이 그 방 이야기만). 올리는 것은 부르는 쪽(주간 시계).
    * 맡은 방이 아니면 돌지 않는다.
+   *
+   * **방이 먼저 말 걸지 말라고 한 상태면 안 돈다**(재검토 2026-10-30) — 부르면 답하는 방(`quietRooms`) · 「그만」(`buttInHushed`)
+   * · 「대답하지 마」(`hushed`) · 방금 「조용히」(`noReplyAt`). 후속은 먼저 말 거는 일이라 끼어들기와 같은 굴레를 받는다.
+   * **상주 turn.py 로 돈다** — 그 방 대화를 상주 워커가 쥐고 있어서, 단발로 돌면 봇이 방금 다시 물은 말을 그 워커가 모를 수 있다.
    */
   async follow(f: FollowUp): Promise<TurnResult> {
     if (!(this.opts.channels ?? []).includes(f.room)) return { reply: '', error: '맡은 방이 아님' };
-    return this.runTurnOnce(this.turnBody(f.room, '', '', true, false, { follow: f }), TURN_TIMEOUT_WEEKLY_MS);
+    if (this.isQuiet(f.room) || this.buttInHushed.has(f.room) || this.hushed.has(f.room)
+        || Date.now() - (this.noReplyAt.get(f.room) ?? 0) < NO_REPLY_MS) {
+      return { reply: '', speak: false, error: null, follow: true };
+    }
+    return this.runTurn(f.room, '', '', true, false, { follow: f });
   }
 
   async start(): Promise<void> {
@@ -1914,6 +1922,8 @@ export class ChatHost {
       bot: this.opts.name,
       key,
       user: key.startsWith('U') ? key : '',
+      // 실장 ID — 채널 턴은 `user` 가 비어 와서 파이썬이 실장 본인 1:1 을 카드 원문 검사에서 빼지 못했다(재검토 2026-10-30)
+      ...(manager && this.opts.managerUserId ? { manager: this.opts.managerUserId } : {}),
       user_name: name,
       role: manager ? 'manager' : 'member',
       // 같은 봇이 DM 과 채널을 다 받으므로 **어느 자리인지 알려준다.** 둘의 태도가

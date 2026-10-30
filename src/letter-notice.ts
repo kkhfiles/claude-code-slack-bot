@@ -271,6 +271,7 @@ export class LetterNotice {
         const why = await this.guard(client, text, kind.guard);
         if (why) {
           this.logger.warn(`보내기 직전 빗장에 막힘 — ${why}`);
+          this.logProposal({ ev: 'blocked', id: found.id, at: new Date().toISOString() });
           await this.tell(client, body.user.id, `:no_entry_sign: 고친 글이 *빗장에 막혔습니다* — ${why}\n_아무것도 안 나갔습니다. 카드는 닫혔으니 다시 말씀해 주세요._`);
           return;
         }
@@ -285,6 +286,9 @@ export class LetterNotice {
       }
       if (await this.send(client, body.user.id, meta.kind || '', kind, room, text)) {
         this.logProposal({ ev: 'sent', id: found.id, at: new Date().toISOString(), edited, to_label: room.label });
+      } else {
+        // 안 나갔다(같은 글을 방금 보냄 · 슬랙 실패) — 「응답 없이 사라짐」으로 잘못 남지 않게(재검토 2026-10-30)
+        this.logProposal({ ev: 'send_failed', id: found.id, at: new Date().toISOString() });
       }
     });
 
@@ -314,6 +318,7 @@ export class LetterNotice {
     const total = new Map<string, number>();
     for (const a of asks) total.set(a.name, (total.get(a.name) ?? 0) + 1);
     const seen = new Map<string, number>();
+    const retired = new Set<string>();
     for (const ask of asks) {
       const kind = this.kind(ask.name);
       if (!kind) {
@@ -332,8 +337,13 @@ export class LetterNotice {
       }
       // **같은 대화의 같은 갈래 카드는 새 판이 나오면 앞 판을 닫는다**(2026-10-30 — 실장이 소인 DM 에서 글을 세 번 고치자 카드
       // 네 장이 다 살아 있었고, 그중 하나에는 실장이 「공개하지 말자」고 뺀 팀별 잔여 팀비가 그대로 있었다). 한 번에 여럿 낸
-      // 후보(「후보 n/N」)는 서로 닫지 않는다 — 이 호출 전에 있던 카드만 닫는다.
-      if (!seen.has(ask.name)) await this.retire(client, ask.name, from.channel);
+      // 후보(「후보 n/N」)는 서로 닫지 않는다 — 이 호출 전에 있던 카드만 닫는다. **올릴 방이 같은 것만** 닫는다(재검토 2026-10-30 —
+      // 소인 갈래는 방을 가리지 않고 하나라, 노는거 공지 카드가 점심원정대 안내 카드에 말없이 닫혔다).
+      const slot = `${ask.name}|${ask.room ?? ''}`;
+      if (!retired.has(slot)) {
+        retired.add(slot);
+        await this.retire(client, ask.name, from.channel, ask.room ? String(ask.room) : '');
+      }
       const item: Pending = {
         id: crypto.randomBytes(6).toString('hex'),
         kind: ask.name,
@@ -414,8 +424,12 @@ export class LetterNotice {
    * 같은 대화(`from`)에서 낸 같은 갈래의 앞 카드를 닫는다 — 대기 목록에서 빼고(버튼을 눌러도 「만료」), 카드 글은 「새 판이 있어
    * 닫았습니다」로 고친다. 글을 못 고쳐도(오래된 카드라 글 위치를 모름 · 슬랙 오류) 대기 목록에서는 뺀다 — 버튼이 안 먹는 쪽이 안전하다.
    */
-  private async retire(client: App['client'], kindName: string, from: string): Promise<void> {
-    const old = [...this.pending.values()].filter((p) => p.kind === kindName && p.from === from);
+  private async retire(client: App['client'], kindName: string, from: string, room: string): Promise<void> {
+    // 실장 DM 은 하나의 대화로 본다 — 주간 시계는 「DM」, 실장 DM 턴은 그 DM 채널 ID(D…)로 와서, 주간 카드를 DM 에서 고쳐도
+    // 앞 카드가 안 닫혔다(재검토 2026-10-30).
+    const convo = (c: string) => (c === 'DM' || /^D/.test(c) ? 'manager-dm' : c);
+    const old = [...this.pending.values()].filter((p) => p.kind === kindName && convo(p.from) === convo(from)
+      && (p.room ?? '') === room);
     if (!old.length) return;
     for (const p of old) this.pending.delete(p.id);
     this.save();

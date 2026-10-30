@@ -367,7 +367,7 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
       { name: 'pulse', text: '첫째 길 — 지난주 이야기를 잇는 글입니다' },
       { name: 'pulse', text: '둘째 길 — 새 화제를 여는 글입니다' },
       { name: 'pulse', text: '셋째 길 — 한 조각을 이어 가는 글입니다' },
-    ], { user: 'UBOSS', channel: 'DM_NEXT' });   // 다른 대화 — 같은 대화면 위 카드를 새 판으로 닫는다(아래 「앞 카드 닫기」)
+    ], { user: 'UBOSS', channel: 'C_NEXT' });   // 다른 대화(방) — 실장 DM(「DM」·D…)끼리는 위 카드를 새 판으로 닫는다(아래 「앞 카드 닫기」)
     const heads = c3.posted.map((m) => JSON.stringify(m.blocks));
     ok('대안 셋이면 카드 셋 · 각각 「후보 n/3 — 하나만」', c3.posted.length === 3
       && heads[0].includes('후보 1/3') && heads[1].includes('후보 2/3') && heads[2].includes('후보 3/3')
@@ -405,6 +405,16 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
     const reloaded = make({ logPath: path.join(dir, 'retire.jsonl'), pendingPath: path.join(dir, 'retire-pending.json') });
     ok('재시작해도 닫힌 카드는 안 살아나고, 산 카드는 글 위치(msg)를 들고 있다',
       !reloaded['pending'].has(first) && reloaded['pending'].get(second)?.msg?.ts === '1700000000.000100');
+    // 재검토(2026-10-30) — 올릴 방이 다르면 안 닫는다 · 주간 시계(「DM」)와 실장 DM 턴(D…)은 같은 대화로 본다
+    await nr.offer(cr, [{ name: 'pulse', text: '노는거 공지', room: 'C_CHAT' }], { user: 'UBOSS', channel: 'D_LUNCH' });
+    const toPlay = cr.posted[cr.posted.length - 1];
+    await nr.offer(cr, [{ name: 'pulse', text: 'bot_test 안내', room: 'C_TEST' }], { user: 'UBOSS', channel: 'D_LUNCH' });
+    ok('같은 대화라도 올릴 방이 다른 카드는 안 닫는다', nr['pending'].has(buttonOf(toPlay).value), [...nr['pending'].keys()]);
+    await nr.offer(cr, [{ name: 'pulse', text: '주간 판단이 낸 노는거 공지', room: 'C_CHAT' }], { user: 'UBOSS', channel: 'DM' });
+    const weekly = cr.posted[cr.posted.length - 1];
+    ok('주간 시계(「DM」)가 낸 같은 방 카드는 실장 DM 턴의 앞 카드를 닫는다', !nr['pending'].has(buttonOf(toPlay).value));
+    await nr.offer(cr, [{ name: 'pulse', text: 'DM 에서 고친 노는거 공지', room: 'C_CHAT' }], { user: 'UBOSS', channel: 'D_OTHERID' });
+    ok('실장 DM 에서 고치면 주간 카드도 닫힌다 (10/30 금액이 남은 카드가 안 닫히던 것)', !nr['pending'].has(buttonOf(weekly).value));
   }
   const btnP = buttonOf(c.posted[0]);
   c = fakeClient();
