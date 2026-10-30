@@ -183,11 +183,13 @@ function sessionsFile(file: string): string {
  *
  * - 처음 보는 세션 — 새로 띄운 것이면 그 값 전부(0 에서 시작했다). **이어 받은 것이면 0** 을 내고 기준만 적는다: 그 누적에
  *   구독으로 돈 옛 차례가 섞여 있어 얼마가 크레딧 몫인지 모른다(조금 덜 세는 쪽을 고름 · 이 값은 참고용)
- * - 누적이 줄었으면(다른 프로세스가 0 부터 다시 셈) 그 값 전부
+ * - **같은 프로세스의 둘째 차례부터는 그 프로세스가 앞서 낸 값과의 차이**(`prev`) — 한 프로세스 안의 누적은 줄지 않는다
+ * - 다른 프로세스가 앞서 적은 기준과 비교할 때 누적이 줄었으면 0 — 2026-10-30 실측: 한 세션을 두 프로세스가 번갈아
+ *   이어 받아 기준이 들쭉날쭉했고, 그전 규칙(「줄었으면 그 값 전부」)이 매번 누적 전체를 더해 실제 $37.08 을 $102.62 로 셌다
  * - 기준 파일을 못 읽거나 못 쓰면 0 — 장부를 부풀리지 않는다
  */
 export function turnCost(session: string | null | undefined, cumulative: number, resumed: boolean,
-  nowMs: number = Date.now(), file = ledgerFile()): number {
+  nowMs: number = Date.now(), file = ledgerFile(), prev?: number): number {
   if (!(cumulative > 0) || !session) return 0;
   const sf = sessionsFile(file);
   let seen: Record<string, { c: number; at: number }> = {};
@@ -197,7 +199,9 @@ export function turnCost(session: string | null | undefined, cumulative: number,
     if (err?.code !== 'ENOENT') return 0;
   }
   const last = seen[session]?.c;
-  const delta = last === undefined ? (resumed ? 0 : cumulative) : (cumulative >= last ? cumulative - last : cumulative);
+  const delta = prev !== undefined ? Math.max(0, cumulative - prev)
+    : last === undefined ? (resumed ? 0 : cumulative)
+    : Math.max(0, cumulative - last);
   seen[session] = { c: cumulative, at: nowMs };
   for (const [k, v] of Object.entries(seen)) if (!v || nowMs - Number(v.at) > SESSION_KEEP_MS) delete seen[k];
   try {

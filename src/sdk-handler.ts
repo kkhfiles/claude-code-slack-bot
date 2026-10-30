@@ -155,6 +155,10 @@ export class SdkProcess {
   retry: CreditRetry | null = null;
   /** 옛 세션을 이어 받아 띄웠나 — 처음 보는 이어 받은 세션의 누적 비용은 크레딧 몫을 몰라 안 센다(`turnCost`). */
   resumed = false;
+  /** 이 프로세스가 마지막으로 낸 누적 비용 — 둘째 차례부터는 이것과의 차이만 센다(`turnCost`). */
+  private lastCost: number | undefined = undefined;
+  /** 무엇이 이 세션을 불렀나 — 크레딧 사용 내역의 `caller` 에 붙는다(`SdkRunOptions.caller`). */
+  caller: string | undefined = undefined;
   /** 시작 이벤트가 알려 준 것 — 크레딧 사용 내역에 같이 남긴다(정말 API 키로 돌았나 · 어느 세션인가). */
   private init: { session: string | null; auth: string | null; model: string | null } = { session: null, auth: null, model: null };
 
@@ -175,10 +179,12 @@ export class SdkProcess {
     try {
       // `total_cost_usd` 는 그 세션의 누적 비용이라 늘어난 만큼만 더한다(`turnCost` · 2026-10-23 27~29배로 부풀었다).
       const session = ev.session_id || this.init.session;
-      const cost = turnCost(session, Number(ev.total_cost_usd ?? 0), this.resumed);
+      const cumulative = Number(ev.total_cost_usd ?? 0);
+      const cost = turnCost(session, cumulative, this.resumed, Date.now(), ledgerFile(), this.lastCost);
+      if (cumulative > 0) this.lastCost = cumulative;
       if (cost > 0) {
         recordCreditSpend(this.credit.name, cost, Date.now(), ledgerFile(), {
-          session, auth: this.init.auth, model: this.init.model, caller: 'sdk-handler',
+          session, auth: this.init.auth, model: this.init.model, caller: this.caller ? `sdk-handler:${this.caller}` : 'sdk-handler',
         });
       }
       const text = String(ev.result ?? '');
@@ -285,6 +291,12 @@ export class SdkProcess {
 // --- SdkHandler: mirrors CliHandler.runQuery interface --------------------
 
 export interface SdkRunOptions {
+  /**
+   * 무엇이 불렀나 — `dm`(사람 DM) · `mail`(메일 후보) · `board`(보드에서 온 말) 등.
+   * 크레딧 사용 내역에 `sdk-handler:<값>` 으로 남아 비용이 어디서 나오는지 가를 수 있게 한다(2026-10-30).
+   * SDK 에 넘기는 값이 아니라 미리 띄우기 지문(`keyOf`)에는 안 들어간다.
+   */
+  caller?: string;
   workingDirectory?: string;
   session?: ConversationSession;
   resumeSessionId?: string;
@@ -520,6 +532,7 @@ export class SdkHandler {
       const p = new SdkProcess(SdkHandler.queryFn({ prompt, options: built.sdkOptions }), built.abortController, 'claude-api',
         built.credit);
       p.resumed = !!built.sdkOptions.resume;
+      p.caller = opts.caller;
       return p;
     }
     // 엔진 연습(`engine-drill.ts`) — 막힌 모양을 재생한다. 처음부터 막힌 갈래는 진짜를 안 띄우고,
@@ -537,6 +550,7 @@ export class SdkHandler {
         : new SdkProcess(q, ac, 'claude', built.credit);
       if (built.credit) p.retry = this.creditRetry(prompt, opts, depth);
       p.resumed = !!built.sdkOptions.resume;
+      p.caller = opts.caller;
       return p;
     };
     const key = this.keyOf(built.sdkOptions);

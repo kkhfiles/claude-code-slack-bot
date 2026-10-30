@@ -85,7 +85,19 @@ try {
   eq('이어 받은 세션을 처음 보면 0(크레딧 몫을 모름)', ac.turnCost('s-old', 44.0, true, KST('2026-10-23'), LEDGER), 0);
   eq('그 뒤로는 늘어난 만큼', [ac.turnCost('s-old', 44.2, true, KST('2026-10-23'), LEDGER),
     ac.turnCost('s-old', 46.36, true, KST('2026-10-23'), LEDGER)], [0.2, 2.16]);
-  eq('누적이 줄면 그 값 전부(다른 프로세스가 0부터)', ac.turnCost('s-new', 0.1, true, KST('2026-10-23'), LEDGER), 0.1);
+  eq('다른 프로세스가 적은 기준보다 누적이 줄면 0', ac.turnCost('s-new', 0.1, true, KST('2026-10-23'), LEDGER), 0);
+  // 2026-10-30 실측 모양 — 한 세션을 두 프로세스(A·B)가 번갈아 이어 받았다. 그전 규칙은 줄 때마다 누적 전체를 더해
+  // 실제 $37.08 을 $102.62 로 셌다. 프로세스마다 자기가 앞서 낸 값(prev)과의 차이만 센다.
+  {
+    const T = KST('2026-10-23');
+    const a1 = ac.turnCost('s-alt', 24.0, true, T, LEDGER);          // A 첫 차례 — 이어 받았고 처음 봄 → 0
+    const b1 = ac.turnCost('s-alt', 1.0, true, T, LEDGER);           // B 첫 차례 — 기준(24.0)보다 작음 → 0
+    const a2 = ac.turnCost('s-alt', 24.3, true, T, LEDGER, 24.0);    // A 둘째 — 자기 값과의 차이
+    const b2 = ac.turnCost('s-alt', 1.4, true, T, LEDGER, 1.0);      // B 둘째 — 자기 값과의 차이
+    const a3 = ac.turnCost('s-alt', 24.5, true, T, LEDGER, 24.3);
+    eq('번갈아 이어 받아도 늘어난 만큼만', [a1, b1, a2, b2, a3], [0, 0, 0.3, 0.4, 0.2]);
+    eq('같은 프로세스에서 값이 줄면 0', ac.turnCost('s-alt', 24.4, true, T, LEDGER, 24.5), 0);
+  }
   eq('세션 id 가 없으면 안 셈', ac.turnCost(null, 1, false, KST('2026-10-23'), LEDGER), 0);
   eq('보름 넘은 기준은 걷음', (ac.turnCost('s-x', 1, false, KST('2026-11-10'), LEDGER),
     Object.keys(JSON.parse(fs.readFileSync(LEDGER.replace(/\.json$/, '') + '.sessions.json', 'utf-8')))), ['s-x']);
