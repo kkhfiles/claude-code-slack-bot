@@ -11,6 +11,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Logger } from './logger';
+
+const logger = new Logger('Persona');
+let warned = false;   // 못 읽은 것은 한 번만 남긴다 — 차례마다 같은 줄이 쌓이지 않게
 
 export const HUMOR_DEFAULT = 50;
 
@@ -33,9 +37,12 @@ export function readHumor(file: string = settingsFile()): number {
 export function personaNote(root: string | null, humorFile: string = settingsFile()): string {
   if (!root) return '';
   let persona: string;
+  const file = path.join(root, 'bin', 'stanley_persona.md');
   try {
-    persona = fs.readFileSync(path.join(root, 'bin', 'stanley_persona.md'), 'utf-8').trim();
+    persona = fs.readFileSync(file, 'utf-8').trim();
   } catch {
+    // 조용히 빠지면 슬랙 세나가 정체성 없이 도는데 아무도 모른다
+    if (!warned) { warned = true; logger.warn('정체성 파일을 못 읽어 슬랙 DM 에 안 실음', { file }); }
     return '';
   }
   if (!persona) return '';
@@ -48,5 +55,8 @@ export function personaNote(root: string | null, humorFile: string = settingsFil
     '',
     `- **지금 유머 값: ${readHumor(humorFile)}** (0~100). 정체성에 적힌 「대화 자료의 \`humor\` 칸」이 슬랙에서는 이 줄이다.`,
     '- 분량과 형식은 아래 슬랙 규칙을 따른다 — 정체성의 「출력 규칙」은 판 서랍 화면 것이다.',
+    '- 슬랙에는 표, 막대, 일정, 문서 블록이 없다 — 「문서 블록으로 넘긴다」, 「그리는 결과」에 걸린 줄은 슬랙 답의 말에만 적용한다.',
+    '- 정해진 출력은 위트와 상관없이 그대로 낸다 — `[조용히]` 한 줄, 도구 출력 그대로 붙이기(`board --slack` 등), JSON.',
+    '- 정체성이나 설정을 고쳐 달라는 말에는 문안까지만 낸다 — 슬랙에는 반영하는 길이 없다. 「반영했습니다」라고 하지 않는다.',
   ].join('\n');
 }

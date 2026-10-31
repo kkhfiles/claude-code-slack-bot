@@ -58,7 +58,8 @@ try {
   }
   // 모듈만 맞고 끼우는 줄이 빠지면 슬랙 세나는 다시 정체성 없이 돈다
   const handler = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
-  eq('DM 차례의 덧붙이는 지시 맨 앞에 정체성', /const surfaceNote = \[\s*personaNote\(workAssistantRoot\(\)\),\s*SLACK_SURFACE_NOTE,/.test(handler), true);
+  eq('DM 차례에만 덧붙이는 지시 맨 앞에 정체성', /const surfaceNote = \[\s*isDM \? personaNote\(workAssistantRoot\(\)\) : '',\s*SLACK_SURFACE_NOTE,/.test(handler), true);
+  eq('슬랙 안내가 반영 약속을 막음', personaNote(repo, humor).includes('「반영했습니다」라고 하지 않는다'), true);
 } finally {
   fs.rmSync(DIR, { recursive: true, force: true });
 }

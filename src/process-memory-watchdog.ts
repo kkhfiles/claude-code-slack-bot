@@ -146,7 +146,7 @@ export interface Decision {
 }
 
 const ROLE_LABEL: Record<Role, string> = {
-  host: '스탠리를 띄운 쪽', stanley: '스탠리 세션', pipeline: '자정 · 정오 동기화',
+  host: '세나를 띄운 쪽', stanley: '세나 세션', pipeline: '자정 · 정오 동기화',
   interactive: '대화형 터미널',
 };
 
@@ -296,7 +296,7 @@ export function buildReviewPrompt(ctx: {
   return [
     '이 PC 의 메모리 감시기가 자동 종료 대상을 정하려 한다. 도구 없이 아래 자료만으로 판정해 JSON 하나로 답한다.',
     '',
-    '목적: 이 PC 에서 상시 도는 작업(스탠리 봇과 그 세션 · 자정 · 정오 동기화 파이프라인)이 메모리 고갈로 넘어지지 않게 지킨다. 감시기가 그 작업을 직접 죽이는 것도 같은 사고다.',
+    '목적: 이 PC 에서 상시 도는 작업(세나 봇과 그 세션 · 자정 · 정오 동기화 파이프라인)이 메모리 고갈로 넘어지지 않게 지킨다. 감시기가 그 작업을 직접 죽이는 것도 같은 사고다.',
     '',
     `경로: ${ctx.path === 'runaway'
       ? `폭주 — 한 프로세스가 ${ctx.processThresholdMB} MB 이상`
@@ -963,7 +963,7 @@ export class ProcessMemoryWatchdog {
     const roles = classifyRoles(rows, { botPid: process.pid, pipelinePid: this.readPipelinePid() });
     const prompt = [
       '이 PC 의 시스템 점검이 메모리 압박을 알리려 한다. 도구 없이 아래 자료만으로 분석하고 사람이 고를 대안을 JSON 하나로 답한다.',
-      '목적: 상시 작업(스탠리 봇과 그 세션 · 자정 · 정오 동기화)이 메모리 고갈로 넘어지지 않게 하면서, 사람이 일하는 것을 덜 잃는 쪽을 먼저 낸다.',
+      '목적: 상시 작업(세나 봇과 그 세션 · 자정 · 정오 동기화)이 메모리 고갈로 넘어지지 않게 하면서, 사람이 일하는 것을 덜 잃는 쪽을 먼저 낸다.',
       `상황: ${situation}`,
       '',
       snapshotDigest(snap, roles),

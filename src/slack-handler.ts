@@ -1829,8 +1829,9 @@ export class SlackHandler {
       const sessionPrompt = [event.replayNote, ledgerNote(served), unseen, finalPrompt].filter(Boolean).join('\n');
       // 비서는 하나 — 판 서랍과 같은 정체성 파일(세나)을 맨 앞에 싣는다(persona.ts). 차례마다 새로 읽고,
       // 미리 띄우는 세션도 이 글을 그대로 쓰므로 유머 값이나 파일이 바뀐 다음 차례만 새로 띄운다.
+      // **DM 에만** — 채널은 다른 사람도 보고 저장소 작업 방이라 「실장님 한 사람의 비서」 호칭과 위트가 안 맞는다.
       const surfaceNote = [
-        personaNote(workAssistantRoot()),
+        isDM ? personaNote(workAssistantRoot()) : '',
         SLACK_SURFACE_NOTE,
         capture ? CAPTURE_NOTE : '',
         slotMap,

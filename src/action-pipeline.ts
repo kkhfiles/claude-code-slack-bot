@@ -925,7 +925,7 @@ export class ActionPipeline {
         this.limitResetsAt = result.rateLimitResetsAt ?? null;
         args.push('--rate-limited');
       } else {
-        const why = crash ? `스탠리 오류 — ${crash}` : `세션 ${result?.subtype ?? '?'} — 결과 파일 없음`;
+        const why = crash ? `세나 오류 — ${crash}` : `세션 ${result?.subtype ?? '?'} — 결과 파일 없음`;
         args.push('--failed', shellSafe(why));
       }
     }
