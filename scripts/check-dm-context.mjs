@@ -51,7 +51,7 @@ const lines = (b) => b.split('\n').filter((l) => l.startsWith('- '));
 {
   const msgs = [bot(1000, '첫 글'), me(1100, '앞 댓글'), bot(1200, '세션이 한 답'), bot(1500, '세션 밖 댓글'), me(1600, '지금')];
   const b = unseenBlock(msgs, { ...base, currentTs: '1600', threadTs: '1000', isNewSession: false, sinceSec: 1300 });
-  eq('이어받는 스레드는 마지막 차례 뒤 글만', lines(b).map((l) => l.replace(/^- \d+ /, '')), ['스탠리: 세션 밖 댓글']);
+  eq('이어받는 스레드는 마지막 차례 뒤 글만', lines(b).map((l) => l.replace(/^- \d+ /, '')), ['세나: 세션 밖 댓글']);
 }
 
 // ── 최상위 · 세션 밖에서 나간 ❓ (10/13 10:14 모양) ────────────────────────
@@ -77,7 +77,7 @@ eq('붙일 것 없으면 빈 문자열',
 {
   const msgs = [me(800, '1 완료'), bot(801, 'TSK-5 완료로 넘겼습니다')];
   const b = unseenBlock(msgs, { ...base, currentTs: '900', isNewSession: false, sinceSec: 700 });
-  eq('사람·스탠리를 가른다', lines(b).map((l) => l.split(':')[0].replace(/^- \d+ /, '')), ['사용자', '스탠리']);
+  eq('사람·세나를 가른다', lines(b).map((l) => l.split(':')[0].replace(/^- \d+ /, '')), ['사용자', '세나']);
 }
 
 // ── 개인 글은 빼고 뺐다는 사실만 ────────────────────────────────────────────

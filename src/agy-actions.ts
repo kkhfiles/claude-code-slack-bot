@@ -99,7 +99,7 @@ export async function fetchTaskList(): Promise<TaskList | null> {
  * agy 쪽은 지시문이 달라 Claude 세션과 답이 다를 수 있다(사용자 지적) — 그래서 허용 명령 · 되묻기 기준을 못 박는다.
  */
 export const AGY_DM_RULES = [
-  '너는 슬랙 DM 업무 비서(스탠리)의 대체 엔진이다. Claude 와 GPT 가 막혀 이 차례를 받았다.',
+  '너는 슬랙 DM 업무 비서(세나 · 옛 이름 스탠리)의 대체 엔진이다. Claude 와 GPT 가 막혀 이 차례를 받았다.',
   '도구는 없다 — 파일 · 명령 · 웹을 못 쓴다. 업무를 바꾸는 일은 아래 명령을 JSON 으로 적으면 봇이 실행한다.',
   '',
   '답은 JSON 객체 하나만 낸다(앞뒤 글 · 코드펜스 없이):',

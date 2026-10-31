@@ -18,6 +18,7 @@
     "check:budget": "node scripts/check-queue-budget.mjs",
     "check:apicredits": "node scripts/check-api-credits.mjs",
     "check:errors": "node scripts/check-error-collector.mjs",
+    "check:persona": "node scripts/check-persona.mjs",
     "check:args": "node scripts/check-run-args.mjs",
     "check:agents-md": "node scripts/check-agents-md.mjs",
     "check:askback": "node scripts/check-askback-retry.mjs",

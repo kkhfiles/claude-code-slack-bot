@@ -93,7 +93,7 @@ export function unseenBlock(msgs: SlackMsg[], o: UnseenOpts): string {
     const head = Boolean(o.threadTs) && ts === o.threadTs;
     if (head ? !o.isNewSession : (o.sinceSec !== undefined && sec <= o.sinceSec)) continue;
     if (o.isPrivate(text)) { hidden += 1; continue; }
-    const who = (m.bot_id || (o.botUserId && m.user === o.botUserId)) ? '스탠리' : '사용자';
+    const who = (m.bot_id || (o.botUserId && m.user === o.botUserId)) ? '세나' : '사용자';
     picked.push({ sec, who, text, head });
   }
   if (!picked.length && !hidden) return '';

@@ -45,6 +45,7 @@ import type { ThreadApi } from './action-pipeline';
 import { captureToInbox, checkinMap, checkinNow, codexTurn, dropCapture, isWorkAssistantEnabled,
   markCaptureFailed, markCaptureReplayed, markCaptureTold, markCaptureTried, pendingCaptures,
   pendingHeld, quickUpdate, SESSION_CODEX_MODEL, workAssistantRoot } from './work-assistant';
+import { personaNote } from './persona';
 import { boardLabel } from './board-queue';
 import { readUnseen } from './dm-context';
 import { containsPrivate } from './privacy-guard';
@@ -1826,7 +1827,10 @@ export class SlackHandler {
       // 「못 본 대화방 글」이 싣는다. 세션이 마지막으로 돈 뒤의 장부만 세므로 돌아온 첫 차례에만 붙는다.
       // 다시 돌리는 차례면 그 메모(받은 시각 · 그 뒤의 글 · 이미 한 것)를 맨 앞에 — 보류 v2.
       const sessionPrompt = [event.replayNote, ledgerNote(served), unseen, finalPrompt].filter(Boolean).join('\n');
+      // 비서는 하나 — 판 서랍과 같은 정체성 파일(세나)을 맨 앞에 싣는다(persona.ts). 차례마다 새로 읽고,
+      // 미리 띄우는 세션도 이 글을 그대로 쓰므로 유머 값이나 파일이 바뀐 다음 차례만 새로 띄운다.
       const surfaceNote = [
+        personaNote(workAssistantRoot()),
         SLACK_SURFACE_NOTE,
         capture ? CAPTURE_NOTE : '',
         slotMap,

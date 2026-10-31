@@ -1,0 +1,67 @@
+#!/usr/bin/env node
+/**
+ * 슬랙 DM 세션에 세나 정체성이 실리는지 — `src/persona.ts`(2026-10-31).
+ *
+ * node scripts/check-persona.mjs
+ *
+ * 임시 폴더에 가짜 업무 비서 레포(`bin/stanley_persona.md`)와 유머 설정 파일을 만들어 읽힌다.
+ * 진짜 정체성 파일이 있으면 그것도 한 번 읽어 대원칙 줄이 실리는지 본다.
+ */
+import './lib/fresh-dist.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
+const { personaNote, readHumor, HUMOR_DEFAULT } = require(path.join(ROOT, 'dist', 'persona.js'));
+const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-'));
+const bad = [];
+
+function eq(name, got, want) {
+  const ok = JSON.stringify(got) === JSON.stringify(want);
+  console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${ok ? '' : ` — ${JSON.stringify(got)} ≠ ${JSON.stringify(want)}`}`);
+  if (!ok) bad.push(name);
+}
+
+try {
+  const repo = path.join(DIR, 'wa');
+  fs.mkdirSync(path.join(repo, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'bin', 'stanley_persona.md'), '세나는 실장님 한 사람의 개인 비서다.\n', 'utf-8');
+  const humor = path.join(DIR, 'chat.settings.json');
+
+  eq('설정 파일이 없으면 유머 50', readHumor(humor), HUMOR_DEFAULT);
+  fs.writeFileSync(humor, JSON.stringify({ humor: 83 }), 'utf-8');
+  eq('설정 파일의 유머 값을 읽음', readHumor(humor), 83);
+  for (const v of [101, -1, 50.5, '50', true]) {
+    fs.writeFileSync(humor, JSON.stringify({ humor: v }), 'utf-8');
+    eq(`잘못된 값(${JSON.stringify(v)})은 50`, readHumor(humor), HUMOR_DEFAULT);
+  }
+  fs.writeFileSync(humor, 'not json', 'utf-8');
+  eq('깨진 설정 파일은 50', readHumor(humor), HUMOR_DEFAULT);
+
+  fs.writeFileSync(humor, JSON.stringify({ humor: 20 }), 'utf-8');
+  const note = personaNote(repo, humor);
+  eq('정체성 글이 맨 앞 제목 뒤에 실림', note.includes('세나는 실장님 한 사람의 개인 비서다.'), true);
+  eq('슬랙에서는 유머 값이 줄로 실림', note.includes('지금 유머 값: 20'), true);
+  eq('업무 비서 레포가 없으면 빈 글', personaNote(null, humor), '');
+  eq('정체성 파일이 없으면 빈 글', personaNote(path.join(DIR, 'none'), humor), '');
+
+  fs.writeFileSync(path.join(repo, 'bin', 'stanley_persona.md'), '세나는 바뀐 정체성이다.\n', 'utf-8');
+  eq('파일을 고치면 다음 차례부터 걸림(다시 읽음)', personaNote(repo, humor).includes('바뀐 정체성'), true);
+
+  const real = process.env.WORK_ASSISTANT_ROOT || 'P:/github/work-assistant';
+  if (fs.existsSync(path.join(real, 'bin', 'stanley_persona.md'))) {
+    eq('진짜 정체성 파일의 대원칙이 실림', personaNote(real, humor).includes('장난은 쳐도 팩트는 틀리지 않는다'), true);
+  }
+  // 모듈만 맞고 끼우는 줄이 빠지면 슬랙 세나는 다시 정체성 없이 돈다
+  const handler = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
+  eq('DM 차례의 덧붙이는 지시 맨 앞에 정체성', /const surfaceNote = \[\s*personaNote\(workAssistantRoot\(\)\),\s*SLACK_SURFACE_NOTE,/.test(handler), true);
+} finally {
+  fs.rmSync(DIR, { recursive: true, force: true });
+}
+
+if (bad.length) { console.log(`\n실패 ${bad.length}건`); process.exit(1); }
+console.log('\n통과');
