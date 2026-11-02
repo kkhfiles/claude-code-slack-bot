@@ -114,13 +114,13 @@ export class DaouLoginNotifier {
     return [{ type: 'section', text: { type: 'mrkdwn', text } }];
   }
 
-  private buttonBlocks(text: string): any[] {
+  private buttonBlocks(text: string, value: string = ALERT_ID): any[] {
     return [
       { type: 'section', text: { type: 'mrkdwn', text } },
       { type: 'actions', elements: [{
         type: 'button', style: 'primary',
         text: { type: 'plain_text', text: '🔑 다우 로그인' },
-        action_id: ACTION_ID, value: ALERT_ID,
+        action_id: ACTION_ID, value,
       }] },
     ];
   }
@@ -158,48 +158,55 @@ export class DaouLoginNotifier {
     }
   }
 
-  /** 버튼. `ack()` 는 부르는 쪽이 먼저 보낸다. */
-  async handleAction(messageTs: string): Promise<void> {
+  /**
+   * 버튼. `ack()` 는 부르는 쪽이 먼저 보낸다.
+   * - `update` — 버튼이 다른 앱의 DM 에 달렸을 때(소인의 세션 알림) 그 메시지를 고치는 길. 없으면 스탠리 DM.
+   * - `value` 가 `renew` — 소인의 「곧 끊깁니다」 버튼. 아직 살아 있는 세션을 미리 바꾸는 것이라 살아 있어도 창을 연다.
+   * 창은 어느 버튼에서 눌렀든 한 번에 하나다(`inFlight`).
+   */
+  async handleAction(messageTs: string, opts: { update?: UpdateMessageFn; value?: string } = {}): Promise<void> {
+    const update = opts.update ?? this.updateMessage;
+    const value = opts.value === 'renew' ? 'renew' : ALERT_ID;
     if (this.inFlight) {
       const busy = '⏳ 이미 로그인 창이 열려 있습니다 — 그 창에서 로그인하세요';
-      await this.updateMessage(messageTs, busy, this.plainBlocks(busy)).catch(() => {});
+      await update(messageTs, busy, this.plainBlocks(busy)).catch(() => {});
       return;
     }
     this.inFlight = true;
     try {
       // 하루 뒤에 눌렀을 수 있다 — 그사이 다른 길로 로그인했으면 창을 띄울 이유가 없다.
-      const alive = await this.probeAlive();
+      const alive = value === 'renew' ? false : await this.probeAlive();
       if (alive) {
         const already = '✅ 다우 세션이 이미 살아 있습니다 (다른 곳에서 로그인됨) — 알림을 내립니다';
-        await this.updateMessage(messageTs, already, this.plainBlocks(already));
+        await update(messageTs, already, this.plainBlocks(already));
         await this.clearAlert();
         return;
       }
 
       const opened = '⏳ 이 PC 에 로그인 창을 띄웠습니다 — 5분 안에 계정·비밀번호·보안문자를 넣으세요';
-      await this.updateMessage(messageTs, opened, this.plainBlocks(opened));
+      await update(messageTs, opened, this.plainBlocks(opened));
       const result = await this.runLogin();
       if (!result.ok) {
         const text = result.timedOut
           ? '⚠️ 5분 안에 로그인이 없어 창을 닫았습니다 — 다시 누르면 다시 엽니다'
           : `⚠️ 로그인 창을 못 띄웠습니다 — ${result.error}\n다시 누르면 다시 시도합니다`;
-        await this.updateMessage(messageTs, text, this.buttonBlocks(text));
+        await update(messageTs, text, this.buttonBlocks(text, value));
         return;
       }
 
       const when = localHHMM();
       const head = `✅ 다우 로그인 됨 (${when}) · 쿠키 ${result.cookies ?? '?'}개`;
-      await this.updateMessage(messageTs, `${head} · 밀린 적재 확인 중…`,
+      await update(messageTs, `${head} · 밀린 적재 확인 중…`,
         this.plainBlocks(`${head} · 밀린 적재 확인 중…`));
       const sync = await this.runCatchUp();
-      await this.updateMessage(messageTs, `${head} · ${sync}`, this.plainBlocks(`${head} · ${sync}`));
+      await update(messageTs, `${head} · ${sync}`, this.plainBlocks(`${head} · ${sync}`));
       const notice = this.readNotice();
       if (notice && notice.ts === messageTs) {
         this.writeNotice({ ...notice, resolvedAt: new Date().toISOString() });
       }
     } catch (e) {
       const text = `⚠️ 처리 중 오류 — ${(e as Error).message}\n다시 누르면 다시 시도합니다`;
-      await this.updateMessage(messageTs, text, this.buttonBlocks(text)).catch(() => {});
+      await update(messageTs, text, this.buttonBlocks(text, value)).catch(() => {});
     } finally {
       this.inFlight = false;
     }

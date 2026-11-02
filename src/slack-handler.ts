@@ -837,6 +837,21 @@ export class SlackHandler {
             premium?.register(app);
             lunchNotice?.register(app);
             lunchInitiative?.register(app);
+            // 소인 세션 알림 DM 의 「🔑 다우 로그인」(lunch-party `_session_blocks`) — 스탠리 DM 버튼과 같은 처리로
+            // 이 PC 에 로그인 창만 띄운다(터미널 없이 · 2026-11-02 실장). 버튼은 그 DM 을 보낸 소인 앱 소켓으로 온다.
+            app.action(DAOU_LOGIN_ACTION, async ({ ack, body, client }: any) => {
+              await ack();
+              const daou = this.daouLogin;
+              const channel = body?.channel?.id;
+              const ts = body?.message?.ts;
+              if (!daou || !channel || !ts || body?.user?.id !== config.letter.managerUserId) return;
+              await daou.handleAction(ts, {
+                value: body?.actions?.[0]?.value,
+                update: async (t, text, blocks?) => {
+                  await client.chat.update({ channel, ts: t, text, ...(blocks ? { blocks } : {}) });
+                },
+              });
+            });
           },
         });
         this.chatHosts.push(lunchHost);

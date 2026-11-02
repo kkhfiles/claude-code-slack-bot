@@ -72,7 +72,24 @@ const notifier = new DaouLoginNotifier(
   ok('진행 중에 다시 누르면 「이미 열려 있음」', busy.length === 1, JSON.stringify(updated.slice(-3)));
   ok('살아 있으면 창 없이 「이미 살아 있음」', updated.some((u) => /이미 살아 있습니다/.test(u.text)));
 
+  // ── 소인 DM 버튼 — 그 앱의 메시지를 고치고, 「곧 끊김」(renew)은 살아 있어도 창을 연다 ──────────
+  let logins = 0;
+  notifier.runLogin = async () => { logins++; return { ok: false, timedOut: true }; };
+  const lunch = [];
+  const lunchUpdate = async (ts, text, blocks) => { lunch.push({ ts, text, blocks }); };
+  const before = updated.length;
+  await notifier.handleAction('1800000001.000', { value: 'renew', update: lunchUpdate });
+  ok('renew — 살아 있어도 로그인 창을 엶', logins === 1, JSON.stringify(lunch));
+  ok('renew — 고치는 것은 소인 DM 메시지뿐(스탠리 DM 은 그대로)',
+     updated.length === before && lunch.length >= 2 && lunch.every((u) => u.ts === '1800000001.000'));
+  ok('renew — 5분 넘겨 닫히면 다시 누를 버튼도 renew', buttonOf(lunch.at(-1)?.blocks)?.value === 'renew',
+     JSON.stringify(lunch.at(-1)));
+  lunch.length = 0;
+  await notifier.handleAction('1800000002.000', { value: 'daou-session', update: lunchUpdate });
+  ok('끊김 버튼 — 그새 살아났으면 창 없이 「이미 살아 있음」', logins === 1 && /이미 살아 있습니다/.test(lunch.at(-1)?.text || ''),
+     JSON.stringify(lunch));
+
   fs.rmSync(home, { recursive: true, force: true });
   if (fail) { console.log(`\n실패 ${fail}건`); process.exit(1); }
-  console.log('\n통과 — 다우 로그인 버튼 (한 만료에 한 알림 · 해소 시 메시지 고침 · 새 만료는 새 알림 · 겹눌림 가드)');
+  console.log('\n통과 — 다우 로그인 버튼 (한 만료에 한 알림 · 해소 시 메시지 고침 · 새 만료는 새 알림 · 겹눌림 가드 · 소인 DM 버튼)');
 })();
