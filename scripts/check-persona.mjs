@@ -60,6 +60,14 @@ try {
   const handler = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
   eq('DM 차례에만 덧붙이는 지시 맨 앞에 정체성', /const surfaceNote = \[\s*isDM \? personaNote\(workAssistantRoot\(\)\) : '',\s*SLACK_SURFACE_NOTE,/.test(handler), true);
   eq('슬랙 안내가 반영 약속을 막음', personaNote(repo, humor).includes('「반영했습니다」라고 하지 않는다'), true);
+  // 정해진 형식을 만드는 차례(2026-11-02 결정 F 「전부」) — 형식이 위트보다 앞선다
+  const out = personaNote(repo, humor, 'output');
+  eq('형식 차례에는 형식 우선 안내', out.includes('출력 형식은 아래 지시가 정한다') && !out.includes('슬랙에서 이 정체성을'), true);
+  eq('형식 차례에도 유머 값', out.includes('지금 유머 값: 20'), true);
+  const sched = fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8');
+  eq('카드 요약, 개선 제안, 집중 줄, 아침 브리핑 — 네 곳에 정체성', (sched.match(/appendSystemPrompt: withSena\(/g) || []).length, 4);
+  eq('좁은 길은 규칙 글을 읽는 자리에서 정체성을 붙임(1차와 폴백이 같은 글)', /const rulesText = withSena\(fs\.readFileSync\(rules/.test(sched), true);
+  eq('agy 대체 엔진에도 정체성', /system: \[personaNote\(workAssistantRoot\(\), undefined, 'output'\), AGY_DM_RULES\]/.test(handler), true);
 } finally {
   fs.rmSync(DIR, { recursive: true, force: true });
 }

@@ -20,6 +20,12 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
 import { agyRungsOn, agyText } from './agy-turn';
 import { AGY_BRIEF_NOTE, AGY_FOCUS_NOTE, parseTaskList, parseFocusReply, runActions, validateActions } from './agy-actions';
 import type { QuickOutcome } from './work-assistant';
+import { personaNote } from './persona';
+
+/** 세나 정체성을 앞에 붙인 지시(2026-11-02 결정 F) — 정체성 파일을 못 읽으면 지시만 그대로. */
+export function withSena(rules: string): string {
+  return [personaNote(workAssistantRoot(), undefined, 'output'), rules].filter(Boolean).join('\n\n');
+}
 import { engineState } from './engine-state';
 import { codexQuota } from './codex-quota';
 import { dmFallbackOn, dmLadder } from './dm-fallback';
@@ -1812,7 +1818,7 @@ export class AssistantScheduler {
       // 규칙 파일을 안 읽는다 — 두 CLAUDE.md 가 따라 들어오면 그것만으로
       // 건당 값이 몇 배가 된다(focus 에서 겪은 것).
       settingSources: [],
-      appendSystemPrompt: fs.readFileSync(promptPath, 'utf-8'),
+      appendSystemPrompt: withSena(fs.readFileSync(promptPath, 'utf-8')),
       env: { ASSISTANT_MODE: 'summary', CLAUDE_SCHEDULED: '1' },
       skipMcp: true,
       noSessionPersistence: true,
@@ -1889,7 +1895,7 @@ export class AssistantScheduler {
       tools: [],
       allowedTools: [],
       settingSources: [],
-      appendSystemPrompt: fs.readFileSync(promptPath, 'utf-8'),
+      appendSystemPrompt: withSena(fs.readFileSync(promptPath, 'utf-8')),
       env: { ASSISTANT_MODE: 'improve', CLAUDE_SCHEDULED: '1' },
       skipMcp: true,
       noSessionPersistence: true,
@@ -2306,8 +2312,8 @@ export class AssistantScheduler {
       // 파이썬 호출만 여기서 직접 열어 준다(그 밖은 조용히 거부된다).
       settingSources: [],
       settings: { permissions: { allow: ['Bash(python:*)', 'Read'] } },
-      appendSystemPrompt:
-        'tasks.py 의 json·focus 두 서브커맨드만 쓴다. 그 외 쓰기·발신 금지.',
+      appendSystemPrompt: withSena(
+        'tasks.py 의 json·focus 두 서브커맨드만 쓴다. 그 외 쓰기·발신 금지.'),
       env: { ASSISTANT_MODE: 'focus', CLAUDE_SCHEDULED: '1' },
       skipMcp: true,
       noSessionPersistence: true,
@@ -2949,7 +2955,8 @@ export class AssistantScheduler {
     const card = await narrowCard(task);
     if (!card) return { kind: 'not-quick', detail: `${task} 재료를 못 만듦`, code: 'no-card' };
     // 두 엔진이 **같은 규칙**을 받아야 한다 — 한쪽만 고치면 폴백이 다른 일을 한다.
-    const rulesText = fs.readFileSync(rules, 'utf-8');
+    // 세나 정체성은 여기서 한 번 붙인다 — 1차와 폴백(codex)이 같은 글을 받아야 같은 일을 한다(2026-11-02 결정 F)
+    const rulesText = withSena(fs.readFileSync(rules, 'utf-8'));
 
     const today = new Date();
     const p = (n: number) => String(n).padStart(2, '0');
@@ -3336,6 +3343,7 @@ export class AssistantScheduler {
       allowedTools,
       noSessionPersistence: true,
       skipMcp: true,
+      appendSystemPrompt: withSena(''),
       env: { CLAUDE_SCHEDULED: '1' },
       // codex 뒤에 agy 두 칸(6단계) — `tasks.py brief` 출력을 재료로 본문만(읽기만).
       agyRung: 'briefing',

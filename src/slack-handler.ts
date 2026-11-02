@@ -3162,7 +3162,8 @@ export class SlackHandler {
       });
       this.logger.warn(`DM 폴백 — ${rung} 가 이어 받습니다`, { model: model.alias, priorWrites, origin: event.replay ? 'replay' : 'dm' });
       const r = await agyTurn(prompt, {
-        rung, system: AGY_DM_RULES, drillScope: 'interactive', env: fallbackEnv(captureId),
+        rung, system: [personaNote(workAssistantRoot(), undefined, 'output'), AGY_DM_RULES].filter(Boolean).join('\n\n'),
+        drillScope: 'interactive', env: fallbackEnv(captureId),
         onSpawn: (k) => { kill = k; if (stopped) k(); },
       });
       if (stopped) {
