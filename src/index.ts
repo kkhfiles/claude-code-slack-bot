@@ -9,8 +9,15 @@ import { installActivityLog, tagApp, tagToken } from './activity-log';
 import { installPrivacyGuard } from './privacy-guard';
 import { getVersionInfo, checkForUpdates } from './version';
 import { ReportServer } from './report-server';
+import { isSessionEnv } from './child-env';
 
 const logger = new Logger('Main');
+
+// **봇을 띄운 세션의 변수를 지운다** (2026-11-03). pm2 를 Claude Code · Codex 세션에서 띄우면 그 세션의
+// 변수가 데몬과 봇에 남고(cluster 모드라 데몬 환경을 물려받는다), 봇이 띄우는 파이썬 · claude · codex · agy 가
+// 그것을 물려받아 사람이 보는 세션의 자식으로 잡힌다. 자식을 띄우는 곳이 스무 곳 가까이라 여기서 한 번에 지운다.
+const scrubbed = Object.keys(process.env).filter(isSessionEnv);
+for (const k of scrubbed) delete process.env[k];
 
 // **봇이 띄운 세션이라는 표시** (2026-10-13). 세션이 이 프로세스의 환경을 물려받으므로
 // 여기 한 번 심으면 대화·예약 세션 모두에 실린다. 사용자 설정의 훅이 이 표시를 보고
@@ -34,6 +41,7 @@ async function start() {
       useBedrock: config.claude.useBedrock,
       useVertex: config.claude.useVertex,
     });
+    if (scrubbed.length) logger.info(`세션 환경 변수 ${scrubbed.length}개를 지웠습니다(이름은 child-env 의 목록)`);
 
     // 봇이 한 일을 로컬에 남긴다. **슬랙에 붙기 전에** 길목을 감싸야 첫 말부터 잡힌다.
     installActivityLog();

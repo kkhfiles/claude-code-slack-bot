@@ -66,6 +66,17 @@ const args = new Set(process.argv.slice(2));
 const force = args.has('--force');
 const dry = args.has('--dry');
 const RESTART_CMD = `pm2 restart ${APP}${args.has('--keep-env') ? '' : ' --update-env'}`;
+/**
+ * pm2 에 넘기는 환경 — 이 스크립트를 부른 Claude Code · Codex · agy 세션의 변수를 뺀다(2026-11-03). `--update-env` 는
+ * 부른 쪽 환경을 저장 환경에 더하고, 데몬이 없을 때의 `pm2 jlist` 는 그 환경으로 데몬을 띄운다. 목록 정본은
+ * `src/session-env.json`(봇 `child-env.ts` 와 같은 파일) — dist 없이도 돌게 그 파일을 바로 읽는다.
+ */
+const SESSION_ENV = JSON.parse(fs.readFileSync(new URL('../src/session-env.json', import.meta.url), 'utf-8'));
+const SESSION_NAMES = new Set(SESSION_ENV.names.map((n) => n.toUpperCase()));
+const PM2_ENV = Object.fromEntries(Object.entries(process.env).filter(([k]) => {
+  const u = k.toUpperCase();
+  return !SESSION_NAMES.has(u) && !SESSION_ENV.prefixes.some((p) => u.startsWith(p));
+}));
 /** SDK 판 맞춤 결과 — 이보다 오래 `running` 이면 멈춘 것으로 보고 막지 않는다. */
 const SDK_UPDATE_STALE_MS = 2 * 60 * 60_000;
 
@@ -84,7 +95,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function pm2Info() {
   try {
-    const list = JSON.parse(execSync('pm2 jlist', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }));
+    const list = JSON.parse(execSync('pm2 jlist', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], env: PM2_ENV }));
     return list.find((p) => p.name === APP) || null;
   } catch {
     return null;
@@ -217,7 +228,7 @@ function lastQueueActivity(logPath) {
 const proc = pm2Info();
 if (!proc) {
   console.log(`⚠️ pm2 에 ${APP} 이 없습니다 — 셀 것이 없어 그냥 넘깁니다`);
-  if (!dry) execSync(RESTART_CMD, { stdio: 'inherit' });
+  if (!dry) execSync(RESTART_CMD, { stdio: 'inherit', env: PM2_ENV });
   process.exit(0);
 }
 
@@ -315,4 +326,4 @@ if (dry) {
   process.exit(0);
 }
 console.log('✅ 걸리는 것 없음 — 재시작합니다');
-execSync(RESTART_CMD, { stdio: 'inherit' });
+execSync(RESTART_CMD, { stdio: 'inherit', env: PM2_ENV });

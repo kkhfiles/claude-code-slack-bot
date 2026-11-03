@@ -33,6 +33,7 @@
     "check:windowshide": "node scripts/check-windows-hide.mjs",
     "restart": "node scripts/restart.mjs",
     "check:restart": "node scripts/check-restart.mjs",
+    "check:sessionenv": "node scripts/check-session-env.mjs",
     "test": "node scripts/check-all.mjs",
     "check:cli": "node scripts/check-cli-contract.mjs",
     "check:fresh": "node scripts/check-fresh-dist.mjs",
