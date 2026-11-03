@@ -351,6 +351,8 @@ interface MessageEvent {
   heldFiles?: HeldFile[];
   /** agy 칸이 「Claude·GPT 몫」으로 남긴 것을 다시 돌림(6단계) — agy 칸을 건너뛴다. */
   needsFull?: boolean;
+  /** 서랍에서 온 차례(2026-11-04) — 슬랙에 글이 없고 `ts` 는 지어낸 값이다(`askFromBoard`). */
+  drawer?: boolean;
   files?: Array<{
     id: string;
     name: string;
@@ -1062,10 +1064,27 @@ export class SlackHandler {
    * 이 방에서 이어 가던 대화와 갈라진다.
    */
   private async askFromBoard(text: string, lead?: string, shown?: string,
-                             captureId?: string, opts: { thread?: boolean } = {}): Promise<TurnOutcome & { lastText?: string }> {
+                             captureId?: string, opts: { drawer?: boolean } = {}): Promise<TurnOutcome & { lastText?: string }> {
     const channel = config.assistant.dmChannel;
     const user = config.bot.allowUsers[0];
     if (!channel || !user) throw new Error('비서 방 또는 사용자가 설정되지 않았습니다');
+
+    // **서랍(세나 대화)에서 온 말은 슬랙에 아무것도 안 남긴다**(2026-11-04 실장님 「세나 답을 슬랙에 안 쓰는 게 좋겠다 ·
+    // 필요한 경우에만」). 머리 줄도 스레드도 없이 같은 세나 세션(DM 의 세션 열쇠 'direct')에 넘기고, 마지막 글은 부른
+    // 쪽이 서랍 차례에 쓴다. 차례 `ts` 는 지어낸 값이다 — 쓰는 곳이 반응 달기(실패를 삼킴), 상태 줄(`say` 가 ts 를 안
+    // 주면 건너뜀), 캡처의 순서 값뿐이다. 슬랙에 올리는 것은 `drawerSay` 가 고른 둘뿐이다.
+    if (opts.drawer) {
+      let lastText = '';
+      const now = Date.now();
+      const ts = `${Math.floor(now / 1000)}.${String((now % 1000) * 1000 + Math.floor(Math.random() * 1000)).padStart(6, '0')}`;
+      const outcomeSink: Partial<TurnOutcome> = {};
+      await this.handleMessage(
+        { type: 'message', channel, user, text, ts, pushed: true, drawer: true,
+          captureId, outcomeSink } as unknown as MessageEvent,
+        this.drawerSay(channel, lead ?? '🗂 서랍에서', (t) => { if (t.trim()) lastText = t; }),
+      );
+      return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink, lastText };
+    }
 
     // 무엇에 대한 답인지 보이게 먼저 남긴다 — 이 줄이 없으면 답만 덩그러니 뜬다.
     // 봇이 쓴 것이라 메시지 핸들러가 되받지 않는다(`user` 가 없는 이벤트가 된다).
@@ -1097,13 +1116,7 @@ export class SlackHandler {
     //
     // ⚠️ **판단이 든 것은 그대로 말한다** — 해석해서 넣은 날짜, 되물을 것,
     // 못 한 것. 조용한 것이 「그대로 됐다」는 뜻이 되려면 그래야 한다.
-    // **서랍(세나 대화)에서 온 말**(2026-11-03 A1 · 실장님 「답은 서랍에만」) — 슬랙 본문에는 위 머리 줄 하나만 두고
-    // 진행 글과 답은 그 줄의 스레드로 보낸다. 세션은 그대로 같은 세나 세션이다(DM 의 세션 열쇠는 차례의 `thread_ts`
-    // 로 정해지고, 여기서 바꾸는 것은 글을 올리는 곳뿐). 마지막 글은 부른 쪽이 서랍 차례에 쓴다.
-    let lastText = '';
-    const say = opts.thread
-      ? this.threadedSay(channel, String(posted.ts), (t) => { if (t.trim()) lastText = t; })
-      : this.pushedSay(channel);
+    const say = this.pushedSay(channel);
     // `pushed` 는 **사람이 말을 건 것이 아니라는 표시**다 — 완료 줄을 남길지가
     // 여기서 갈린다(사람이 물었으면 「끝났다」이고, 안 물었으면 아무 말도 아니다).
     //
@@ -1115,21 +1128,35 @@ export class SlackHandler {
         captureId, outcomeSink } as unknown as MessageEvent,
       say,
     );
-    return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink,
-             ...(opts.thread ? { lastText } : {}) };
+    return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink };
   }
 
   /**
-   * 서랍에서 온 차례의 `say` — 스레드가 정해지지 않은 글은 머리 줄의 스레드로 보내고, 보낸 글을 `seen` 에 알린다.
-   * `[조용히]` 도 서랍에는 알린다(서랍은 「반영했어요」로 보인다) — 슬랙에는 안 올린다.
+   * 서랍에서 온 차례의 `say` — 글은 `seen` 에만 알리고(마지막 글이 서랍 답의 예비가 된다) 슬랙에는 안 올린다.
+   * 올리는 것은 둘이고, 둘 다 DM 바깥 글로 간다(차례 `ts` 가 지어낸 값이라 스레드를 못 단다).
+   * - **세나가 첫 줄을 `[슬랙]` 으로 연 글** — 실장님이 슬랙으로 꼭 아셔야 할 것(위험, 오늘 마감, 결정 필요).
+   *   표시는 떼고 올린다 · 서랍에 옮겨 쓸 때도 `sena_drawer.py` 가 표시를 뗀다
+   * - **버튼이 든 글**(계획 실행, 도구 허락, 한도 안내) — 서랍에서는 누를 수 없어 슬랙에서 답해야 한다
    */
-  private threadedSay(channel: string, headTs: string, seen: (text: string) => void): (msg: any) => Promise<{ ts?: string }> {
+  private drawerSay(channel: string, lead: string, seen: (text: string) => void): (msg: any) => Promise<{ ts?: string }> {
     return async (msg: any) => {
       const text = typeof msg === 'string' ? msg : String(msg?.text ?? '');
       seen(text);
-      if (/^\s*\[조용히\]\s*$/m.test(text.split('\n')[0])) return {};
-      const body = typeof msg === 'string' ? { text: msg } : { ...msg };
-      return this.app.client.chat.postMessage({ channel, ...body, thread_ts: body.thread_ts || headTs });
+      const [first, ...rest] = text.split('\n');
+      if (/^\s*\[슬랙\]/.test(first)) {
+        const body = [first.replace(/^\s*\[슬랙\]\s*/, ''), ...rest].join('\n').trim();
+        if (body) {
+          await this.app.client.chat.postMessage({ channel, text: `${lead}\n${body}` })
+            .catch((err) => this.logger.warn('서랍 차례의 슬랙 알림을 못 보냄', err));
+        }
+        return {};
+      }
+      const blocks = typeof msg === 'string' ? undefined : msg?.blocks;
+      if (Array.isArray(blocks) && blocks.some((b: any) => b?.type === 'actions')) {
+        const { thread_ts: _thread, ...body } = msg;
+        return this.app.client.chat.postMessage({ channel, ...body, text: `${lead} — 슬랙에서 답이 필요해요\n${text}` });
+      }
+      return {};
     };
   }
 
@@ -1815,7 +1842,7 @@ export class SlackHandler {
 
       // Show command hint on first message in a new thread
       const threadKey = `${channel}:${replyTs}`;
-      if (isNewSession && !this.hintShownThreads.has(threadKey)) {
+      if (isNewSession && !event.drawer && !this.hintShownThreads.has(threadKey)) {
         this.hintShownThreads.add(threadKey);
         await this.app.client.chat.postMessage({
           channel,

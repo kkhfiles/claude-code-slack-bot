@@ -962,6 +962,38 @@ try {
     eq('-engines — 세션을 안 띄움', [claudeCalls.length, s.codex.length], [0, 0]);
   }
 
+  // ================================================================ ⑬-b 서랍 차례는 슬랙에 안 쓴다(2026-11-04 실장님 「필요한 경우에만」)
+  {
+    const run = async (answer) => {
+      reset();
+      claudeScript = 'ok';
+      SCRIPTS.drawer = () => [ev.init, ev.text(answer), ev.ok(answer)];
+      claudeScript = 'drawer';
+      const t = makeHandler();
+      const out = await t.h.askFromBoard('[서랍 차례 x]\n오늘 할 일', '🗂 서랍에서 · 오늘 할 일', '', undefined, { drawer: true });
+      return { t, out };
+    };
+    let r = await run('서랍에 답했어요 — 오늘은 두 건');
+    eq('서랍 — 슬랙에 머리 줄도 답도 안 올림', r.t.posts.length, 0);
+    eq('서랍 — 마지막 글은 서랍 답의 예비로 돌려줌', r.out.lastText, '서랍에 답했어요 — 오늘은 두 건');
+    ok('서랍 — 세션은 띄움', claudeCalls.length >= 1);
+    r = await run('[슬랙] 오늘 하드 마감 하나가 아직 손 안 댔어요');
+    eq('서랍 — 「[슬랙]」 글만 표시를 떼고 DM 바깥 글로',
+       r.t.posts.map((p) => [p.text, p.thread_ts ?? null]),
+       [['🗂 서랍에서 · 오늘 할 일\n오늘 하드 마감 하나가 아직 손 안 댔어요', null]]);
+    // 버튼이 든 글(계획 실행 · 도구 허락 · 한도 안내)은 서랍에서 못 누른다 — 슬랙에 올린다
+    const t = makeHandler();
+    const posts = [];
+    t.h.app.client.chat.postMessage = async (m) => { posts.push(m); return { ts: '1.000001' }; };
+    const say = t.h.drawerSay('D_DM', '🗂 서랍에서 · 시험', () => {});
+    await say({ text: '진행 줄', thread_ts: '9.9' });
+    await say({ text: '허락이 필요해요', thread_ts: '9.9', blocks: [{ type: 'actions', elements: [] }] });
+    eq('서랍 — 버튼 글만 올리고 지어낸 스레드는 뗌', posts.map((p) => [p.text.split('\n')[0], p.thread_ts ?? null]),
+       [['🗂 서랍에서 · 시험 — 슬랙에서 답이 필요해요', null]]);
+    delete SCRIPTS.drawer;
+    claudeScript = 'ok';
+  }
+
   // ================================================================ ⑭ 공개 저장소 — 장부 · 연습 파일은 안 올린다
   {
     const gi = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf-8');

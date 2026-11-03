@@ -601,20 +601,21 @@ export async function remindDone(id: string, at?: string): Promise<boolean> {
 }
 
 /**
- * 서랍 차례에 세나의 답(또는 오류)을 쓴다(2026-11-03 A1 · `bin/sena_drawer.py finish`). 썼으면 true —
- * 그 차례가 이미 끝났거나 중단됐으면 false. 글은 임시 파일로 넘긴다(인자로 주면 셸 길이와 기호에 걸린다).
+ * 서랍 차례에 세나의 답(또는 오류)을 쓴다(2026-11-03 A1 · `bin/sena_drawer.py finish`). 결과 셋 —
+ * `wrote` 썼음 · `answered` 세나 세션이 이미 썼음(rc 4) · `gone` 차례가 끊겼거나 없음, 또는 못 부름(답을 쓸 곳이 없음).
+ * 글은 임시 파일로 넘긴다(인자로 주면 셸 길이와 기호에 걸린다).
  */
-export async function finishDrawerTurn(tid: string, r: { answer?: string; error?: string }): Promise<boolean> {
-  if (!/^[0-9a-f]{32}$/.test(tid)) return false;
+export async function finishDrawerTurn(tid: string, r: { answer?: string; error?: string }): Promise<'wrote' | 'answered' | 'gone'> {
+  if (!/^[0-9a-f]{32}$/.test(tid)) return 'gone';
   const file = path.join(os.tmpdir(), `sena-drawer-${tid}-${Date.now()}.txt`);
   try {
     const args = ['finish', '--turn', tid];
     if (r.error) args.push('--error', r.error);
     else { fs.writeFileSync(file, r.answer ?? '', 'utf-8'); args.push('--answer-file', file); }
     const { code } = await runTasks(args, 30_000, 'bin/sena_drawer.py');
-    return code === 0;
+    return code === 0 ? 'wrote' : code === 4 ? 'answered' : 'gone';
   } catch {
-    return false;
+    return 'gone';
   } finally {
     try { fs.unlinkSync(file); } catch { /* 안 만들었거나 이미 지움 */ }
   }

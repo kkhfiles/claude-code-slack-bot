@@ -991,7 +991,7 @@ export class AssistantScheduler {
      * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
      */
     private askFromBoard?: (text: string, lead?: string, shown?: string,
-                            opts?: { thread?: boolean }) => Promise<(TurnOutcome & { lastText?: string }) | void>,
+                            opts?: { drawer?: boolean }) => Promise<(TurnOutcome & { lastText?: string }) | void>,
     deps: SchedulerDeps = {},
   ) {
     this.reportLog = deps.reportLog ?? runReportLog;
@@ -2431,26 +2431,30 @@ export class AssistantScheduler {
 
   /**
    * 서랍(세나 대화)에서 온 말 하나(2026-11-03 A1) — 세나 세션에 넘기고 마지막 글을 그 서랍 차례에 쓴다.
-   * 슬랙에는 머리 줄 하나와 그 스레드만 남는다(실장님 「답은 서랍에만」). 못 넘기면 서랍 차례에 오류를 쓰고 던진다 —
-   * 드레인이 원문을 DM 으로 돌려준다. 서랍 차례가 이미 끝나 있으면(서버 재시작으로 중단) 답은 스레드에만 남는다.
+   * **슬랙에는 아무것도 안 남긴다**(2026-11-04 실장님 「필요한 경우에만」 · `askFromBoard` 의 `drawer`). 못 넘기면 서랍
+   * 차례에 오류를 쓰고 던진다 — 드레인이 원문을 DM 으로 돌려준다. 서랍 차례가 끊겨(서버 재시작) 답을 쓸 곳이 없으면
+   * 그때만 답을 DM 에 남긴다 — 안 남기면 그 답은 어디에도 없다.
    */
   private async askFromDrawer(item: QueueItem): Promise<void> {
     if (!this.askFromBoard || !item.reply) throw new Error('세나 세션에 넘길 길이 없습니다');
     const preview = item.text.replace(/\s+/g, ' ').slice(0, 60);
     // 차례 번호를 앞에 붙인다(2026-11-03) — 세나 세션이 표, 막대, 업무 카드가 든 답을 그 차례에 직접 쓴다
     // (`sena_drawer.py reply`, work-assistant `prompts/drawer-answer.md`). 세션이 썼으면 아래 `finishDrawerTurn` 은
-    // 차례가 이미 끝나 비켜 가고, 못 썼으면 지금처럼 슬랙 글을 옮긴다.
+    // 차례가 이미 끝나 비켜 가고, 못 썼으면 세션의 마지막 글을 옮긴다.
     const marked = /^[0-9a-f]{32}$/.test(item.reply.tid) ? `[서랍 차례 ${item.reply.tid}]\n${item.text}` : item.text;
     let last = '';
     try {
-      const out = await this.askFromBoard(marked, `🗂 서랍에서 — 답은 서랍에 있어요 · ${preview}`, '', { thread: true });
+      const out = await this.askFromBoard(marked, `🗂 서랍에서 · ${preview}`, '', { drawer: true });
       last = (out && out.lastText) || '';
     } catch (err) {
       await finishDrawerTurn(item.reply.tid, { error: '세나 세션에 넘기지 못했어요 — 잠시 뒤 다시 보내 주세요' });
       throw err;
     }
-    const wrote = await finishDrawerTurn(item.reply.tid, { answer: last });
-    if (!wrote) this.logger.info(`서랍 차례가 이미 끝나 있음 — 세나 세션이 직접 썼거나 서버 재시작으로 중단 (${item.id})`);
+    const r = await finishDrawerTurn(item.reply.tid, { answer: last });
+    if (r !== 'gone') return;
+    this.logger.info(`서랍 차례가 끊겨 있음 — 답을 DM 에 남김 (${item.id})`);
+    const body = last.replace(/^\s*\[(조용히|슬랙)\]\s*/, '').trim();
+    await this.sendMessage(`🗂 서랍 차례가 끊겨 답을 여기 남겨요 · ${preview}${body ? `\n${body}` : ''}`).catch(() => {});
   }
 
   /**
