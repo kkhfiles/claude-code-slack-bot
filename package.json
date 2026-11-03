@@ -72,6 +72,8 @@
     "check:myceliumguard": "node scripts/check-mycelium-guard.mjs",
     "check:turntiming": "node scripts/check-turn-timing.mjs",
     "check:drawerprogress": "node scripts/check-drawer-progress.mjs",
+    "check:recurring": "node scripts/check-recurring.mjs",
+    "check:timerdirect": "node scripts/check-timer-direct.mjs",
     "check:schedgaps": "node scripts/check-scheduled-gaps.mjs",
     "check:calbase": "node scripts/check-calendar-baseline.mjs",
     "check:dmfallback": "node scripts/check-dm-fallback.mjs",
