@@ -81,7 +81,7 @@ const cleared = new Set(
   [...body(src, 'clearAllTimers').matchAll(/this\.(\w+Timer)\b/g)].map((m) => m[1]),
 );
 const declared = new Set(
-  [...src.matchAll(/private (\w+Timer): ReturnType/g)].map((m) => m[1]),
+  [...src.matchAll(/private (\w+Timer): (?:ReturnType|Task)\b/g)].map((m) => m[1]),
 );
 const scheduleAll = body(src, 'scheduleAll');
 
@@ -105,7 +105,7 @@ for (const t of cleared) {
 for (const [timer, fn] of Object.entries(REGISTRAR)) {
   if (!cleared.has(timer)) continue;
   const b = body(src, fn);
-  if (b.includes('setInterval')) continue;              // 되풀이는 그쪽이 알아서
+  if (b.includes('setInterval') || b.includes('every({')) continue;   // 되풀이는 그쪽이 알아서(공통 장치 every 포함)
   if (!b.includes(`this.${fn}()`)) {
     fails.push(`${fn}() — 한 번 터지고 끝난다 (자기를 다시 안 예약한다)`);
   }

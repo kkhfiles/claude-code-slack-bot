@@ -28,6 +28,7 @@ export function withSena(rules: string): string {
 }
 import { engineState } from './engine-state';
 import { codexQuota } from './codex-quota';
+import { every, type RunFailure, type Task } from './recurring';
 import { dmFallbackOn, dmLadder } from './dm-fallback';
 import { isHeldOutcome, READ_ONLY_TOOLS, type TurnOutcome } from './turn-outcome';
 import { buildImproveBlocks, improveEnabled, improvePreviewText,
@@ -922,7 +923,7 @@ export class AssistantScheduler {
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private workNudgeTimer: ReturnType<typeof setTimeout> | null = null;
   private offsitePushTimer: ReturnType<typeof setTimeout> | null = null;
-  private notionWatchTimer: ReturnType<typeof setInterval> | null = null;
+  private notionWatchTimer: Task | null = null;
   private notionWatchBusy = false;
   private notionWatchFailures = 0;
   private daouKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -934,18 +935,18 @@ export class AssistantScheduler {
   private retryBusy = false;
   private summaryTimer: ReturnType<typeof setTimeout> | null = null;
   private improveTimer: ReturnType<typeof setTimeout> | null = null;
-  private boardQueueTimer: ReturnType<typeof setInterval> | null = null;
-  private mailPollTimer: ReturnType<typeof setInterval> | null = null;
+  private boardQueueTimer: Task | null = null;
+  private mailPollTimer: Task | null = null;
   private mailPollBusy = false;
   /** 막혀서 건너뛴다는 로그를 이 막힘(시작 시각)에 이미 남겼나 — 10분마다 같은 줄이 안 쌓이게. */
   private mailBlockedLogged: number | null = null;
-  private remindTimer: ReturnType<typeof setInterval> | null = null;
-  private heldTimer: ReturnType<typeof setInterval> | null = null;
+  private remindTimer: Task | null = null;
+  private heldTimer: Task | null = null;
   private heldBusy = false;
-  private vaultSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private vaultSweepTimer: Task | null = null;
   private remindBusy = false;
-  private actionsTimer: ReturnType<typeof setInterval> | null = null;
-  private runSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private actionsTimer: Task | null = null;
+  private runSweepTimer: Task | null = null;
   /** 한 차례가 끝나기 전에 다음 차례가 겹치지 않게 — 저장 · push 가 한 시간을 넘길 일은 드물지만 막아 둔다. */
   private runSweepBusy = false;
   private readonly actionPipeline: ActionPipeline;
@@ -1060,7 +1061,7 @@ export class AssistantScheduler {
   }
 
   stop(): void {
-    this.clearAllTimers();
+    this.clearAllTimers('stop');
     // 타이머만 푼다 — 계획은 파일에 남아 다음 기동이 다시 건다.
     for (const timer of this.analysisRetryTimers.values()) clearTimeout(timer);
     this.analysisRetryTimers.clear();
@@ -1439,7 +1440,7 @@ export class AssistantScheduler {
     }
   }
 
-  private clearAllTimers(): void {
+  private clearAllTimers(reason: 'reload' | 'stop' = 'reload'): void {
     if (this.briefingTimer) {
       clearTimeout(this.briefingTimer);
       this.briefingTimer = null;
@@ -1461,11 +1462,11 @@ export class AssistantScheduler {
       this.workNudgeTimer = null;
     }
     if (this.notionWatchTimer) {
-      clearInterval(this.notionWatchTimer);
+      this.notionWatchTimer.stop(reason);
       this.notionWatchTimer = null;
     }
     if (this.boardQueueTimer) {
-      clearInterval(this.boardQueueTimer);
+      this.boardQueueTimer.stop(reason);
       this.boardQueueTimer = null;
     }
     if (this.boardPush) {
@@ -1473,28 +1474,28 @@ export class AssistantScheduler {
       this.boardPush = null;
     }
     if (this.mailPollTimer) {
-      clearInterval(this.mailPollTimer);
+      this.mailPollTimer.stop(reason);
       this.mailPollTimer = null;
     }
     if (this.remindTimer) {
-      clearInterval(this.remindTimer);
+      this.remindTimer.stop(reason);
       this.remindTimer = null;
     }
     if (this.heldTimer) {
-      clearInterval(this.heldTimer);
+      this.heldTimer.stop(reason);
       this.heldTimer = null;
     }
     if (this.vaultSweepTimer) {
-      clearInterval(this.vaultSweepTimer);
+      this.vaultSweepTimer.stop(reason);
       this.vaultSweepTimer = null;
     }
     if (this.actionsTimer) {
-      clearInterval(this.actionsTimer);
+      this.actionsTimer.stop(reason);
       this.actionsTimer = null;
     }
     this.actionPipeline.stopResume();
     if (this.runSweepTimer) {
-      clearInterval(this.runSweepTimer);
+      this.runSweepTimer.stop(reason);
       this.runSweepTimer = null;
     }
     if (this.focusTimer) {
@@ -1529,12 +1530,16 @@ export class AssistantScheduler {
     const a = this.config?.actions;
     const window = parseWindow(a?.reviewWindow ?? '23:00-00:50');
     this.logger.info('처리 제안 타이머 시작', { nightlyReview: !!a?.nightlyReview, window: a?.reviewWindow });
-    this.actionsTimer = setInterval(() => {
-      const now = new Date();
-      void this.actionPipeline.tick({
-        review: !!a?.nightlyReview, window, workingDay: this.isActionsWorkingDay(window, now),
-      }, now);
-    }, ACTIONS_TICK_MS);
+    this.actionsTimer = every({
+      name: 'scheduler:actions',
+      everyMs: ACTIONS_TICK_MS,
+      run: () => {
+        const now = new Date();
+        return this.actionPipeline.tick({
+          review: !!a?.nightlyReview, window, workingDay: this.isActionsWorkingDay(window, now),
+        }, now);
+      },
+    });
     // 한도로 미뤄 둔 사람이 시킨 검토 — 재시작 · 설정 저장(clearAllTimers 가 지움) 뒤에 다시 건다.
     this.actionPipeline.restoreResume();
   }
@@ -1559,7 +1564,11 @@ export class AssistantScheduler {
       this.logger.info('분석 회차 정리 타이머 꺼짐 (report-log 자동 기록 클론 없음)');
       return;
     }
-    this.runSweepTimer = setInterval(() => { void this.sweepReportRuns(); }, RUN_SWEEP_MS);
+    this.runSweepTimer = every({
+      name: 'scheduler:run-sweep',
+      everyMs: RUN_SWEEP_MS,
+      run: () => this.sweepReportRuns().then((r): RunFailure | undefined => (r?.error ? { ok: false, code: 'sweep' } : undefined)),
+    });
   }
 
   /** 정리 한 차례. **던지지 않는다** — 실패는 로그와 브리핑 「시스템 이슈」로만 남긴다. */
@@ -2045,9 +2054,7 @@ export class AssistantScheduler {
     this.logger.info('Started remind poller', {
       everyMs: REMIND_POLL_MS, window: `${REMIND_FROM_HOUR}~${REMIND_TO_HOUR}시`,
     });
-    this.remindTimer = setInterval(() => {
-      void this.runRemindPoll();
-    }, REMIND_POLL_MS);
+    this.remindTimer = every({ name: 'scheduler:remind', everyMs: REMIND_POLL_MS, run: () => this.runRemindPoll() });
   }
 
   /**
@@ -2055,7 +2062,7 @@ export class AssistantScheduler {
    * 세션을 안 띄운다 — 정한 지시를 정한 세션에 넣기만 한다.
    */
   private startHeldPoller(): void {
-    this.heldTimer = setInterval(() => { void this.runHeldPoll(); }, HELD_POLL_MS);
+    this.heldTimer = every({ name: 'scheduler:held', everyMs: HELD_POLL_MS, run: () => this.runHeldPoll() });
   }
 
   /** 한 차례 — 타이머와 시험이 부른다. **절대 던지지 않는다.** */
@@ -2083,7 +2090,7 @@ export class AssistantScheduler {
    * (`commitVaultLeftovers` · 안 던진다).
    */
   private startVaultSweep(): void {
-    this.vaultSweepTimer = setInterval(() => { void this.runVaultSweep(); }, VAULT_SWEEP_MS);
+    this.vaultSweepTimer = every({ name: 'scheduler:vault-sweep', everyMs: VAULT_SWEEP_MS, run: () => this.runVaultSweep() });
   }
 
   /** 한 차례 — 타이머와 시험이 부른다. 안 던진다. */
@@ -2131,13 +2138,11 @@ export class AssistantScheduler {
     this.logger.info('Started mail poller', {
       everyMs: MAIL_POLL_MS, window: `${MAIL_POLL_FROM_HOUR}~${MAIL_POLL_TO_HOUR}시`,
     });
-    this.mailPollTimer = setInterval(() => {
-      void this.runMailPoll();
-    }, MAIL_POLL_MS);
+    this.mailPollTimer = every({ name: 'scheduler:mail', everyMs: MAIL_POLL_MS, run: () => this.runMailPoll() });
   }
 
   /** 한 판 돈다. **절대 던지지 않는다** — 여기서 터지면 로그가 빈 채로 조용해진다. */
-  private async runMailPoll(): Promise<void> {
+  private async runMailPoll(): Promise<void | RunFailure> {
     const h = new Date().getHours();
     if (h < MAIL_POLL_FROM_HOUR || h >= MAIL_POLL_TO_HOUR) return;
     // 쉬는 날에는 읽지도 않는다 — **읽고 안 넘기면 표시가 옮겨질 위험만 남는다.**
@@ -2168,7 +2173,7 @@ export class AssistantScheduler {
         // 것이 받는 쪽에서 똑같아 보인다 — 사람에게는 안 알리되(10분마다라
         // 소음이 된다) 로그에는 남긴다.
         this.logger.warn(`Mail poll failed — ${r.detail}`);
-        return;
+        return { ok: false, code: 'mail-read' };
       }
       if (!r.threads.length) return;
       if (!this.askFromBoard) {
@@ -2232,7 +2237,7 @@ export class AssistantScheduler {
       return;
     }
     this.logger.info('Started Notion watch', { everyMs: NOTION_WATCH_MS });
-    this.notionWatchTimer = setInterval(async () => {
+    this.notionWatchTimer = every({ name: 'scheduler:notion-watch', everyMs: NOTION_WATCH_MS, run: async (): Promise<void | RunFailure> => {
       // 앞판이 아직 도는 중이면 건너뛴다 — 다시 그리는 데 몇 초 걸린다.
       if (this.notionWatchBusy) return;
       this.notionWatchBusy = true;
@@ -2253,10 +2258,11 @@ export class AssistantScheduler {
           const why = error instanceof Error ? error.message : String(error);
           this.logger.warn(`Notion watch failed (${this.notionWatchFailures}회째): ${why}`);
         }
+        return { ok: false, code: 'notion-watch' };
       } finally {
         this.notionWatchBusy = false;
       }
-    }, NOTION_WATCH_MS);
+    } });
   }
 
   /**
@@ -2413,7 +2419,7 @@ export class AssistantScheduler {
       dailyCalls: boardQueueDailyCalls(),
       push: process.env.BOARD_PUSH === 'off' ? 'off' : 'on',
     });
-    this.boardQueueTimer = setInterval(() => { void this.tickBoardQueue(false); }, BOARD_QUEUE_POLL_MS);
+    this.boardQueueTimer = every({ name: 'scheduler:board-queue', everyMs: BOARD_QUEUE_POLL_MS, run: () => this.tickBoardQueue(false) });
     // **알림이 오면 주기를 안 기다리고 바로 돈다** (2026-10-01). 끄는 문은 `BOARD_PUSH=off`
     // 하나 — 끄면 위 타이머가 예전 주기(낮 2초 · 밤 30초)로 그대로 돈다.
     if (process.env.BOARD_PUSH !== 'off') {
@@ -2468,7 +2474,7 @@ export class AssistantScheduler {
    * **한 판이 도는 동안 온 알림은 버리지 않는다** — 끝난 뒤 한 번 더 돈다. 안 그러면
    * 세션 하나(20초)가 도는 사이에 누른 버튼이 안전망 주기(60초)까지 기다린다.
    */
-  private async tickBoardQueue(force: boolean): Promise<void> {
+  private async tickBoardQueue(force: boolean): Promise<void | RunFailure> {
     if (this.boardQueueBusy) {
       if (force) this.boardQueueAgain = true;
       return;
@@ -2480,6 +2486,7 @@ export class AssistantScheduler {
         < boardQueueGapMs(new Date(now), this.boardPush?.healthy(now) ?? false)) return;
     this.boardQueueLast = now;
     this.boardQueueBusy = true;
+    let failed = false;
     try {
       // 판 큐는 차례 결과를 안 본다(막힌 것은 캡처가 들고 드레인이 다시 돌린다) — 결과는 버리고 넘긴다.
       const ask = this.askFromBoard;
@@ -2540,6 +2547,7 @@ export class AssistantScheduler {
       // **매번 찍지 않는다.** 30초마다 도는 자리라 하루 못 고치면 로그가 같은
       // 줄로 덮인다. 처음과 10분마다만 남긴다.
       this.boardQueueFailures += 1;
+      failed = true;
       if (this.boardQueueFailures === 1 || this.boardQueueFailures % 20 === 0) {
         const why = error instanceof Error ? error.message : String(error);
         this.logger.warn(
@@ -2552,6 +2560,7 @@ export class AssistantScheduler {
       this.boardQueueAgain = false;
       void this.tickBoardQueue(true);
     }
+    return failed ? { ok: false, code: 'board-queue' } : undefined;
   }
 
   // --- Briefing ---

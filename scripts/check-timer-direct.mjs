@@ -21,14 +21,6 @@ const SRC = path.join(ROOT, 'src');
 
 /** 아직 안 옮긴 `setInterval` — `파일:메서드` → 그 메서드 안의 개수. 옮기면 지운다. */
 const INTERVAL_LEFT = new Map([
-  ['assistant-scheduler.ts:startActionsTicker', 1],
-  ['assistant-scheduler.ts:startBoardQueuePoller', 1],
-  ['assistant-scheduler.ts:startHeldPoller', 1],
-  ['assistant-scheduler.ts:startMailPoller', 1],
-  ['assistant-scheduler.ts:startNotionWatch', 1],
-  ['assistant-scheduler.ts:startRemindPoller', 1],
-  ['assistant-scheduler.ts:startRunSweeper', 1],
-  ['assistant-scheduler.ts:startVaultSweep', 1],
   ['board-push.ts:start', 1],
   ['calendar-poller.ts:start', 2],
   ['chat-host.ts:start', 1],
