@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
+import { every as everyTask, type Task } from './recurring';
 import { tagApp, tagToken, tagRooms, note, FORWARD_HEAD } from './activity-log';
 import { rememberPrivate } from './privacy-guard';
 import { pythonCommand } from './python-command';
@@ -340,7 +341,7 @@ export class ChatHost {
   /** 이 봇의 기본 말투(`bots/<이름>/config.json` 의 `tone`). 대화에 저장된 것이 없을 때 쓴다. */
   private botTone = '';
   /** 쌓인 말을 주기적으로 훑어보는 타이머. */
-  private sweeper: NodeJS.Timeout | null = null;
+  private sweeper: Task | null = null;
   /** 먼저 말 꺼내기(후속) 타이머와 겹침 막이. */
 
   /** 지금 턴이 도는 열쇠 — 그쪽으로 새로 온 말은 뒤에 줄서지 않고 합쳐진다. */
@@ -556,11 +557,13 @@ export class ChatHost {
       if (this.servesChannel && this.opts.buttIn && every > 0) {
         // **비동기라 try/catch 로는 못 잡는다** — 채널을 읽어 오는 사이에 나는 실패는
         // 되돌아온 약속(promise)에 담겨 오므로 거기서 받아야 타이머가 안 죽는다.
-        this.sweeper = setInterval(() => {
-          void this.sweep().catch((error) =>
-            this.logger.warn('훑어보다 넘어졌습니다', error));
-        }, every * 1000);
-        this.sweeper.unref?.();
+        this.sweeper = everyTask({
+          name: `chat:${this.opts.name}:sweep`,
+          everyMs: every * 1000,
+          run: () => this.sweep().catch((error) =>
+            this.logger.warn('훑어보다 넘어졌습니다', error)),
+          unref: true,
+        });
       }
       const where: string[] = [];
       if (this.servesDm) where.push(`DM ${this.opts.allowUsers?.length ?? 0}명 허용`);
@@ -611,7 +614,7 @@ export class ChatHost {
 
   async stop(): Promise<void> {
     if (this.sweeper) {
-      clearInterval(this.sweeper);
+      this.sweeper.stop('stop');
       this.sweeper = null;
     }
     // 상주 turn.py 를 내린다 — 안 내리면 그 아래 agy 워커(하나에 177MB)가 남는다.

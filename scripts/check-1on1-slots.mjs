@@ -68,7 +68,7 @@ b.register({
   action: (sel, fn) => { H[sel.action_id instanceof RegExp ? 'pick' : sel.action_id] = fn; },
   client,
 });
-if (b['nudgeTimer']) clearInterval(b['nudgeTimer']);
+if (b['nudgeTimer']) b['nudgeTimer'].stop();   // 공통 장치의 Task
 
 const since = () => calls.length;
 const after = (n) => calls.slice(n);

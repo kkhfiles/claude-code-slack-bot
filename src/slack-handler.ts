@@ -7,6 +7,7 @@ import { CliHandler, type CliEvent, type CliAssistantEvent, type CliInitEvent, t
 import { SdkHandler, SdkProcess, SdkRunOptions } from './sdk-handler';
 import { PendingDenial } from './types';
 import { Logger } from './logger';
+import { every, type Task } from './recurring';
 import { WorkingDirectoryManager } from './working-directory-manager';
 import { FileHandler, ProcessedFile } from './file-handler';
 import { TodoManager, Todo } from './todo-manager';
@@ -696,6 +697,7 @@ export class SlackHandler {
       // 소인의 주간 시계 — 같은 장치를 **소인 앱에** 얹는다(실장 DM 과 카드가 소인 DM 으로 간다). 읽을 방은 시험 방 뺀
       // 소인의 방 · 방 이력은 소인 토큰으로 · 현황판은 `lunch_pulse.py` · 판단 턴은 소인 대화 호스트가 단발로 돈다.
       lunchInitiative = new LetterInitiative({
+        role: 'lunch',
         enabled: config.lunchBot.initiative.enabled && Boolean(lunchClient),
         at: config.lunchBot.initiative.at,
         rooms: rooms(config.lunchBot.chatChannel).filter((id) => id !== testRoom)
@@ -4922,22 +4924,28 @@ export class SlackHandler {
     // 시간으로 풀린 것)을 줍는다. 막혀 있으면 안 돌고, 밀린 것이 없으면 드레인이 바로 돌아온다.
     // 막힘은 사다리로 본다(`drainBlocked`) — Claude 만 보면 GPT · agy 가 비어도 Claude 가 풀릴 때까지 안 돈다.
     if (holdV2On()) {
-      const sweep = setInterval(() => {
-        if (this.drainBlocked()) return;
-        void this.drainStuck('쓸어보기');
-      }, HOLD_SWEEP_MS);
-      sweep.unref?.();
+      every({
+        name: 'chat:hold-sweep',
+        everyMs: HOLD_SWEEP_MS,
+        run: () => {
+          if (this.drainBlocked()) return;
+          void this.drainStuck('쓸어보기');
+        },
+        unref: true,
+      });
     }
 
     // Cleanup inactive sessions periodically
-    setInterval(() => this.sweepSessions(), 5 * 60 * 1000);
+    every({ name: 'chat:session-sweep', everyMs: 5 * 60 * 1000, run: () => this.sweepSessions() });
 
     // Periodic token health check (every 1 hour)
-    setInterval(() => {
-      this.checkTokenHealth().catch(err =>
+    every({
+      name: 'chat:token-health',
+      everyMs: 60 * 60 * 1000,
+      run: () => this.checkTokenHealth().catch(err =>
         this.logger.error('Token health check failed', err),
-      );
-    }, 60 * 60 * 1000);
+      ),
+    });
     // Run once at startup (after 30 seconds to let Slack connect)
     setTimeout(() => {
       this.checkTokenHealth().catch(err =>

@@ -604,7 +604,7 @@ try {
   // ================================================================ ⑪ 배선 — 기동 · 쓸어 보기 · 버튼
   {
     const src = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
-    ok('30분 쓸어 보기는 켜졌을 때만', /if \(holdV2On\(\)\) \{\s*const sweep = setInterval\(/.test(src));
+    ok('30분 쓸어 보기는 켜졌을 때만', /if \(holdV2On\(\)\) \{\s*every\(\{\s*name: 'chat:hold-sweep'/.test(src));
     // 막힘은 사다리로 — Claude 만 보면 GPT · agy 가 비어도 Claude 가 풀릴 때까지 안 돈다.
     ok('쓸어 보기는 사다리가 다 막혀 있을 때만 쉰다', /if \(this\.drainBlocked\(\)\) return;\s*void this\.drainStuck\('쓸어보기'\)/.test(src));
     ok('[실행] · [버림] 버튼이 걸려 있다', /this\.action\('held_run'/.test(src) && /this\.action\('held_drop'/.test(src));

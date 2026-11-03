@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import Holidays from 'date-holidays';
 import { Logger } from './logger';
+import { every, type Task } from './recurring';
 import { pythonCommand } from './python-command';
 
 /**
@@ -16,7 +17,7 @@ import { pythonCommand } from './python-command';
  * so nothing here touches this bot's Slack client.
  */
 export class LunchPoller {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: Task | null = null;
   private running = false;
   private logger = new Logger('LunchPoller');
   private holidays = new Holidays('KR');
@@ -33,9 +34,11 @@ export class LunchPoller {
     if (this.timer) return;
 
     const intervalMs = Math.max(1, this.intervalMinutes) * 60 * 1000;
-    this.timer = setInterval(() => {
-      this.tick().catch((error) => this.logger.warn('Lunch tick failed', error));
-    }, intervalMs);
+    this.timer = every({
+      name: 'lunch:poll',
+      everyMs: intervalMs,
+      run: () => this.tick().catch((error) => this.logger.warn('Lunch tick failed', error)),
+    });
 
     this.logger.info('Lunch poller started', {
       script: this.scriptPath,
@@ -46,7 +49,7 @@ export class LunchPoller {
 
   stop(): void {
     if (this.timer) {
-      clearInterval(this.timer);
+      this.timer.stop('stop');
       this.timer = null;
       this.logger.info('Lunch poller stopped');
     }

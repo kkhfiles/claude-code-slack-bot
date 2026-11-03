@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
+import { every, type Task } from './recurring';
 
 /**
  * 레터의 **1on1 신청 창구** — 반기 정기 1on1 말고, 하고 싶을 때 여는 자리.
@@ -177,7 +178,7 @@ interface Alive {
 export class LetterBooking {
   private logger = new Logger('Letter:1on1');
   private names = new Map<string, string>();
-  private nudgeTimer?: NodeJS.Timeout;
+  private nudgeTimer?: Task;
 
   constructor(private readonly opts: LetterBookingOptions) {}
 
@@ -601,10 +602,12 @@ export class LetterBooking {
    */
   private startNudge(app: App): void {
     if (this.nudgeTimer) return;
-    this.nudgeTimer = setInterval(() => {
-      void this.maybeNudge(app).catch((error) => this.logger.warn('알림에서 넘어졌습니다', error));
-    }, 60 * 1000);
-    this.nudgeTimer.unref?.();
+    this.nudgeTimer = every({
+      name: 'booking:nudge',
+      everyMs: 60 * 1000,
+      run: () => this.maybeNudge(app).catch((error) => this.logger.warn('알림에서 넘어졌습니다', error)),
+      unref: true,
+    });
   }
 
   /** `now` 를 밖에서 받는다 — 안 그러면 검사가 몇 시에 돌렸는지에 따라 결과가 달라진다. */

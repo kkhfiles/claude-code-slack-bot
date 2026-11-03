@@ -3,6 +3,7 @@ import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
+import { every, type Task } from './recurring';
 import { pythonCommand } from './python-command';
 import type { FollowUp, TurnAsk, TurnResult } from './chat-host';
 
@@ -97,6 +98,8 @@ export interface LetterInitiativeOptions {
   /** 방 이름(후속 알림 · 이력). 없으면 `rooms` 의 이름. */
   roomLabel?: (id: string) => string;
   logger?: Logger;
+  /** 상태 파일 타이머 이름의 역할 키 — 없으면 `letter`(인스턴스가 둘이라 가름). */
+  role?: string;
 }
 
 export type Outcome =
@@ -107,7 +110,7 @@ type State = { week?: string; day?: string; wake?: string };
 
 export class LetterInitiative {
   private logger: Logger;
-  private timer: NodeJS.Timeout | null = null;
+  private timer: Task | null = null;
   /** 이번 주 돌았다는 표시를 메모리에도 둔다 — 상태 파일을 못 쓰면 두 시간 동안 매분 돌게 된다(검토 2026-09-18). */
   private ranWeek = '';
   /** 오늘을 쉬는 날로 봤다는 표시 — 쉬는 날에 두 시간 동안 매분 파이썬을 부르지 않게. */
@@ -135,10 +138,12 @@ export class LetterInitiative {
       return;
     }
     if (this.timer) return;
-    this.timer = setInterval(() => {
-      void this.tick(app.client).catch((error) => this.logger.warn('주간 턴에서 넘어졌습니다', error));
-    }, 60 * 1000);
-    this.timer.unref?.();
+    this.timer = every({
+      name: `initiative:${this.opts.role ?? 'letter'}`,
+      everyMs: 60 * 1000,
+      run: () => this.tick(app.client).catch((error) => this.logger.warn('주간 턴에서 넘어졌습니다', error)),
+      unref: true,
+    });
     this.logger.info(`준비됨 — 월요일(못 돌면 다음 업무일) ${this.opts.at} 실장 DM 으로 「이번 주 이렇게 할까요」`
       + ` · 그 밖의 업무일 같은 시각에는 기한이 된 맡은 일만 · 방에는 카드를 거쳐야만`);
   };

@@ -30,6 +30,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Logger } from './logger';
+import { every, type Task } from './recurring';
 
 const logger = new Logger('EngineState');
 
@@ -404,7 +405,7 @@ export class EngineState {
   private seen: string | null = null;
   /** 마지막으로 본 파일 표시(수정 시각 · 크기) — 안 바뀌었으면 읽지도 않는다. */
   private stamp: string | null = null;
-  private watchTimer: NodeJS.Timeout | null = null;
+  private watchTimer: Task | null = null;
 
   private statKey(): string {
     try {
@@ -447,14 +448,13 @@ export class EngineState {
     if (!this.watchTimer) {
       // 지금 모양을 기준으로 삼는다 — 켜는 순간의 막힘은 기동 때 안내 · 타이머가 이미 본다.
       this.pollFile();
-      this.watchTimer = setInterval(() => { this.pollFile(); }, intervalMs);
-      this.watchTimer.unref?.();
+      this.watchTimer = every({ name: 'engine-state:watch', everyMs: intervalMs, run: () => { this.pollFile(); }, unref: true });
     }
     return () => this.stopWatch();
   }
 
   stopWatch(): void {
-    if (this.watchTimer) clearInterval(this.watchTimer);
+    if (this.watchTimer) this.watchTimer.stop('stop');
     this.watchTimer = null;
   }
 

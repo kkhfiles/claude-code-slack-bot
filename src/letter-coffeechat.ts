@@ -3,6 +3,7 @@ import { spawn } from 'child_process';
 import { pythonCommand } from './python-command';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
+import { every, type Task } from './recurring';
 import { coffeechatMessage } from './coffeechat-message';
 
 /**
@@ -109,7 +110,7 @@ interface Live {
 export class LetterCoffeechat {
   private logger = new Logger('Letter:커피챗');
   private names = new Map<string, string>();
-  private timer: NodeJS.Timeout | null = null;
+  private timer: Task | null = null;
   /** 예약 발송이 실패했다고 이미 알린 사람. 같은 DM 이 1분마다 오는 것을 막는다. */
   private warned = new Set<string>();
 
@@ -458,11 +459,15 @@ export class LetterCoffeechat {
    */
   private startTimer(app: App): void {
     if (this.timer) return;
-    this.timer = setInterval(() => {
-      void this.maybeDigest(app).catch((error) => this.logger.warn('주간 알림에서 넘어졌습니다', error));
-      void this.maybeSendQueued(app).catch((error) => this.logger.warn('예약 발송에서 넘어졌습니다', error));
-    }, 60 * 1000);
-    this.timer.unref?.();
+    this.timer = every({
+      name: 'coffeechat:letter',
+      everyMs: 60 * 1000,
+      run: () => {
+        void this.maybeDigest(app).catch((error) => this.logger.warn('주간 알림에서 넘어졌습니다', error));
+        void this.maybeSendQueued(app).catch((error) => this.logger.warn('예약 발송에서 넘어졌습니다', error));
+      },
+      unref: true,
+    });
   }
 
   private async maybeDigest(app: App): Promise<void> {

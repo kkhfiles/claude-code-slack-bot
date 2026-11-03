@@ -52,8 +52,9 @@ check('회차 전에 읽은 번호를 적는다(도는 사이 바뀐 것은 다�
 
 // 회귀 — 1분 회차로 되돌아가지 않았나
 const src = fs.readFileSync(path.join(ROOT, 'src', 'premium-seat.ts'), 'utf-8');
-check('예약 회차를 1분 타이머로 직접 걸지 않는다', !/every\(60_000,\s*\(\)\s*=>\s*this\.pumpBooking\(\)\)/.test(src));
-check('15초 변경 번호 확인을 건다', /every\(15_000,\s*\(\)\s*=>\s*this\.watchBooking\(\)\)/.test(src));
+// `this.every('이름', ms, fn)` — 앞의 이름은 공통 장치의 타이머 이름
+check('예약 회차를 1분 타이머로 직접 걸지 않는다', !/every\((?:'[^']+',\s*)?60_000,\s*\(\)\s*=>\s*this\.pumpBooking\(\)\)/.test(src));
+check('15초 변경 번호 확인을 건다', /every\((?:'[^']+',\s*)?15_000,\s*\(\)\s*=>\s*this\.watchBooking\(\)\)/.test(src));
 
 if (fails) {
   console.log(`\n실패 ${fails}건`);

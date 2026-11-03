@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
 import { Logger } from './logger';
+import { every, type Task } from './recurring';
 import { errorCollector } from './error-collector';
 import { t, Locale } from './messages';
 import { pythonCommand } from './python-command';
@@ -392,7 +393,7 @@ function descendantsOf(rows: ProcRow[]): (pid: number) => number[] {
 export const RISE_SNAPSHOT_PCT = 85;
 
 export class ProcessMemoryWatchdog {
-  private checkTimer: ReturnType<typeof setInterval> | null = null;
+  private checkTimer: Task | null = null;
   private pendingKills: Map<number, PendingKill> = new Map();
   private excludedPids: Set<number> = new Set();
   private cachedCommitLimitMB: number = 0;
@@ -430,15 +431,16 @@ export class ProcessMemoryWatchdog {
     this.logger.info(`Memory watchdog started (threshold: ${this.thresholdPct}%, processThreshold: ${this.processThresholdMB} MB, interval: ${this.checkIntervalSec}s, autoKill: ${this.autoKillDelaySec}s)`);
     // Run first check after a short delay
     setTimeout(() => this.checkMemory().catch(e => this.logger.error('Memory check failed', e)), 10_000);
-    this.checkTimer = setInterval(
-      () => this.checkMemory().catch(e => this.logger.error('Memory check failed', e)),
-      this.checkIntervalSec * 1000,
-    );
+    this.checkTimer = every({
+      name: 'memory-watchdog',
+      everyMs: this.checkIntervalSec * 1000,
+      run: () => this.checkMemory().catch(e => this.logger.error('Memory check failed', e)),
+    });
   }
 
   stop(): void {
     if (this.checkTimer) {
-      clearInterval(this.checkTimer);
+      this.checkTimer.stop('stop');
       this.checkTimer = null;
     }
     for (const [, pending] of this.pendingKills) {

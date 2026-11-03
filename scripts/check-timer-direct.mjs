@@ -21,19 +21,6 @@ const SRC = path.join(ROOT, 'src');
 
 /** 아직 안 옮긴 `setInterval` — `파일:메서드` → 그 메서드 안의 개수. 옮기면 지운다. */
 const INTERVAL_LEFT = new Map([
-  ['board-push.ts:start', 1],
-  ['calendar-poller.ts:start', 2],
-  ['chat-host.ts:start', 1],
-  ['daou-login.ts:start', 1],
-  ['engine-state.ts:startWatch', 1],
-  ['letter-booking.ts:startNudge', 1],
-  ['letter-coffeechat.ts:startTimer', 1],
-  ['letter-initiative.ts:rooms', 1],
-  ['lunch-poller.ts:start', 1],
-  ['premium-seat.ts:every', 1],
-  ['process-memory-watchdog.ts:start', 1],
-  ['sdk-update.ts:start', 1],
-  ['slack-handler.ts:setupEventHandlers', 3],
 ]);
 
 /** 아직 안 옮긴 자기 재예약 `setTimeout` — `파일:메서드`. 옮기면 지운다. */

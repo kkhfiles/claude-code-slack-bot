@@ -17,6 +17,7 @@
  * 근거 = work-assistant `docs/design.md` 「확정 전 마지막 시험」.
  */
 import { Logger } from './logger';
+import { every, type Task } from './recurring';
 
 /** 기본 WebSocket(Node 22 · undici)과 시험용 가짜가 같이 맞추는 모양. */
 export interface PushSocket {
@@ -82,7 +83,7 @@ export class BoardPush {
   private gen = 0;
   private attempt = 0;
   private lastPong = 0;
-  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private pingTimer: Task | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
   private authWarned = false;
@@ -101,14 +102,13 @@ export class BoardPush {
     if (!this.stopped) return;
     this.stopped = false;
     this.connect();
-    this.pingTimer = setInterval(() => this.heartbeat(), this.pingMs);
-    this.pingTimer.unref?.();
+    this.pingTimer = every({ name: 'board-push:ping', everyMs: this.pingMs, run: () => this.heartbeat(), unref: true });
   }
 
   /** 멈춘다 — 타이머를 다 걷고 연결을 닫는다. 다시 `start` 하면 처음부터 붙는다. */
   stop(): void {
     this.stopped = true;
-    if (this.pingTimer) clearInterval(this.pingTimer);
+    if (this.pingTimer) this.pingTimer.stop('stop');
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.pingTimer = null;
     this.reconnectTimer = null;

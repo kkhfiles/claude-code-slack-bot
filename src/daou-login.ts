@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
 import { Logger } from './logger';
+import { every, type Task } from './recurring';
 import { pythonCommand } from './python-command';
 
 const execFileAsync = promisify(execFile);
@@ -42,7 +43,7 @@ interface Notice {
 export class DaouLoginNotifier {
   private logger = new Logger('DaouLogin');
   private inFlight = false;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: Task | null = null;
 
   constructor(
     private sendMessage: SendMessageFn,
@@ -57,16 +58,17 @@ export class DaouLoginNotifier {
   start(): void {
     if (this.timer) return;
     setTimeout(() => this.poll().catch(e => this.logger.error('다우 알림 점검 실패', e)), 20_000);
-    this.timer = setInterval(
-      () => this.poll().catch(e => this.logger.error('다우 알림 점검 실패', e)),
-      this.intervalSec * 1000,
-    );
+    this.timer = every({
+      name: 'daou-login:watch',
+      everyMs: this.intervalSec * 1000,
+      run: () => this.poll().catch(e => this.logger.error('다우 알림 점검 실패', e)),
+    });
     this.logger.info(`다우 세션 알림 시작 (${this.intervalSec}s)`);
   }
 
   stop(): void {
     if (this.timer) {
-      clearInterval(this.timer);
+      this.timer.stop('stop');
       this.timer = null;
     }
   }

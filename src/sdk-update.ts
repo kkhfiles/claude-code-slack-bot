@@ -4,6 +4,7 @@ import * as path from 'path';
 import { execFile } from 'child_process';
 import Holidays from 'date-holidays';
 import { Logger } from './logger';
+import { every, type Task } from './recurring';
 import { offDays, ymd } from './work-assistant';
 
 /**
@@ -53,7 +54,7 @@ export interface SdkUpdateOptions {
 
 export class SdkUpdate {
   private logger: Logger;
-  private timer: NodeJS.Timeout | null = null;
+  private timer: Task | null = null;
   private ranWeek = '';
   private restDay = '';
   private retryAt = 0;
@@ -75,11 +76,15 @@ export class SdkUpdate {
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => {
-      void this.tick().catch((e) => this.logger.warn('판 대조에서 넘어졌습니다', e));
-      void this.watchResult().catch((e) => this.logger.warn('결과 알림에서 넘어졌습니다', e));
-    }, 60 * 1000);
-    this.timer.unref?.();
+    this.timer = every({
+      name: 'sdk-update',
+      everyMs: 60 * 1000,
+      run: () => {
+        void this.tick().catch((e) => this.logger.warn('판 대조에서 넘어졌습니다', e));
+        void this.watchResult().catch((e) => this.logger.warn('결과 알림에서 넘어졌습니다', e));
+      },
+      unref: true,
+    });
     this.logger.info(`준비됨 — 주 첫 업무일 ${this.opts.at} 에 Agent SDK 판 대조 · 어긋나면 DM 에 [업데이트] 버튼`);
   }
 

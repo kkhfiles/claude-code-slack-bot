@@ -155,7 +155,7 @@ function makeHost(bypassBlocks) {
     action: (sel, fn) => { handlers[typeof sel === 'string' ? sel : sel.action_id] = fn; },
   };
   b.register(app);
-  if (b['nudgeTimer']) { clearInterval(b['nudgeTimer']); clearTimeout(b['nudgeTimer']); }
+  if (b['nudgeTimer']) b['nudgeTimer'].stop();   // 공통 장치의 Task
   // 넘긴 메시지의 시각 — **이번 달 안이어야** 한 달 한 번 검사가 어느 날 돌려도 같은 답을 낸다.
   const forwardedMs = Date.now() - 60_000;
   const press = async (user, client, value = { u: MEMBER, t: SECRET }) => {

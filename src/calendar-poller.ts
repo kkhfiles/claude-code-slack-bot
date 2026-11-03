@@ -18,6 +18,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import { Logger } from './logger';
+import { every, type Task } from './recurring';
 import { errorCollector } from './error-collector';
 import type { SpawnOpts, SessionResult } from './assistant-scheduler';
 import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
@@ -103,8 +104,8 @@ export class CalendarPoller {
   private logger = new Logger('CalendarPoller');
 
   // Timers
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
-  private dispatchTimer: ReturnType<typeof setInterval> | null = null;
+  private pollTimer: Task | null = null;
+  private dispatchTimer: Task | null = null;
 
   // Token paths (shared with @cocal/google-calendar-mcp)
   private readonly tokensPath = path.join(
@@ -173,18 +174,22 @@ export class CalendarPoller {
     }, 30_000);
 
     // Regular polling
-    this.pollTimer = setInterval(() => {
-      this.poll().catch(err => {
+    this.pollTimer = every({
+      name: 'calendar:poll',
+      everyMs: intervalMs,
+      run: () => this.poll().catch(err => {
         this.logger.error('Poll failed', err);
-      });
-    }, intervalMs);
+      }),
+    });
 
     // Dispatch timer: every 1 minute
-    this.dispatchTimer = setInterval(() => {
-      this.dispatchNotifications().catch(err => {
+    this.dispatchTimer = every({
+      name: 'calendar:dispatch',
+      everyMs: 60_000,
+      run: () => this.dispatchNotifications().catch(err => {
         this.logger.error('Dispatch failed', err);
-      });
-    }, 60_000);
+      }),
+    });
 
     this.logger.info('CalendarPoller started', {
       intervalMinutes: config.reminders.pollingIntervalMinutes,
@@ -193,11 +198,11 @@ export class CalendarPoller {
 
   stop(): void {
     if (this.pollTimer) {
-      clearInterval(this.pollTimer);
+      this.pollTimer.stop('stop');
       this.pollTimer = null;
     }
     if (this.dispatchTimer) {
-      clearInterval(this.dispatchTimer);
+      this.dispatchTimer.stop('stop');
       this.dispatchTimer = null;
     }
     this.logger.info('CalendarPoller stopped');

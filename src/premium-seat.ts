@@ -3,6 +3,7 @@ import { App } from '@slack/bolt';
 import { Logger } from './logger';
 import { BookingVersion, afterBookingTick, bookingTickReason, initialWatch } from './booking-watch';
 import { pythonCommand } from './python-command';
+import { every, type Task } from './recurring';
 
 /**
  * Premium 좌석 관리 — 슬랙 표면.
@@ -238,7 +239,7 @@ const TIMEOUT_SWAP_MS = 300_000;
 export class PremiumSeatSlack {
   private logger = new Logger('PremiumSeat');
   private app: App | null = null;
-  private timers: NodeJS.Timeout[] = [];
+  private timers: Task[] = [];
   private children = new Set<ReturnType<typeof spawn>>();
   private registered = false;
   private jobBusy = false;
@@ -375,20 +376,20 @@ export class PremiumSeatSlack {
     });
 
     const jobEvery = (this.opts.jobPollSeconds ?? 10) * 1000;
-    this.every(60_000, () => this.pumpNudges());
-    this.every(jobEvery, () => this.pumpJobs());
-    this.every(60_000, () => this.pumpNotifications());
-    this.every(60_000, () => this.syncAnnouncements());
-    this.every(60_000, () => this.scheduleReconciles());
+    this.every('seat:nudges', 60_000, () => this.pumpNudges());
+    this.every('seat:jobs', jobEvery, () => this.pumpJobs());
+    this.every('seat:notifications', 60_000, () => this.pumpNotifications());
+    this.every('seat:announcements', 60_000, () => this.syncAnnouncements());
+    this.every('seat:reconciles', 60_000, () => this.scheduleReconciles());
     // 통합 예약 사이트와 잇기 — 명단 올리기 · 판 받기 · 끝날 때의 알림 · 실장 취소 알림.
     // 15초마다 사이트의 변경 번호만 보고(파이썬 안 띄움), 바뀌었을 때·자정·정오·알림 시각·10분마다만
     // 회차를 돈다. 번호를 못 읽으면 예전처럼 1분 회차(`booking-watch.ts`).
-    this.every(15_000, () => this.watchBooking());
+    this.every('seat:booking', 15_000, () => this.watchBooking());
     setTimeout(() => {
       void this.pumpBooking();
     }, 5_000).unref?.();
     // 06:00~18:00 사이 2시간 간격 세션 점검
-    this.every(600_000, () => this.pumpSessionCheck());
+    this.every('seat:session-check', 600_000, () => this.pumpSessionCheck());
     setTimeout(() => {
       void this.pumpSessionCheck();
     }, 60_000).unref?.();
@@ -398,7 +399,7 @@ export class PremiumSeatSlack {
   }
 
   dispose(): void {
-    for (const t of this.timers) clearInterval(t);
+    for (const t of this.timers) t.stop('stop');
     this.timers = [];
     if (this.dashboardPending) clearTimeout(this.dashboardPending);
     if (this.notifyPending) clearTimeout(this.notifyPending);
@@ -413,15 +414,20 @@ export class PremiumSeatSlack {
     this.registered = false;
   }
 
-  private every(ms: number, fn: () => void): void {
-    const timer = setInterval(() => {
-      try {
-        fn();
-      } catch (error) {
-        this.logger.warn('timer body threw', error);
-      }
-    }, ms);
-    timer.unref?.();
+  private every(name: string, ms: number, fn: () => unknown): void {
+    const timer = every({
+      name,
+      everyMs: ms,
+      run: () => {
+        try {
+          return fn();
+        } catch (error) {
+          this.logger.warn('timer body threw', error);
+          return undefined;
+        }
+      },
+      unref: true,
+    });
     this.timers.push(timer);
   }
 
