@@ -28,7 +28,7 @@ export function withSena(rules: string): string {
 }
 import { engineState } from './engine-state';
 import { codexQuota } from './codex-quota';
-import { every, type RunFailure, type Task } from './recurring';
+import { every, once, type RunFailure, type Task } from './recurring';
 import { dmFallbackOn, dmLadder } from './dm-fallback';
 import { isHeldOutcome, READ_ONLY_TOOLS, type TurnOutcome } from './turn-outcome';
 import { buildImproveBlocks, improveEnabled, improvePreviewText,
@@ -914,27 +914,27 @@ export class AssistantScheduler {
   private readonly workingDir: string;
 
   // Timers
-  private briefingTimer: ReturnType<typeof setTimeout> | null = null;
-  private analysisTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private briefingTimer: Task | null = null;
+  private analysisTimers: Map<string, Task> = new Map();
   /** 한도 재시도 — `clearAllTimers` 밖에 둔다. 설정을 다시 읽어도 살아남아야 하고(다시 걸어 줄
    *  곳이 없다) 같은 스케줄의 재시도가 둘이어도 둘 다 쥔다. 봇을 끌 때(`stop`)만 푼다.
    *  열쇠는 계획 id — 계획은 파일에 있어 재시작해도 다시 건다(`rearmAnalysisRetries`). */
   private analysisRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private midnightTimer: ReturnType<typeof setTimeout> | null = null;
-  private workNudgeTimer: ReturnType<typeof setTimeout> | null = null;
-  private offsitePushTimer: ReturnType<typeof setTimeout> | null = null;
+  private midnightTimer: Task | null = null;
+  private workNudgeTimer: Task | null = null;
+  private offsitePushTimer: Task | null = null;
   private notionWatchTimer: Task | null = null;
   private notionWatchBusy = false;
   private notionWatchFailures = 0;
-  private daouKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
-  private focusTimer: ReturnType<typeof setTimeout> | null = null;
+  private daouKeepAliveTimer: Task | null = null;
+  private focusTimer: Task | null = null;
   private focusBusy = false;
   /** 브리핑이 도는 중 — 예약 · 놓친 것 · 회복 뒤 다시가 겹쳐 두 번 올리지 않게. */
   private briefingBusy = false;
   /** 한도 재시도 계획을 지금 돌리는 중 — 기동 · 회복이 겹쳐 같은 계획을 두 번 돌리지 않게. */
   private retryBusy = false;
-  private summaryTimer: ReturnType<typeof setTimeout> | null = null;
-  private improveTimer: ReturnType<typeof setTimeout> | null = null;
+  private summaryTimer: Task | null = null;
+  private improveTimer: Task | null = null;
   private boardQueueTimer: Task | null = null;
   private mailPollTimer: Task | null = null;
   private mailPollBusy = false;
@@ -1067,7 +1067,7 @@ export class AssistantScheduler {
     this.analysisRetryTimers.clear();
     this.stopConfigWatcher();
     if (this.midnightTimer) {
-      clearTimeout(this.midnightTimer);
+      this.midnightTimer.stop('stop');
       this.midnightTimer = null;
     }
     this.logger.info('AssistantScheduler stopped');
@@ -1442,7 +1442,7 @@ export class AssistantScheduler {
 
   private clearAllTimers(reason: 'reload' | 'stop' = 'reload'): void {
     if (this.briefingTimer) {
-      clearTimeout(this.briefingTimer);
+      this.briefingTimer.stop(reason);
       this.briefingTimer = null;
     }
     if (this.calendarPoller) {
@@ -1450,15 +1450,15 @@ export class AssistantScheduler {
       this.calendarPoller = null;
     }
     for (const timer of this.analysisTimers.values()) {
-      clearTimeout(timer);
+      timer.stop(reason);
     }
     this.analysisTimers.clear();
     if (this.daouKeepAliveTimer) {
-      clearTimeout(this.daouKeepAliveTimer);
+      this.daouKeepAliveTimer.stop(reason);
       this.daouKeepAliveTimer = null;
     }
     if (this.workNudgeTimer) {
-      clearTimeout(this.workNudgeTimer);
+      this.workNudgeTimer.stop(reason);
       this.workNudgeTimer = null;
     }
     if (this.notionWatchTimer) {
@@ -1499,19 +1499,19 @@ export class AssistantScheduler {
       this.runSweepTimer = null;
     }
     if (this.focusTimer) {
-      clearTimeout(this.focusTimer);
+      this.focusTimer.stop(reason);
       this.focusTimer = null;
     }
     if (this.summaryTimer) {
-      clearTimeout(this.summaryTimer);
+      this.summaryTimer.stop(reason);
       this.summaryTimer = null;
     }
     if (this.improveTimer) {
-      clearTimeout(this.improveTimer);
+      this.improveTimer.stop(reason);
       this.improveTimer = null;
     }
     if (this.offsitePushTimer) {
-      clearTimeout(this.offsitePushTimer);
+      this.offsitePushTimer.stop(reason);
       this.offsitePushTimer = null;
     }
   }
@@ -1688,7 +1688,7 @@ export class AssistantScheduler {
     const nextFire = this.getNextWorkingDay(WORK_NUDGE_TIME);
     this.logger.info('Scheduled work nudge', { time: WORK_NUDGE_TIME, nextFire: nextFire.toISOString() });
 
-    this.workNudgeTimer = setTimeout(async () => {
+    this.workNudgeTimer = once({ name: 'scheduler:work-nudge', run: async () => {
       try {
         const nonWorking = this.isNonWorkingDay();
         if (nonWorking.skip) {
@@ -1725,7 +1725,7 @@ export class AssistantScheduler {
         ).catch(() => { });
       }
       this.scheduleWorkNudge();
-    }, nextFire.getTime() - Date.now());
+    }, ms: nextFire.getTime() - Date.now() });
   }
 
   /**
@@ -1779,7 +1779,7 @@ export class AssistantScheduler {
     this.logger.info('Scheduled card summaries', {
       time: SUMMARY_TIME, nextFire: nextFire.toISOString(),
     });
-    this.summaryTimer = setTimeout(async () => {
+    this.summaryTimer = once({ name: 'scheduler:summary', run: async () => {
       try {
         const nonWorking = this.isNonWorkingDay();
         if (nonWorking.skip) {
@@ -1798,7 +1798,7 @@ export class AssistantScheduler {
       } finally {
         this.scheduleSummary();
       }
-    }, nextFire.getTime() - Date.now());
+    }, ms: nextFire.getTime() - Date.now() });
   }
 
   /** 한 판 돈다. **절대 던지지 않는다** — 부르는 쪽의 `finally` 가 재예약한다. */
@@ -1878,7 +1878,7 @@ export class AssistantScheduler {
   private scheduleImprove(): void {
     const nextFire = this.getNextWorkingDay(IMPROVE_TIME);
     this.logger.info('Scheduled improvement proposals', { time: IMPROVE_TIME, nextFire: nextFire.toISOString() });
-    this.improveTimer = setTimeout(async () => {
+    this.improveTimer = once({ name: 'scheduler:improve', run: async () => {
       try {
         const nonWorking = this.isNonWorkingDay();
         if (nonWorking.skip) {
@@ -1894,7 +1894,7 @@ export class AssistantScheduler {
       } finally {
         this.scheduleImprove();
       }
-    }, nextFire.getTime() - Date.now());
+    }, ms: nextFire.getTime() - Date.now() });
   }
 
   /**
@@ -1993,14 +1993,14 @@ export class AssistantScheduler {
       time: OFFSITE_PUSH_TIME, nextFire: nextFire.toISOString(),
     });
 
-    this.offsitePushTimer = setTimeout(async () => {
+    this.offsitePushTimer = once({ name: 'scheduler:offsite-push', run: async () => {
       // **걷기가 내보내기보다 먼저다** — 순서를 뒤집으면 그날 걷은 커밋이
       // 하루를 꼬박 PC 안에만 머문다. 걷기가 실패해도 내보내기는 그대로 돈다
       // (백업이 다른 일 때문에 멈추면 방향이 거꾸로다).
       await this.runCommitHarvest();
       await this.runOffsitePush('daily');
       this.scheduleOffsitePush();
-    }, nextFire.getTime() - Date.now());
+    }, ms: nextFire.getTime() - Date.now() });
   }
 
   /**
@@ -2297,7 +2297,7 @@ export class AssistantScheduler {
     const waitMs = next.getTime() - Date.now();
     this.logger.info('Scheduled board focus', { nextFire: next.toISOString() });
 
-    this.focusTimer = setTimeout(async () => {
+    this.focusTimer = once({ name: 'scheduler:focus', run: async () => {
       const hour = new Date().getHours();
       const nonWorking = this.isNonWorkingDay();
       try {
@@ -2326,7 +2326,7 @@ export class AssistantScheduler {
         this.focusBusy = false;
         this.scheduleFocus();
       }
-    }, waitMs);
+    }, ms: waitMs });
   }
 
   private async runFocus(): Promise<void> {
@@ -2576,7 +2576,7 @@ export class AssistantScheduler {
       nextFire: nextFire.toISOString(),
     });
 
-    this.briefingTimer = setTimeout(async () => {
+    this.briefingTimer = once({ name: 'scheduler:briefing', run: async () => {
       // Double-check working day at fire time
       const nonWorking = this.isNonWorkingDay();
       if (nonWorking.skip) {
@@ -2624,7 +2624,7 @@ export class AssistantScheduler {
 
       // Reschedule for next working day
       this.scheduleBriefing();
-    }, msUntil);
+    }, ms: msUntil });
   }
 
   /** If briefing was missed today (e.g. bot restarted after briefing time), run it now. */
@@ -2993,14 +2993,14 @@ export class AssistantScheduler {
   /** Schedule the Daou keep-alive at 13:00 EVERY calendar day (no working-day skip). */
   private scheduleDaouKeepAlive(): void {
     // Idempotent: drop any existing timer so a double-call can't fork the self-rescheduling chain.
-    if (this.daouKeepAliveTimer) clearTimeout(this.daouKeepAliveTimer);
+    if (this.daouKeepAliveTimer) this.daouKeepAliveTimer.stop('rearm');
     const nextFire = this.getNextEveryDayTime('13:00');
     const msUntil = Math.max(0, nextFire.getTime() - Date.now());
     this.logger.info('Scheduled Daou keep-alive', { nextFire: nextFire.toISOString() });
-    this.daouKeepAliveTimer = setTimeout(async () => {
+    this.daouKeepAliveTimer = once({ name: 'scheduler:daou-keepalive', run: async () => {
       await this.runDaouKeepAlive().catch(e => this.logger.error('Daou keep-alive failed', e));
       this.scheduleDaouKeepAlive();
-    }, msUntil);
+    }, ms: msUntil });
   }
 
   /** Next occurrence of HH:MM on ANY day — unlike getNextWorkingDay, does not skip weekends/holidays. */
@@ -3589,7 +3589,7 @@ export class AssistantScheduler {
     // **예정일은 예약 발화 시각의 대상 한국 날짜다** — 실제로 돈 시각이 아니다. 저녁 데일리 회차
     // (`daily-22:00` 등)는 다음 날 아침 업무일을 앞당겨 도는 것이므로 다음 달력 날짜를 잡는다.
     const slot = kstDate(targetDateForSchedule(schedule, nextFire));
-    const timer = setTimeout(async () => {
+    const timer: Task = once({ name: `scheduler:analysis:${schedule}`, run: async () => {
       try {
         await this.runAnalysisGroup(schedule, types, { slot, trigger: 'scheduled' });
       } catch (error) {
@@ -3602,7 +3602,7 @@ export class AssistantScheduler {
       if (this.analysisTimers.get(schedule) !== timer) return;
       this.analysisTimers.delete(schedule);
       this.scheduleAnalysisGroup(schedule, types);
-    }, msUntil);
+    }, ms: msUntil });
 
     this.analysisTimers.set(schedule, timer);
   }
@@ -4603,9 +4603,9 @@ export class AssistantScheduler {
     midnight.setHours(24, 0, 0, 0);
     const msUntil = midnight.getTime() - now.getTime();
 
-    this.midnightTimer = setTimeout(() => {
+    this.midnightTimer = once({ name: 'scheduler:midnight', run: () => {
       this.logger.debug('Midnight cleanup');
       this.scheduleMidnightCleanup();
-    }, msUntil);
+    }, ms: msUntil });
   }
 }

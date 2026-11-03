@@ -202,7 +202,8 @@ sched.runAnalysisGroup = async (schedule) => {
 /** 설정 파일 감시가 하는 그대로 — 지우고 · 다시 읽고 · 다시 건다. */
 const reload = () => { sched.clearAllTimers(); sched.loadConfig(); sched.scheduleAll(); };
 /** 다우 keep-alive 를 뺀 살아 있는 타이머 — 이 설정에서는 분석 타이머만 남는다. */
-const analysisLive = () => [...live].filter((h) => h !== sched.daouKeepAliveTimer);
+//  필드와 맵에는 공통 장치의 Task 가 담긴다 — 장부의 핸들과는 `.handle` 로 대조한다.
+const analysisLive = () => [...live].filter((h) => h !== sched.daouKeepAliveTimer?.handle);
 /** 한 차례 — 그룹이 도는 사이에 `during()` 을 하고 그룹을 끝낸다. */
 const round = async (during) => {
   runs.length = 0;
@@ -220,7 +221,7 @@ try {
   // 대조 — 아무 일 없으면 끝난 그룹이 다음 회차를 스스로 건다(지나치게 막아 그룹이 끊기면 안 된다).
   await round(() => {});
   const own = analysisLive();
-  if (own.length !== 1 || own[0] !== sched.analysisTimers.get(GROUP)) {
+  if (own.length !== 1 || own[0] !== sched.analysisTimers.get(GROUP)?.handle) {
     fails.push(`⑥ 끝난 그룹이 다음 회차를 안 건다 (타이머 ${own.length}개) — 그룹이 한 번 돌고 끊긴다`);
   }
   sched.stop();
@@ -228,7 +229,7 @@ try {
   await round(reload);
   const left = analysisLive();
   if (runs.length !== 1) fails.push(`⑥ 그룹이 한 번 돌아야 하는데 ${runs.length}번`);
-  if (left.length !== 1 || left[0] !== sched.analysisTimers.get(GROUP)) {
+  if (left.length !== 1 || left[0] !== sched.analysisTimers.get(GROUP)?.handle) {
     fails.push(`⑥ 그룹이 도는 사이 설정을 다시 읽으면 다음 회차 타이머가 ${left.length}개 — 하나(맵에 있는 것)여야 한다`
       + ' (맵에서 빠진 타이머가 다음 예정 시각에 같은 그룹을 한 번 더 돌린다)');
   }

@@ -21,6 +21,8 @@ export interface RunFailure { ok: false; code?: string }
 
 export interface Task {
   readonly name: string;
+  /** 밑의 `setInterval` · `setTimeout` 핸들 — 시험이 가짜 타이머 장부와 대조할 때만 쓴다. */
+  readonly handle: unknown;
   /** 타이머를 지운다. `reason` 은 상태 파일에 남는다 — `reload`(설정 다시 읽기) · `stop`(기능 끔) 등. */
   stop(reason?: string): void;
 }
@@ -168,6 +170,7 @@ export function every(opts: { name: string; everyMs: number; run: () => unknown;
   let done = false;
   return {
     name: opts.name,
+    handle,
     stop(reason = 'stop') {
       if (done) return;
       done = true;
@@ -198,6 +201,7 @@ export function once(opts: { name: string; ms: number; run: () => unknown; unref
   touch();
   return {
     name: opts.name,
+    handle,
     stop(reason = 'stop') {
       if (done) return;
       done = true;

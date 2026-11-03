@@ -74,6 +74,7 @@
     "check:drawerprogress": "node scripts/check-drawer-progress.mjs",
     "check:recurring": "node scripts/check-recurring.mjs",
     "check:timerdirect": "node scripts/check-timer-direct.mjs",
+    "check:timernames": "node scripts/check-timer-names.mjs",
     "check:schedgaps": "node scripts/check-scheduled-gaps.mjs",
     "check:calbase": "node scripts/check-calendar-baseline.mjs",
     "check:dmfallback": "node scripts/check-dm-fallback.mjs",

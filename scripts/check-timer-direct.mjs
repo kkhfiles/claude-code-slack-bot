@@ -38,15 +38,6 @@ const INTERVAL_LEFT = new Map([
 
 /** 아직 안 옮긴 자기 재예약 `setTimeout` — `파일:메서드`. 옮기면 지운다. */
 const REARM_LEFT = new Set([
-  'assistant-scheduler.ts:scheduleAnalysisGroup',
-  'assistant-scheduler.ts:scheduleBriefing',
-  'assistant-scheduler.ts:scheduleDaouKeepAlive',
-  'assistant-scheduler.ts:scheduleFocus',
-  'assistant-scheduler.ts:scheduleImprove',
-  'assistant-scheduler.ts:scheduleMidnightCleanup',
-  'assistant-scheduler.ts:scheduleOffsitePush',
-  'assistant-scheduler.ts:scheduleSummary',
-  'assistant-scheduler.ts:scheduleWorkNudge',
 ]);
 
 /**
