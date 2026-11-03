@@ -66,6 +66,9 @@ import {
   AGY_DM_RULES, actionReport, actionSteps, agyDmPrompt, fetchTaskList, isMailTurn, mailBodies, mailBodiesBlock,
   mailSubjectMap, parseMailSubjects, runActions, validateActions,
 } from './agy-actions';
+import {
+  GUARD_ACTION, buttonsTail, confirmTail, labelOf, needsConfirm, parsePick, resultTail, runGuard, swapTail,
+} from './mycelium-guard';
 
 /**
  * 슬랙 대화 세션의 사고 깊이. SDK 기본값은 `'high'` 다.
@@ -4442,6 +4445,31 @@ export class SlackHandler {
       await ack();
       const locale = await this.getUserLocale((body as any).user?.id).catch(() => 'ko' as Locale);
       await respond(noticeReply(t('report.archiveRetired', locale))).catch(() => {});
+    });
+
+    // --- Mycelium 사이트 알림 버튼 (`mycelium-guard.ts`) ---
+    // 막기와 닫기는 한 번 더 묻고, 결과는 버튼 자리에 둔다. 누른 사람 확인은 `this.action` 이 한다.
+    this.action(GUARD_ACTION, async ({ ack, body, respond, action }) => {
+      await ack();
+      const step = GUARD_ACTION.exec(action?.action_id || '')?.[1] || '';
+      const pick = parsePick(action?.value);
+      const blocks = (body as any).message?.blocks;
+      const text = (body as any).message?.text || 'Mycelium 알림';
+      const put = (tail: any[]) => respond({ replace_original: true, text, blocks: swapTail(blocks, tail) });
+      try {
+        if (!pick || (step !== 'yes' && step !== 'no' && step !== pick.id) || (step === 'yes' && !needsConfirm(pick.id))) {
+          await put(resultTail('버튼', { ok: false, message: '버튼 값을 못 읽었습니다' }));
+          return;
+        }
+        if (step === 'no') { await put(buttonsTail(pick.who)); return; }
+        if (step !== 'yes' && needsConfirm(pick.id)) { await put(confirmTail(pick)); return; }
+        const r = await runGuard(pick, '세나 버튼');
+        this.logger.info('Mycelium guard button', { id: pick.id, ok: r.ok });
+        await put(resultTail(labelOf(pick.id), r));
+      } catch (error) {
+        this.logger.error('Mycelium guard button failed', error);
+        await respond(noticeReply('❌ 처리 실패')).catch(() => {});
+      }
     });
 
     // --- NAS 이동 컨펌 버튼 (inbox auto-classify) ---

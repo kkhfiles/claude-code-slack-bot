@@ -69,6 +69,7 @@
     "check:engine": "node scripts/check-engine-state.mjs",
     "check:inboxlock": "node scripts/check-inbox-lock.mjs",
     "check:hold": "node scripts/check-hold-replay.mjs",
+    "check:myceliumguard": "node scripts/check-mycelium-guard.mjs",
     "check:schedgaps": "node scripts/check-scheduled-gaps.mjs",
     "check:calbase": "node scripts/check-calendar-baseline.mjs",
     "check:dmfallback": "node scripts/check-dm-fallback.mjs",
