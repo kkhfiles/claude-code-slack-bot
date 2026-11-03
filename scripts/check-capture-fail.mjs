@@ -119,8 +119,9 @@ try {
     eq('옛 드레인도 다시 막히면 멈춘다',
        /if \(isHeldOutcome\(out\)\) \{[\s\S]{0,200}?break;/.test(body), true);
     // 결과를 돌려주는 쪽 — `askFromBoard` 가 차례 결과를 받아 넘긴다(비면 별일 없이 끝난 것).
+    // 뒤에 서랍 차례의 마지막 글(`lastText`, 2026-11-03 A1)이 더 붙을 수 있다 — 차례 결과는 그대로 넘어간다
     eq('askFromBoard 가 차례 결과를 돌려준다',
-       /outcomeSink[\s\S]{0,300}?return \{ outcome: 'ok'[\s\S]{0,80}?\.\.\.outcomeSink \}/.test(
+       /outcomeSink[\s\S]{0,300}?return \{ outcome: 'ok'[\s\S]{0,80}?\.\.\.outcomeSink[\s,][\s\S]{0,80}?\}/.test(
          h.slice(h.indexOf('private async askFromBoard'))), true);
 
     // 트리거 둘 — 하나라도 빠지면 그 길로 밀린 것이 영영 안 돈다.
