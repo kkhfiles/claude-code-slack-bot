@@ -34,7 +34,7 @@ const MOD = path.join(ROOT, 'dist', 'sdk-handler.js');
 // **require 보다 먼저** 정한다(모듈이 읽을 때 경로를 굳힌다).
 const EVENTS = path.join(fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'warm-ev-')), 'ev.jsonl');
 process.env.WORK_EVENTS_FILE = EVENTS;
-const { SdkHandler, warmKey, warmDiff, pushableInput } = require(MOD);
+const { SdkHandler, warmKey, warmDiff, pushableInput, settingsDigest } = require(MOD);
 
 const fails = [];
 function eq(label, got, want) {
@@ -160,6 +160,25 @@ eq('미리 띄우기가 터져도 평소대로', calls.length, 1);
 //     원인을 짚으려고 탐침을 따로 짜야 했다.
 eq('갈린 칸 이름을 낸다', warmDiff(warmKey({ a: 1, b: 2 }), warmKey({ a: 1, b: 3 })), 'b');
 eq('값은 안 찍는다', /2|3/.test(warmDiff(warmKey({ a: 1, b: 2 }), warmKey({ a: 1, b: 3 }))), false);
+eq('띄울 때 읽은 파일 중 어느 것이 달랐는지 낸다',
+  warmDiff(warmKey({ a: 1, __ctx: { 'CLAUDE.md': '1', 'user settings.json': 'x' } }),
+           warmKey({ a: 1, __ctx: { 'CLAUDE.md': '2', 'user settings.json': 'x' } })), '__ctx(CLAUDE.md)');
+
+// 12. **사용자 설정은 스피너 문구를 빼고 내용으로 견준다**(2026-11-03) — 스피너 훅이 말마다 이 파일을
+//     다시 써서 시각으로 보면 미리 띄운 것이 거의 늘 「다름」이었다(11월 실패 25번 중 13번).
+{
+  const dir = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'warm-set-'));
+  const f = path.join(dir, 'settings.json');
+  fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [1] }, spinnerVerbs: { verbs: ['가'] } }));
+  const before = settingsDigest(f);
+  fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [1] }, spinnerVerbs: { verbs: ['나', '다'] } }));
+  eq('스피너 문구만 바뀌면 같다', settingsDigest(f), before);
+  fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [2] }, spinnerVerbs: { verbs: ['나'] } }));
+  eq('훅이 바뀌면 다르다', settingsDigest(f) !== before, true);
+  fs.writeFileSync(f, '{ 깨진');
+  eq('못 읽으면 수정 시각으로', /^\d+$/.test(settingsDigest(f)), true);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
 
 // 12. ⭐ **세션을 이어받는 옵션 그대로 띄워야 맞는다.**
 //

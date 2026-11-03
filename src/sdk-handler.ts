@@ -5,7 +5,8 @@ import {
   type CanUseTool,
   type PermissionMode as SdkPermissionMode,
 } from '@anthropic-ai/claude-agent-sdk';
-import { existsSync, statSync } from 'fs';
+import { createHash } from 'crypto';
+import { existsSync, readFileSync, statSync } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Logger } from './logger';
@@ -794,20 +795,41 @@ export function warmKey(sdkOptions: any): string {
  * `CLAUDE.md` 는 그것을 불러오는 한 줄(`@AGENTS.md`)만 둔다. 그러면 규칙을 고쳐도 `CLAUDE.md` 의
  * 시각은 그대로라, 이것을 안 보면 미리 띄운 프로세스가 옛 규칙으로 답한다.
  */
-export function contextStamp(cwd?: string): string {
+export function contextStamp(cwd?: string): Record<string, string> {
   const home = os.homedir();
-  const files = [
-    cwd && path.join(cwd, 'CLAUDE.md'),
-    cwd && path.join(cwd, 'AGENTS.md'),
-    cwd && path.join(cwd, '.claude', 'settings.json'),
-    cwd && path.join(cwd, '.claude', 'settings.local.json'),
-    path.join(home, '.claude', 'CLAUDE.md'),
-    path.join(home, '.claude', 'settings.json'),
-    resolveClaudeExecutable(),
-  ].filter(Boolean) as string[];
-  return files.map((f) => {
-    try { return String(Math.round(statSync(f).mtimeMs)); } catch { return '0'; }
-  }).join('.');
+  const files: Array<[string, string | undefined]> = [
+    ['CLAUDE.md', cwd && path.join(cwd, 'CLAUDE.md')],
+    ['AGENTS.md', cwd && path.join(cwd, 'AGENTS.md')],
+    ['project settings.json', cwd && path.join(cwd, '.claude', 'settings.json')],
+    ['project settings.local.json', cwd && path.join(cwd, '.claude', 'settings.local.json')],
+    ['user CLAUDE.md', path.join(home, '.claude', 'CLAUDE.md')],
+    ['user settings.json', path.join(home, '.claude', 'settings.json')],
+    ['claude', resolveClaudeExecutable()],
+  ];
+  const out: Record<string, string> = {};
+  for (const [name, f] of files) {
+    if (!f) continue;
+    // **사용자 설정은 시각이 아니라 내용으로 본다**(2026-11-03) — 스피너 문구 훅(`spinner-pick-next.py`)이
+    // 어느 세션이든 말을 보낼 때마다 이 파일을 다시 써서, 시각으로 보면 미리 띄운 것이 거의 늘 「다름」이었다
+    // (11월 실패 25번 중 13번이 이 칸만 달랐다). 스피너 문구는 SDK 세션에 아무 영향이 없으므로 빼고 견준다.
+    out[name] = name === 'user settings.json' ? settingsDigest(f) : mtimeOf(f);
+  }
+  return out;
+}
+
+function mtimeOf(f: string): string {
+  try { return String(Math.round(statSync(f).mtimeMs)); } catch { return '0'; }
+}
+
+/** 사용자 설정 내용의 지문 — `spinnerVerbs` 만 뺀다. 못 읽으면 수정 시각으로 돌아간다. */
+export function settingsDigest(f: string): string {
+  try {
+    const value = JSON.parse(readFileSync(f, 'utf-8'));
+    if (value && typeof value === 'object') delete value.spinnerVerbs;
+    return createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 16);
+  } catch {
+    return mtimeOf(f);
+  }
 }
 
 /** 시스템 커밋이 이만큼이면 미리 띄우지 않고 들고 있던 것도 버린다. */
@@ -840,5 +862,12 @@ export function warmDiff(a: string, b: string): string {
   try { x = JSON.parse(a); y = JSON.parse(b); } catch { return '읽을 수 없음'; }
   const keys = [...new Set([...Object.keys(x ?? {}), ...Object.keys(y ?? {})])];
   const off = keys.filter((k) => JSON.stringify(x?.[k]) !== JSON.stringify(y?.[k]));
-  return off.length ? off.join(',') : '(같은데 안 맞음)';
+  // 띄울 때 읽은 파일이 달랐으면 **어느 파일인지** 이름을 붙인다(2026-11-03) — 「__ctx」만으로는 원인을 못 짚었다
+  const named = off.map((k) => {
+    const a = x?.[k], c = y?.[k];
+    if (k !== '__ctx' || !a || !c || typeof a !== 'object' || typeof c !== 'object') return k;
+    const files = [...new Set([...Object.keys(a), ...Object.keys(c)])].filter((f) => a[f] !== c[f]);
+    return files.length ? `__ctx(${files.join('|')})` : k;
+  });
+  return named.length ? named.join(',') : '(같은데 안 맞음)';
 }

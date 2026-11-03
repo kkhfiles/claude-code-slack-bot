@@ -46,7 +46,8 @@ import { captureToInbox, checkinMap, checkinNow, codexTurn, dropCapture, isWorkA
   markCaptureFailed, markCaptureReplayed, markCaptureTold, markCaptureTried, pendingCaptures,
   pendingHeld, quickUpdate, SESSION_CODEX_MODEL, workAssistantRoot } from './work-assistant';
 import { personaNote } from './persona';
-import { boardLabel } from './board-queue';
+import { boardLabel, event as recordEvent } from './board-queue';
+import { TurnTimer } from './turn-timing';
 import { readUnseen } from './dm-context';
 import { containsPrivate } from './privacy-guard';
 import { ChannelGate, HOLD_SWEEP_MS, REPLAY_FRAME, buildHoldExtra, drainHeld, dropHeldFiles, holdV2On,
@@ -1776,6 +1777,8 @@ export class SlackHandler {
     // 답한 엔진 한 줄(다 막혔으면 ⏸ 한 줄)만 나가게. 아래 `finally` 가 놓고, 놓을 때 안내가 지금 모양을 한 번 본다.
     const releaseNotice = fbBase ? this.engineNotice.hold() : null;
 
+    // **차례 구간 시계**(2026-11-03) — 띄우기, 모델, 도구를 나눠 관찰 기록 `turn_timing` 에 한 줄
+    const turnTimer = new TurnTimer();
     try {
       this.logger.info('Spawning Claude CLI process', {
         prompt: finalPrompt.substring(0, 200) + (finalPrompt.length > 200 ? '...' : ''),
@@ -1934,6 +1937,7 @@ export class SlackHandler {
         writeInflight(m); }
 
       for await (const event of cliProcess) {
+        turnTimer.see(event);
         // **돈 도구를 적는다**(보류 v2) — 새 도구가 시작할 때만 처리 중 기록을 고쳐 쓴다(도구 하나에
         // 한 번). 재시작으로 끊기면 기동이 이것으로 「쓰기가 돌았나」를 가른다.
         if (stepLog.see(event)) {
@@ -2069,6 +2073,9 @@ export class SlackHandler {
         } else if (event.type === 'result') {
           const resultEvent = event as CliResultEvent;
           tailT0 = Date.now();
+          recordEvent('turn_timing', turnTimer.summary({
+            where: /^\[서랍 차례 [0-9a-f]{32}\]/.test(finalPrompt) ? 'drawer' : isDM ? 'dm' : 'channel',
+            sdk_ms: resultEvent.duration_ms ?? null }));
           this.logger.info('Received result from CLI', {
             subtype: resultEvent.subtype,
             totalCost: resultEvent.total_cost_usd,
