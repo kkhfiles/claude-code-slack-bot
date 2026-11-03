@@ -508,7 +508,7 @@ export class SlackHandler {
         },
         async (prompt, opts) => this.runAssistantSession(prompt, opts),
         config.assistant.configDir,
-        async (text, lead, shown) => this.askFromBoard(text, lead, shown),
+        async (text, lead, shown, opts) => this.askFromBoard(text, lead, shown, undefined, opts),
         { actionThreads: this.actionThreadApi() },
       );
 
@@ -1058,7 +1058,7 @@ export class SlackHandler {
    * 이 방에서 이어 가던 대화와 갈라진다.
    */
   private async askFromBoard(text: string, lead?: string, shown?: string,
-                             captureId?: string): Promise<TurnOutcome> {
+                             captureId?: string, opts: { thread?: boolean } = {}): Promise<TurnOutcome & { lastText?: string }> {
     const channel = config.assistant.dmChannel;
     const user = config.bot.allowUsers[0];
     if (!channel || !user) throw new Error('비서 방 또는 사용자가 설정되지 않았습니다');
@@ -1093,7 +1093,13 @@ export class SlackHandler {
     //
     // ⚠️ **판단이 든 것은 그대로 말한다** — 해석해서 넣은 날짜, 되물을 것,
     // 못 한 것. 조용한 것이 「그대로 됐다」는 뜻이 되려면 그래야 한다.
-    const say = this.pushedSay(channel);
+    // **서랍(세나 대화)에서 온 말**(2026-11-03 A1 · 실장님 「답은 서랍에만」) — 슬랙 본문에는 위 머리 줄 하나만 두고
+    // 진행 글과 답은 그 줄의 스레드로 보낸다. 세션은 그대로 같은 세나 세션이다(DM 의 세션 열쇠는 차례의 `thread_ts`
+    // 로 정해지고, 여기서 바꾸는 것은 글을 올리는 곳뿐). 마지막 글은 부른 쪽이 서랍 차례에 쓴다.
+    let lastText = '';
+    const say = opts.thread
+      ? this.threadedSay(channel, String(posted.ts), (t) => { if (t.trim()) lastText = t; })
+      : this.pushedSay(channel);
     // `pushed` 는 **사람이 말을 건 것이 아니라는 표시**다 — 완료 줄을 남길지가
     // 여기서 갈린다(사람이 물었으면 「끝났다」이고, 안 물었으면 아무 말도 아니다).
     //
@@ -1105,7 +1111,22 @@ export class SlackHandler {
         captureId, outcomeSink } as unknown as MessageEvent,
       say,
     );
-    return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink };
+    return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink,
+             ...(opts.thread ? { lastText } : {}) };
+  }
+
+  /**
+   * 서랍에서 온 차례의 `say` — 스레드가 정해지지 않은 글은 머리 줄의 스레드로 보내고, 보낸 글을 `seen` 에 알린다.
+   * `[조용히]` 도 서랍에는 알린다(서랍은 「반영했어요」로 보인다) — 슬랙에는 안 올린다.
+   */
+  private threadedSay(channel: string, headTs: string, seen: (text: string) => void): (msg: any) => Promise<{ ts?: string }> {
+    return async (msg: any) => {
+      const text = typeof msg === 'string' ? msg : String(msg?.text ?? '');
+      seen(text);
+      if (/^\s*\[조용히\]\s*$/m.test(text.split('\n')[0])) return {};
+      const body = typeof msg === 'string' ? { text: msg } : { ...msg };
+      return this.app.client.chat.postMessage({ channel, ...body, thread_ts: body.thread_ts || headTs });
+    };
   }
 
   /**

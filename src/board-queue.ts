@@ -73,11 +73,16 @@ export interface QueueItem {
   id: string;
   text: string;
   /** 어디로 갈지. 없으면 짧은 문법이다 — 이 표시가 생기기 전에 담긴 것도 있다. */
-  kind?: 'quick' | 'ask' | 'note';
+  kind?: 'quick' | 'ask' | 'note' | 'drawer';
   label?: string;
   ts: number;
   taken?: number;
+  /** 서랍(세나 대화)에서 온 말이 답할 차례 — `drawer` 일 때만(2026-11-03 A1). 답은 그 차례에 쓴다. */
+  reply?: { cid: string; tid: string };
 }
+
+/** 서랍에서 온 말을 세나 세션에 넘기고 답을 그 서랍 차례에 쓰는 쪽. 넘기지 못하면 던진다. */
+export type Drawer = (item: QueueItem) => Promise<void>;
 
 /**
  * 밖에서 온 문의 한 건. **판 큐와 다른 칸(`inbox`)에 담긴다.**
@@ -278,7 +283,8 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
                             note?: Apply | null,
                             stage?: Apply | null,
                             narrow?: Apply | null,
-                            deliver?: Deliver | null): Promise<DrainResult> {
+                            deliver?: Deliver | null,
+                            drawer?: Drawer | null): Promise<DrainResult> {
   const out: DrainResult = {
     applied: [], dropped: [], retry: [], lost: [], duplicates: 0, contacts: [],
   };
@@ -378,6 +384,27 @@ export async function drain(apply: Apply, ask: Ask | null, base?: string,
       // 반영은 끝났는데 ack 이 못 갔던 것. 지우기만 하면 된다.
       out.duplicates += 1;
       ack.push(item.id);
+      continue;
+    }
+    if (item.kind === 'drawer') {
+      // **서랍(세나 대화)에서 온 말**(A1) — 좁은 길과 원문 먼저 박기를 안 탄다(서랍 머리말은 업무를 짚는 판 머리말이
+      // 아니고, 답은 서랍으로 가야 한다). `ask` 와 같이 한 번만 시도하고 부르기 전에 처리한 것으로 적는다.
+      if (!drawer || !item.reply) { out.retry.push(item); continue; }
+      done.push(item.id);
+      seen.add(item.id);
+      saveDone(done);
+      ack.push(item.id);
+      try {
+        await drawer(item);
+        event('drawer', { ok: true });
+        out.applied.push({ item, output: '' });
+        pressed(item, 'drawer', true);
+      } catch (err) {
+        logger.error('서랍에서 온 말을 세나에게 못 넘겼습니다', err);
+        event('drawer', { ok: false });
+        out.lost.push(item);
+        pressed(item, 'lost', false);
+      }
       continue;
     }
     if (item.kind === 'ask') {

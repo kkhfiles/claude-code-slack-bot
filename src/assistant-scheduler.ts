@@ -13,7 +13,7 @@ import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   noteUpdate, stageUpdate, summaryCandidates, summaryApply,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
-  offsitePush, commitHarvest, remindDue, remindDone, deliverHeld,
+  offsitePush, commitHarvest, remindDue, remindDone, deliverHeld, finishDrawerTurn,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell, dropCapture,
   offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexTurn, codexWritableDirs, commitVaultLeftovers,
   improveGather, improveAccept, improveShow, improvePosted, improveDecide, runTasks } from './work-assistant';
@@ -34,7 +34,7 @@ import { buildImproveBlocks, improveEnabled, improvePreviewText,
   IMPROVE_DECISIONS, IMPROVE_ID_RE } from './improve-message';
 import { boardLabel, boardPushAuthBroken, boardPushTarget, boardQueueEnabled, drain, event as recordEvent } from './board-queue';
 import { BoardPush } from './board-push';
-import type { ContactItem } from './board-queue';
+import type { ContactItem, QueueItem } from './board-queue';
 import { config } from './config';
 import { ladderEventLines, ladderTable, ladderText, sameTier, serviceCodex } from './model-ladder';
 import { ActionPipeline, parseWindow, reportLogAvailable, reportLogState, runReportLog } from './action-pipeline';
@@ -990,7 +990,8 @@ export class AssistantScheduler {
      * 판에서 온 **사람 말**을 이 방의 대화로 들여보내는 길. 없으면 그런 항목은
      * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
      */
-    private askFromBoard?: (text: string, lead?: string, shown?: string) => Promise<TurnOutcome | void>,
+    private askFromBoard?: (text: string, lead?: string, shown?: string,
+                            opts?: { thread?: boolean }) => Promise<(TurnOutcome & { lastText?: string }) | void>,
     deps: SchedulerDeps = {},
   ) {
     this.reportLog = deps.reportLog ?? runReportLog;
@@ -2429,6 +2430,26 @@ export class AssistantScheduler {
   }
 
   /**
+   * 서랍(세나 대화)에서 온 말 하나(2026-11-03 A1) — 세나 세션에 넘기고 마지막 글을 그 서랍 차례에 쓴다.
+   * 슬랙에는 머리 줄 하나와 그 스레드만 남는다(실장님 「답은 서랍에만」). 못 넘기면 서랍 차례에 오류를 쓰고 던진다 —
+   * 드레인이 원문을 DM 으로 돌려준다. 서랍 차례가 이미 끝나 있으면(서버 재시작으로 중단) 답은 스레드에만 남는다.
+   */
+  private async askFromDrawer(item: QueueItem): Promise<void> {
+    if (!this.askFromBoard || !item.reply) throw new Error('세나 세션에 넘길 길이 없습니다');
+    const preview = item.text.replace(/\s+/g, ' ').slice(0, 60);
+    let last = '';
+    try {
+      const out = await this.askFromBoard(item.text, `🗂 서랍에서 — 답은 서랍에 있어요 · ${preview}`, '', { thread: true });
+      last = (out && out.lastText) || '';
+    } catch (err) {
+      await finishDrawerTurn(item.reply.tid, { error: '세나 세션에 넘기지 못했어요 — 잠시 뒤 다시 보내 주세요' });
+      throw err;
+    }
+    const wrote = await finishDrawerTurn(item.reply.tid, { answer: last });
+    if (!wrote) this.logger.warn(`서랍 차례에 답을 못 썼습니다(이미 끝났거나 중단됨) — 답은 슬랙 스레드에 있습니다 (${item.id})`);
+  }
+
+  /**
    * 큐를 한 번 비운다. `force` 는 알림이 깨운 것 — 주기 판정을 건너뛴다.
    *
    * **한 판이 도는 동안 온 알림은 버리지 않는다** — 끝난 뒤 한 번 더 돈다. 안 그러면
@@ -2450,7 +2471,8 @@ export class AssistantScheduler {
       // 판 큐는 차례 결과를 안 본다(막힌 것은 캡처가 들고 드레인이 다시 돌린다) — 결과는 버리고 넘긴다.
       const ask = this.askFromBoard;
       const r = await drain(quickUpdate, ask ? async (text: string) => { await ask(text); } : null, undefined,
-        noteUpdate, stageUpdate, this.narrowFromBoard, this.tellContact);
+        noteUpdate, stageUpdate, this.narrowFromBoard, this.tellContact,
+        ask ? (item) => this.askFromDrawer(item) : null);
       if (this.boardQueueFailures) {
         this.logger.info(`Board queue recovered (${this.boardQueueFailures}회 실패 뒤)`);
         this.boardQueueFailures = 0;

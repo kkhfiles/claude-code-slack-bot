@@ -311,6 +311,25 @@ r = await q.drain(apply, null, BASE);
 eq('받을 곳이 없으면 남긴다', [r.retry.length, r.lost.length, r.dropped.length], [1, 0, 0]);
 eq('큐에 그대로 있다', (await pending()).length, 1);
 
+// 10-b. **서랍(세나 대화)에서 온 말**(A1) — 서랍 갈래가 받고, 답할 차례가 같이 넘어간다. 좁은 길·비서·짧은 문법으로 안 샌다
+await clear();
+const DR = { cid: 'a'.repeat(32), tid: 'b'.repeat(32) };
+await post('act', { text: '서랍 시험 — TSK-5 금요일로', kind: 'drawer', reply: DR });
+const drawn = [];
+const asked0 = asked.length, applied0 = applied.length;
+r = await q.drain(apply, ask, BASE, null, null, null, null, async (item) => { drawn.push(item); });
+eq('서랍 갈래가 받고 답할 차례가 같이 온다', [drawn.length, drawn[0]?.reply?.tid, drawn[0]?.text], [1, DR.tid, '서랍 시험 — TSK-5 금요일로']);
+eq('비서나 짧은 문법으로 안 샌다', [asked.length - asked0, applied.length - applied0], [0, 0]);
+eq('받은 것은 큐에서 사라진다(서랍)', (await pending()).length, 0);
+await post('act', { text: '서랍 — 넘기다 넘어짐', kind: 'drawer', reply: DR });
+r = await q.drain(apply, ask, BASE, null, null, null, null, async () => { throw new Error('세션 없음'); });
+eq('서랍도 한 번만 — 못 넘기면 원문이 돌아온다', [r.lost.length, (await pending()).length], [1, 0]);
+await post('act', { text: '서랍 — 받을 곳 없음', kind: 'drawer', reply: DR });
+r = await q.drain(apply, ask, BASE);
+eq('서랍 갈래가 없으면 버리지 않고 남긴다', [r.retry.length, asked.length - asked0], [1, 0]);
+await clear();
+fs.rmSync(EVENTS, { force: true });
+
 // 11. **여러 줄 글은 묶지 않는다.** 짧은 문법은 `·` 로 이어 보내는데 사람이 쓴
 //     글에는 그 글자와 줄바꿈이 그대로 들어 있어, 이으면 조각이 쪼개진다.
 await clear();
