@@ -16,6 +16,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -46,11 +47,19 @@ if (built.status !== 0) {
 }
 console.log('됨');
 
+// **검사가 실제 오류 기록에 쓰지 않게 한다** (2026-11-03) — 오류 모음이 10/30 부터 파일
+// (`~/.claude/state/bot-errors.jsonl`)에도 쌓이는데, 검사들이 가짜 실패(PID 32 강제 종료, 「깨진 원장」,
+// 「시험 — Claude error」)를 그 파일에 적어 아침 브리핑 「시스템 이슈」에 실렸다. 검사가 남기는 비우기 줄
+// (`cleared`)은 봇이 다시 뜰 때 그 앞의 진짜 실패까지 버리게 한다. 검사마다 따로 안 고치고 여기서 한 번에 돌린다.
+// **파일은 검사마다 따로** — 하나를 같이 쓰면 앞 검사가 남긴 줄을 뒤 검사가 되읽어 건수를 세는 검사가 깨진다(calbase).
+const errorsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-check-errors-'));
+
 const failed = [];
 for (const name of names) {
   process.stdout.write(`${name} … `);
+  const env = { ...process.env, BOT_ERRORS_FILE: path.join(errorsDir, `${name.replace(/[^\w-]/g, '_')}.jsonl`) };
   const r = spawnSync('npm', ['run', '--silent', name], {
-    cwd: ROOT, shell: true, encoding: 'utf-8', timeout: PER_CHECK_MS,
+    cwd: ROOT, shell: true, encoding: 'utf-8', timeout: PER_CHECK_MS, env,
   });
   const out = ((r.stdout || '') + (r.stderr || '')).trimEnd();
   if (r.status === 0) {
@@ -60,6 +69,7 @@ for (const name of names) {
     failed.push({ name, out });
   }
 }
+fs.rmSync(errorsDir, { recursive: true, force: true });
 
 console.log('');
 if (failed.length) {
