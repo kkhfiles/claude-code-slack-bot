@@ -35,6 +35,7 @@ const REGISTRAR = {
   offsitePushTimer: 'scheduleOffsitePush',
   mailPollTimer: 'startMailPoller',
   remindTimer: 'startRemindPoller',
+  heldTimer: 'startHeldPoller',
   vaultSweepTimer: 'startVaultSweep',
   actionsTimer: 'startActionsTicker',
   runSweepTimer: 'startRunSweeper',

@@ -600,6 +600,27 @@ export async function remindDone(id: string, at?: string): Promise<boolean> {
   }
 }
 
+/** 보류했던 지시를 보낸 결과 한 줄. **뜻은 파이썬만 안다** — 여기서는 나르기만 한다. */
+export interface HeldDelivery {
+  result: string;
+  line: string;
+}
+
+/**
+ * 엔진이 막혀 보류한 세션 지시 중 풀린 것을 보낸다(2026-11-03 · `stanley_send.py --deliver-held`).
+ * 보낼 때가 아니거나 아직 막혔으면 빈 목록. 못 읽으면 빈 목록 — 보류 파일은 그대로 남아 다음 차례에 다시 본다.
+ */
+export async function deliverHeld(): Promise<HeldDelivery[]> {
+  try {
+    const { code, stdout } = await runTasks(['--deliver-held', '--json'], 180_000, 'bin/stanley_send.py');
+    if (code !== 0) return [];
+    const r = JSON.parse(stdout) as { items?: HeldDelivery[] };
+    return Array.isArray(r.items) ? r.items : [];
+  } catch {
+    return [];
+  }
+}
+
 /** 요약을 다시 쓸 업무 하나. **뜻은 파이썬만 안다** — 여기서는 나르기만 한다. */
 export interface SummaryItem {
   id: string;

@@ -13,7 +13,7 @@ import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   noteUpdate, stageUpdate, summaryCandidates, summaryApply,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
-  offsitePush, commitHarvest, remindDue, remindDone,
+  offsitePush, commitHarvest, remindDue, remindDone, deliverHeld,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell, dropCapture,
   offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexTurn, codexWritableDirs, commitVaultLeftovers,
   improveGather, improveAccept, improveShow, improvePosted, improveDecide, runTasks } from './work-assistant';
@@ -198,6 +198,11 @@ const MTIME_SLACK_MS = 50;
 const REMIND_POLL_MS = 30_000;
 const REMIND_FROM_HOUR = 8;
 const REMIND_TO_HOUR = 20;
+/**
+ * 보류한 세션 지시를 볼 간격(2026-11-03). **시각과 쉬는 날을 안 가린다** — 막힌 엔진은 밤에도 풀리고, 풀리면 바로
+ * 보내야 맡긴 일이 이어진다. 보낸 것을 알리는 DM 만 「조용히」 기간에 멈춘다(보내기는 그대로).
+ */
+const HELD_POLL_MS = 120_000;
 /**
  * 노션이 직접 고쳐졌는지 보는 간격. **이 값이 곧 화면이 낡아 있을 수 있는
  * 최대 시간이다.** 안 바뀌었으면 1행 질의(0.5초)로 끝나므로 짧게 잡아도
@@ -935,6 +940,8 @@ export class AssistantScheduler {
   /** 막혀서 건너뛴다는 로그를 이 막힘(시작 시각)에 이미 남겼나 — 10분마다 같은 줄이 안 쌓이게. */
   private mailBlockedLogged: number | null = null;
   private remindTimer: ReturnType<typeof setInterval> | null = null;
+  private heldTimer: ReturnType<typeof setInterval> | null = null;
+  private heldBusy = false;
   private vaultSweepTimer: ReturnType<typeof setInterval> | null = null;
   private remindBusy = false;
   private actionsTimer: ReturnType<typeof setInterval> | null = null;
@@ -1415,6 +1422,7 @@ export class AssistantScheduler {
       this.scheduleOffsitePush();
       this.startMailPoller();
       this.startRemindPoller();
+      this.startHeldPoller();
       this.startVaultSweep();
       // 켜는 문이 꺼져 있으면 안 건다 — 06:30 에 아무것도 안 만든다(시안 확인 전).
       if (improveEnabled()) this.scheduleImprove();
@@ -1470,6 +1478,10 @@ export class AssistantScheduler {
     if (this.remindTimer) {
       clearInterval(this.remindTimer);
       this.remindTimer = null;
+    }
+    if (this.heldTimer) {
+      clearInterval(this.heldTimer);
+      this.heldTimer = null;
     }
     if (this.vaultSweepTimer) {
       clearInterval(this.vaultSweepTimer);
@@ -2035,6 +2047,33 @@ export class AssistantScheduler {
     this.remindTimer = setInterval(() => {
       void this.runRemindPoll();
     }, REMIND_POLL_MS);
+  }
+
+  /**
+   * 엔진이 막혀 보류한 세션 지시(`stanley_send.py` 의 held) — 풀린 것을 보내고 한 줄씩 알린다.
+   * 세션을 안 띄운다 — 정한 지시를 정한 세션에 넣기만 한다.
+   */
+  private startHeldPoller(): void {
+    this.heldTimer = setInterval(() => { void this.runHeldPoll(); }, HELD_POLL_MS);
+  }
+
+  /** 한 차례 — 타이머와 시험이 부른다. **절대 던지지 않는다.** */
+  async runHeldPoll(): Promise<number> {
+    if (this.heldBusy) return 0;
+    this.heldBusy = true;
+    try {
+      const done = await deliverHeld();
+      if (done.length && !(await isQuietPeriod())) {
+        await this.sendMessage(done.map((d) => `📨 ${d.line}`).join('\n'));
+      }
+      if (done.length) this.logger.info(`Held — ${done.length}건 처리`);
+      return done.length;
+    } catch (error) {
+      this.logger.error('Held poll threw', error);
+      return 0;
+    } finally {
+      this.heldBusy = false;
+    }
   }
 
   /**
