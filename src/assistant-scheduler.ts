@@ -2437,16 +2437,20 @@ export class AssistantScheduler {
   private async askFromDrawer(item: QueueItem): Promise<void> {
     if (!this.askFromBoard || !item.reply) throw new Error('세나 세션에 넘길 길이 없습니다');
     const preview = item.text.replace(/\s+/g, ' ').slice(0, 60);
+    // 차례 번호를 앞에 붙인다(2026-11-03) — 세나 세션이 표, 막대, 업무 카드가 든 답을 그 차례에 직접 쓴다
+    // (`sena_drawer.py reply`, work-assistant `prompts/drawer-answer.md`). 세션이 썼으면 아래 `finishDrawerTurn` 은
+    // 차례가 이미 끝나 비켜 가고, 못 썼으면 지금처럼 슬랙 글을 옮긴다.
+    const marked = /^[0-9a-f]{32}$/.test(item.reply.tid) ? `[서랍 차례 ${item.reply.tid}]\n${item.text}` : item.text;
     let last = '';
     try {
-      const out = await this.askFromBoard(item.text, `🗂 서랍에서 — 답은 서랍에 있어요 · ${preview}`, '', { thread: true });
+      const out = await this.askFromBoard(marked, `🗂 서랍에서 — 답은 서랍에 있어요 · ${preview}`, '', { thread: true });
       last = (out && out.lastText) || '';
     } catch (err) {
       await finishDrawerTurn(item.reply.tid, { error: '세나 세션에 넘기지 못했어요 — 잠시 뒤 다시 보내 주세요' });
       throw err;
     }
     const wrote = await finishDrawerTurn(item.reply.tid, { answer: last });
-    if (!wrote) this.logger.warn(`서랍 차례에 답을 못 썼습니다(이미 끝났거나 중단됨) — 답은 슬랙 스레드에 있습니다 (${item.id})`);
+    if (!wrote) this.logger.info(`서랍 차례가 이미 끝나 있음 — 세나 세션이 직접 썼거나 서버 재시작으로 중단 (${item.id})`);
   }
 
   /**
