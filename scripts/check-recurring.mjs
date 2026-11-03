@@ -121,6 +121,29 @@ try {
     eq('② 비동기 거부 — 처리 안 된 거부 수가 직접 건 것과 같음', rejections.length, direct);
     ok('② 비동기 거부 — 같은 거부 이유', rejections[0] === why);
     eq('② 비동기 거부 기록(code 없으면 name)', [R.snapshot().async.fails, R.snapshot().async.lastCode], [1, 'TypeError']);
+
+    // 회차마다 같은 Promise 를 돌려주는 곳(처리 제안의 pumping) — 거부가 회차 수만큼 늘면 안 된다
+    rejections.length = 0;
+    const sharedDirect = Promise.reject(new Error('공유'));
+    void sharedDirect; void sharedDirect;   // 대조 — 직접 건 콜백 두 회차가 같은 Promise 를 흘림
+    await settle();
+    const directShared = rejections.length;
+    rejections.length = 0;
+    const shared = Promise.reject(new Error('공유'));
+    R.every({ name: 'shared', everyMs: 1000, run: () => shared });
+    armedList.at(-1).fn();
+    armedList.at(-1).fn();
+    await settle();
+    eq('② 같은 Promise 를 두 회차가 돌려줘도 처리 안 된 거부 수가 직접 건 것과 같음', rejections.length, directShared);
+    eq('② 같은 Promise 두 회차 모두 실패로 셈', R.snapshot().shared.fails, 2);
+  }
+
+  // NaN 대기 — setTimeout 은 받으므로 기록이 그 앞에서 던지면 안 된다
+  {
+    reset();
+    let threw = false;
+    try { R.once({ name: 'nan', ms: Number.NaN, run: () => {} }); } catch { threw = true; }
+    eq('① NaN 대기도 던지지 않고 setTimeout 에 그대로', [threw, armedList.length, Number.isNaN(armedList[0]?.ms)], [false, 1, true]);
   }
 
   // ③ 겹쳐도 돈다 · 같은 이름 둘
@@ -209,6 +232,7 @@ try {
     let threw = false;
     try { armedList.at(-1).fn(); } catch { threw = true; }
     eq('⑤ 못 써도 던지지 않고 run 은 돎', [threw, calls], [false, 1]);
+    ok('⑤ 못 썼을 때도 임시 파일이 안 남음', !fs.readdirSync(TMP).some((n) => n.endsWith('.tmp')));
     R.setStatusFile(null);
   }
 } finally {

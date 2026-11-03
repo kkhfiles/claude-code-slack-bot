@@ -54,6 +54,8 @@ const WRITE_EVERY_MS = 30_000;
 
 const logger = new Logger('Recurring');
 const entries = new Map<string, Entry>();
+/** 이미 거부를 다시 낸 Promise — `fire` 가 본다. */
+const rethrown = new WeakSet<object>();
 let statusFile: string | null = null;
 let lastWrite = 0;
 let dirty = false;
@@ -127,9 +129,13 @@ function fire(e: Entry, run: () => unknown): void {
     throw err;
   }
   if (r && typeof (r as PromiseLike<unknown>).then === 'function') {
+    // 거부는 Promise 하나당 한 번만 다시 낸다 — `run` 이 회차마다 같은 Promise 를 돌려주는 곳(처리 제안의
+    // `pumping`)에서 회차 수만큼 처리 안 된 거부가 늘지 않게. 두 번째부터는 기록만 한다.
+    const first = !rethrown.has(r as object);
+    if (first) rethrown.add(r as object);
     void (r as Promise<unknown>).then(
       (v) => finish(e, started, true, undefined, v),
-      (err) => { finish(e, started, false, err); throw err; },
+      (err) => { finish(e, started, false, err); if (first) throw err; },
     );
   } else {
     finish(e, started, true, undefined, r);
@@ -187,7 +193,8 @@ export function every(opts: { name: string; everyMs: number; run: () => unknown;
 export function once(opts: { name: string; ms: number; run: () => unknown; unref?: boolean }): Task {
   const e = entry(opts.name, 'once', !!opts.unref);
   e.everyMs = undefined;
-  e.dueAt = new Date(Date.now() + Math.max(0, opts.ms)).toISOString();
+  // 숫자가 아닌 대기(NaN · Infinity)도 `setTimeout` 은 1ms 로 받는다 — 기록이 그 앞에서 던지지 않게 거른다
+  e.dueAt = Number.isFinite(opts.ms) ? new Date(Date.now() + Math.max(0, opts.ms)).toISOString() : undefined;
   armed(e);
   let done = false;
   const handle = setTimeout(() => {
@@ -246,6 +253,7 @@ function write(now: number): void {
   if (!file || !dirty) return;
   lastWrite = now;
   dirty = false;
+  const tmp = `${file}.${process.pid}.tmp`;
   try {
     const body = JSON.stringify({
       pid: process.pid,
@@ -254,19 +262,20 @@ function write(now: number): void {
       tasks: snapshot(),
     }, null, 1);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, body, 'utf-8');
     try {
       fs.renameSync(tmp, file);
     } catch {
       // Windows 에서 점검기가 열고 있으면 이름 바꾸기가 EPERM · EBUSY 로 실패한다 — 덮어쓴다
       fs.writeFileSync(file, body, 'utf-8');
-      try { fs.rmSync(tmp, { force: true }); } catch { /* 남아도 다음 회차가 덮는다 */ }
     }
   } catch (err: any) {
     if (!writeWarned) {
       writeWarned = true;
       logger.warn('타이머 상태 파일을 못 썼습니다', { code: safe(err?.code) ?? 'other' });
     }
+  } finally {
+    // 임시 파일은 어느 갈래로 끝나도 지운다 — 남기면 재시작으로 pid 가 바뀔 때마다 하나씩 쌓인다
+    try { fs.rmSync(tmp, { force: true }); } catch { /* 지울 수 없으면 그만 */ }
   }
 }
