@@ -346,6 +346,23 @@ export async function dropCapture(id: string, why: string): Promise<void> {
   }
 }
 
+/**
+ * 서랍 차례가 답을 쓰고 끝났는데 캡처가 아직 열려 있으면 닫는다(2026-11-04).
+ *
+ * 서랍에서 조회만 한 말은 세나 세션이 닫기를 빠뜨려 받은 말 기록함에 20건이 쌓였다. 원문은 서랍 대화 기록에
+ * 남아 있으므로 실패 큐에 둘 까닭이 없다. **`--if-open`** 이라 쓰기가 등록으로 닫은 캡처(filed)는 그대로 두고,
+ * `--force` 를 안 붙여 답을 기다리는 메일 물음이 남은 캡처도 안 닫는다.
+ */
+export async function closeDrawerCapture(id: string): Promise<void> {
+  if (!id || !isWorkAssistantEnabled()) return;
+  try {
+    const r = await runTasks(['inbox', 'resolve', '--id', id, '--drop', '서랍 차례 — 답을 서랍에 씀', '--if-open'], 30_000);
+    if (r.code !== 0) logger.warn('서랍 차례 캡처를 못 닫았습니다', { id, code: r.code, stderr: r.stderr.slice(-200) });
+  } catch (err) {
+    logger.error('서랍 차례 캡처를 못 닫았습니다', err);
+  }
+}
+
 /** 아직 세션이 처리하지 않은 캡처 수. 브리핑 꼬리에 붙인다. */
 export function openCaptureCount(): number {
   const root = workAssistantRoot();

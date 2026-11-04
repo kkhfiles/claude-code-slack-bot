@@ -514,7 +514,7 @@ export class SlackHandler {
         },
         async (prompt, opts) => this.runAssistantSession(prompt, opts),
         config.assistant.configDir,
-        async (text, lead, shown, opts) => this.askFromBoard(text, lead, shown, undefined, opts),
+        async (text, lead, shown, opts) => this.askFromBoard(text, lead, shown, opts?.captureId, opts),
         { actionThreads: this.actionThreadApi() },
       );
 

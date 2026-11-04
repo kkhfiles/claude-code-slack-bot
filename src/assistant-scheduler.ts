@@ -13,7 +13,7 @@ import { listNasQueue, buildNasQueueBlocks } from './nas-confirm';
 import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   noteUpdate, stageUpdate, summaryCandidates, summaryApply,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
-  offsitePush, commitHarvest, remindDue, remindDone, deliverHeld, finishDrawerTurn,
+  offsitePush, commitHarvest, remindDue, remindDone, deliverHeld, finishDrawerTurn, closeDrawerCapture, captureToInbox,
   workAssistantRoot, mailCandidates, mailMark, boardOutputToTell, dropCapture,
   offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexTurn, codexWritableDirs, commitVaultLeftovers,
   improveGather, improveAccept, improveShow, improvePosted, improveDecide, runTasks } from './work-assistant';
@@ -991,7 +991,7 @@ export class AssistantScheduler {
      * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
      */
     private askFromBoard?: (text: string, lead?: string, shown?: string,
-                            opts?: { drawer?: boolean }) => Promise<(TurnOutcome & { lastText?: string }) | void>,
+                            opts?: { drawer?: boolean; captureId?: string }) => Promise<(TurnOutcome & { lastText?: string }) | void>,
     deps: SchedulerDeps = {},
   ) {
     this.reportLog = deps.reportLog ?? runReportLog;
@@ -2442,16 +2442,21 @@ export class AssistantScheduler {
     // (`sena_drawer.py reply`, work-assistant `prompts/drawer-answer.md`). 세션이 썼으면 아래 `finishDrawerTurn` 은
     // 차례가 이미 끝나 비켜 가고, 못 썼으면 세션의 마지막 글을 옮긴다.
     const marked = /^[0-9a-f]{32}$/.test(item.reply.tid) ? `[서랍 차례 ${item.reply.tid}]\n${item.text}` : item.text;
+    // 캡처를 여기서 남긴다(2026-11-04) — 차례가 끝난 뒤 열려 있으면 닫으려면 id 를 알아야 한다(`closeDrawerCapture`)
+    const capture = captureToInbox(marked, 'slack');
     let last = '';
     try {
-      const out = await this.askFromBoard(marked, `🗂 서랍에서 · ${preview}`, '', { drawer: true });
+      const out = await this.askFromBoard(marked, `🗂 서랍에서 · ${preview}`, '', { drawer: true, captureId: capture?.id });
       last = (out && out.lastText) || '';
     } catch (err) {
       await finishDrawerTurn(item.reply.tid, { error: '세나 세션에 넘기지 못했어요 — 잠시 뒤 다시 보내 주세요' });
       throw err;
     }
     const r = await finishDrawerTurn(item.reply.tid, { answer: last });
-    if (r !== 'gone') return;
+    if (r !== 'gone') {
+      if (capture?.id) await closeDrawerCapture(capture.id);
+      return;
+    }
     this.logger.info(`서랍 차례가 끊겨 있음 — 답을 DM 에 남김 (${item.id})`);
     const body = last.replace(/^\s*\[(조용히|슬랙)\]\s*/, '').trim();
     await this.sendMessage(`🗂 서랍 차례가 끊겨 답을 여기 남겨요 · ${preview}${body ? `\n${body}` : ''}`).catch(() => {});
