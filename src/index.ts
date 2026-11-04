@@ -12,8 +12,12 @@ import { getVersionInfo, checkForUpdates } from './version';
 import { ReportServer } from './report-server';
 import { isSessionEnv } from './child-env';
 import { setStatusFile } from './recurring';
+import { useDefaultErrorsFile } from './error-collector';
 
 const logger = new Logger('Main');
+
+// **실제 오류 기록 파일은 봇 본체만 쓴다** (2026-11-04) — 검사가 모듈을 불러 쓰면 메모리에만 남는다(`error-collector.ts`).
+useDefaultErrorsFile();
 
 // **봇을 띄운 세션의 변수를 지운다** (2026-11-03). pm2 를 Claude Code · Codex 세션에서 띄우면 그 세션의
 // 변수가 데몬과 봇에 남고(cluster 모드라 데몬 환경을 물려받는다), 봇이 띄우는 파이썬 · claude · codex · agy 가

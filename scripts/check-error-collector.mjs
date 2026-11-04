@@ -46,6 +46,19 @@ try {
   const r = spawnSync(process.execPath, ['-e', `const { errorCollector: c } = require(${JSON.stringify(path.join(ROOT, 'dist', 'error-collector.js'))}); c.add('x','y'); console.log(c.hasErrors())`],
     { env: { ...process.env, BOT_ERRORS_FILE: path.join(DIR, 'blocker', 'bot-errors.jsonl') }, encoding: 'utf-8' });
   eq('못 쓰는 경로여도 메모리로 돎', r.stdout.trim(), 'true');
+  // 실제 기록 파일은 봇 본체만 — 검사가 모듈을 불러 쓰면 집 폴더의 기본 경로에 안 남음(2026-11-04)
+  const home = path.join(DIR, 'home');
+  fs.mkdirSync(home);
+  const homeEnv = { ...process.env, HOME: home, USERPROFILE: home };
+  delete homeEnv.BOT_ERRORS_FILE;
+  const real = path.join(home, '.claude', 'state', 'bot-errors.jsonl');
+  const mod = JSON.stringify(path.join(ROOT, 'dist', 'error-collector.js'));
+  spawnSync(process.execPath, ['-e', `const m = require(${mod}); m.errorCollector.add('check', '시험'); m.errorCollector.getAndClear();`],
+    { env: homeEnv, encoding: 'utf-8' });
+  eq('본체가 아니면 기본 경로에 안 씀', fs.existsSync(real), false);
+  spawnSync(process.execPath, ['-e', `const m = require(${mod}); m.useDefaultErrorsFile(); m.errorCollector.add('bot', '진짜');`],
+    { env: homeEnv, encoding: 'utf-8' });
+  eq('본체가 정하면 기본 경로에 씀', fs.existsSync(real) && JSON.parse(fs.readFileSync(real, 'utf-8').trim().split('\n').pop()).source, 'bot');
 } finally {
   fs.rmSync(DIR, { recursive: true, force: true });
 }
