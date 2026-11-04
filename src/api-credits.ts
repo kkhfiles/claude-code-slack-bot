@@ -8,6 +8,10 @@
  * **고르는 규칙**(파이썬과 같다 — 바꾸면 둘을 같이 바꾼다)
  *   - 장부의 `enabled` 가 참일 때만(기본 꺼짐 — 과금 경로를 켜는 것은 사람이 정한다)
  *   - 만료가 이른 키부터 · 못 쓰는 키 = 막힘 표시(서버가 잔액 부족이라 했거나 사람이 막음), 만료일 0시(한국 시각) 지남
+ *   - **한 키에 부여가 여럿일 수 있다**(2026-11-04) — 키 기록의 `grants: [{usd, expires, since}]`. 그 키의 순서는 아직 안 지난
+ *     부여 중 가장 이른 만료일이고, 안 지난 부여가 하나라도 있으면 쓸 수 있다. `grants` 가 없으면 옛 `grant_usd` · `expires`
+ *     한 칸을 부여 하나로 읽는다. 전에는 팀 키(11-05 · 12-05 만료 부여)가 12-05 로 줄을 서서 12-02 만료 Max 키를 먼저 썼다
+ *   - 만료일이 같으면 이름순(파이썬 `min((stop, name, rec))` 과 같은 결과)
  *   - **장부를 못 읽거나 깨졌으면 쓸 키가 없다** — 이상한 장부로 과금 쪽에 가지 않는다(구독으로 띄운다)
  *
  * **쓴 금액은 참고 값이다 — 이 값으로 멈추지 않는다**(2026-10-23 사용자 결정 「실제 값과 같다고 보장이 안 되니 멈추면 중단」).
@@ -33,8 +37,11 @@ const DEFAULT_KEY_FILES: Record<string, string> = {
 
 export interface CreditKey { name: string; keyFile: string }
 
+/** 부여 하나 — 한 키에 만료일이 다른 크레딧이 여럿 있을 수 있다(2026-11-04 · `python -m llm_playbook.credits grant`). */
+interface Grant { usd?: unknown; expires?: unknown; since?: unknown }
+
 interface KeyRecord {
-  key_file?: string; grant_usd?: number; expires?: string; spent_usd?: number;
+  key_file?: string; grant_usd?: number; expires?: string; spent_usd?: number; grants?: Grant[];
   daily?: Record<string, number>; blocked?: { why: string; at: number } | null; [extra: string]: unknown;
 }
 interface Ledger { v: number; enabled?: boolean; margin?: number; keys: Record<string, KeyRecord>; [extra: string]: unknown }
@@ -63,29 +70,46 @@ function load(file = ledgerFile()): Ledger | null {
   }
 }
 
-/** 만료일 → 멈출 시각(그날 0시 한국 시각 · epoch 밀리초). 모양이 틀리면 NaN. */
-export function stopAt(expires: string | undefined): number {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(expires ?? '');
-  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) - KST_OFFSET_MS : NaN;
+/** 만료일 → 멈출 시각(그날 0시 한국 시각 · epoch 밀리초). 모양이 틀리거나 없는 날짜(2026-13-40)면 NaN — 파이썬 `stop_at` 과 같은 날짜만 받는다. */
+export function stopAt(expires: unknown): number {
+  const m = typeof expires === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(expires) : null;
+  if (!m) return NaN;
+  const utc = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+  return new Date(utc).toISOString().slice(0, 10) === expires ? utc - KST_OFFSET_MS : NaN;
 }
 
-/** 쓸 수 있나 — 막힘 · 만료 · 받은 금액 없음만 본다. 쓴 금액(추정)은 안 본다(머리말). */
+/** 그 키의 부여 목록 — `grants` 가 있으면 그것, 없으면 옛 한 칸(`grant_usd` · `expires`)을 부여 하나로(파이썬 `grants`). */
+function grantsOf(rec: KeyRecord): Grant[] {
+  const gs = rec.grants;
+  if (Array.isArray(gs) && gs.length) return gs.filter((g): g is Grant => !!g && typeof g === 'object');
+  return [{ usd: rec.grant_usd, expires: rec.expires }];
+}
+
+/** 그 키의 순서 — 금액이 있고 아직 안 지난 부여 중 가장 이른 멈출 시각. 없으면 NaN(파이썬 `next_stop`). */
+function nextStop(rec: KeyRecord, nowMs: number): number {
+  const live = grantsOf(rec)
+    .filter((g) => Number(g.usd ?? 0) > 0)
+    .map((g) => stopAt(g.expires))
+    .filter((t) => Number.isFinite(t) && nowMs < t);
+  return live.length ? Math.min(...live) : NaN;
+}
+
+/** 쓸 수 있나 — 막힘 · 받은 금액 없음 · 부여가 다 지남만 본다. 쓴 금액(추정)은 안 본다(머리말). */
 function usable(rec: KeyRecord, nowMs: number): boolean {
   if (rec.blocked) return false;
-  const grant = Number(rec.grant_usd ?? 0);
-  const stop = stopAt(rec.expires);
-  return grant > 0 && Number.isFinite(stop) && nowMs < stop;
+  return Number.isFinite(nextStop(rec, nowMs));
 }
 
-/** 지금 쓸 키 — 없으면 null(꺼짐 포함). 만료가 이른 것부터. */
+/** 지금 쓸 키 — 없으면 null(꺼짐 포함). 안 지난 부여의 만료가 이른 키부터, 같으면 이름순(파이썬 `pick` 과 같다). */
 export function pickCreditKey(nowMs: number = Date.now(), file = ledgerFile()): CreditKey | null {
   const st = load(file);
   if (!st || st.enabled !== true) return null;
   const ok = Object.entries(st.keys)
     .filter(([, rec]) => rec && typeof rec === 'object' && usable(rec, nowMs))
-    .sort(([, a], [, b]) => stopAt(a.expires) - stopAt(b.expires));
+    .map(([name, rec]) => ({ name, rec, stop: nextStop(rec, nowMs) }))
+    .sort((a, b) => a.stop - b.stop || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   if (!ok.length) return null;
-  const [name, rec] = ok[0];
+  const { name, rec } = ok[0];
   return { name, keyFile: expand(rec.key_file || DEFAULT_KEY_FILES[name] || '') };
 }
 

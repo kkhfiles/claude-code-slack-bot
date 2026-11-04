@@ -68,7 +68,9 @@
 - **무엇** — 봇이 띄우는 Claude 세션 전부(DM, 예약 일, 좁은 길, 달력 판정)가 월 API 크레딧이 있는 동안 API 키로 먼저 뜸. 크레딧이 소진되거나 만료되면 구독 토큰으로 뜸
 - **장부** — llm-playbook 과 같은 파일 `~/.config/llm-playbook/api-credits.json`(`src/api-credits.ts`, 기준 규칙은 `llm_playbook/credits.py`)
   - 켜는 문 `enabled`(기본 꺼짐). 켜고 끄기와 새 크레딧 등록은 `python -m llm_playbook.credits on`, `off`, `set --key … --usd … --expires …`
-  - 만료가 이른 키부터 사용. 만료일 0시(한국 시각), 받은 금액의 97% 사용, 서버의 「credit balance too low」, 지출 한도(「specified API usage limits」, 2026-10-29 추가), 키 거부 중 하나면 그 키는 사용 불가
+  - 같은 키에 만료일이 다른 크레딧이 더 있으면 `grant --key … --usd … --expires …` 로 부여를 하나씩 더함(2026-11-04). 쓴 금액과 막힘은 그대로 둠
+  - 아직 안 지난 부여의 만료일이 가장 이른 키부터 사용. 한 키에 부여가 여럿이면 그중 안 지난 것의 가장 이른 만료일이 그 키의 순서(같으면 키 이름순)
+  - 못 쓰는 키 — 부여가 모두 만료됨(만료일 0시, 한국 시각), 서버의 「credit balance too low」, 지출 한도(「specified API usage limits」, 2026-10-29 추가), 키 거부, 사람이 막음. 장부가 추정한 사용액으로는 멈추지 않음(2026-10-23)
 - **고르는 위치** — `SdkHandler.buildOptions` 한 곳. `billing` 을 생략하면 장부 키, 없으면 구독. `'subscription'` 은 항상 구독
 - **기록** — 크레딧 세션의 결과마다 `total_cost_usd` 를 장부에 더하고, 엔진 상태는 `claude-api` 열쇠에 적음(구독 Claude 의 막힘을 안 지움)
 - **도중에 바닥나면**(2026-10-22 사용자 결정) — 그 차례를 다음 키, 그다음 구독으로 다시 띄움(`SdkProcess.retry`, 두 번까지). 크레딧 오류 메시지와 결과는 밖으로 안 냄

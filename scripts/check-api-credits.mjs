@@ -39,6 +39,27 @@ const base = {
 };
 const name = (now) => ac.pickCreditKey(now)?.name ?? null;
 
+const TEAM_TWO = { key_file: 'K-team', grant_usd: 817.52, expires: '2026-12-05', spent_usd: 0,
+  grants: [{ usd: 317.52, expires: '2026-11-05' }, { usd: 500, expires: '2026-12-05' }] };
+const MAX_ONE = { key_file: 'K-max', grant_usd: 100, expires: '2026-12-02', spent_usd: 0 };
+const PICK_CASES = [
+  ['옛 기록 — 한 칸만 있으면 오늘처럼 그 만료일로',
+    { max: MAX_ONE, team: { key_file: 'K-team', grant_usd: 817.62, expires: '2026-12-05', spent_usd: 0 } }, ['2026-11-04', 12], 'max'],
+  ['이른 부여가 있는 키가 다른 키를 이김', { max: MAX_ONE, team: TEAM_TWO }, ['2026-11-04', 12], 'team'],
+  ['이른 부여 만료일 0시 직전까지는 그 키', { max: MAX_ONE, team: TEAM_TWO }, ['2026-11-04', 23], 'team'],
+  ['이른 부여가 지나면 늦은 부여의 만료일로 다시 줄 섬', { max: MAX_ONE, team: TEAM_TWO }, ['2026-11-05', 0], 'max'],
+  ['다른 키가 만료되면 늦은 부여로 남은 키', { max: MAX_ONE, team: TEAM_TWO }, ['2026-12-02', 0], 'team'],
+  ['막힌 키는 부여가 남아도 안 씀', { max: MAX_ONE, team: { ...TEAM_TWO, blocked: { why: 'x', at: 0 } } }, ['2026-11-04', 12], 'max'],
+  ['부여가 다 지나면 없음', { max: MAX_ONE, team: TEAM_TWO }, ['2026-12-05', 0], null],
+  ['금액 0 인 부여는 순서에 안 들어감',
+    { max: MAX_ONE, team: { ...TEAM_TWO, grants: [{ usd: 0, expires: '2026-11-05' }, { usd: 500, expires: '2026-12-05' }] } },
+    ['2026-11-04', 12], 'max'],
+  ['모양이 틀린 만료일의 부여는 안 셈',
+    { max: MAX_ONE, team: { ...TEAM_TWO, grants: [{ usd: 300, expires: '11/05' }, { usd: 500, expires: '2026-12-05' }] } },
+    ['2026-11-04', 12], 'max'],
+  ['만료일이 같으면 이름순', { team: { ...MAX_ONE, key_file: 'K-team' }, max: MAX_ONE }, ['2026-11-04', 12], 'max'],
+];
+
 try {
   write({ enabled: false, keys: base });
   eq('꺼짐 — 안 고름', name(KST('2026-10-22')), null);
@@ -58,6 +79,13 @@ try {
   eq('깨진 장부는 덮어쓰지 않음', fs.readFileSync(LEDGER, 'utf-8'), '{깨짐');
   fs.rmSync(LEDGER);
   eq('장부 없음 — 없음', name(KST('2026-10-22')), null);
+
+  // 한 키에 부여가 여럿(2026-11-04) — llm-playbook `tests/test_credits.py` 의 PICK_CASES 와 같은 표 · 같은 기대값.
+  // 그날 팀 키(11-05 · 12-05 만료 부여)가 12-05 로 줄을 서서 12-02 만료 Max 키를 먼저 썼다.
+  for (const [why, keys, [day, hh], want] of PICK_CASES) {
+    write({ enabled: true, keys });
+    eq(`여러 부여 — ${why}`, name(KST(day, hh)), want);
+  }
 
   // 쓴 금액 · 날짜별 합 · 막기
   write({ enabled: true, keys: base });
@@ -126,6 +154,7 @@ try {
     ['2026-11-01', 0, { enabled: true, keys: base }],
     ['2026-10-22', 12, { enabled: true, keys: { ...base, max: { ...base.max, spent_usd: 94 } } }],
     ['2026-10-22', 12, { enabled: false, keys: base }],
+    ...PICK_CASES.map(([, keys, [day, hh]]) => [day, hh, { enabled: true, keys }]),
   ];
   for (const [day, hh, ledger] of cases) {
     write(ledger);
@@ -150,5 +179,5 @@ if (fails.length) {
   for (const f of fails) console.log('  ✗ ' + f);
   process.exitCode = 1;
 } else {
-  console.log('통과 — API 크레딧 장부 (꺼짐 · 만료가 이른 키부터 · 만료일 0시 · 추정 사용액으로 안 멈춤 · 막힘 · 깨진 장부 · 날짜별 합 · 세션 누적에서 늘어난 만큼 · Claude 막힘 판단 · 파이썬과 같은 키)');
+  console.log('통과 — API 크레딧 장부 (꺼짐 · 만료가 이른 키부터 · 한 키의 여러 부여 · 만료일 0시 · 추정 사용액으로 안 멈춤 · 막힘 · 깨진 장부 · 날짜별 합 · 세션 누적에서 늘어난 만큼 · Claude 막힘 판단 · 파이썬과 같은 키)');
 }
