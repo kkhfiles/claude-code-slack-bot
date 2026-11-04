@@ -53,6 +53,7 @@ import { containsPrivate } from './privacy-guard';
 import { ChannelGate, HOLD_SWEEP_MS, REPLAY_FRAME, buildHoldExtra, drainHeld, dropHeldFiles, holdV2On,
   leadText, markChoice, needsCanary, oldListMessage, receivedSec, replayNote, replayTarget,
   type HeldFile, type HeldItem } from './hold-replay';
+import { drawerTidOf, progressWriter, stepLabel } from './drawer-progress';
 import { StepLog, isHeldOutcome, isWriteTool, outcomeFrom, type TurnOutcome, type TurnStep } from './turn-outcome';
 import { fallbackEligible, isAgyRung, isFallbackRung, pickAfter, pickEngine, type DmOrigin, type LadderPick, type PickInput } from './engine-ladder';
 import { CODEX_INFLIGHT_STEP, FALLBACK_TIMEOUT_MS, INCOMPLETE_LINE, NEEDS_FULL_LINE, agyMarkerLines, agyRunningStep,
@@ -1806,6 +1807,8 @@ export class SlackHandler {
 
     // **차례 구간 시계**(2026-11-03) — 띄우기, 모델, 도구를 나눠 관찰 기록 `turn_timing` 에 한 줄
     const turnTimer = new TurnTimer();
+    // **서랍 차례면 도구 호출마다 단계 한 줄**(2026-11-04 N6 시안 04) — 서랍이 기다리는 동안 그 줄을 쌓는다
+    const drawerStep = event.drawer ? progressWriter(drawerTidOf(text)) : null;
     try {
       this.logger.info('Spawning Claude CLI process', {
         prompt: finalPrompt.substring(0, 200) + (finalPrompt.length > 200 ? '...' : ''),
@@ -2057,6 +2060,9 @@ export class SlackHandler {
             textPreview: contentParts.filter((p: any) => p.type === 'text').map((p: any) => p.text?.substring(0, 80)),
           });
 
+          if (hasToolUse && drawerStep) {
+            for (const part of contentParts as any[]) if (part.type === 'tool_use') drawerStep(stepLabel(part.name, part.input));
+          }
           if (hasToolUse) {
             const todoTool = contentParts.find((part: any) =>
               part.type === 'tool_use' && part.name === 'TodoWrite'
