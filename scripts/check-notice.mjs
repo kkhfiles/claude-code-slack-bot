@@ -329,6 +329,16 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
     ok(`봇이 쓴 글에 ${why}이(가) 들어가면 카드를 안 만들고 까닭을 알린다`,
       !c.posted.some((m) => buttonOf(m)) && c.posted.some((m) => String(m.text).includes('빗장')), c.posted);
   }
+  // 성을 뗀 이름은 낱말 안에 든 것을 이름으로 안 본다 — 「변경하게」의 「경하」로 실데이 카드가 막혔다(2026-11-05)
+  c = fakeClient();
+  await na.offer(c, [{ name: 'agenda', text: '산길동무와 함께 걸어요' }], { user: 'UBOSS', channel: 'DM' });
+  ok('성을 뗀 이름이 낱말 안에 들어 있으면 이름으로 안 본다 (「산길동무」의 「길동」)', c.posted.some((m) => buttonOf(m)), c.posted);
+  c = fakeClient();
+  await na.offer(c, [{ name: 'agenda', text: '이번엔 길동 씨도 와요' }], { user: 'UBOSS', channel: 'DM' });
+  ok('빈칸 뒤 성을 뗀 이름은 여전히 막는다', !c.posted.some((m) => buttonOf(m)) && c.posted.some((m) => String(m.text).includes('빗장')), c.posted);
+  c = fakeClient();
+  await na.offer(c, [{ name: 'agenda', text: '대표홍길동님과도 이야기해요' }], { user: 'UBOSS', channel: 'DM' });
+  ok('성까지 붙은 이름은 낱말에 붙어 있어도 막는다', !c.posted.some((m) => buttonOf(m)), c.posted);
   c = fakeClient();
   await na.offer(c, [{ name: 'agenda', text: '1on1 은 10시 반에도 돼요. 9/22 에 봬요!' }], { user: 'UBOSS', channel: 'DM' });
   ok('시각·날짜·1on1 의 숫자는 둔다', c.posted.some((m) => buttonOf(m)), c.posted);

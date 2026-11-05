@@ -131,6 +131,26 @@ const NUM_KO = '(?:(?:열|스물|서른|마흔|쉰)(?:한|두|세|네|다섯|여
 const TALLY = new RegExp(`\\d+\\s*(?:명|건|%|퍼센트|배|위|등|번째)|${NUM_KO}\\s*(?:명|분)(?!화)|절반|과반|대다수|대부분|다수`);
 const DIGIT_ALLOW = /1on1|\d{4}-\d{2}-\d{2}|\d{1,2}\s*\/\s*\d{1,2}|\d{1,2}\s*시(?:\s*\d{1,2}\s*분)?(?:\s*반)?|\d{1,2}\s*분|\d{1,2}\s*월|\d{1,2}\s*일|\d{1,2}\s*주|\d{4}\s*년/g;
 
+/**
+ * 글에 나온 실원 이름 하나. 없으면 빈 문자열.
+ * **성을 뗀 이름(「홍길동」의 「길동」)은 앞 글자가 한글이 아닐 때만** 이름으로 본다 — 그냥 찾으면 「변경하게」 안의
+ * 「경하」를 이름으로 잡아 실데이 안내 카드가 막혔다(2026-11-05). 이름은 글 첫머리나 빈칸·문장부호 뒤에 온다.
+ */
+export function nameHit(text: string, names: string[]): string {
+  for (const name of names) {
+    if (!name) continue;
+    const given = names.some((n) => n !== name && /^[가-힣]{3,4}$/.test(n) && n.slice(1) === name);
+    if (!given) {
+      if (text.includes(name)) return name;
+      continue;
+    }
+    for (let at = text.indexOf(name); at >= 0; at = text.indexOf(name, at + 1)) {
+      if (at === 0 || !/[가-힣]/.test(text[at - 1])) return name;
+    }
+  }
+  return '';
+}
+
 export class LetterNotice {
   private logger = new Logger('Letter:notice');
   private pending = new Map<string, Pending>();
@@ -633,7 +653,8 @@ export class LetterNotice {
     for (const id of this.opts.members ?? []) {
       const names = await this.namesOf(client, id);
       if (!names.length) return `이름을 못 받아 옴(${id}) — 빗장을 못 세워 막음`;
-      for (const name of names) if (name && text.includes(name)) return `실원 이름(「${name}」)`;
+      const hit = nameHit(text, names);
+      if (hit) return `실원 이름(「${hit}」)`;
     }
     return '';
   }
