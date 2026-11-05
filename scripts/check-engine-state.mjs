@@ -474,25 +474,14 @@ try {
     eq('Claude 회복', composeTransition('none', 'claude', s.load(), L, nowSec()), '✅ Claude 회복 — 돌아왔습니다');
     eq('차례가 같으면 안내 없음', composeTransition('codex', 'codex', s.load(), L, nowSec()), null);
 
-    // 2026-10-23 — 구독이 막혀도 크레딧 키가 있으면 그 차례는 API 키로 뜬다. 「GPT 로 이어 갑니다」가 나갔다.
+    // 2026-11-05 사용자 결정 — 봇은 크레딧을 안 쓴다. 구독이 막히면 크레딧 칸(claude-api)으로 안내하지 않고 다음 칸(GPT).
+    // 2026-10-23 ~ 11-05 에는 장부에 쓸 키가 있으면 「Claude API(크레딧)로 이어 갑니다」를 냈다.
     const k = fresh();
     k.recordBlocked('claude', { kind: 'usage', until: U });
-    eq('크레딧이 있으면 Claude API 차례', dmRung(k.load(), nowSec(), undefined, true), 'claude-api');
-    eq('크레딧이 없으면 그대로 GPT 차례', dmRung(k.load(), nowSec(), undefined, false), 'codex');
-    eq('구독 소진 → 크레딧',
-       composeTransition('claude', 'claude-api', k.load(), L, nowSec()),
-       '🔁 Claude 구독 사용량 소진(풀림 10/19(월) 10:00) — Claude API(크레딧)로 이어 갑니다');
-    eq('크레딧도 없으면 → GPT',
-       composeTransition('claude-api', 'codex', k.load(), L, nowSec()),
-       '🔁 Claude 사용량 소진(풀림 10/19(월) 10:00) · API 크레딧 없음 — GPT(gpt-T1-astra)로 이어 갑니다');
-    eq('크레딧에서 Claude 로 돌아옴', composeTransition('claude-api', 'claude', k.load(), L, nowSec()), '✅ Claude 회복 — 돌아왔습니다');
-    const ko = fresh();
-    ko.recordBlocked('claude', { kind: 'overload' });
-    ok('과부하에는 「구독」을 안 붙인다',
-       /^🔁 Claude 서버 과부하\(다시 확인 .+\) — Claude API\(크레딧\)로 이어 갑니다$/.test(
-         composeTransition('claude', 'claude-api', ko.load(), L, nowSec())));
+    eq('구독이 막히면 GPT 차례 — 크레딧 칸으로 안 감', dmRung(k.load(), nowSec()), 'codex');
+    ok('안내가 크레딧 장부를 본다', !/pickCreditKey|api-credits|크레딧/.test(fs.readFileSync(path.join(SRC, 'engine-notice.ts'), 'utf-8')));
+    // 막힘 출처 시험용 — claude-api 열쇠는 엔진 상태에 남아 있다(표에 칸을 다시 넣을 때만 도는 옛 경로)
     k.recordBlocked('claude-api', { kind: 'usage', why: 'x'.repeat(300) });
-    eq('크레딧 칸이 막히면 GPT 차례', dmRung(k.load(), nowSec(), undefined, true), 'codex');
 
     // 막힘 출처 — 상태 파일 옆 한 줄(누가 적었나 · 왜). 상태에는 근거 글이 안 들어간다.
     const blockLog = path.join(path.dirname(k.file), '.engine-blocks.jsonl');

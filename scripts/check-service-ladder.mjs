@@ -38,8 +38,8 @@ const eq = (label, got, want) => {
 
 const TODAY = ['claude', 'codex', 'agy-gemini', 'agy-claude'];
 /**
- * DM 차례 — 10/22 오전에 Claude 다음에 월 API 크레딧 칸(`claude_api`)을 넣었다가 같은 날 뺐다. 1차 Claude 칸이 크레딧을
- * 먼저 쓰게 되어(`api-credits.ts`) 같은 크레딧을 두 번 시도하는 칸이 됐기 때문이다. 그래서 예약 일과 같다.
+ * DM 차례 — 10/22 오전에 Claude 다음에 월 API 크레딧 칸(`claude_api`)을 넣었다가 같은 날 뺐다(그때는 1차 Claude 칸이
+ * 크레딧을 먼저 썼다). 2026-11-05 사용자 결정으로 봇은 크레딧을 안 쓰므로 다시 넣지 않는다. 그래서 예약 일과 같다.
  */
 const DM_TODAY = TODAY;
 const ON = { DM_FALLBACK: 'on', DM_FALLBACK_AGY: 'on' };

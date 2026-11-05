@@ -108,7 +108,7 @@ try {
   ok(`빼는 함수가 키를 남긴다(대소문자 무관) — ${JSON.stringify(Object.keys(out))}`,
      JSON.stringify(Object.keys(out)) === JSON.stringify(['PATH']));
 
-  const { SdkHandler, CREDIT_RESUME_NOTE } = require(path.join(DIST, 'sdk-handler.js'));
+  const { SdkHandler } = require(path.join(DIST, 'sdk-handler.js'));
   const h = new SdkHandler({ getServerConfiguration: () => ({}), getDefaultAllowedTools: () => [] });
   for (const [label, extra] of [['env 없음', {}], ['env 있음', { env: { CLAUDE_CODE_OAUTH_TOKEN: 'oauth-check' } }]]) {
     const { sdkOptions } = h.buildOptions('확인', { workingDirectory: os.tmpdir(), ...extra });
@@ -144,135 +144,68 @@ try {
     ok(`API 칸: 엔진 상태를 claude-api 에 안 적는다(${proc.engine})`, proc.engine === 'claude-api');
     ok('보통 차례: 엔진 상태를 claude 에 안 적는다', h.runQuery('확인', { workingDirectory: os.tmpdir() }).engine === 'claude');
 
-    // ── ⑤ 크레딧 먼저(2026-10-22) — 장부가 켜져 있고 쓸 키가 있을 때만 그 키 · 아니면 구독 ──────────
+    // ── ⑤ 크레딧은 안 쓴다(2026-11-05 사용자 결정 「API 크레딧은 Mycelium 사이트만」) ──────────
+    // 장부가 켜져 있고 쓸 키가 있어도 봇 세션은 구독으로 뜬다 · Claude 막힘은 구독 상태만 따른다 · 장부에 안 쓴다.
+    // 2026-10-22 ~ 11-05 에는 장부에 쓸 키가 있으면 모든 봇 세션을 그 키로 띄웠다(「크레딧 먼저」). 그 길이 다시 붙으면
+    // 이 장부(켜짐 · 만료 전 · 막힘 없음)를 찾으므로 아래가 넘어진다.
     const ledger = path.join(os.tmpdir(), `check-noaccounts-ledger-${process.pid}.json`);
     const beforeLedger = process.env.LLM_PLAYBOOK_CREDITS;
     process.env.LLM_PLAYBOOK_CREDITS = ledger;
     const future = new Date(Date.now() + 10 * 86400_000).toISOString().slice(0, 10);
-    const writeLedger = (enabled) => fs.writeFileSync(ledger, JSON.stringify({ v: 1, enabled, margin: 0.03,
-      keys: { max: { key_file: keyFile, grant_usd: 10, expires: future, spent_usd: 0, daily: {} } } }));
+    const ledgerText = JSON.stringify({ v: 1, enabled: true, margin: 0.03, keys: {
+      max: { key_file: keyFile, grant_usd: 100, expires: future, spent_usd: 0, daily: {} },
+      team: { key_file: keyFile, grant_usd: 500, grants: [{ usd: 500, expires: future }], expires: future, spent_usd: 0, daily: {} },
+    } });
     try {
-      writeLedger(false);
-      let o = h.buildOptions('확인', { workingDirectory: os.tmpdir(), env });
-      ok('크레딧 꺼짐: 키가 들어갔다 — 구독이어야 한다', leaks(o.sdkOptions.env).length === 0 && o.credit === null);
-      writeLedger(true);
-      o = h.buildOptions('확인', { workingDirectory: os.tmpdir(), env });
-      ok('크레딧 켜짐: 장부 키가 안 들어갔다', o.sdkOptions.env?.ANTHROPIC_API_KEY === KEY && o.credit?.name === 'max');
-      ok('크레딧 켜짐: 구독 토큰이 남았다', !('CLAUDE_CODE_OAUTH_TOKEN' in o.sdkOptions.env));
-      o = h.buildOptions('확인', { workingDirectory: os.tmpdir(), env, billing: 'subscription' });
-      ok('구독 고정: 키가 들어갔다', leaks(o.sdkOptions.env).length === 0 && o.credit === null);
+      fs.writeFileSync(ledger, ledgerText);
+      const o = h.buildOptions('확인', { workingDirectory: os.tmpdir(), env });
+      ok('크레딧 장부 켜짐: 보통 세션에 키가 들어갔다 — 구독이어야 한다', leaks(o.sdkOptions.env).length === 0);
+      ok('크레딧 장부 켜짐: 구독 토큰이 빠졌다', o.sdkOptions.env?.CLAUDE_CODE_OAUTH_TOKEN === 'oauth-check');
+      ok('크레딧 장부 켜짐: 장부 키를 고른 흔적이 있다', !('credit' in o));
 
-      // 결과마다 쓴 금액을 적고, 크레딧 부족이면 그 키를 막는다
-      SdkHandler.queryFn = () => (async function* () {
-        yield { type: 'result', subtype: 'success', is_error: false, result: '답', total_cost_usd: 0.5, session_id: 's' };
-      })();
-      for await (const _ of h.runQuery('확인', { workingDirectory: os.tmpdir() })) { /* 끝까지 */ }
-      let st = JSON.parse(fs.readFileSync(ledger, 'utf-8'));
-      ok(`크레딧 세션: 쓴 금액을 장부에 안 적었다(${st.keys.max.spent_usd})`, st.keys.max.spent_usd === 0.5);
-      SdkHandler.queryFn = () => (async function* () {
-        yield { type: 'result', subtype: 'success', is_error: true, total_cost_usd: 0, session_id: 's',
-          result: 'Credit balance too low · Add funds: https://platform.claude.com/settings/billing' };
-      })();
-      for await (const _ of h.runQuery('확인', { workingDirectory: os.tmpdir() })) { /* 끝까지 */ }
-      st = JSON.parse(fs.readFileSync(ledger, 'utf-8'));
-      ok('크레딧 세션: 크레딧 부족인데 키를 안 막았다', !!st.keys.max.blocked);
-      o = h.buildOptions('확인', { workingDirectory: os.tmpdir(), env });
-      ok('막힌 키: 그래도 키가 들어갔다 — 구독으로 돌아가야 한다', leaks(o.sdkOptions.env).length === 0);
-
-      // ── ⑥ 크레딧이 도중에 바닥난 차례는 다음 키나 구독으로 한 번 더(2026-10-22 사용자 결정) ──────────
-      // 첫 띄우기는 SDK 가 대신 만든 오류 메시지(billing_error)와 오류 결과, 다음 띄우기는 성공 — 부른 옵션을 적어 둔다.
-      const billing = [
-        { type: 'assistant', error: 'billing_error', message: { content: [{ type: 'text', text: 'Credit balance too low · Add funds' }] } },
-        { type: 'result', subtype: 'success', is_error: true, total_cost_usd: 0, session_id: 's1', result: 'Credit balance too low · Add funds' },
-      ];
-      const scripted = (first) => {
-        const calls = [];
-        SdkHandler.queryFn = ({ prompt, options }) => {
-          calls.push({ prompt, resume: options.resume, key: leaks(options.env).length > 0 });
-          const evs = calls.length === 1 ? first
-            : [{ type: 'result', subtype: 'success', is_error: false, result: '다시 한 답', total_cost_usd: 0, session_id: 's2' }];
-          return (async function* () { for (const e of evs) yield e; })();
-        };
-        return calls;
+      // 실제로 띄우는 옵션 — 대화 차례 · 미리 띄운 세션 둘 다 키 없이, 엔진은 구독 Claude
+      const seen = [];
+      SdkHandler.queryFn = ({ options }) => {
+        seen.push(leaks(options.env).length);
+        return (async function* () {
+          yield { type: 'result', subtype: 'success', is_error: false, result: '답', total_cost_usd: 0.5, session_id: 's-nc' };
+          yield { type: 'result', subtype: 'success', is_error: true, total_cost_usd: 0, session_id: 's-nc',
+            result: 'Credit balance too low · Add funds: https://platform.claude.com/settings/billing' };
+        })();
       };
-      const drain = async (proc) => { const out = []; for await (const e of proc) out.push(e); return out; };
-      const texts = (evs) => evs.map((e) => e.result ?? e.message?.content?.[0]?.text ?? '').join(' | ');
+      const p1 = h.runQuery('확인', { workingDirectory: os.tmpdir(), env });
+      ok(`크레딧 장부 켜짐: 엔진 상태를 claude 가 아닌 곳에 적는다(${p1.engine})`, p1.engine === 'claude');
+      const evs = [];
+      for await (const e of p1) evs.push(e);
+      ok(`크레딧 장부 켜짐: 크레딧 글에 다시 띄웠다(띄움 ${seen.length})`, seen.length === 1 && evs.length === 2);
+      h.prewarm({ workingDirectory: os.tmpdir(), env, noSessionPersistence: true });
+      ok(`크레딧 장부 켜짐: 띄운 세션에 키가 들어갔다(${JSON.stringify(seen)})`, seen.length >= 1 && seen.every((n) => n === 0));
+      h.dropAllWarm('검사 끝');
+      ok('크레딧 장부 켜짐: 봇이 장부를 고쳤다(쓴 금액 · 막힘)', fs.readFileSync(ledger, 'utf-8') === ledgerText);
+      ok('크레딧 장부 켜짐: 봇이 장부 옆 기록을 남겼다',
+         !fs.existsSync(ledger.replace(/\.json$/, '.history.jsonl')) && !fs.existsSync(ledger.replace(/\.json$/, '.sessions.json')));
 
-      writeLedger(true);
-      let calls = scripted(billing);
-      let evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env }));
-      ok(`도중 소진(도구 안 돎): 다시 안 띄웠다 · 같은 말로 · 구독으로(${JSON.stringify(calls)})`,
-        calls.length === 2 && calls[1].prompt === '확인' && calls[0].key && !calls[1].key);
-      ok(`도중 소진: 오류 글이 밖으로 나갔다 — 다시 한 답만 나가야 한다(${texts(evs)})`,
-        texts(evs) === '다시 한 답' && !evs.some((e) => e.error));
-      st = JSON.parse(fs.readFileSync(ledger, 'utf-8'));
-      ok('도중 소진: 그 키를 안 막았다', !!st.keys.max.blocked);
-
-      writeLedger(true);
-      const withTool = [
-        { type: 'system', subtype: 'init', session_id: 's1' },
-        { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] } },
-        ...billing,
-      ];
-      calls = scripted(withTool);
-      evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env }));
-      ok(`도중 소진(도구 돎): 그 세션을 「이미 한 일은 다시 하지 말라」로 잇지 않았다(${JSON.stringify(calls)})`,
-        calls.length === 2 && calls[1].resume === 's1' && calls[1].prompt === CREDIT_RESUME_NOTE && !calls[1].key);
-      ok('도중 소진(도구 돎): 앞서 낸 이벤트를 다시 냈거나 빠뜨렸다', evs.length === 3 && evs[2].result === '다시 한 답');
-
-      writeLedger(true);
-      calls = scripted(withTool);
-      evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env, noSessionPersistence: true }));
-      ok(`도중 소진(도구 돎 · 저장 안 함): 다시 띄웠다 — 같은 쓰기가 두 번 들어간다(${calls.length})`,
-        calls.length === 1 && evs.some((e) => e.is_error));
-
-      writeLedger(true);
-      calls = scripted(billing);
-      evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env, billing: 'subscription' }));
-      ok(`구독 세션: 크레딧 글에 다시 띄웠다(${calls.length})`, calls.length === 1);
-
-      // 다시 띄운 세션도 소진이면 다음으로 — 상한(두 번)을 넘으면 원래 오류를 낸다
-      writeLedger(true);
-      let n = 0;
-      SdkHandler.queryFn = () => { n++; return (async function* () { for (const e of billing) yield e; })(); };
-      const fs2 = fs.readFileSync(ledger, 'utf-8');
-      fs.writeFileSync(ledger, JSON.stringify({ ...JSON.parse(fs2), keys: { ...JSON.parse(fs2).keys,
-        team: { key_file: keyFile, grant_usd: 10, expires: future, spent_usd: 0, daily: {} } } }));
-      evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env }));
-      ok(`연달아 소진: max → team → 구독 세 번이 아니다(${n})`, n === 3);
-      ok('연달아 소진: 마지막 구독 세션의 오류는 그대로 나가야 한다', evs.some((e) => e.is_error));
-
-      // 지출 한도(2026-10-29 실제 문구) — 사용량 소진이 아니라 그 키의 소진. 다음 키(team)로 같은 말을 다시 띄운다
-      const SPEND = 'API Error: 400 You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.';
-      const writeTwo = () => fs.writeFileSync(ledger, JSON.stringify({ v: 1, enabled: true, margin: 0.03, keys: {
-        max: { key_file: keyFile, grant_usd: 10, expires: future, spent_usd: 0, daily: {} },
-        team: { key_file: keyFile, grant_usd: 10, expires: future, spent_usd: 0, daily: {} } } }));
-      for (const [label, err] of [['error 칸 있음', 'invalid_request'], ['error 칸 없음', undefined]]) {
-        writeTwo();
-        calls = scripted([
-          { type: 'assistant', ...(err ? { error: err } : {}), message: { content: [{ type: 'text', text: SPEND }] } },
-          { type: 'result', subtype: 'success', is_error: true, total_cost_usd: 0, session_id: 's1', result: SPEND },
-        ]);
-        evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env }));
-        st = JSON.parse(fs.readFileSync(ledger, 'utf-8'));
-        ok(`지출 한도(${label}): 다음 키로 같은 말을 다시 안 띄웠다(${JSON.stringify(calls)})`,
-          calls.length === 2 && calls[1].prompt === '확인' && calls[1].key);
-        ok(`지출 한도(${label}): max 를 안 막았거나 team 까지 막았다`, !!st.keys.max.blocked && !st.keys.team.blocked);
-        ok(`지출 한도(${label}): 오류 글이 밖으로 나갔다(${texts(evs)})`, texts(evs) === '다시 한 답');
+      // Claude 막힘 — 구독 상태만 본다(크레딧 키가 있어도 구독이 막혔으면 막힘)
+      const { EngineState, engineState: liveState } = require(path.join(DIST, 'engine-state.js'));
+      const dmf = require(path.join(DIST, 'dm-fallback.js'));
+      const rlu = require(path.join(DIST, 'rate-limit-until.js'));
+      const esDir = fs.mkdtempSync(path.join(os.tmpdir(), 'check-noaccounts-engine-'));
+      try {
+        const es = new EngineState(path.join(esDir, '.engine-state.json'));
+        es.recordBlocked('claude', { kind: 'usage', until: Math.floor(Date.now() / 1000) + 3600 });
+        ok('구독 막힘 + 크레딧 있음: DM 사다리 막힘 표가 Claude 를 안 막힘으로 본다', dmf.ladderBlockedMap(es).claude === true);
+        es.recordOk('claude');
+        ok('구독 풀림: DM 사다리 막힘 표가 Claude 를 막힘으로 본다', dmf.ladderBlockedMap(es).claude === false);
+      } finally {
+        fs.rmSync(esDir, { recursive: true, force: true });
       }
-      // 같은 문구를 Claude 가 대화 중에 인용한 것은 오류가 아니다 — error 칸도 API Error 머리도 없다
-      writeTwo();
-      calls = scripted([
-        { type: 'assistant', message: { content: [{ type: 'text', text: `오늘 받은 오류는 「${SPEND.slice(15)}」입니다` }] } },
-        { type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0, session_id: 's1', result: '답' },
-      ]);
-      evs = await drain(h.runQuery('확인', { workingDirectory: os.tmpdir(), env }));
-      st = JSON.parse(fs.readFileSync(ledger, 'utf-8'));
-      ok(`지출 한도 문구 인용: 다시 띄웠거나 키를 막았다(${calls.length})`, calls.length === 1 && !st.keys.max.blocked);
+      // 보류 드레인의 「아직 막혔나」 — 기본 엔진 상태(검사에서는 `fresh-dist.mjs` 가 옮긴 임시 파일)
+      liveState.recordBlocked('claude', { kind: 'usage', until: Math.floor(Date.now() / 1000) + 3600 });
+      ok('구독 막힘 + 크레딧 있음: 보류 드레인이 막힘으로 안 본다', rlu.stillBlocked() === true);
+      liveState.recordOk('claude');
+      ok('구독 풀림: 보류 드레인이 막힘으로 본다', rlu.stillBlocked() === false);
     } finally {
       fs.rmSync(ledger, { force: true });
-      // 세션별 누적 비용 파일도 — 남으면 같은 프로세스 번호가 다시 온 회차가 옛 비용을 읽어 「안 적었다」로 넘어진다(2026-10-29)
-      fs.rmSync(ledger.replace(/\.json$/, '.sessions.json'), { force: true });
       if (beforeLedger === undefined) delete process.env.LLM_PLAYBOOK_CREDITS;
       else process.env.LLM_PLAYBOOK_CREDITS = beforeLedger;
     }
@@ -298,8 +231,8 @@ try {
 const addAt = files.filter((f) => f !== HELPER && /withApiKey\(/.test(all[f]));
 ok(`키를 넣는 함수(withApiKey)를 sdk-handler.ts 밖에서 부른다 — ${addAt.join(' · ')}`,
    addAt.length === 1 && addAt[0] === 'sdk-handler.ts');
-ok('sdk-handler.ts 가 키를 넣는 함수를 `billing === \'api\'` 또는 장부 키 갈래 밖에서 부른다',
-   /opts\.billing === 'api' \|\| credit\s*\n\s*\? withApiKey\(/.test(all['sdk-handler.ts'] ?? '')
+ok('sdk-handler.ts 가 키를 넣는 함수를 `billing === \'api\'` 갈래 밖에서 부른다',
+   /opts\.billing === 'api'\s*\n\s*\? withApiKey\(/.test(all['sdk-handler.ts'] ?? '')
    && (all['sdk-handler.ts'].match(/withApiKey\(/g) ?? []).length === 1);
 // 객체 속성으로 쓴 것만 센다 — 주석의 `billing: 'api'` 는 띄우는 곳이 아니다.
 const billAt = files.filter((f) => /[{,]\s*billing: 'api'/.test(all[f]));

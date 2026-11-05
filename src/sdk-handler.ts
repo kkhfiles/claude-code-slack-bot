@@ -16,7 +16,6 @@ import { event as recordEvent } from './board-queue';
 import { withApiKey, withoutApiKey } from './child-env';
 import { ClaudeTap } from './engine-tap';
 import { engineState, type Engine } from './engine-state';
-import { blockCreditKey, ledgerFile, pickCreditKey, recordCreditSpend, turnCost, type CreditKey } from './api-credits';
 import { afterFirstToolResult, claudeDrill, claudeDrillEvents, drillQuery, limitTail, type DrillScope } from './engine-drill';
 import type {
   CliEvent,
@@ -105,125 +104,26 @@ export function interpretSdkMessage(msg: SDKMessage): CliEvent | null {
 
 // --- SdkProcess: mirrors CliProcess interface -----------------------------
 
-/**
- * 크레딧 소진 — 「Your credit balance is too low …」 · 「Credit balance too low · Add funds」(공식 문서 원문)와
- * 지출 한도 — 「API Error: 400 You have reached your specified API usage limits. You will regain access on …」.
- * 2026-10-29 지출 한도를 몰라 사용량 소진으로 읽고 다음 키 대신 GPT 로 넘겼고 오류 글이 DM 에 나갔다(파이썬 `claude_api._SPEND` 와 같은 기준).
- */
-const CREDIT_EXHAUSTED = /credit balance (?:is )?too low|specified API usage limits?\b/i;
-/** SDK 가 대신 만든 API 오류 글의 머리 — `error` 칸이 비어 와도 이 머리면 오류 메시지로 본다. */
-const API_ERROR_HEAD = /^\s*API Error: \d{3}\b/;
-/** 키 거부 — 「Invalid API key」 · 「invalid x-api-key」 · `authentication_error` · 「Failed to authenticate」 · 401. */
-const KEY_REJECTED = /invalid (?:x-)?api[ -]key|authentication_error|failed to authenticate|\b401\b/i;
-
-/**
- * 크레딧 세션이 크레딧 부족 · 키 거부로 못 한 것인가 — SDK 가 대신 만든 오류 메시지(`error` 칸)와 결과.
- * 보통 글에 「401」이 나와도 안 잡히게 어시스턴트 메시지는 `error` 칸이 있거나 글이 `API Error: 4xx` 로 시작할 때만 본다.
- */
-function creditFailure(ev: any): boolean {
-  if (ev?.type === 'assistant') {
-    const err = ev.error;
-    if (err === 'billing_error' || err === 'authentication_failed') return true;
-    const text = (ev.message?.content ?? []).map((b: any) => b?.text ?? '').join(' ');
-    if (!err && !API_ERROR_HEAD.test(text)) return false;
-    return CREDIT_EXHAUSTED.test(text) || KEY_REJECTED.test(text);
-  }
-  if (ev?.type === 'result' && ev.is_error) {
-    const text = String(ev.result ?? '');
-    return CREDIT_EXHAUSTED.test(text) || KEY_REJECTED.test(text);
-  }
-  return false;
-}
-
-/**
- * 크레딧이 도중에 바닥난 차례를 다시 띄우는 법 — `sessionId` 는 못 한 세션, `ranTools` 는 그 세션에서 도구가 돌았나.
- * 다시 띄울 수 없으면 `null`(그때는 원래 오류를 그대로 낸다).
- */
-export type CreditRetry = (sessionId: string, ranTools: boolean) => SdkProcess | null;
-
-/** 도구가 돈 뒤 크레딧이 바닥난 세션을 이을 때 보내는 말. */
-export const CREDIT_RESUME_NOTE = '(앞 차례가 API 크레딧 부족으로 도중에 끊겼습니다. 계정을 바꿔 이어 갑니다. '
-  + '이미 한 일은 다시 하지 말고, 남은 일을 이어서 끝내 주세요.)';
-
 export class SdkProcess {
   private query: Query;
   private abortController: AbortController;
   private done = false;
   private logger = new Logger('SdkProcess');
-  /** 크레딧 부족으로 다시 띄운 세션 — 끊기(`interrupt`)를 그쪽으로 넘긴다. */
-  private child: SdkProcess | null = null;
-  /** 크레딧이 도중에 바닥나면 다음 키나 구독으로 한 번 더 띄운다(2026-10-22 사용자 결정 · `SdkHandler.runQuery`). */
-  retry: CreditRetry | null = null;
-  /** 옛 세션을 이어 받아 띄웠나 — 처음 보는 이어 받은 세션의 누적 비용은 크레딧 몫을 몰라 안 센다(`turnCost`). */
-  resumed = false;
-  /** 이 프로세스가 마지막으로 낸 누적 비용 — 둘째 차례부터는 이것과의 차이만 센다(`turnCost`). */
-  private lastCost: number | undefined = undefined;
-  /** 무엇이 이 세션을 불렀나 — 크레딧 사용 내역의 `caller` 에 붙는다(`SdkRunOptions.caller`). */
-  caller: string | undefined = undefined;
-  /** 시작 이벤트가 알려 준 것 — 크레딧 사용 내역에 같이 남긴다(정말 API 키로 돌았나 · 어느 세션인가). */
-  private init: { session: string | null; auth: string | null; model: string | null } = { session: null, auth: null, model: null };
 
-  /**
-   * `engine` — 엔진 상태를 어느 열쇠에 적나. `credit` — 이 세션을 띄운 크레딧 키(있으면 엔진은 `claude-api` 이고 결과마다
-   * 쓴 금액을 장부에 적는다 · 크레딧 부족 · 키 거부면 그 키를 막는다).
-   */
-  constructor(q: Query, abortController: AbortController, private engine: Engine = 'claude',
-              private credit: CreditKey | null = null) {
+  /** `engine` — 엔진 상태를 어느 열쇠에 적나. 월 API 크레딧 세션은 `claude-api`(`billing: 'api'`). */
+  constructor(q: Query, abortController: AbortController, private engine: Engine = 'claude') {
     this.query = q;
     this.abortController = abortController;
-    if (credit) this.engine = 'claude-api';
-  }
-
-  /** 크레딧 세션의 결과 — 쓴 금액을 적고, 크레딧이 바닥났거나 키가 거부됐으면 그 키를 막는다. 안 던진다. */
-  private seeCredit(ev: any): void {
-    if (!this.credit || ev?.type !== 'result') return;
-    try {
-      // `total_cost_usd` 는 그 세션의 누적 비용이라 늘어난 만큼만 더한다(`turnCost` · 2026-10-23 27~29배로 부풀었다).
-      const session = ev.session_id || this.init.session;
-      const cumulative = Number(ev.total_cost_usd ?? 0);
-      const cost = turnCost(session, cumulative, this.resumed, Date.now(), ledgerFile(), this.lastCost);
-      if (cumulative > 0) this.lastCost = cumulative;
-      if (cost > 0) {
-        recordCreditSpend(this.credit.name, cost, Date.now(), ledgerFile(), {
-          session, auth: this.init.auth, model: this.init.model, caller: this.caller ? `sdk-handler:${this.caller}` : 'sdk-handler',
-        });
-      }
-      const text = String(ev.result ?? '');
-      if (ev.is_error && (CREDIT_EXHAUSTED.test(text) || KEY_REJECTED.test(text))) {
-        blockCreditKey(this.credit.name, text.slice(0, 120));
-      }
-    } catch (err: any) {
-      this.logger.warn('크레딧 장부에 못 적었습니다 — 차례는 그대로 갑니다', { err: String(err?.message ?? err) });
-    }
   }
 
   async *[Symbol.asyncIterator](): AsyncIterableIterator<CliEvent> {
     // 엔진 상태를 적는 곳 — 내보내는 이벤트를 하나도 빼지 않고 본다(`engine-tap.ts`).
     const tap = new ClaudeTap(engineState, this.engine);
-    // **크레딧이 도중에 바닥나면**(2026-10-22) — 그 오류 메시지와 결과를 내보내지 않고 들고 있다가, 다음 키나 구독으로
-    // 다시 띄운 세션의 이벤트를 이어 낸다. 다시 못 띄우면 들고 있던 것을 그대로 낸다. 장부 · 엔진 상태는 그대로 적는다.
-    const held: CliEvent[] = [];
-    let sessionId = '';
-    let ranTools = false;
     try {
       for await (const sdkMsg of this.query) {
-        const raw = sdkMsg as any;
-        if (raw?.type === 'system' && raw.subtype === 'init') {
-          this.init = { session: raw.session_id ?? null, auth: raw.apiKeySource ?? null, model: raw.model ?? null };
-        }
         const event = interpretSdkMessage(sdkMsg);
         if (event) {
-          if (event.type === 'system' && (event as any).session_id) sessionId = (event as any).session_id;
-          const hold = !!(this.credit && this.retry && (held.length || creditFailure(event)));
-          // 결과 글이 다른 모양이어도 다음 띄우기가 같은 키를 다시 고르지 않게 여기서 막는다(장부 쓰기는 안 던진다)
-          if (hold && !held.length) {
-            try { blockCreditKey(this.credit!.name, `${(event as any).error ?? 'result'}: credit failure`); } catch { /* 장부 못 씀 */ }
-          }
-          if (!hold && event.type === 'assistant'
-              && ((event as any).message?.content ?? []).some((b: any) => b?.type === 'tool_use')) ranTools = true;
           tap.see(event);
-          this.seeCredit(event);
-          if (hold) { held.push(event); continue; }
           yield event;
         }
       }
@@ -244,36 +144,14 @@ export class SdkProcess {
         result: isAbort ? 'aborted' : String(err?.message || err),
       } as CliResultEvent;
       tap.see(failed);
-      if (!held.length) {
-        yield failed;
-        return;
-      }
-      held.push(failed);
+      yield failed;
     } finally {
       this.done = true;
     }
-    if (!held.length) return;
-    let next: SdkProcess | null = null;
-    if (!this.abortController.signal.aborted) {
-      try {
-        next = this.retry!(sessionId, ranTools);
-      } catch (err: any) {
-        this.logger.warn('크레딧 부족 뒤 다시 띄우기 실패 — 원래 오류를 냅니다', { err: String(err?.message ?? err) });
-      }
-    }
-    if (!next) {
-      // 들고 있던 것은 받을 때 이미 탭이 봤다(위 반복문) — 여기서 다시 보이면 막힘이 두 번 적힌다
-      yield* held;
-      return;
-    }
-    this.logger.warn('크레딧이 도중에 바닥나 다시 띄웁니다', { key: this.credit?.name, next: next.credit?.name ?? 'subscription', ranTools });
-    this.child = next;
-    yield* next;
   }
 
   interrupt(): void {
-    if (this.child) this.child.interrupt();
-    else if (!this.done) this.abortController.abort();
+    if (!this.done) this.abortController.abort();
   }
 
   kill(): void {
@@ -292,12 +170,6 @@ export class SdkProcess {
 // --- SdkHandler: mirrors CliHandler.runQuery interface --------------------
 
 export interface SdkRunOptions {
-  /**
-   * 무엇이 불렀나 — `dm`(사람 DM) · `mail`(메일 후보) · `board`(보드에서 온 말) 등.
-   * 크레딧 사용 내역에 `sdk-handler:<값>` 으로 남아 비용이 어디서 나오는지 가를 수 있게 한다(2026-10-30).
-   * SDK 에 넘기는 값이 아니라 미리 띄우기 지문(`keyOf`)에는 안 들어간다.
-   */
-  caller?: string;
   workingDirectory?: string;
   session?: ConversationSession;
   resumeSessionId?: string;
@@ -350,12 +222,12 @@ export interface SdkRunOptions {
   /** 엔진 연습을 받는 차례인가 — 대화 차례는 `interactive`(생략하면 예약 일 · `engine-drill.ts`). */
   drillScope?: DrillScope;
   /**
-   * 어느 돈으로 띄우나 — **생략하면 크레딧 먼저**(2026-10-22 사용자 결정): 크레딧 장부(`api-credits.ts`)에 쓸 키가 있으면
-   * 그 키로, 없으면(꺼짐 · 소진 · 만료) 구독 토큰으로. `'subscription'` 은 늘 구독, `'api'` 는 늘 API 키(장부 키가 없으면
-   * 기본 키 파일 · 미리 띄운 세션과 엔진 연습을 안 씀 — 구독이 막혔을 때의 `claude-api` 칸). 키 파일을 못 읽으면 던진다
-   * (`ApiKeyFileError`).
+   * `'api'` — 구독 토큰 대신 월 API 크레딧 키로 띄운다(`claude-api` 칸 · 2026-10-21 사용자 결정). 미리 띄운 세션과
+   * 엔진 연습을 안 쓰고(둘 다 구독 환경으로 뜬다) 엔진 상태는 `claude-api` 에 적는다. 키 파일을 못 읽으면 던진다
+   * (`ApiKeyFileError`). **생략하면 늘 구독** — 크레딧 장부(`~/.config/llm-playbook/api-credits.json`)는 안 읽는다
+   * (2026-11-05 사용자 결정 「크레딧은 Mycelium 사이트만 쓴다」 · 봇의 DM · 예약 일 · 달력 판정 · 폴백은 구독만).
    */
-  billing?: 'api' | 'subscription';
+  billing?: 'api';
 }
 
 export class SdkHandler {
@@ -507,34 +379,9 @@ export class SdkHandler {
   get warmCount(): number { return this.warms.size; }
 
   runQuery(prompt: string, opts: SdkRunOptions): SdkProcess {
-    return this.start(prompt, opts, 0);
-  }
-
-  /**
-   * 크레딧이 도중에 바닥났을 때 다시 띄우는 법 — 다음 키, 그다음 구독(키가 둘이라 두 번까지).
-   * 도구가 안 돌았으면 같은 말 · 같은 옵션으로 처음부터, 돌았으면 그 세션을 「이미 한 일은 다시 하지 말라」와 함께 잇는다.
-   * 도구가 돌았는데 세션을 이을 수 없으면(저장 안 함 · id 없음) 다시 하면 같은 쓰기가 두 번 들어가므로 원래 오류로 둔다.
-   */
-  private creditRetry(prompt: string, opts: SdkRunOptions, depth: number): CreditRetry {
-    return (failedSid, ranTools) => {
-      if (depth >= SdkHandler.CREDIT_RETRIES) return null;
-      if (!ranTools) return this.start(prompt, opts, depth + 1);
-      if (opts.noSessionPersistence || !failedSid) return null;
-      return this.start(CREDIT_RESUME_NOTE, { ...opts, resumeSessionId: failedSid, continueLastSession: undefined }, depth + 1);
-    };
-  }
-
-  /** 크레딧 부족 뒤 다시 띄우는 횟수 상한 — 장부 키가 둘(max · team)이라 다음 키 하나 + 구독 하나. */
-  static CREDIT_RETRIES = 2;
-
-  private start(prompt: string, opts: SdkRunOptions, depth: number): SdkProcess {
     if (opts.billing === 'api') {
       const built = this.buildOptions(prompt, opts);
-      const p = new SdkProcess(SdkHandler.queryFn({ prompt, options: built.sdkOptions }), built.abortController, 'claude-api',
-        built.credit);
-      p.resumed = !!built.sdkOptions.resume;
-      p.caller = opts.caller;
-      return p;
+      return new SdkProcess(SdkHandler.queryFn({ prompt, options: built.sdkOptions }), built.abortController, 'claude-api');
     }
     // 엔진 연습(`engine-drill.ts`) — 막힌 모양을 재생한다. 처음부터 막힌 갈래는 진짜를 안 띄우고,
     // `usage-after-tool` 은 진짜 차례(미리 띄운 것 포함)를 첫 도구 결과까지 돌린 뒤 꼬리를 끼운다.
@@ -544,16 +391,10 @@ export class SdkHandler {
       const ac = new AbortController();
       return new SdkProcess(drillQuery(claudeDrillEvents(drill, sid), ac.signal) as unknown as Query, ac);
     }
+    const wrap = (q: Query, ac: AbortController): SdkProcess => (drill === 'usage-after-tool'
+      ? new SdkProcess(afterFirstToolResult(q, () => ac.abort(), () => limitTail(sid)) as unknown as Query, ac)
+      : new SdkProcess(q, ac));
     const built = this.buildOptions(prompt, opts);
-    const wrap = (q: Query, ac: AbortController): SdkProcess => {
-      const p = drill === 'usage-after-tool'
-        ? new SdkProcess(afterFirstToolResult(q, () => ac.abort(), () => limitTail(sid)) as unknown as Query, ac, 'claude', built.credit)
-        : new SdkProcess(q, ac, 'claude', built.credit);
-      if (built.credit) p.retry = this.creditRetry(prompt, opts, depth);
-      p.resumed = !!built.sdkOptions.resume;
-      p.caller = opts.caller;
-      return p;
-    };
     const key = this.keyOf(built.sdkOptions);
 
     // **미리 띄운 것이 맞으면 그것을 쓴다.** 지문이 같은 자리만 본다 — 남의 옵션으로 뜬
@@ -593,7 +434,7 @@ export class SdkHandler {
   }
 
   private buildOptions(prompt: string, opts: SdkRunOptions):
-      { sdkOptions: any; abortController: AbortController; credit: CreditKey | null } {
+      { sdkOptions: any; abortController: AbortController } {
     const abortController = new AbortController();
 
     // 'default' would prompt the user for risky tool calls, but background
@@ -647,11 +488,9 @@ export class SdkHandler {
     // subprocess keeps standard env and only opts.env overrides on top.
     // **`opts.env` 가 없어도 늘 넘긴다** — 안 넘기면 SDK 가 `process.env` 를 그대로 써서
     // PC 에 남은 API 키가 세션으로 샌다(`child-env.ts`).
-    // 크레딧 먼저 — 장부에 쓸 키가 있으면 그 키로(`api-credits.ts`). 미리 띄운 세션의 지문에 키 파일이 들어가므로
-    // 키가 바뀌면 그 자리는 안 맞고 새로 뜬다.
-    const credit = opts.billing === 'subscription' ? null : pickCreditKey();
-    sdkOptions.env = opts.billing === 'api' || credit
-      ? withApiKey({ ...process.env, ...opts.env }, credit?.keyFile)
+    // **크레딧 장부는 안 본다**(2026-11-05 사용자 결정) — 키를 넣는 것은 `billing: 'api'` 한 길뿐이다.
+    sdkOptions.env = opts.billing === 'api'
+      ? withApiKey({ ...process.env, ...opts.env })
       : withoutApiKey({ ...process.env, ...opts.env });
     if (opts.canUseTool) sdkOptions.canUseTool = opts.canUseTool;
 
@@ -736,7 +575,7 @@ export class SdkHandler {
       effort: sdkOptions.effort,
     });
 
-    return { sdkOptions, abortController, credit };
+    return { sdkOptions, abortController };
   }
 }
 

@@ -45,12 +45,16 @@ for (const k of Object.keys(KEEP)) ok(`withoutApiKey 가 ${k} 를 뺐다`, out[k
 
 const keyFile = path.join(os.tmpdir(), `check-sessionenv-key-${process.pid}`);
 fs.writeFileSync(keyFile, ['sk', 'ant', 'check', 'only', 'x'.repeat(40)].join('-'));
+const beforeKeyFile = process.env.CLAUDE_API_KEY_FILE;
+process.env.CLAUDE_API_KEY_FILE = keyFile;
 try {
-  const withKey = withApiKey({ ...SESSION, ...KEEP }, keyFile);
+  const withKey = withApiKey({ ...SESSION, ...KEEP });
   ok('withApiKey 가 세션 변수를 남긴다', Object.keys(SESSION).every((k) => !(k in withKey)));
   ok('withApiKey 가 PATH 를 뺐다', withKey.PATH === 'p');
 } finally {
   fs.rmSync(keyFile, { force: true });
+  if (beforeKeyFile === undefined) delete process.env.CLAUDE_API_KEY_FILE;
+  else process.env.CLAUDE_API_KEY_FILE = beforeKeyFile;
 }
 
 // ── ③ 봇이 뜰 때 지우기 ──────────────────────────────────────────────────

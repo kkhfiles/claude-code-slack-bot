@@ -1,4 +1,3 @@
-import { claudeBlocked } from './api-credits';
 import { App } from '@slack/bolt';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -1933,8 +1932,6 @@ export class SlackHandler {
       const sdkOpts: SdkRunOptions = {
         ...runOpts, env: sessionEnv, skills: 'all', effort: INTERACTIVE_EFFORT,
         appendSystemPrompt: surfaceNote,
-        // 크레딧 사용 내역의 출처 — 메일 후보 · 보드에서 온 말 · 사람 DM
-        caller: isMailTurn(finalPrompt) ? 'mail' : /^\s*\[진행판\]/.test(finalPrompt) ? 'board' : 'dm',
         settings: { autoCompactWindow: INTERACTIVE_COMPACT_WINDOW },
       };
       // 차례가 끝나면 이 옵션 그대로 하나 띄워 둔다 — 아래 `finally` 에서 쓴다.
@@ -1946,7 +1943,7 @@ export class SlackHandler {
       // **DM 폴백 — 띄우기 전**: 엔진 상태가 Claude 가 막혔다고 하면 안 띄운다(띄워도 한도 글만 받는다).
       // 다음 칸(GPT)이 비었으면 스트림 뒤에서 그리로 넘기고, 다 막혔으면 예전 한도 길로 모아 둔다.
       let pick: LadderPick = 'claude';
-      if (claudeBlocked() && fbBase) {
+      if (engineState.isBlocked('claude') && fbBase) {
         pick = pickEngine(await pickInput(), dmLadder());
         claudeSkipped = pick !== 'claude';
         if (claudeSkipped) this.logger.warn('Claude 가 막혀 있어 띄우지 않습니다(DM 폴백)', { next: pick });
@@ -3054,7 +3051,6 @@ export class SlackHandler {
             session: undefined, resumeSessionId: undefined, continueLastSession: undefined, drillScope: undefined,
             model: 'sonnet', billing: 'api', maxBudgetUsd: CLAUDE_API_TURN_BUDGET_USD,
             env: { ...(a.claudeOpts.env ?? {}), ...fallbackEnv(captureId) },
-            caller: `fallback-${a.claudeOpts.caller ?? 'dm'}`,
           });
         } catch (err: any) {
           // 키 파일을 못 읽음 · 모양이 틀림 — 띄우지도 않았다. 한 시간 뒤에 다시 본다(auth).
@@ -3981,9 +3977,7 @@ export class SlackHandler {
     // 느린 곳이 띄우기인지 써 내려가기인지 운영에서 가를 수 없다. 원장에 그대로 옮긴다.
     const t0 = Date.now();
     const timing: { initMs?: number; firstMs?: number; resultMs?: number } = {};
-    // 크레딧 사용 내역의 출처 — 좁은 길(보드에서 온 말)과 그 밖의 예약 세션을 가른다.
-    const caller = env.ASSISTANT_MODE === 'narrow' ? 'board-narrow' : 'scheduled';
-    const sdkOpts = { ...commonOpts, effort: opts.effort, caller };
+    const sdkOpts = { ...commonOpts, effort: opts.effort };
     const proc = this.sdkHandler.runQuery(prompt, sdkOpts);
 
     this.logger.info('Assistant session started', { via: 'sdk' });
