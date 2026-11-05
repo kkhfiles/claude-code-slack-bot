@@ -30,6 +30,7 @@ const env = {
 };
 for (const [k, v] of Object.entries(env)) process.env[k] = path.join(TMP, v);
 process.env.DAILY_IMPROVE = 'on';
+process.env.BOARD_FOCUS = 'on';   // 기본 꺼짐(2026-11-05) — 켰을 때 다시 걸리는지는 계속 본다
 process.env.BOARD_PUSH = 'off';
 fs.mkdirSync(path.join(TMP, 'wa', 'bin'), { recursive: true });
 fs.writeFileSync(path.join(TMP, 'wa', 'bin', 'tasks.py'), '', 'utf-8');

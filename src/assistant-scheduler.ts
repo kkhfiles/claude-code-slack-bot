@@ -1419,7 +1419,9 @@ export class AssistantScheduler {
       this.scheduleWorkNudge();
       this.startBoardQueuePoller();
       void this.startNotionWatch();
-      this.scheduleFocus();
+      // 「지금 집중할 것」 자동 갱신은 기본 꺼짐(2026-11-05 실장 결정 「지금 끔」) — 판 맨 위 줄은
+      // 11/04 에 걷혔는데 2시간마다 Opus 판단만 돌고 있었다. 다시 켜려면 `BOARD_FOCUS=on`.
+      if (process.env.BOARD_FOCUS === 'on') this.scheduleFocus();
       this.scheduleSummary();
       this.scheduleOffsitePush();
       this.startMailPoller();
