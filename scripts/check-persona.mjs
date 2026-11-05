@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
-const { personaNote, readHumor, HUMOR_DEFAULT } = require(path.join(ROOT, 'dist', 'persona.js'));
+const { personaNote, readHumor, HUMOR_DEFAULT, humorReminder } = require(path.join(ROOT, 'dist', 'persona.js'));
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-'));
 const bad = [];
 
@@ -69,6 +69,21 @@ try {
   eq('카드 요약, 개선 제안, 집중 줄, 아침 브리핑 — 네 곳에 정체성', (sched.match(/appendSystemPrompt: withSena\(/g) || []).length, 4);
   eq('좁은 길은 규칙 글을 읽는 자리에서 정체성을 붙임(1차와 폴백이 같은 글)', /const rulesText = withSena\(fs\.readFileSync\(rules/.test(sched), true);
   eq('agy 대체 엔진에도 정체성', /system: \[personaNote\(workAssistantRoot\(\), undefined, 'output'\), AGY_DM_RULES\]/.test(handler), true);
+  // 차례 끝 유머 상기(2026-11-05) — 값마다 눈금, 0 과 끄는 문에서는 빈 글, 사람 DM 과 서랍 차례의 말 끝에만
+  fs.writeFileSync(humor, JSON.stringify({ humor: 100 }), 'utf-8');
+  const r100 = humorReminder(humor);
+  eq('유머 100 상기 — 블록 제목도 농담, 길이 고정, 새 사실 금지', r100.includes('[유머 100]') && r100.includes('블록 제목도 농담')
+    && r100.includes('줄을 더하지 않는다') && r100.includes('새 사실은 농담에도 넣지 않는다'), true);
+  fs.writeFileSync(humor, JSON.stringify({ humor: 50 }), 'utf-8');
+  eq('유머 50 상기 — 어울릴 때 한 마디', humorReminder(humor).includes('어울릴 때 한 마디'), true);
+  fs.writeFileSync(humor, JSON.stringify({ humor: 0 }), 'utf-8');
+  eq('유머 0 이면 상기 없음', humorReminder(humor), '');
+  fs.writeFileSync(humor, JSON.stringify({ humor: 100 }), 'utf-8');
+  process.env.HUMOR_REMIND = 'off';
+  eq('HUMOR_REMIND=off 면 상기 없음', humorReminder(humor), '');
+  delete process.env.HUMOR_REMIND;
+  eq('상기는 말 끝에, 사람 DM 과 서랍 차례에만', /const remind = \(isDM && !\(event as any\)\.pushed\) \|\| \/\^\\\[서랍 차례 \[0-9a-f\]\{32\}\\\]\/\.test\(finalPrompt\) \? humorReminder\(\) : '';/.test(handler)
+    && /finalPrompt \+ remind\]/.test(handler), true);
 } finally {
   fs.rmSync(DIR, { recursive: true, force: true });
 }

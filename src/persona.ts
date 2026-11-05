@@ -68,6 +68,27 @@ export function personaNote(root: string | null, humorFile: string = settingsFil
   ].join('\n');
 }
 
+/**
+ * 차례 말 끝에 붙이는 유머 상기 한 줄(2026-11-05 실장님 결정 — 서랍과 슬랙 DM).
+ * 정체성의 위트 규칙은 세션 맨 앞에만 있고, 답을 쓰기 직전에 읽는 지시(서랍 답 형식, 슬랙 「짧게」)는 모두 건조하다.
+ * 긴 세션일수록 앞의 정체성이 흐려진다(Li 외 2024). 실험(`P:/d/humor-lab/results.md`, 운영 조건 Opus · low · 긴 세션)에서
+ * 상기 없이는 유머 100 에 맞춤 점수 2.0~2.5, 농담 제목 0/7 — 운영 지적과 같았고, 이 줄을 붙이면 7.0 · 6/7 에
+ * 답 길이는 같고 사실 위반 0. 지연은 질문별 중앙 +2.5초라 운영 실측으로 판정한다. 끄는 문은 `HUMOR_REMIND=off`.
+ * 0 이면 붙이지 않는다. 눈금 설명은 정체성 파일의 「값은 이어지는 눈금」과 같은 말이다.
+ */
+export function humorReminder(humorFile: string = settingsFile()): string {
+  if (process.env.HUMOR_REMIND === 'off') return '';
+  const h = readHumor(humorFile);
+  if (h <= 0) return '';
+  const tone = h >= 88 ? '위험을 알리는 줄과 선택지 값만 건조하게, 나머지 줄(answer 의 모든 줄, note, 블록 제목)은 일부러 과하게 말맛을 낸다 — 블록 제목도 농담, answer 는 줄마다'
+    : h >= 63 ? '첫 줄부터 매번 말맛을 내고 과장과 놀림도 쓴다 — 위험을 알리는 줄과 선택지 값만 건조하게'
+    : h >= 38 ? '어울릴 때 한 마디 — 결론이나 맺는 말에서'
+    : '가끔 건조한 관찰 한 마디';
+  return `\n[유머 ${h}] 이 답의 말투 — ${tone}. 말맛은 따로 궁리하지 말고 쓰면서 바로 고른다. `
+    + '줄 수와 길이는 유머 0일 때와 같게 — 말을 바꾸지 줄을 더하지 않는다. 사실(숫자, 날짜, 업무 이름)은 그대로이고, '
+    + '센 적 없는 횟수나 직함 같은 새 사실은 농담에도 넣지 않는다. 유머 값은 답에서 꺼내 말하지 않는다.';
+}
+
 /** 정해진 형식을 만드는 차례에 덧붙이는 안내 — 형식을 지키게 하는 것이 위트보다 앞선다. */
 function OUTPUT_NOTES(humor: number): string[] {
   return [

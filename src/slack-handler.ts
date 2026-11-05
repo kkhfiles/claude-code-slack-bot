@@ -45,7 +45,7 @@ import type { ThreadApi } from './action-pipeline';
 import { captureToInbox, checkinMap, checkinNow, codexTurn, dropCapture, isWorkAssistantEnabled,
   markCaptureFailed, markCaptureReplayed, markCaptureTold, markCaptureTried, pendingCaptures,
   pendingHeld, quickUpdate, SESSION_CODEX_MODEL, workAssistantRoot } from './work-assistant';
-import { personaNote } from './persona';
+import { personaNote, humorReminder } from './persona';
 import { boardLabel, event as recordEvent } from './board-queue';
 import { TurnTimer } from './turn-timing';
 import { readUnseen } from './dm-context';
@@ -1899,7 +1899,11 @@ export class SlackHandler {
       // **Claude 가 막힌 동안 다른 엔진이 받은 것이 있으면 한 줄 알린다**(DM 폴백 · 위 `served`) — 내용은
       // 「못 본 대화방 글」이 싣는다. 세션이 마지막으로 돈 뒤의 장부만 세므로 돌아온 첫 차례에만 붙는다.
       // 다시 돌리는 차례면 그 메모(받은 시각 · 그 뒤의 글 · 이미 한 것)를 맨 앞에 — 보류 v2.
-      const sessionPrompt = [event.replayNote, ledgerNote(served), unseen, finalPrompt].filter(Boolean).join('\n');
+      // 유머 상기는 말 **끝**에 — 답을 쓰기 직전에 읽는 자리라야 긴 세션에서도 듣는다(persona.ts `humorReminder`, 11/05 실험).
+      // 사람이 DM 에 쓴 말과 서랍 차례만 — 채널은 정체성을 안 싣고, 봇이 넘긴 차례(판 버튼 `[진행판]`, 메일 후보)는
+      // `[조용히]` 처럼 정해진 출력이 많아 안 붙인다.
+      const remind = (isDM && !(event as any).pushed) || /^\[서랍 차례 [0-9a-f]{32}\]/.test(finalPrompt) ? humorReminder() : '';
+      const sessionPrompt = [event.replayNote, ledgerNote(served), unseen, finalPrompt + remind].filter(Boolean).join('\n');
       // 비서는 하나 — 판 서랍과 같은 정체성 파일(세나)을 맨 앞에 싣는다(persona.ts). 차례마다 새로 읽고,
       // 미리 띄우는 세션도 이 글을 그대로 쓰므로 유머 값이나 파일이 바뀐 다음 차례만 새로 띄운다.
       // **DM 에만** — 채널은 다른 사람도 보고 저장소 작업 방이라 「실장님 한 사람의 비서」 호칭과 위트가 안 맞는다.
