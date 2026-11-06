@@ -16,7 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
-const { personaNote, readHumor, HUMOR_DEFAULT, humorReminder } = require(path.join(ROOT, 'dist', 'persona.js'));
+const { personaNote, readHumor, HUMOR_DEFAULT, humorReminder, humorValueLine } = require(path.join(ROOT, 'dist', 'persona.js'));
+const { identityNotice, recordSnapshot } = require(path.join(ROOT, 'dist', 'identity-note.js'));
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-'));
 const bad = [];
 
@@ -45,7 +46,9 @@ try {
   fs.writeFileSync(humor, JSON.stringify({ humor: 20 }), 'utf-8');
   const note = personaNote(repo, humor);
   eq('정체성 글이 맨 앞 제목 뒤에 실림', note.includes('세나는 실장님 한 사람의 개인 비서다.'), true);
-  eq('슬랙에서는 유머 값이 줄로 실림', note.includes('지금 유머 값: 20'), true);
+  // 값은 시스템 프롬프트에 안 둔다(2026-11-06) — 이어 가는 세션은 그것을 첫 차례 것으로 고정한다. 말 끝 줄이 값을 싣는다
+  eq('슬랙 정체성에는 유머 값이 안 실림(말 끝 줄을 가리킴)', !note.includes('지금 유머 값: 20') && note.includes('「[지금 유머 값: N]」'), true);
+  eq('말 끝 유머 값 줄', humorValueLine(humor), '[지금 유머 값: 20]');
   eq('업무 비서 레포가 없으면 빈 글', personaNote(null, humor), '');
   eq('정체성 파일이 없으면 빈 글', personaNote(path.join(DIR, 'none'), humor), '');
 
@@ -58,7 +61,13 @@ try {
   }
   // 모듈만 맞고 끼우는 줄이 빠지면 슬랙 세나는 다시 정체성 없이 돈다
   const handler = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
-  eq('DM 차례에만 덧붙이는 지시 맨 앞에 정체성', /const surfaceNote = \[\s*isDM \? personaNote\(workAssistantRoot\(\)\) : '',\s*SLACK_SURFACE_NOTE,/.test(handler), true);
+  eq('DM 차례에만 덧붙이는 지시 맨 앞에 정체성', /const stableNote = \[isDM \? personaNote\(workAssistantRoot\(\)\) : '', SLACK_SURFACE_NOTE\]/.test(handler), true);
+  // 이어 가는 세션(11/06) — Claude 세션의 시스템 프롬프트는 안 바뀌는 것만, 바뀌는 것은 말 끝에, 바뀐 정체성은 알림으로
+  eq('Claude 세션의 시스템 프롬프트는 stableNote', /appendSystemPrompt: stableNote,/.test(handler) && !/appendSystemPrompt: surfaceNote,\n\s*settings: \{ autoCompactWindow/.test(handler), true);
+  eq('말 끝에 유머 값, 캡처 안내, 번호표, 정체성 알림',
+     /const turnNote = \[\s*isDM \? humorValueLine\(\) : '',\s*capture \? CAPTURE_NOTE : '',\s*slotMap,\s*isDM \? identityNotice\(resumingId, resuming, stableNote\) : '',/.test(handler), true);
+  eq('새 세션의 첫 차례와 압축 뒤에 판을 적음', /if \(isDM && !resuming\) recordSnapshot\(initEvent\.session_id, stableNote\)/.test(handler)
+     && /subtype === 'compact_boundary'\) \{\s*recordSnapshot\(/.test(handler), true);
   eq('슬랙 안내가 반영 약속을 막음', personaNote(repo, humor).includes('「반영했습니다」라고 하지 않는다'), true);
   eq('슬랙에서 유머를 바꾸는 명령을 알림', personaNote(repo, humor).includes('bin/sena_humor.py'), true);
   // 정해진 형식을 만드는 차례(2026-11-02 결정 F 「전부」) — 형식이 위트보다 앞선다
@@ -84,7 +93,22 @@ try {
   eq('HUMOR_REMIND=off 면 상기 없음', humorReminder(humor), '');
   delete process.env.HUMOR_REMIND;
   eq('상기는 말 끝에, 사람 DM 과 서랍 차례에만', /const remind = \(isDM && !\(event as any\)\.pushed\) \|\| \/\^\\\[서랍 차례 \[0-9a-f\]\{32\}\\\]\/\.test\(finalPrompt\) \? humorReminder\(\) : '';/.test(handler)
-    && /finalPrompt \+ remind\]/.test(handler), true);
+    && /finalPrompt \+ \(turnNote \? `\\n\\n\$\{turnNote\}` : ''\) \+ remind\]/.test(handler), true);
+
+  // 정체성 판(`identity-note.ts`) — 바뀌면 바뀐 줄을 한 번, 압축 뒤에는 다시 안 알림, 처음 보는 세션은 전문 한 번
+  process.env.SENA_IDENTITY_DIR = path.join(DIR, 'identity');
+  const v1 = '규칙 가\n규칙 나\n', v2 = '규칙 가\n규칙 다\n';
+  recordSnapshot('s1', v1);
+  eq('정체성 — 같은 판이면 알림 없음', identityNotice('s1', true, v1), '');
+  const n2 = identityNotice('s1', true, v2);
+  eq('정체성 — 바뀌면 더한 줄과 지운 줄', n2.includes('더하거나 바뀐 줄:\n규칙 다') && n2.includes('지운 줄(이제 따르지 않음):\n규칙 나') && !n2.includes('규칙 가'), true);
+  eq('정체성 — 이미 알렸으면 다시 안 붙임', identityNotice('s1', true, v2), '');
+  recordSnapshot('s1', v2);
+  eq('정체성 — 압축 뒤(기록이 지금 판)에는 알림 없음', identityNotice('s1', true, v2), '');
+  eq('정체성 — 새 세션은 알릴 것 없음', identityNotice('s2', false, v2), '');
+  eq('정체성 — 처음 보는 이어 가는 세션은 전문 한 번', identityNotice('old', true, v2).includes('지금 판 전문:\n규칙 가\n규칙 다'), true);
+  eq('정체성 — 그 뒤로는 다시 안 붙임', identityNotice('old', true, v2), '');
+  delete process.env.SENA_IDENTITY_DIR;
 } finally {
   fs.rmSync(DIR, { recursive: true, force: true });
 }

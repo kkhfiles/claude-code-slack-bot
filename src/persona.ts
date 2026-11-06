@@ -58,7 +58,9 @@ export function personaNote(root: string | null, humorFile: string = settingsFil
     ...(surface === 'output' ? OUTPUT_NOTES(readHumor(humorFile)) : [
     '## 슬랙에서 이 정체성을 쓸 때',
     '',
-    `- **지금 유머 값: ${readHumor(humorFile)}** (0~100). 정체성에 적힌 「대화 자료의 \`humor\` 칸」이 슬랙에서는 이 줄이다.`,
+    // 값은 여기 안 둔다(2026-11-06) — 이어 가는 세션은 시스템 프롬프트를 첫 차례 것으로 고정해 바뀐 값이 안 닿는다.
+    // 차례 말 끝의 `humorValueLine()` 이 지금 값을 싣는다(`identity-note.ts` 머리말)
+    '- **유머 값은 차례 말 끝의 「[지금 유머 값: N]」 줄을 따른다** (0~100). 정체성에 적힌 「대화 자료의 `humor` 칸」이 슬랙에서는 그 줄이다.',
     '- 분량과 형식은 아래 슬랙 규칙을 따른다 — 정체성의 「출력 규칙」은 판 서랍 화면 것이다.',
     '- 슬랙에는 표, 막대, 일정, 문서 블록이 없다 — 「문서 블록으로 넘긴다」, 「그리는 결과」에 걸린 줄은 슬랙 답의 말에만 적용한다.',
     '- 정해진 출력은 위트와 상관없이 그대로 낸다 — `[조용히]` 한 줄, 도구 출력 그대로 붙이기(`board --slack` 등), JSON.',
@@ -88,6 +90,11 @@ export function humorReminder(humorFile: string = settingsFile()): string {
   return `\n[유머 ${h}] 이 답의 말투 — ${tone}. 말맛은 따로 궁리하지 말고 쓰면서 바로 고른다. `
     + '줄 수와 길이는 유머 0일 때와 같게 — 말을 바꾸지 줄을 더하지 않는다. 사실(숫자, 날짜, 업무 이름)은 그대로이고, '
     + '센 적 없는 횟수나 직함 같은 새 사실은 농담에도 넣지 않는다. 유머 값은 답에서 꺼내 말하지 않는다.';
+}
+
+/** 차례 말 끝에 싣는 지금 유머 값 한 줄 — 슬랙 DM 과 서랍 차례(정체성 안내가 이 줄을 가리킨다). */
+export function humorValueLine(humorFile: string = settingsFile()): string {
+  return `[지금 유머 값: ${readHumor(humorFile)}]`;
 }
 
 /** 정해진 형식을 만드는 차례에 덧붙이는 안내 — 형식을 지키게 하는 것이 위트보다 앞선다. */

@@ -45,7 +45,8 @@ import type { ThreadApi } from './action-pipeline';
 import { captureToInbox, checkinMap, checkinNow, codexTurn, dropCapture, isWorkAssistantEnabled,
   markCaptureFailed, markCaptureReplayed, markCaptureTold, markCaptureTried, pendingCaptures,
   pendingHeld, quickUpdate, SESSION_CODEX_MODEL, workAssistantRoot } from './work-assistant';
-import { personaNote, humorReminder } from './persona';
+import { personaNote, humorReminder, humorValueLine } from './persona';
+import { identityNotice, recordSnapshot } from './identity-note';
 import { boardLabel, event as recordEvent } from './board-queue';
 import { TurnTimer } from './turn-timing';
 import { readUnseen } from './dm-context';
@@ -1912,16 +1913,25 @@ export class SlackHandler {
       // 사람이 DM 에 쓴 말과 서랍 차례만 — 채널은 정체성을 안 싣고, 봇이 넘긴 차례(판 버튼 `[진행판]`, 메일 후보)는
       // `[조용히]` 처럼 정해진 출력이 많아 안 붙인다.
       const remind = (isDM && !(event as any).pushed) || /^\[서랍 차례 [0-9a-f]{32}\]/.test(finalPrompt) ? humorReminder() : '';
-      const sessionPrompt = [event.replayNote, ledgerNote(served), unseen, finalPrompt + remind].filter(Boolean).join('\n');
-      // 비서는 하나 — 판 서랍과 같은 정체성 파일(세나)을 맨 앞에 싣는다(persona.ts). 차례마다 새로 읽고,
-      // 미리 띄우는 세션도 이 글을 그대로 쓰므로 유머 값이나 파일이 바뀐 다음 차례만 새로 띄운다.
+      // 비서는 하나 — 판 서랍과 같은 정체성 파일(세나)을 맨 앞에 싣는다(persona.ts). 차례마다 새로 읽는다.
       // **DM 에만** — 채널은 다른 사람도 보고 저장소 작업 방이라 「실장님 한 사람의 비서」 호칭과 위트가 안 맞는다.
-      const surfaceNote = [
-        isDM ? personaNote(workAssistantRoot()) : '',
-        SLACK_SURFACE_NOTE,
+      //
+      // **시스템 프롬프트에는 거의 안 바뀌는 것만**(2026-11-06) — 이어 가는 세션은 첫 차례의 시스템 프롬프트를 압축 전까지
+      // 그대로 쓴다(`identity-note.ts` 머리말 · APPLE/BANANA 실측). 차례마다 바뀌는 것(유머 값, 캡처 안내, 체크인 번호표)은
+      // 말 끝에 싣고, 정체성 파일이 바뀌었으면 바뀐 줄을 한 번 알린다. 시스템 프롬프트가 늘 같아 캐시도 그대로다.
+      const stableNote = [isDM ? personaNote(workAssistantRoot()) : '', SLACK_SURFACE_NOTE].filter(Boolean).join('\n');
+      const resumingId = resumeSessionId ?? session?.sessionId;
+      const resuming = !!(resumingId || continueLastSession);
+      const turnNote = [
+        isDM ? humorValueLine() : '',
         capture ? CAPTURE_NOTE : '',
         slotMap,
+        isDM ? identityNotice(resumingId, resuming, stableNote) : '',
       ].filter(Boolean).join('\n');
+      const sessionPrompt = [event.replayNote, ledgerNote(served), unseen,
+        finalPrompt + (turnNote ? `\n\n${turnNote}` : '') + remind].filter(Boolean).join('\n');
+      // 대체 엔진(GPT, agy)은 차례마다 새로 부르므로 둘을 합친 전문을 시스템 쪽으로 받는다(말은 원래 말 `finalPrompt` 만)
+      const surfaceNote = [stableNote, isDM ? humorValueLine() : '', capture ? CAPTURE_NOTE : '', slotMap].filter(Boolean).join('\n');
       // **캡처 id 를 세션에 넘긴다.** 닫는 규칙을 세션에 맡겼더니 안 닫혔다
       // (2026-08-06: 업무 등록·로그·상호 링크까지 다 해 놓고 닫기만 빠져 두 건이
       // 큐에 남았다). 이제 tasks.py 의 쓰기 명령이 성공하면 스스로 닫는다 —
@@ -1944,7 +1954,7 @@ export class SlackHandler {
       // 아는 데서 나오고, 그 해석은 어차피 사용자 컨펌을 거친다.
       const sdkOpts: SdkRunOptions = {
         ...runOpts, env: sessionEnv, skills: 'all', effort: INTERACTIVE_EFFORT,
-        appendSystemPrompt: surfaceNote,
+        appendSystemPrompt: stableNote,
         settings: { autoCompactWindow: INTERACTIVE_COMPACT_WINDOW },
       };
       // 차례가 끝나면 이 옵션 그대로 하나 띄워 둔다 — 아래 `finally` 에서 쓴다.
@@ -1985,9 +1995,14 @@ export class SlackHandler {
         if (stepLog.see(event)) {
           patchInflight(sessionKey, { steps: stepLog.steps, sessionId: session?.sessionId });
         }
+        // 정체성 판(`identity-note.ts`) — 새 세션의 첫 차례와 압축 뒤에는 시스템 프롬프트가 지금 판으로 기록된다
+        if (isDM && event.type === 'system' && (event as any).subtype === 'compact_boundary') {
+          recordSnapshot((event as any).session_id ?? session?.sessionId, stableNote);
+        }
         // Session init tracking
         if (event.type === 'system' && (event as any).subtype === 'init') {
           const initEvent = event as any;
+          if (isDM && !resuming) recordSnapshot(initEvent.session_id, stableNote);
           if (session) {
             session.sessionId = initEvent.session_id;
             this.cliHandler.scheduleSave();
