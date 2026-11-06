@@ -74,6 +74,7 @@ try {
   const r100 = humorReminder(humor);
   eq('유머 100 상기 — 블록 제목도 농담, 길이 고정, 새 사실 금지', r100.includes('[유머 100]') && r100.includes('블록 제목도 농담')
     && r100.includes('줄을 더하지 않는다') && r100.includes('새 사실은 농담에도 넣지 않는다'), true);
+  eq('유머 100 상기 — 서랍 facts 칸은 건조하게(시안 04c)', r100.includes('facts 칸만 건조하게'), true);
   fs.writeFileSync(humor, JSON.stringify({ humor: 50 }), 'utf-8');
   eq('유머 50 상기 — 어울릴 때 한 마디', humorReminder(humor).includes('어울릴 때 한 마디'), true);
   fs.writeFileSync(humor, JSON.stringify({ humor: 0 }), 'utf-8');

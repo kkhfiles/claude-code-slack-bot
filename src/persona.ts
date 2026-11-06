@@ -80,8 +80,9 @@ export function humorReminder(humorFile: string = settingsFile()): string {
   if (process.env.HUMOR_REMIND === 'off') return '';
   const h = readHumor(humorFile);
   if (h <= 0) return '';
-  const tone = h >= 88 ? '위험을 알리는 줄과 선택지 값만 건조하게, 나머지 줄(answer 의 모든 줄, note, 블록 제목)은 일부러 과하게 말맛을 낸다 — 블록 제목도 농담, answer 는 줄마다'
-    : h >= 63 ? '첫 줄부터 매번 말맛을 내고 과장과 놀림도 쓴다 — 위험을 알리는 줄과 선택지 값만 건조하게'
+  // 서랍의 「확인한 것」(facts) 칸은 말투 없는 자료 칸이라 늘 건조하다(2026-11-06 실장님 시안 04c — 「세나 말투가 아닌게 섞여있는데 잘 구분」)
+  const tone = h >= 88 ? '위험을 알리는 줄, 선택지 값, 서랍의 facts 칸만 건조하게, 나머지 줄(answer 의 모든 줄, note, 블록 제목)은 일부러 과하게 말맛을 낸다 — 블록 제목도 농담, answer 는 줄마다'
+    : h >= 63 ? '첫 줄부터 매번 말맛을 내고 과장과 놀림도 쓴다 — 위험을 알리는 줄, 선택지 값, 서랍의 facts 칸만 건조하게'
     : h >= 38 ? '어울릴 때 한 마디 — 결론이나 맺는 말에서'
     : '가끔 건조한 관찰 한 마디';
   return `\n[유머 ${h}] 이 답의 말투 — ${tone}. 말맛은 따로 궁리하지 말고 쓰면서 바로 고른다. `
