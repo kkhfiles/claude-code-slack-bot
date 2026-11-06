@@ -2451,17 +2451,20 @@ export class AssistantScheduler {
     const marked = /^[0-9a-f]{32}$/.test(item.reply.tid) ? `[서랍 차례 ${item.reply.tid}]\n${item.text}` : item.text;
     // 캡처를 여기서 남긴다(2026-11-04) — 차례가 끝난 뒤 열려 있으면 닫으려면 id 를 알아야 한다(`closeDrawerCapture`)
     const capture = captureToInbox(marked, 'slack');
-    let last = '';
+    let last = '', ok = true;
     try {
       const out = await this.askFromBoard(marked, `🗂 서랍에서 · ${preview}`, '', { drawer: true, captureId: capture?.id });
       last = (out && out.lastText) || '';
+      ok = !out || out.outcome === 'ok';
     } catch (err) {
       await finishDrawerTurn(item.reply.tid, { error: '세나 세션에 넘기지 못했어요 — 잠시 뒤 다시 보내 주세요' });
       throw err;
     }
     const r = await finishDrawerTurn(item.reply.tid, { answer: last });
     if (r !== 'gone') {
-      if (capture?.id) await closeDrawerCapture(capture.id);
+      // **Claude 가 막힌 차례는 캡처를 닫지 않는다**(2026-11-06) — 대체 엔진이 다 했으면 그쪽이 이미 닫았고, 못 해 「Claude·GPT
+      // 몫」으로 모아 둔 차례(보류 v2)를 여기서 닫으면 풀린 뒤 다시 돌 것이 사라진다(11/06 10:32 「agy 세션작업 현황」이 그랬다)
+      if (capture?.id && ok) await closeDrawerCapture(capture.id);
       return;
     }
     this.logger.info(`서랍 차례가 끊겨 있음 — 답을 DM 에 남김 (${item.id})`);

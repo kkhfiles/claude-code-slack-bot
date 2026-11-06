@@ -990,6 +990,12 @@ try {
     await say({ text: '허락이 필요해요', thread_ts: '9.9', blocks: [{ type: 'actions', elements: [] }] });
     eq('서랍 — 버튼 글만 올리고 지어낸 스레드는 뗌', posts.map((p) => [p.text.split('\n')[0], p.thread_ts ?? null]),
        [['🗂 서랍에서 · 시험 — 슬랙에서 답이 필요해요', null]]);
+    // 대체 엔진의 표시 줄(context 블록)은 마지막 글을 덮지 않는다(2026-11-06 「agy 세션작업 현황」 — 서랍 답이 표시 줄 하나만 남음)
+    const seen = [];
+    const say2 = t.h.drawerSay('D_DM', '🗂 서랍에서 · 시험', (text, marker) => seen.push([text, marker]));
+    await say2({ text: '답 본문\n\n⏸ 이 부분은 Claude·GPT 가 돌아오면', thread_ts: '9.9' });
+    await say2({ text: '↪ Gemini 가 답함', blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: '↪ Gemini 가 답함' }] }] });
+    eq('서랍 — 표시 줄은 표시로 알림', seen.map((s) => s[1]), [false, true]);
     delete SCRIPTS.drawer;
     claudeScript = 'ok';
   }

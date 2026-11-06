@@ -1076,16 +1076,22 @@ export class SlackHandler {
     // 쪽이 서랍 차례에 쓴다. 차례 `ts` 는 지어낸 값이다 — 쓰는 곳이 반응 달기(실패를 삼킴), 상태 줄(`say` 가 ts 를 안
     // 주면 건너뜀), 캡처의 순서 값뿐이다. 슬랙에 올리는 것은 `drawerSay` 가 고른 둘뿐이다.
     if (opts.drawer) {
-      let lastText = '';
+      // 마지막 「글」과 마지막 「표시 줄」(엔진 안내 · 슬랙 context 블록)을 따로 든다(2026-11-06) — 대체 엔진은 답 뒤에
+      // 「↪ … 가 답함」 줄을 따로 보내서, 마지막 글 하나만 들면 서랍 답이 그 표시 줄 하나로 남았다(「agy 세션작업 현황」)
+      let lastText = '', lastMarker = '';
       const now = Date.now();
       const ts = `${Math.floor(now / 1000)}.${String((now % 1000) * 1000 + Math.floor(Math.random() * 1000)).padStart(6, '0')}`;
       const outcomeSink: Partial<TurnOutcome> = {};
       await this.handleMessage(
         { type: 'message', channel, user, text, ts, pushed: true, drawer: true,
           captureId, outcomeSink } as unknown as MessageEvent,
-        this.drawerSay(channel, lead ?? '🗂 서랍에서', (t) => { if (t.trim()) lastText = t; }),
+        this.drawerSay(channel, lead ?? '🗂 서랍에서', (t, marker) => {
+          if (!t.trim()) return;
+          if (marker) lastMarker = t; else lastText = t;
+        }),
       );
-      return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink, lastText };
+      const joined = [lastText, lastMarker].filter(Boolean).join('\n\n');
+      return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink, lastText: joined };
     }
 
     // 무엇에 대한 답인지 보이게 먼저 남긴다 — 이 줄이 없으면 답만 덩그러니 뜬다.
@@ -1140,10 +1146,13 @@ export class SlackHandler {
    *   표시는 떼고 올린다 · 서랍에 옮겨 쓸 때도 `sena_drawer.py` 가 표시를 뗀다
    * - **버튼이 든 글**(계획 실행, 도구 허락, 한도 안내) — 서랍에서는 누를 수 없어 슬랙에서 답해야 한다
    */
-  private drawerSay(channel: string, lead: string, seen: (text: string) => void): (msg: any) => Promise<{ ts?: string }> {
+  private drawerSay(channel: string, lead: string, seen: (text: string, marker: boolean) => void): (msg: any) => Promise<{ ts?: string }> {
     return async (msg: any) => {
       const text = typeof msg === 'string' ? msg : String(msg?.text ?? '');
-      seen(text);
+      // 표시 줄 — 블록이 전부 context 인 글(대체 엔진의 「↪ … 가 답함」)
+      const mk = typeof msg !== 'string' && Array.isArray(msg?.blocks) && msg.blocks.length > 0
+        && msg.blocks.every((b: any) => b?.type === 'context');
+      seen(text, mk);
       const [first, ...rest] = text.split('\n');
       if (/^\s*\[슬랙\]/.test(first)) {
         const body = [first.replace(/^\s*\[슬랙\]\s*/, ''), ...rest].join('\n').trim();
