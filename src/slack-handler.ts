@@ -47,6 +47,7 @@ import { captureToInbox, checkinMap, checkinNow, codexTurn, dropCapture, isWorkA
   pendingHeld, quickUpdate, SESSION_CODEX_MODEL, workAssistantRoot } from './work-assistant';
 import { personaNote, humorReminder, humorValueLine } from './persona';
 import { identityNotice, recordSnapshot } from './identity-note';
+import { startEpisode, endEpisode } from './episodes';
 import { boardLabel, event as recordEvent } from './board-queue';
 import { TurnTimer } from './turn-timing';
 import { readUnseen } from './dm-context';
@@ -1656,6 +1657,10 @@ export class SlackHandler {
     const capture = event.captureId
       ? { id: event.captureId }
       : (text?.trim() ? captureToInbox(text, 'slack', thread_ts, { channel, msgTs: ts }) : null);
+    // 세나 일지 시작 줄(`episodes.ts`) — 세나 DM 세션의 차례만, 세션을 띄우기 전에(받은 말을 잃지 않게). 다시 돌리는 차례는
+    // 처음 받을 때 이미 남겼으므로 안 남긴다
+    const episode = isDM && text?.trim() && !event.replay
+      ? startEpisode({ ts, text, pushed: !!(event as any).pushed }) : '';
     // **차례를 띄우기 전까지도 처리 중 기록을 둔다**(2026-10-15 검토) — 원문만 있고 기록도 실패 표시도 없으면, 문에서
     // 기다리다 재시작에 끊긴 말은 드레인 목록에 안 든다(실패 표시가 있는 것만 다시 돈다). 차례가 뜨면 아래에서 지운다.
     const waitRec = !event.replay && capture?.id ? waitKey(capture.id) : '';
@@ -2472,6 +2477,14 @@ export class SlackHandler {
           captureId,
         } satisfies TurnOutcome);
         if (markDone) await markDone.catch(() => { });
+      }
+      // 세나 일지 끝 줄 — 돈 도구, 쓰기, 답 첫 줄(봇이 본 그대로). 대체 엔진이 받았으면 그 몫도 함께
+      if (episode) {
+        endEpisode(episode, {
+          steps: [...stepLog.steps, ...fallbackSteps], writeRan: stepLog.writeRan || fallbackWrote,
+          engine: turnEngine, outcome: outcomeFrom(turnBlock, cliError || turnThrew),
+          answer: currentMessages[currentMessages.length - 1] ?? '', session: session?.sessionId,
+        });
       }
 
       // **다음 차례를 미리 띄워 둔다** — 방금 쓴 것과 **한 글자도 안 고친** 옵션으로.
