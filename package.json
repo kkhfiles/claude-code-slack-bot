@@ -73,6 +73,7 @@
     "check:turntiming": "node scripts/check-turn-timing.mjs",
     "check:drawerprogress": "node scripts/check-drawer-progress.mjs",
     "check:episodes": "node scripts/check-episodes.mjs",
+    "check:memorycard": "node scripts/check-memory-card.mjs",
     "check:recurring": "node scripts/check-recurring.mjs",
     "check:timerdirect": "node scripts/check-timer-direct.mjs",
     "check:timernames": "node scripts/check-timer-names.mjs",

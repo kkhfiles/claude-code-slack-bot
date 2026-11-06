@@ -52,7 +52,7 @@ try {
   eq('시작 줄 — DM 차례, 다시 돌리기 아님, 세션 띄우기 전',
      /const episode = isDM && text\?\.trim\(\) && !event\.replay\s*\? startEpisode\(/.test(handler)
      && handler.indexOf('startEpisode(') < handler.indexOf('const sdkOpts'), true);
-  eq('끝 줄 — finally 의 결과 돌려주기 뒤', /if \(episode\) \{\s*endEpisode\(episode,/.test(handler), true);
+  eq('끝 줄 — finally 의 결과 돌려주기 뒤', /if \(episode\) \{[^}]*?endEpisode\(episode,/.test(handler), true);
 } finally {
   fs.rmSync(DIR, { recursive: true, force: true });
 }

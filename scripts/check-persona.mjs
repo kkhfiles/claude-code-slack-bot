@@ -64,8 +64,8 @@ try {
   eq('DM 차례에만 덧붙이는 지시 맨 앞에 정체성', /const stableNote = \[isDM \? personaNote\(workAssistantRoot\(\)\) : '', SLACK_SURFACE_NOTE\]/.test(handler), true);
   // 이어 가는 세션(11/06) — Claude 세션의 시스템 프롬프트는 안 바뀌는 것만, 바뀌는 것은 말 끝에, 바뀐 정체성은 알림으로
   eq('Claude 세션의 시스템 프롬프트는 stableNote', /appendSystemPrompt: stableNote,/.test(handler) && !/appendSystemPrompt: surfaceNote,\n\s*settings: \{ autoCompactWindow/.test(handler), true);
-  eq('말 끝에 유머 값, 캡처 안내, 번호표, 정체성 알림',
-     /const turnNote = \[\s*isDM \? humorValueLine\(\) : '',\s*capture \? CAPTURE_NOTE : '',\s*slotMap,\s*isDM \? identityNotice\(resumingId, resuming, stableNote\) : '',/.test(handler), true);
+  eq('말 끝에 유머 값, 기억 카드, 미리 꺼낸 것, 캡처 안내, 번호표, 정체성 알림',
+     /const turnNote = \[\s*isDM \? humorValueLine\(\) : '',\s*isDM \? readCard\(\) : '',\s*prefetched,\s*capture \? CAPTURE_NOTE : '',\s*slotMap,\s*isDM \? identityNotice\(resumingId, resuming, stableNote\) : '',/.test(handler), true);
   eq('새 세션의 첫 차례와 압축 뒤에 판을 적음', /if \(isDM && !resuming\) recordSnapshot\(initEvent\.session_id, stableNote\)/.test(handler)
      && /subtype === 'compact_boundary'\) \{\s*recordSnapshot\(/.test(handler), true);
   eq('슬랙 안내가 반영 약속을 막음', personaNote(repo, humor).includes('「반영했습니다」라고 하지 않는다'), true);

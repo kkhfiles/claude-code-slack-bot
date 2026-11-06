@@ -48,6 +48,7 @@ import { captureToInbox, checkinMap, checkinNow, codexTurn, dropCapture, isWorkA
 import { personaNote, humorReminder, humorValueLine } from './persona';
 import { identityNotice, recordSnapshot } from './identity-note';
 import { startEpisode, endEpisode } from './episodes';
+import { readCard, refreshCard, prefetchNote, DRAWER_TURN } from './memory-card';
 import { boardLabel, event as recordEvent } from './board-queue';
 import { TurnTimer } from './turn-timing';
 import { readUnseen } from './dm-context';
@@ -1838,6 +1839,9 @@ export class SlackHandler {
       // 그동안 아래의 토큰 동기화·조회가 어차피 돈다. 쓰는 곳은 저 아래
       // `surfaceNote` 한 곳뿐이라 거기서 받으면 된다.
       const slotMapPending: Promise<string> = isDM ? checkinMap() : Promise.resolve('');
+      // 일지에서 미리 꺼내 붙이기(`memory-card.ts`) — 사람이 쓴 DM 과 서랍 차례만, 번호표와 나란히 돈다
+      const prefetchPending: Promise<string> = isDM && (!(event as any).pushed || DRAWER_TURN.test(text || ''))
+        ? prefetchNote(text || '') : Promise.resolve('');
 
       const statusEmoji = isPlanMode ? '📝' : '🤔';
       const statusText = isPlanMode ? t('status.planning', locale) : t('status.thinking', locale);
@@ -1927,8 +1931,11 @@ export class SlackHandler {
       const stableNote = [isDM ? personaNote(workAssistantRoot()) : '', SLACK_SURFACE_NOTE].filter(Boolean).join('\n');
       const resumingId = resumeSessionId ?? session?.sessionId;
       const resuming = !!(resumingId || continueLastSession);
+      const prefetched = await prefetchPending;
       const turnNote = [
         isDM ? humorValueLine() : '',
+        isDM ? readCard() : '',
+        prefetched,
         capture ? CAPTURE_NOTE : '',
         slotMap,
         isDM ? identityNotice(resumingId, resuming, stableNote) : '',
@@ -2480,6 +2487,7 @@ export class SlackHandler {
       }
       // 세나 일지 끝 줄 — 돈 도구, 쓰기, 답 첫 줄(봇이 본 그대로). 대체 엔진이 받았으면 그 몫도 함께
       if (episode) {
+        refreshCard();   // 다음 차례가 읽을 카드를 다시 써 둔다(기다리지 않음)
         endEpisode(episode, {
           steps: [...stepLog.steps, ...fallbackSteps], writeRan: stepLog.writeRan || fallbackWrote,
           engine: turnEngine, outcome: outcomeFrom(turnBlock, cliError || turnThrew),
