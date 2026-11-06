@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { spawn, execSync } from 'child_process';
 import { pythonCommand } from './python-command';
+import { discoveryRunnerArgs, gateDiscoveryReport } from './discovery-report-gate';
 import Holidays from 'date-holidays';
 import { Logger } from './logger';
 import { CalendarPoller } from './calendar-poller';
@@ -2870,6 +2871,7 @@ export class AssistantScheduler {
     'product-docs-sync': { argv: ['-m', 'batch.product_docs_weekly_sync', '--detach'], cwdSub: 'mycelium' },
     'archive-sync': { argv: ['-m', 'batch.archive_weekly_sync', '--detach'], cwdSub: 'mycelium' },
     'kg-regression': { argv: ['-m', 'batch.kg_regression_weekly', '--detach'], cwdSub: 'mycelium' },
+    'discovery-improvement': { argv: ['-m', 'batch.discovery_weekly', '--detach'], cwdSub: 'mycelium' },
   };
 
   /**
@@ -3712,6 +3714,14 @@ export class AssistantScheduler {
    * 회차가 열린 채 남으므로 정리 작업(`sweep`)이 임시 파일을 받아 저장한다.
    */
   private async commitReportRun(run: ReportRun, partial: boolean, backend: Backend): Promise<any> {
+    if (run.type === 'discovery-improvement') {
+      const gate = await gateDiscoveryReport(this.workingDir, run,
+        this.config?.analysis.types[run.type]?.discovery);
+      if (!gate.ok) {
+        partial = true;
+        this.logger.warn('Discovery acceptance incomplete', { slot: run.slot, errors: gate.errors, unknown: gate.unknown });
+      }
+    }
     const args = ['commit', '--run', run.runId, '--backend', backend];
     if (partial) args.push('--partial');
     let r = await this.reportLog('report_log', args);
@@ -4324,7 +4334,10 @@ export class AssistantScheduler {
     // (러너 가드가 「이미 진행 중」이면 안 띄우므로, 첫 회차가 못 띄웠을 때만 뜬다).
     const prelaunch = AssistantScheduler.RUNNER_PRELAUNCH_BY_TYPE[type];
     if (prelaunch) {
-      await this.launchPipelineRunner(type, prelaunch, ctx);
+      const spec = type === 'discovery-improvement'
+        ? { ...prelaunch, argv: [...prelaunch.argv, ...discoveryRunnerArgs(typeConfig.discovery)] }
+        : prelaunch;
+      await this.launchPipelineRunner(type, spec, ctx);
     }
 
     // **프롬프트 자리를 채운다** — 이어받는 회차는 `'continue'` 한 낱말이라 채울 것이 없다.
