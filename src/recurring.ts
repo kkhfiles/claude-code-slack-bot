@@ -33,7 +33,10 @@ interface Entry {
   dueAt?: string;
   unref: boolean;
   runs: number;
+  /** 연속 실패 — 성공하면 0. 점검기의 「연속 실패」 판정이 본다. */
   fails: number;
+  /** 누적 실패 — 이 기동에서 실패한 회차 수. 이력 파일로 실패 빈도를 센다. */
+  failsTotal: number;
   overlaps: number;
   running: number;
   runningSince?: string;
@@ -68,7 +71,7 @@ const safe = (v: unknown): string | undefined =>
 function entry(name: string, kind: Entry['kind'], unref: boolean): Entry {
   let e = entries.get(name);
   if (!e) {
-    e = { kind, unref, runs: 0, fails: 0, overlaps: 0, running: 0, maxMs: 0, live: 0 };
+    e = { kind, unref, runs: 0, fails: 0, failsTotal: 0, overlaps: 0, running: 0, maxMs: 0, live: 0 };
     entries.set(name, e);
   }
   e.kind = kind;
@@ -96,6 +99,7 @@ function finish(e: Entry, started: number, ok: boolean, err?: unknown, value?: u
     e.lastOk = ok;
     e.lastCode = ok ? undefined : code;
     e.fails = ok ? 0 : e.fails + 1;
+    if (!ok) e.failsTotal += 1;
     if (typeof value === 'string') e.lastOutcome = safe(value);
     touch();
   } catch {
@@ -220,9 +224,36 @@ export function once(opts: { name: string; ms: number; run: () => unknown; unref
 
 /** 운영 진입점(`index.ts`)만 부른다. 부르지 않으면 상태 파일을 쓰지 않는다. */
 export function setStatusFile(file: string | null): void {
+  if (file) keepPrevious(file);
   statusFile = file;
   lastWrite = 0;
   touch();
+}
+
+const HISTORY_KEEP = 60;
+
+/**
+ * 앞 봇이 남긴 상태 파일을 같은 폴더의 `bot-timers-history/` 에 복사한다 — 기동마다 덮여 관찰 자료가
+ * 안 남던 것(2026-11-04~09 재시작 14회 · 2부 재검토). **옮기지 않고 복사한다** — 옮기면 새 봇이 못 쓸 때
+ * 파일이 없어져 점검기의 「뜬 지 N분인데 상태 파일에 안 씀」이 「판단 불가」로 바뀐다.
+ * 이름은 앞 봇의 기동 시각 + pid(12초 간격 재시작도 안 겹침). 자기 pid 파일은 안 넣는다. 최근 60개만 둔다.
+ * 쓰기가 30초 간격이라 앞 봇의 마지막 30초 안쪽은 빠진다. 기록은 던지지 않는다.
+ */
+function keepPrevious(file: string): void {
+  try {
+    const prev = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (!prev || prev.pid === process.pid || typeof prev.bootAt !== 'string') return;
+    const name = `${safe(prev.bootAt.replace(/:/g, '-')) ?? 'other'}-${Number(prev.pid) || 0}.json`;
+    const dir = path.join(path.dirname(file), 'bot-timers-history');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(file, path.join(dir, name));
+    const all = fs.readdirSync(dir).filter((n) => n.endsWith('.json')).sort();
+    for (const old of all.slice(0, Math.max(0, all.length - HISTORY_KEEP))) {
+      fs.rmSync(path.join(dir, old), { force: true });
+    }
+  } catch {
+    // 앞 파일이 없거나 못 읽으면 그만 — 기록은 던지지 않는다
+  }
 }
 
 /** 지금 기록 — 검사가 본다. */

@@ -184,6 +184,7 @@ try {
     eq('④ 성공하면 연속 실패 0, 결과 이름 남김', [R.snapshot().m.fails, R.snapshot().m.lastOk, R.snapshot().m.lastOutcome], [0, true, 'done-today']);
     armedList[0].fn();
     eq('④ 회차 수', R.snapshot().m.runs, 4);
+    eq('④ 누적 실패는 성공해도 안 줄어듦(실패 빈도는 이 칸으로 셈)', R.snapshot().m.failsTotal, 2);
 
     reset();
     let resolveIt;
@@ -221,6 +222,26 @@ try {
     ok('⑤ 오류 문구가 파일에 없음', !second.includes('비밀 문구'));
     eq('⑤ 오류 종류는 남음', JSON.parse(second).tasks.secret.lastCode, 'EACCES');
     ok('⑤ 임시 파일이 안 남음', !fs.readdirSync(path.dirname(file)).some((n) => n.endsWith('.tmp')));
+
+    // 기동 때 앞 봇의 파일은 이력 폴더에 복사해 두고 덮어쓴다 — 옮기면 새 봇이 못 쓸 때 「안 씀」 경보가 꺼진다
+    const hist = path.join(path.dirname(file), 'bot-timers-history');
+    const prev = { pid: 99999, bootAt: '2026-11-09T06:51:36.096Z', writtenAt: '2026-11-09T08:00:00.000Z', tasks: { old: { runs: 7 } } };
+    fs.writeFileSync(file, JSON.stringify(prev));
+    R.setStatusFile(file);
+    const copied = fs.existsSync(hist) ? fs.readdirSync(hist) : [];
+    eq('⑤ 앞 봇 파일을 이력에 복사(이름 = 기동 시각 + pid)', copied, ['2026-11-09T06-51-36.096Z-99999.json']);
+    if (copied.length) eq('⑤ 이력 내용은 앞 봇 그대로', JSON.parse(fs.readFileSync(path.join(hist, copied[0]), 'utf-8')).tasks.old.runs, 7);
+    eq('⑤ 그 뒤 지금 봇 것으로 덮어씀', JSON.parse(fs.readFileSync(file, 'utf-8')).pid, process.pid);
+    R.setStatusFile(file);
+    fs.mkdirSync(hist, { recursive: true });
+    eq('⑤ 자기 pid 파일은 이력에 안 넣음(같은 기동에서 다시 켬)', fs.readdirSync(hist).length, 1);
+    for (let i = 0; i < 65; i += 1) {
+      fs.writeFileSync(path.join(hist, `2026-10-01T00-00-${String(i).padStart(2, '0')}.000Z-${i}.json`), '{}');
+    }
+    fs.writeFileSync(file, JSON.stringify({ ...prev, pid: 88888, bootAt: '2026-11-09T09:00:00.000Z' }));
+    R.setStatusFile(file);
+    const kept = fs.readdirSync(hist).sort();
+    eq('⑤ 이력은 최근 60개만', [kept.length, kept.at(-1)], [60, '2026-11-09T09-00-00.000Z-88888.json']);
 
     // 쓸 수 없는 곳(폴더 자리) — 던지지 않고 타이머는 그대로 돈다
     const dirAsFile = path.join(TMP, 'is-a-dir');
