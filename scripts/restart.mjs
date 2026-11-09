@@ -206,6 +206,10 @@ function openAnalysisRuns(startedAtMs) {
 
 /** 시각 예약이 이 안에 예정이면 곧 도는 것으로 본다 — 기동이 1초 안쪽이라 넉넉히 잡았다. */
 const DUE_SOON_MS = 2 * 60_000;
+/** 예정이 이만큼 안에 지났는데 그 뒤 시작 기록이 없으면 막 시작한 것으로 본다 — 상태 파일은 30초 간격으로 쓴다. */
+const DUE_JUST_MS = 60_000;
+/** 「실행 중」 기록이 이보다 오래면 멈춘 것으로 보고 막지 않는다 — 점검기의 「오래 돎」(시각 예약 60분)과 같은 값. */
+const RUNNING_STALE_MS = 60 * 60_000;
 
 /**
  * 도는 중이거나 예정 `DUE_SOON_MS` 안인 시각 예약(`once`) — 반복 타이머 상태 파일(`recurring.ts`)을 읽는다.
@@ -223,8 +227,13 @@ function busyOnceTimers(botPid) {
   return Object.entries(state.tasks || {})
     .filter(([, t]) => t?.kind === 'once')
     .filter(([, t]) => {
+      const since = Date.parse(t.runningSince || '');
+      if (t.running > 0 && Number.isFinite(since) && now - since < RUNNING_STALE_MS) return true;
       const due = Date.parse(t.dueAt || '');
-      return t.running > 0 || (t.live > 0 && Number.isFinite(due) && due >= now && due - now <= DUE_SOON_MS);
+      if (!Number.isFinite(due)) return false;
+      if (t.live > 0 && due >= now && due - now <= DUE_SOON_MS) return true;
+      const started = Date.parse(t.lastStart || '');
+      return due < now && now - due <= DUE_JUST_MS && !(started >= due);
     })
     .map(([name, t]) => ({ name, ...t }));
 }
@@ -318,18 +327,22 @@ if (runs.live.length && force) {
   console.log(`⚠️ 분석 회차 ${runs.live.length}건이 도는 중인데 --force 라 그냥 합니다 — 판정 없이 남습니다`);
 }
 
-const timers = busyOnceTimers(process.env.BOT_PID ? Number(process.env.BOT_PID) : proc.pid);
 const timerLine = (t) => `   ${t.name}  ${t.running ? `${String(t.runningSince || '').slice(11, 16)}Z 부터 실행 중` : `예정 ${String(t.dueAt).slice(11, 19)}Z`}`;
-if (timers.length && !force) {
-  console.log(`⛔ 시각 예약 ${timers.length}건이 도는 중이거나 곧 돕니다 — 재시작하지 않았습니다`);
-  for (const t of timers) console.log(timerLine(t));
-  console.log('\n   끝나거나 예정 시각이 지난 뒤에 다시 하세요 (예정을 넘겨 기동하면 그 회차는 다음 날로 밀립니다)');
-  console.log('   그래도 지금 해야 하면 —  npm run restart -- --force');
-  process.exit(1);
+/** ④ 를 본다. 아래 큐 대기가 3분까지 기다리므로 그 뒤에 한 번 더 부른다 — 기다리는 사이 예정이 올 수 있다. */
+function checkOnceTimers() {
+  const timers = busyOnceTimers(process.env.BOT_PID ? Number(process.env.BOT_PID) : proc.pid);
+  if (timers.length && !force) {
+    console.log(`⛔ 시각 예약 ${timers.length}건이 도는 중이거나 곧 돕니다 — 재시작하지 않았습니다`);
+    for (const t of timers) console.log(timerLine(t));
+    console.log('\n   끝나거나 예정 시각이 지난 뒤에 다시 하세요 (예정을 넘겨 기동하면 그 회차는 다음 날로 밀립니다)');
+    console.log('   그래도 지금 해야 하면 —  npm run restart -- --force');
+    process.exit(1);
+  }
+  if (timers.length && force) {
+    console.log(`⚠️ 시각 예약 ${timers.length}건이 도는 중이거나 곧 도는데 --force 라 그냥 합니다`);
+  }
 }
-if (timers.length && force) {
-  console.log(`⚠️ 시각 예약 ${timers.length}건이 도는 중이거나 곧 도는데 --force 라 그냥 합니다`);
-}
+checkOnceTimers();
 
 const sdkUpdate = activeSdkUpdate();
 if (sdkUpdate && !force) {
@@ -359,6 +372,7 @@ for (;;) {
   console.log(`⏳ 큐가 ${Math.round(age / 1000)}초 전에 움직였습니다 — 조용해지기를 기다립니다`);
   await sleep(POLL_MS);
 }
+if (Date.now() - waitStart > POLL_MS) checkOnceTimers();
 
 if (dry) {
   console.log('✅ 걸리는 것 없음 (--dry 라 재시작은 안 했습니다)');

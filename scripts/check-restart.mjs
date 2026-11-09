@@ -231,6 +231,18 @@ const oldPid = run(timerEnv(timerState('t-oldpid', {
 if (oldPid.code !== 0) fails.push('지금 봇이 아닌 옛 pid 의 상태 파일로 재시작을 막는다');
 const forcedTimer = run(timerEnv(timerState('t-force', { 'scheduler:summary': { ...ONCE, dueAt: soon(60_000) } })), ['--force']);
 if (forcedTimer.code !== 0) fails.push('예정 직전 시각 예약이 있을 때 --force 로도 못 지나간다');
+// ⑦-b 60분 넘게 「실행 중」인 기록은 막지 않는다 — 끝나지 않는 Promise 하나가 SDK 판 맞춤의 재시작까지 영영 막는다
+const staleRun = run(timerEnv(timerState('t-stale', {
+  'scheduler:analysis:daily-12:00': { ...ONCE, live: 0, running: 1, runningSince: ago(90 * 60_000) } })));
+if (staleRun.code !== 0) fails.push('90분째 「실행 중」으로 남은 기록으로 재시작을 막는다 — 멈춘 것으로 봐야 한다');
+// ⑦-c 예정이 막 지났는데 시작 기록이 아직 없으면 막는다 — 상태 파일은 30초 간격으로 써서 방금 시작한 회차가 늦게 보인다
+const justDue = run(timerEnv(timerState('t-justdue', {
+  'scheduler:summary': { ...ONCE, dueAt: ago(20_000), lastStart: ago(86_400_000) } })));
+if (justDue.code === 0) fails.push('요약 예정 20초 뒤인데 시작 기록이 아직 없는 때 그냥 재시작한다 — 방금 시작한 회차를 죽인다');
+// ⑦-d 예정 뒤에 시작해 이미 끝난 회차는 막지 않는다
+const doneDue = run(timerEnv(timerState('t-donedue', {
+  'scheduler:summary': { ...ONCE, live: 1, dueAt: ago(30_000), lastStart: ago(29_000), lastEnd: ago(25_000) } })));
+if (doneDue.code !== 0) fails.push('예정 뒤에 시작해 끝난 회차로 재시작을 막는다');
 
 // ② 큐가 방금 움직였으면 기다린다 (여기서는 기다리기 시작하는 것까지만 본다)
 const busy = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: busyLog });
