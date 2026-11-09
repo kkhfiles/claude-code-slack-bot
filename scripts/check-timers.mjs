@@ -88,7 +88,7 @@ const scheduleAll = body(src, 'scheduleAll');
 // ① 선언한 타이머는 전부 지워져야 한다 — 안 지우면 설정을 저장할 때마다 하나씩
 //    쌓여 같은 알림이 두 번, 세 번 온다.
 for (const t of declared) {
-  if (t === 'watchDebounceTimer' || t === 'midnightTimer') continue; // 각자 자기 자리에서 지운다
+  if (t === 'watchDebounceTimer') continue; // 자기 자리에서 지운다
   if (!cleared.has(t)) fails.push(`${t} — 선언은 했는데 clearAllTimers() 가 안 지운다`);
 }
 

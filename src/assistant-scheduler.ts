@@ -923,7 +923,6 @@ export class AssistantScheduler {
    *  곳이 없다) 같은 스케줄의 재시도가 둘이어도 둘 다 쥔다. 봇을 끌 때(`stop`)만 푼다.
    *  열쇠는 계획 id — 계획은 파일에 있어 재시작해도 다시 건다(`rearmAnalysisRetries`). */
   private analysisRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private midnightTimer: Task | null = null;
   private workNudgeTimer: Task | null = null;
   private offsitePushTimer: Task | null = null;
   private notionWatchTimer: Task | null = null;
@@ -1023,7 +1022,6 @@ export class AssistantScheduler {
     this.loadCosts();
     this.scheduleAll();
     this.startConfigWatcher();
-    this.scheduleMidnightCleanup();
     this.logger.info('AssistantScheduler started', {
       configPath: this.configPath,
       workingDir: this.workingDir,
@@ -1069,10 +1067,6 @@ export class AssistantScheduler {
     for (const timer of this.analysisRetryTimers.values()) clearTimeout(timer);
     this.analysisRetryTimers.clear();
     this.stopConfigWatcher();
-    if (this.midnightTimer) {
-      this.midnightTimer.stop('stop');
-      this.midnightTimer = null;
-    }
     this.logger.info('AssistantScheduler stopped');
   }
 
@@ -4647,18 +4641,5 @@ export class AssistantScheduler {
       thursday: 4, friday: 5, saturday: 6,
     };
     return days[day.toLowerCase()] ?? 6; // Default to Saturday
-  }
-
-  /** Schedule midnight cleanup (reserved for future per-day state resets). */
-  private scheduleMidnightCleanup(): void {
-    const now = new Date();
-    const midnight = new Date(now);
-    midnight.setHours(24, 0, 0, 0);
-    const msUntil = midnight.getTime() - now.getTime();
-
-    this.midnightTimer = once({ name: 'scheduler:midnight', run: () => {
-      this.logger.debug('Midnight cleanup');
-      this.scheduleMidnightCleanup();
-    }, ms: msUntil });
   }
 }

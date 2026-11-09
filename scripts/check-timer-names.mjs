@@ -59,11 +59,9 @@ const EXPECTED = [
   'scheduler:actions', 'scheduler:board-queue', 'scheduler:held', 'scheduler:mail', 'scheduler:notion-watch',
   'scheduler:remind', 'scheduler:run-sweep', 'scheduler:vault-sweep',
   'scheduler:briefing', 'scheduler:work-nudge', 'scheduler:summary', 'scheduler:improve', 'scheduler:offsite-push',
-  'scheduler:focus', 'scheduler:daou-keepalive', 'scheduler:midnight',
+  'scheduler:focus', 'scheduler:daou-keepalive',
   'scheduler:analysis:saturday-00:00', 'scheduler:analysis:daily-02:00', 'scheduler:analysis:wednesday-20:00',
 ].sort();
-/** 설정 다시 읽기가 안 지우는 것 — 자정 정리는 start() 에서만 걸리고 stop() 이 지운다. */
-const NOT_RELOADED = new Set(['scheduler:midnight']);
 
 const real = { setTimeout, setInterval, clearTimeout, clearInterval };
 const fakeHandle = () => ({ unref() { return this; }, ref() { return this; }, hasRef() { return true; } });
@@ -96,7 +94,7 @@ try {
 
   sched.clearAllTimers();
   const stoppedByReload = Object.entries(R.snapshot()).filter(([, e]) => e.stopReason === 'reload').map(([n]) => n).sort();
-  eq('② 설정 다시 읽기가 지운 이름(자정 정리 빼고 전부)', stoppedByReload, EXPECTED.filter((n) => !NOT_RELOADED.has(n)));
+  eq('② 설정 다시 읽기가 지운 이름(전부)', stoppedByReload, EXPECTED);
   sched.loadConfig();
   sched.scheduleAll();
   await new Promise((r) => real.setTimeout(r, 300));
