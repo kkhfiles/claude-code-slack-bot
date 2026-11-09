@@ -374,6 +374,8 @@ export interface AssistantConfig {
       mode?: 'change-detection';   // reports optional (no-file-generated is OK)
       /** 산출물 없음이 정상인 종류 — 조용한 날 · 변경 없는 달(`noOutputOkType` 참조). */
       noOutputOk?: boolean;
+      /** 그 주 보고서를 모으는 종류(weekly-digest) — 앞 종류가 재시도로 밀리면 같이 밀려 그 뒤에 돈다. */
+      afterGroup?: boolean;
       tools?: string[];            // type-specific data (e.g. competitors.tools)
       allowedTools?: string[];
       writablePaths?: string[];
@@ -3155,6 +3157,16 @@ export class AssistantScheduler {
    * 끝난다. 「한도로 끝난 1차(도구 0회)」로 치고 곧장 폴백으로 간다 · 폴백도 못 하면 그 결과가
    * 한도 갈래로 돌아가 부르는 쪽이 예전처럼 처리한다(분석은 재시도 · 브리핑은 회복 뒤 다시).
    */
+  /**
+   * 분석 그룹의 뒤쪽 타입을 codex 폴백이 받을 수 있나 — `spawnOrFallback` 의 도구 쓰는 회차가 건너뛰는
+   * 조건(`SESSION_FALLBACK=off` · 엔진 상태의 codex 막힘)을 그대로 본다. 시험이 갈아 끼운다.
+   */
+  private async analysisFallbackOpen(): Promise<boolean> {
+    if (process.env.SESSION_FALLBACK === 'off') return false;
+    await codexQuota.refresh();
+    return !engineState.isBlocked('codex');
+  }
+
   private async spawnOrFallback(
     label: string, prompt: string, opts: SpawnOpts,
   ): Promise<SessionResult> {
@@ -3778,6 +3790,10 @@ export class AssistantScheduler {
     const failedRetryTypes: RetryEntry[] = [];
     /** 중단 때문에 못 돈 타입 — 종료 메시지에 그대로 적는다. */
     let deferredTypes: string[] = [];
+    /** 앞 종류의 재시도를 기다리는 `afterGroup` 종류 — 재시도 큐 맨 뒤에 붙인다. */
+    const waitingTypes: RetryEntry[] = [];
+    /** 뒤쪽 타입까지 미루고 그룹을 끊었나 — 폴백도 못 받을 때만 참이다. */
+    let stopGroup = false;
     /** 리미트 해제 시각(epoch sec) — 있으면 재시도를 그 시각 기준으로 잡는다. */
     let limitResetsAt: number | undefined;
 
@@ -3814,6 +3830,13 @@ export class AssistantScheduler {
       const typeConfig = this.config.analysis.types[type];
       const maxRetries = (typeConfig?.maxRetries as number | undefined)
         ?? defaults.maxRetries ?? 2;
+
+      // **그 주 보고서를 모으는 종류는 앞 종류의 재시도를 기다린다**(2026-11-09) — 지금 돌면 재시도로
+      // 늦게 나올 보고서가 빠진 다이제스트가 된다. 회차는 지금 연다(뒤쪽 타입을 미룰 때와 같은 까닭).
+      if (typeConfig?.afterGroup === true && failedRetryTypes.length > 0) {
+        waitingTypes.push({ type, run: await this.openReportRun(type, origin.slot, origin.trigger) });
+        continue;
+      }
 
       // 회차는 첫 시도 전에 한 번 연다 — 같은 종류의 다음 시도(타임아웃 · 오류 재시도)는
       // 같은 회차를 다시 쓴다. 열기가 실패했으면 다음 시도에서 다시 연다.
@@ -3865,7 +3888,12 @@ export class AssistantScheduler {
             // 못 돈 뒤쪽 타입의 회차도 지금 연다(예정일 · 시작 방식은 이 그룹 것) — 재시도가 그
             // 회차를 쓰고, 재시작으로 재시도 예약이 사라져도 열린 회차가 남아 정리 작업(sweep)이
             // 그 공백을 기록한다.
-            if (shouldRetry) {
+            // **단 폴백이 받을 수 있으면 안 미룬다**(2026-11-09) — 뒤쪽 타입은 시작할 때 「Claude 막힘」을
+            // 보고 codex 로 간다(`spawnOrFallback`). 늘 미루던 동안 11-07 주간 한도에서 13종이 58시간
+            // 기다렸다. codex 도 막혔으면 예전 그대로 미루고 끊는다 — 돌려 봐야 곧장 실패하고, 러너를
+            // 미리 띄우는 종류는 재시도 때 러너를 한 번 더 띄운다.
+            if (shouldRetry && !(await this.analysisFallbackOpen())) {
+              stopGroup = true;
               deferredTypes = runnableTypes.slice(runnableTypes.indexOf(type) + 1);
               for (const rest of deferredTypes) failedRetryTypes.push({ type: rest, run: await this.openReportRun(rest, origin.slot, origin.trigger) });
             }
@@ -3876,7 +3904,7 @@ export class AssistantScheduler {
               sessionId: result.sessionId, willRetry: shouldRetry,
               deferred: deferredTypes, runId: run?.runId,
             });
-            break; // Stop remaining types in this group (rate limit affects all)
+            break; // 이 타입의 시도를 끝낸다 — 그룹을 끊을지는 아래 `stopGroup`
           }
 
           if (result.noOutput) {
@@ -3942,9 +3970,11 @@ export class AssistantScheduler {
           `분석 실패 (${type} ${origin.slot}): ${failedWhy} · ${saveOf.get(type)}`);
       }
 
-      // Rate limit breaks the entire group
-      if (failedRetryTypes.length > 0) break;
+      // 폴백도 못 받는 한도면 그룹을 끊는다 — 뒤쪽 타입은 위에서 이미 큐에 넣었다.
+      if (stopGroup) break;
     }
+    // 기다리던 종류는 재시도 큐 맨 뒤 — 앞 종류의 재시도가 끝난 뒤에 돈다.
+    failedRetryTypes.push(...waitingTypes);
 
     // data-sync(daily-00:00)=야간, data-sync-noon(daily-12:00)=정오. 둘 다 startsWith('daily').
     const label = !isDaily ? '주간 분석' : (schedule === 'daily-12:00' ? '정오 동기화' : '야간 동기화');
@@ -3972,6 +4002,9 @@ export class AssistantScheduler {
     // 빠졌다. 못 돈 것은 못 돌았다고 적는다.
     if (deferredTypes.length > 0) {
       parts.push(`🚧 중단으로 미실행: ${deferredTypes.join(', ')}`);
+    }
+    if (waitingTypes.length > 0) {
+      parts.push(`⏸ 앞 종류 재시도 뒤에 실행: ${waitingTypes.map((w) => w.type).join(', ')}`);
     }
     await this.sendMessage(parts.join('\n')).catch(() => {});
 

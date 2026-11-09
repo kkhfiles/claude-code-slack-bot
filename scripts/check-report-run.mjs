@@ -95,7 +95,7 @@ const writeConfig = (extra = {}) => fs.writeFileSync(path.join(CFG, 'config.json
 }), 'utf-8');
 writeConfig();
 const writePrompt = (type, body) => fs.writeFileSync(path.join(PROMPTS, `analysis-${type}.md`), body, 'utf-8');
-for (const t of ['probe', 'second', 'third', 'kg-regression']) {
+for (const t of ['probe', 'second', 'third', 'kg-regression', 'digest']) {
   writePrompt(t, `# ${t}\n\n보고서를 {{REPORT_OUT}} 에 쓴다. 예정일 {{SLOT}}.\n`);
 }
 
@@ -157,6 +157,8 @@ function harness({ results = [], rl = fakeReportLog(), onSpawn } = {}) {
   sched.loadConfig();
   sched.recordSessionCost = () => {};            // 비용 원장(실파일)에 안 남긴다
   sched.launchPipelineRunner = async (...a) => { launches.push(a); };  // 진짜 러너를 안 띄운다
+  // 뒤쪽 타입을 폴백이 받을 수 있나 — 기본은 「못 받음」(codex 도 막힘 · 한도 조회를 실제로 안 부른다).
+  sched.analysisFallbackOpen = async () => false;
   return { sched, spawns, sent, launches, rl };
 }
 
@@ -255,6 +257,57 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
   eq('재시도 결과 줄도 원래 회차 번호',
     journal().filter((r) => r.viaRetry).map((r) => [r.type, r.runId]),
     [['second', '2026-10-03-second-r2'], ['third', '2026-10-03-third-r3']]);
+}
+{
+  // 그 주 보고서를 모으는 종류 — 아래 세 절에서만 둔다(수동 그룹 시험이 기본 스케줄의 종류를 다 센다).
+  writeConfig({ digest: { enabled: true, model: 'sonnet', effort: 'low', afterGroup: true } });
+  // 2026-11-07 의 모양 — 쓰기를 한 뒤 한도에 걸린 종류가 있어도 codex 가 받을 수 있으면 그룹을 안 끊는다.
+  // 뒤쪽 종류는 지금 돌고(실제로는 시작할 때 「Claude 막힘」을 보고 codex 로 간다), 당사자만 이어받기로
+  // 남고, 그 주 보고서를 모으는 종류(afterGroup)는 당사자 재시도 뒤로 밀린다.
+  resetJournal();
+  const rl = fakeReportLog();
+  const LIMITED = { ...WORKED, sessionId: 'sW', writeToolCalls: 7, rateLimited: true,
+    rateLimitResetsAt: Math.floor(Date.now() / 1000) + 58 * 3600 };
+  const { sched, spawns, sent } = harness({ rl, results: [WORKED, LIMITED, WORKED, WORKED, WORKED] });
+  sched.analysisFallbackOpen = async () => true;
+  let captured = null;
+  sched.scheduleAnalysisRetry = (schedule, origin, queue, when) => { captured = { schedule, origin, queue, when }; };
+  await sched.runAnalysisGroup('saturday-00:00', ['probe', 'second', 'third', 'digest'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('폴백이 받으면 — 셋째는 지금 돈다 · 모으는 종류는 안 돈다', spawns.length, 3);
+  eq('큐 — 당사자(이어받기) 다음에 모으는 종류',
+    captured && captured.queue.map((q) => [q.type, q.sessionId ?? null, q.run && q.run.runId]),
+    [['second', 'sW', '2026-10-03-second-r2'], ['digest', null, '2026-10-03-digest-r4']]);
+  eq('결과 줄 — 셋째는 완료 · 모으는 종류는 아직 없음',
+    journal().filter((r) => r.kind === 'outcome').map((r) => [r.type, r.outcome]),
+    [['probe', 'completed'], ['second', 'rate_limited'], ['third', 'completed']]);
+  ok('완료 메시지에 미실행 줄이 없다', !sent.some((t) => t.includes('중단으로 미실행')));
+  ok('완료 메시지가 기다리는 종류를 적는다', sent.some((t) => t.includes('⏸ 앞 종류 재시도 뒤에 실행: digest')));
+  await sched.runAnalysisRetry(captured.schedule, captured.origin, captured.queue);
+  eq('재시도 — 당사자 이어받기 다음에 모으는 종류를 새로',
+    spawns.slice(3).map((s) => s.opts.resumeSessionId ?? null), ['sW', null]);
+}
+{
+  // codex 도 막혔으면 예전 그대로 — 뒤쪽 종류(모으는 종류 포함)를 큐에 넣고 그룹을 끊는다(2026-08-22 보호).
+  resetJournal();
+  const rl = fakeReportLog();
+  const LIMITED = { ...WORKED, sessionId: 'sW', writeToolCalls: 7, rateLimited: true };
+  const { sched, spawns, sent } = harness({ rl, results: [LIMITED] });
+  let captured = null;
+  sched.scheduleAnalysisRetry = (schedule, origin, queue) => { captured = { queue }; };
+  await sched.runAnalysisGroup('saturday-00:00', ['probe', 'third', 'digest'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('codex 도 막힘 — 첫 종류 뒤로 안 돈다', spawns.length, 1);
+  eq('큐 — 당사자 · 뒤쪽 둘', captured && captured.queue.map((q) => q.type), ['probe', 'third', 'digest']);
+  ok('완료 메시지가 미실행을 적는다', sent.some((t) => t.includes('중단으로 미실행: third, digest')));
+}
+{
+  // 앞에서 밀린 것이 없으면 모으는 종류도 그냥 돈다.
+  const rl = fakeReportLog();
+  const { sched, spawns } = harness({ rl, results: [WORKED, WORKED] });
+  let scheduled = false;
+  sched.scheduleAnalysisRetry = () => { scheduled = true; };
+  await sched.runAnalysisGroup('saturday-00:00', ['probe', 'digest'], { slot: '2026-10-03', trigger: 'scheduled' });
+  eq('밀린 것 없음 — 둘 다 돈다 · 재시도 없음', [spawns.length, scheduled], [2, false]);
+  writeConfig();
 }
 {
   // 원래 회차를 못 연 칸 — 재시도에서 처음 열 때만 `retry` · 예정일은 원래 것.
