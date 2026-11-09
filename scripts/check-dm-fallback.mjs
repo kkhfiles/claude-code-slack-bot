@@ -258,6 +258,9 @@ const LIMIT_TEXT = /hit your session limit/;
 
 async function scenario(o) {
   reset();
+  // 장면마다 따로 — 표시 줄은 같은 막힘 구간의 첫 답에만 붙는다(V3 · `shouldMark`). 장면끼리 막힘 시각이 같은 초라
+  // 지우지 않으면 앞 장면의 기억이 이 장면의 첫 표시 줄을 먹는다.
+  dmf.resetMarked();
   claudeCalls.length = 0;
   bridge.captures = 0;
   bridge.failed = [];
@@ -401,6 +404,21 @@ try {
     const o = await scenario({ claude: 'overload' });
     ok('과부하도 넘긴다 · 원문(529) 안 올림', o.codex.length === 1 && !allText(o.posts).includes('529'));
     ok(`과부하 표시 줄 — ${markers(o.posts)[0]?.text}`, (markers(o.posts)[0]?.text ?? '').endsWith('· Claude 과부하'));
+    // V3(2026-11-09) — 같은 막힘 구간 · 같은 엔진이면 첫 답에만 표시 줄. 엔진이나 구간이 바뀌면 다시 · 넘겨받음은 늘
+    {
+      dmf.resetMarked();
+      const b1 = { kind: 'usage', until: 2000, untilKnown: true, since: 1000 };
+      const b2 = { ...b1, since: 3000 };
+      eq('표시 줄은 구간의 첫 답에만 — 첫 답 · 같은 구간 둘째 답',
+        [dmf.shouldMark('codex', b1), dmf.shouldMark('codex', b1)], [true, false]);
+      eq('엔진이 바뀌면 · 새 막힘 구간이면 다시 붙음',
+        [dmf.shouldMark('agy-gemini', b1), dmf.shouldMark('agy-gemini', b2)], [true, true]);
+      eq('넘겨받은 차례는 같은 구간이어도 늘 붙음', dmf.shouldMark('agy-gemini', b2, 2), true);
+      eq('막힘을 모를 때(null)도 한 번', [dmf.shouldMark('codex', null), dmf.shouldMark('codex', null)], [true, false]);
+      const two = await scenario({ claude: 'limited' });
+      await two.dm('그다음 말');
+      eq('같은 막힘 동안 GPT 가 두 번 답해도 표시 줄은 한 통', markers(two.posts).length, 1);
+    }
     const e = await scenario({ claude: 'error' });
     eq('Claude 의 보통 오류는 안 넘긴다', e.codex.length, 0);
   }

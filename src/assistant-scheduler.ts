@@ -38,6 +38,7 @@ import { BoardPush } from './board-push';
 import type { ContactItem, QueueItem } from './board-queue';
 import { config } from './config';
 import { ladderEventLines, ladderTable, ladderText, sameTier, serviceCodex } from './model-ladder';
+import { summarizeIssues } from './issue-summary';
 import { ActionPipeline, parseWindow, reportLogAvailable, reportLogState, runReportLog } from './action-pipeline';
 import type { ThreadApi } from './action-pipeline';
 
@@ -994,7 +995,7 @@ export class AssistantScheduler {
      * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
      */
     private askFromBoard?: (text: string, lead?: string, shown?: string,
-                            opts?: { drawer?: boolean; captureId?: string }) => Promise<(TurnOutcome & { lastText?: string }) | void>,
+                            opts?: { drawer?: boolean; single?: boolean; captureId?: string }) => Promise<(TurnOutcome & { lastText?: string }) | void>,
     deps: SchedulerDeps = {},
   ) {
     this.reportLog = deps.reportLog ?? runReportLog;
@@ -1635,6 +1636,8 @@ export class AssistantScheduler {
    */
   private async postActionDigest(): Promise<void> {
     try {
+      // 요약 한 통 + 카드는 그 스레드(2026-11-09 실장 결정 V1). 통로가 없거나 요약을 못 올리면 예전 길로.
+      if (reportLogAvailable() && (await this.actionPipeline.postDigest()) !== 'fallback') return;
       const blocks = await this.actionDigestBlocks();
       if (blocks) await this.sendMessage('🗂 처리 제안', blocks);
     } catch (err) {
@@ -2189,9 +2192,10 @@ export class AssistantScheduler {
       // **사람에게는 한 줄만 보인다.** 본문은 세션이 읽을 것이라 통계·머리표·지시가
       // 들어 있고, 그것을 그대로 채널에 붙이면 같은 내용이 두 번 뜬다(2026-08-19
       // 사용자 지적). 세 번째 인자가 빈 문자열이면 머리 줄만 남는다.
+      // **한 통으로**(2026-11-09 실장 결정 V2) — 머리 줄과 답을 끝에 한 메시지로(`single`).
       const out = await this.askFromBoard(
         `[메일] 후보 ${r.threads.length}건\n${r.text}`,
-        r.lead || `📬 메일 후보 ${r.threads.length}건`, '');
+        r.lead || `📬 메일 후보 ${r.threads.length}건`, '', { single: true });
       // **막혀 끝났으면 표시를 안 옮긴다**(2026-10-14) — 풀린 뒤 첫 회차가 같은 메일을 그때의 목록으로
       // 다시 읽는다. 그러면 이번 차례의 캡처는 **버린다** — 남겨 두면 회복 때 드레인이 옛 목록을 한 번
       // 더 넘겨 같은 후보가 두 번 나간다. 쓰기가 돈 뒤 막힌 것(일하다 끊김)은 표시를 옮기고 캡처가
@@ -3558,12 +3562,11 @@ export class AssistantScheduler {
       grouped.set(err.source, list);
     }
 
+    // 한도 오류 원문과 폴백 기록은 한 줄씩으로 줄인다(2026-11-09 실장 결정 V4 · `issue-summary.ts`)
+    const groups = summarizeIssues([...grouped].map(([source, messages]) => ({ source, messages: [...new Set(messages)] })));
+    if (!groups.length) return '';
     let report = '\n\n⚠️ *시스템 이슈*';
-    for (const [source, messages] of grouped) {
-      // Deduplicate identical messages
-      const unique = [...new Set(messages)];
-      report += `\n• _${source}_: ${unique.join(', ')}`;
-    }
+    for (const g of groups) report += `\n• _${g.source}_: ${g.messages.join(', ')}`;
     return report;
   }
 

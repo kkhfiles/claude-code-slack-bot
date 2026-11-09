@@ -61,7 +61,8 @@ import { StepLog, isHeldOutcome, isWriteTool, outcomeFrom, type TurnOutcome, typ
 import { fallbackEligible, isAgyRung, isFallbackRung, pickAfter, pickEngine, type DmOrigin, type LadderPick, type PickInput } from './engine-ladder';
 import { CODEX_INFLIGHT_STEP, FALLBACK_TIMEOUT_MS, INCOMPLETE_LINE, NEEDS_FULL_LINE, agyMarkerLines, agyRunningStep,
   appendLedger, codexSteps, dmFallbackOn, fallbackEnv, dmLadder, engineStatusText, filesNote, handoverNote, isQuietReply,
-  ladderBlockedMap, ledgerActiveSince, ledgerNote, ledgerServedSince, markerLines, notRunSteps, claudeApiMarkerLines } from './dm-fallback';
+  ladderBlockedMap, ledgerActiveSince, ledgerNote, ledgerServedSince, markerLines, notRunSteps, claudeApiMarkerLines, shouldMark } from './dm-fallback';
+import { isStatusLine, singleMessage } from './single-message';
 import { codexQuota } from './codex-quota';
 import { sameTier, serviceCodex } from './model-ladder';
 import { readDrill } from './engine-drill';
@@ -1069,7 +1070,7 @@ export class SlackHandler {
    * 이 방에서 이어 가던 대화와 갈라진다.
    */
   private async askFromBoard(text: string, lead?: string, shown?: string,
-                             captureId?: string, opts: { drawer?: boolean } = {}): Promise<TurnOutcome & { lastText?: string }> {
+                             captureId?: string, opts: { drawer?: boolean; single?: boolean } = {}): Promise<TurnOutcome & { lastText?: string }> {
     const channel = config.assistant.dmChannel;
     const user = config.bot.allowUsers[0];
     if (!channel || !user) throw new Error('비서 방 또는 사용자가 설정되지 않았습니다');
@@ -1095,6 +1096,30 @@ export class SlackHandler {
       );
       const joined = [lastText, lastMarker].filter(Boolean).join('\n\n');
       return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink, lastText: joined };
+    }
+
+    // **메일 차례는 한 통으로**(2026-11-09 실장 결정 V2 「답 한 통만」) — 전에는 머리 줄(「📬 메일 후보 N건」)을
+    // 먼저 올리고 그 스레드에 명령어 안내 · 답 · 엔진 줄이 따로 붙어 차례마다 네 통이었다. 이제 서랍 차례처럼
+    // 글을 모았다가 끝에 「머리 줄 + 답(+ 엔진 줄)」 한 통만 올린다.
+    // - 원문 사본 노릇은 캡처 큐가 한다 — 메일 후보는 넘기기 전에 캡처에 남고, 세션이 넘어지면 오류 글이 답 자리에 실린다
+    // - 버튼이 든 글(계획 실행, 도구 허락, 한도 안내)은 그 자리에서 따로 올린다 — 눌러야 하는 것
+    // - 답이 `[조용히]` 이거나 비었으면 머리 줄만 — 메일 차례가 아무 자국 없이 사라지지 않게
+    if (opts.single) {
+      let lastText = '', lastMarker = '';
+      const now = Date.now();
+      const ts = `${Math.floor(now / 1000)}.${String((now % 1000) * 1000 + Math.floor(Math.random() * 1000)).padStart(6, '0')}`;
+      const head = lead ?? `🗂 ${boardLabel()} 에서`;
+      const outcomeSink: Partial<TurnOutcome> = {};
+      await this.handleMessage(
+        { type: 'message', channel, user, text, ts, pushed: true, captureId, outcomeSink } as unknown as MessageEvent,
+        this.singleSay(channel, head, (t, marker) => {
+          if (!t.trim()) return;
+          if (marker) lastMarker = t; else lastText = t;
+        }),
+      );
+      await this.app.client.chat.postMessage(singleMessage(channel, head, lastText, lastMarker))
+        .catch((err) => this.logger.warn('메일 차례의 한 통을 못 보냄', err));
+      return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink };
     }
 
     // 무엇에 대한 답인지 보이게 먼저 남긴다 — 이 줄이 없으면 답만 덩그러니 뜬다.
@@ -1170,6 +1195,25 @@ export class SlackHandler {
         const { thread_ts: _thread, ...body } = msg;
         return this.app.client.chat.postMessage({ channel, ...body, text: `${lead} — 슬랙에서 답이 필요해요\n${text}` });
       }
+      return {};
+    };
+  }
+
+  /**
+   * 한 통으로 모으는 차례(메일)의 `say` — 글은 `seen` 에만 알리고 슬랙에는 안 올린다. 버튼이 든 글만 그 자리에서
+   * DM 바깥 글로 올린다(눌러야 하므로). 차례 `ts` 가 지어낸 값이라 스레드는 못 단다. 끝의 한 통은 부른 쪽이 올린다.
+   */
+  private singleSay(channel: string, lead: string, seen: (text: string, marker: boolean) => void): (msg: any) => Promise<{ ts?: string }> {
+    return async (msg: any) => {
+      const text = typeof msg === 'string' ? msg : String(msg?.text ?? '');
+      const blocks = typeof msg === 'string' ? undefined : msg?.blocks;
+      if (Array.isArray(blocks) && blocks.some((b: any) => b?.type === 'actions')) {
+        const { thread_ts: _thread, ...body } = msg;
+        return this.app.client.chat.postMessage({ channel, ...body, text: `${lead}\n${text}` });
+      }
+      const mk = Array.isArray(blocks) && blocks.length > 0 && blocks.every((b: any) => b?.type === 'context');
+      if (!mk && isStatusLine(text)) return {};
+      seen(text, mk);
       return {};
     };
   }
@@ -1865,7 +1909,9 @@ export class SlackHandler {
 
       // Show command hint on first message in a new thread
       const threadKey = `${channel}:${replyTs}`;
-      if (isNewSession && !event.drawer && !this.hintShownThreads.has(threadKey)) {
+      // 봇이 스스로 넘긴 차례(메일 · 판 · 드레인)에는 안 붙인다 — 사람이 말을 건 것이 아니라 안내가 쓸모없고,
+      // 메일 차례마다 한 통씩 늘었다(2026-11-09 실장 결정 V2)
+      if (isNewSession && !event.drawer && !(event as any).pushed && !this.hintShownThreads.has(threadKey)) {
         this.hintShownThreads.add(threadKey);
         await this.app.client.chat.postMessage({
           channel,
@@ -3128,7 +3174,9 @@ export class SlackHandler {
       if (!failure && reply) {
         await a.say({ text: this.formatMessage(reply, true), thread_ts: a.replyTs });
         // 판에서 온 차례가 「조용히」로 답했으면 답이 안 보이므로 표시 줄도 안 올린다.
-        if (!((event as any).pushed && isQuietReply(reply))) {
+        // 엔진이 바뀐 첫 답에만 붙인다(V3 · `shouldMark`) — 서랍 차례는 늘(서랍 답에 남는 글).
+        if (!((event as any).pushed && isQuietReply(reply))
+            && ((event as any).drawer || shouldMark('claude-api', a.block, claudeWrites || undefined))) {
           const marker = claudeApiMarkerLines({ block: a.block, ...(claudeWrites ? { handover: claudeWrites } : {}) }).join('\n');
           await a.say({ text: marker, blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: marker }] }], thread_ts: a.replyTs });
         }
@@ -3206,7 +3254,9 @@ export class SlackHandler {
         const reply = r.text.trim();
         if (reply) await a.say({ text: this.formatMessage(reply, true), thread_ts: a.replyTs });
         // 판에서 온 차례가 「조용히」로 답했으면 답이 안 보이므로 표시 줄도 안 올린다.
-        if (!((event as any).pushed && isQuietReply(reply))) {
+        // 엔진이 바뀐 첫 답에만 붙인다(V3 · `shouldMark`) — 서랍 차례는 늘(서랍 답에 남는 글).
+        if (!((event as any).pushed && isQuietReply(reply))
+            && ((event as any).drawer || shouldMark('codex', a.block, claudeWrites || undefined))) {
           const marker = markerLines({ model, block: a.block, ...(claudeWrites ? { handover: claudeWrites } : {}) }).join('\n');
           await a.say({ text: marker, blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: marker }] }], thread_ts: a.replyTs });
         }
@@ -3349,11 +3399,14 @@ export class SlackHandler {
           : incomplete ? INCOMPLETE_LINE : '';
         const body = [quiet ? '' : plan.reply, report, held].filter(Boolean).join('\n\n');
         if (body) await a.say({ text: this.formatMessage(body, true), thread_ts: a.replyTs });
-        const marker = agyMarkerLines({
-          display, claudeBlock: a.block, above: a.ladder.slice(0, Math.max(0, a.ladder.indexOf(rung))),
-          st: engineState.load(), nowSec: engineState.nowSec(), ...(priorWrites ? { handover: priorWrites } : {}),
-        }).join('\n');
-        await a.say({ text: marker, blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: marker }] }], thread_ts: a.replyTs });
+        // 엔진이 바뀐 첫 답에만 붙인다(V3 · `shouldMark`) — 서랍 차례는 늘(서랍 답에 남는 글).
+        if ((event as any).drawer || shouldMark(rung, a.block, priorWrites || undefined)) {
+          const marker = agyMarkerLines({
+            display, claudeBlock: a.block, above: a.ladder.slice(0, Math.max(0, a.ladder.indexOf(rung))),
+            st: engineState.load(), nowSec: engineState.nowSec(), ...(priorWrites ? { handover: priorWrites } : {}),
+          }).join('\n');
+          await a.say({ text: marker, blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: marker }] }], thread_ts: a.replyTs });
+        }
       }
 
       if (holdRest) {

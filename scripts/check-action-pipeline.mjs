@@ -929,6 +929,56 @@ const completes = (calls) => calls.filter((c) => c[1] === 'complete').map((c) =>
   }
   // T6 — 대응 파일은 임시 파일을 거쳐 씀 · 남는 임시 파일 없음
   ok('대응 파일을 쓴 뒤 임시 파일이 안 남음', !fs.existsSync(`${THREADS_FILE}.tmp`) && typeof readMap() === 'object');
+
+  // V1(2026-11-09 실장 결정) — 아침 요약은 한 통, 처음 보는 제안의 카드와 결정 요청은 그 요약의 스레드 답글.
+  // 11/09 아침에는 카드 셋 + 요약 하나로 네 통이 따로 떴다.
+  {
+    const tt = fakeThread();
+    const P1 = 'a-20261109-31';
+    const P2 = 'a-20261109-32';
+    const P3 = 'a-20261109-33';
+    const dg = { need_you: [NOTICE(P1, 'digest', 'needs-decision', BTN), NOTICE(P2, 'digest', 'proposed', BTN),
+      NOTICE(P3, 'digest', 'reject-proposed', BTN)], stuck: [], site: 'https://desk.example' };
+    const wv = world({ thread: tt.api, digest: dg });
+    eq('요약을 보냄', await wv.pipe.postDigest(), 'sent');
+    const top = tt.msgs.filter((m) => !m.threadTs);
+    eq('DM 바깥 글은 요약 한 통', top.length, 1);
+    const digestTs = top[0].ts;
+    const inThread = repliesOf(tt, digestTs);
+    eq('카드 셋 + 결정 요청 셋이 다 요약 스레드 안', inThread.length, 6);
+    ok('카드에 제안 링크', [P1, P2, P3].every((id) => inThread.some((m) => flat(m.blocks).includes(`/actions/${id}/`))));
+    ok('결정 버튼은 스레드 답글에만', inThread.filter((m) => m.blocks.some((b) => b.type === 'actions')).length === 3
+      && !top[0].blocks.some((b) => b.type === 'actions'));
+    const finalDigest = tt.updates.filter((u) => u.ts === digestTs).pop();
+    ok('요약은 카드 링크로 고쳐 씀', !!finalDigest && [P1, P2, P3].every((id) => {
+      const card = inThread.find((m) => flat(m.blocks).includes(`/actions/${id}/`));
+      return !!card && flat(finalDigest.blocks).includes(`https://slack.example/p/${card.ts}`);
+    }));
+    eq('대응 기록 — 스레드는 요약, 카드는 답글', [readMap()[P1].ts, !!readMap()[P1].card], [digestTs, true]);
+    // 그 제안의 다음 일은 요약 스레드에 이어 붙고, 고쳐 쓰는 것은 카드(요약이 아님)
+    await world({ thread: tt.api }).pipe.tell([NOTICE(P1, 'result', 'achieved')]);
+    const card1 = readMap()[P1].card;
+    eq('다음 일도 바깥 글을 안 만듦', tt.msgs.filter((m) => !m.threadTs).length, 1);
+    eq('다음 일 답글은 요약 스레드', repliesOf(tt, digestTs).length, 7);
+    ok('지금 상태는 카드를 고쳐 씀', tt.updates.some((u) => u.ts === card1 && flat(u.blocks).includes('달성')));
+    // 다음 날 — 이미 카드가 있는 제안은 옛 자리에 그대로, 새 요약 한 통만 더
+    const n0 = tt.msgs.filter((m) => !m.threadTs).length;
+    await world({ thread: tt.api, digest: { need_you: [NOTICE(P2, 'digest', 'proposed', BTN)], stuck: [], site: 'https://desk.example' } })
+      .pipe.postDigest();
+    eq('다음 날 — 바깥 글은 새 요약 하나만', tt.msgs.filter((m) => !m.threadTs).length - n0, 1);
+    // 요약을 못 올리면 예전 길로
+    const dead2 = fakeThread();
+    dead2.api.post = async () => null;
+    eq('요약을 못 올리면 fallback', await world({ thread: dead2.api, digest: dg }).pipe.postDigest(), 'fallback');
+    eq('통로가 없으면 fallback', await world({ digest: dg }).pipe.postDigest(), 'fallback');
+    // 카드를 못 달면 요약을 버튼 든 예전 모양으로 고쳐 씀
+    const half = fakeThread();
+    const origPost = half.api.post;
+    half.api.post = async (text, blocks, threadTs) => (threadTs ? null : origPost(text, blocks, threadTs));
+    try { fs.unlinkSync(THREADS_FILE); } catch { /* 처음 */ }
+    eq('카드를 못 달아도 보냄', await world({ thread: half.api, digest: dg }).pipe.postDigest(), 'sent');
+    ok('카드를 못 달면 요약에 버튼(결정할 길 유지)', half.updates.some((u) => u.blocks.some((b) => b.type === 'actions')));
+  }
 }
 
 // ── ② Codex 폴백의 쓰기 범위 · SDK 추가 폴더 ─────────────────────────────

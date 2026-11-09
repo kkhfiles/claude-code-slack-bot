@@ -125,7 +125,13 @@ export interface ThreadApi {
 
 /** 제안 하나의 스레드 — 바깥 메시지를 다시 그릴 재료와 지금 열려 있는 결정 요청. */
 interface ThreadEntry {
+  /** 이어지는 일을 다는 스레드의 부모 — 보통 카드 자신, 아침 요약에서 만든 카드면 그 요약 메시지. */
   ts: string;
+  /**
+   * 카드가 남의 스레드 안 답글일 때 그 카드의 ts — 아침 요약 한 통 아래에 카드를 단다(2026-11-09 실장 결정 V1,
+   * 「제안마다 한 통씩 오던 것을 요약 한 통으로」). 없으면 카드가 곧 `ts`(예전 모양).
+   */
+  card?: string;
   title: string;
   url: string;
   emoji: string;
@@ -142,6 +148,11 @@ interface ThreadEntry {
   ask?: { ts: string; state: string; text?: string };
   link?: string;
   at: string;
+}
+
+/** 카드(제목 · 요약 · 지금 상태) 메시지의 ts — 요약 스레드 안 답글이면 그 답글, 아니면 스레드 부모 자신. */
+function cardTs(e: Pick<ThreadEntry, 'ts' | 'card'>): string {
+  return e.card || e.ts;
 }
 
 /** 대응 기록을 몇 날 남기나 — 오래된 제안은 다시 오면 새 바깥 메시지를 만든다. */
@@ -985,7 +996,7 @@ export class ActionPipeline {
    * 그 제안의 바깥 메시지를 찾아 지금 상태를 `now` 로 고쳐 쓰거나, 없으면(처음 · 지워짐) 새로 만든다.
    * 못 보내면 null — 부르는 쪽이 예전 모양으로 물러난다. 같은 제안의 차례(`inTurn`) 안에서 부른다.
    */
-  private async ensureThread(n: FlowNotice, now: string): Promise<ThreadEntry | null> {
+  private async ensureThread(n: FlowNotice, now: string, parent?: string): Promise<ThreadEntry | null> {
     const api = this.deps.thread;
     if (!api) return null;
     const map = readThreads();
@@ -1002,7 +1013,7 @@ export class ActionPipeline {
       ActionPipeline.step(e, now);
       let alive = true;
       try {
-        alive = await api.update(e.ts, `🗂 ${e.title}`, buildThreadRoot(n.id, e));
+        alive = await api.update(cardTs(e), `🗂 ${e.title}`, buildThreadRoot(n.id, e));
       } catch (err) {
         // 지워진 것이 아닌 오류(한도 · 네트워크) — 스레드는 그대로 쓰고 「지금」 줄만 이번에 못 고침
         this.logger.warn(`${n.id} 바깥 메시지를 못 고침 — 스레드는 그대로`, err);
@@ -1011,11 +1022,17 @@ export class ActionPipeline {
     }
     if (!e) {
       // 처음이거나 바깥 메시지가 지워짐 — 지나온 일은 이어 받고 링크 · 열린 요청은 버린다
+      // `parent` 가 있으면(아침 요약) 카드를 요약의 스레드 답글로 — DM 에 한 통만 뜬다
       const fresh: ThreadEntry = { ts: '', ...fields, now, trail: [...(old?.trail || [])], at: '' };
       ActionPipeline.step(fresh, now);
-      const ts = await api.post(`🗂 ${fresh.title}`, buildThreadRoot(n.id, fresh));
+      const ts = await api.post(`🗂 ${fresh.title}`, buildThreadRoot(n.id, fresh), parent);
       if (!ts) return null;
-      fresh.ts = ts;
+      if (parent) {
+        fresh.ts = parent;
+        fresh.card = ts;
+      } else {
+        fresh.ts = ts;
+      }
       e = fresh;
     }
     // 쓰기 직전에 다시 읽는다 — 슬랙을 기다리는 사이 다른 제안이 쓴 대응을 덮지 않게
@@ -1066,8 +1083,8 @@ export class ActionPipeline {
   }
 
   /** 요약의 한 제안 — 스레드를 갖추고 결정 요청을 단다. 링크(못 얻으면 '') · 못 갖추면 null(예전 모양으로). */
-  private async digestItem(api: ThreadApi, n: FlowNotice): Promise<string | null> {
-    const e = await this.ensureThread(n, n.state_label || n.state);
+  private async digestItem(api: ThreadApi, n: FlowNotice, parent?: string): Promise<string | null> {
+    const e = await this.ensureThread(n, n.state_label || n.state, parent);
     if (!e) return null;
     if (buttonsBlock(n) && (!e.ask || e.ask.state !== n.state)) {
       // 요약 자체가 알림이라 멘션은 안 한다
@@ -1078,7 +1095,7 @@ export class ActionPipeline {
       if (e.ask) await this.closeAsk(n.id, e.ask, '지나간 요청 — 새 요청은 아래');
       ActionPipeline.patchThread(n.id, (x) => { x.ask = { ts, state: n.state, text: askText(blocks) }; });
     }
-    const link = e.link || (await api.permalink(e.ts));
+    const link = e.link || (await api.permalink(cardTs(e)));
     if (link && link !== e.link) ActionPipeline.patchThread(n.id, (x) => { x.link = link; });
     return link || '';
   }
@@ -1122,7 +1139,7 @@ export class ActionPipeline {
       // 열린 결정 요청은 버튼을 뺀다 — 누른 답글이 그것이면 곧이어 버튼 답(`decisionReply`)이 같은 모양으로 덮는다
       await this.closeAsk(id, ask, `결정 — ${now}`);
       try {
-        await api.update(e.ts, `🗂 ${e.title}`, buildThreadRoot(id, e));
+        await api.update(cardTs(e), `🗂 ${e.title}`, buildThreadRoot(id, e));
       } catch (err) {
         this.logger.warn('처리 제안 바깥 메시지를 못 고침', err);
       }
@@ -1148,6 +1165,54 @@ export class ActionPipeline {
       return null;
     }
     return this.digestFrom(d as FlowDigest);
+  }
+
+  /**
+   * 아침 요약을 **한 통으로** 보낸다 — 요약을 먼저 올리고, 처음 보는 제안의 카드와 결정 요청은 그 요약의 스레드
+   * 답글로 단 뒤 요약의 줄 링크를 채워 고쳐 쓴다(2026-11-09 실장 결정 V1). 전에는 제안마다 바깥 메시지가 한 통씩
+   * 따로 떠, 11/09 아침에 같은 넷이 카드 셋 + 요약 하나로 네 통이 왔다.
+   *
+   * - `sent` — 보냄 · `none` — 보낼 것이 없거나 못 읽음(못 읽은 것은 「시스템 이슈」로 남김)
+   * - `fallback` — 스레드 통로가 없거나 요약 자체를 못 올림 → 부르는 쪽이 예전 길(`digestBlocks` + DM 한 통)로
+   * - 이미 스레드가 있는 제안은 그 스레드에 그대로 묻는다(옛 카드가 있는 곳)
+   * - 카드를 못 달면 요약을 버튼이 든 예전 모양으로 고쳐 쓴다 — 결정할 길을 잃지 않게
+   */
+  async postDigest(): Promise<'sent' | 'none' | 'fallback'> {
+    const api = this.deps.thread;
+    if (!api) return 'fallback';
+    const d = await this.deps.run('flow', ['digest']);
+    if (!d || d.error) {
+      this.logger.warn(`처리 제안 요약을 못 읽음 — ${d?.error}`);
+      errorCollector.add('처리 제안', `요약을 못 읽음 — ${String(d?.error ?? '답 없음').slice(0, 200)}`);
+      return 'none';
+    }
+    const dg = d as FlowDigest;
+    const need = dg.need_you || [];
+    const map = readThreads();
+    const links: Record<string, string> = {};
+    for (const n of [...need, ...(dg.stuck || [])]) if (map[n.id]?.link) links[n.id] = map[n.id].link as string;
+    const first = need.length ? buildDigestLinkBlocks(dg, links) : buildDigestBlocks(dg);
+    if (!first) return 'none';
+    const parent = await api.post('🗂 처리 제안', first);
+    if (!parent) return 'fallback';
+    if (!need.length) return 'sent';
+    let broke = false;
+    try {
+      for (const n of need.slice(0, DIGEST_MAX_LINES)) {
+        const link = await this.inTurn(n.id, () => this.digestItem(api, n, parent));
+        if (link === null) { broke = true; break; }
+        if (link) links[n.id] = link;
+      }
+    } catch (err) {
+      this.logger.warn('처리 제안 카드를 못 갖춤 — 요약을 예전 모양으로', err);
+      broke = true;
+    }
+    try {
+      await api.update(parent, '🗂 처리 제안', (broke ? buildDigestBlocks(dg) : buildDigestLinkBlocks(dg, links)) ?? first);
+    } catch (err) {
+      this.logger.warn('처리 제안 요약의 링크를 못 채움', err);
+    }
+    return 'sent';
   }
 
   /** `-report` 답 블록. report-log 를 못 읽으면 null — 부르는 쪽이 그 사실을 알린다. */

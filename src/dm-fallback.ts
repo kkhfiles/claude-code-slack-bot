@@ -73,6 +73,25 @@ export function claudeWhy(b: Block | null): string {
 }
 
 /**
+ * 「↪ … 가 답함」 줄을 슬랙의 이번 답에 붙일까 — **엔진이 바뀐 첫 답에만**(2026-11-09 실장 결정 V3). 같은 막힘
+ * 구간(`block.since`)에 같은 엔진이 답하는 동안은 다시 안 붙인다 — 11/09 아침 GPT 가 답할 때마다 같은 줄이 붙었다.
+ * 돌아온 것은 엔진 안내(`engine-notice.ts` 「✅ Claude 회복」)가 한 번 말한다.
+ * - 넘겨받은 차례(`handover`)는 늘 붙인다 — 「이미 한 것」을 알리는 줄이라 되풀이가 아니다
+ * - 서랍 차례는 부르는 쪽이 이것을 안 묻는다 — 서랍 답은 따로 남는 글이라 차례마다 엔진을 적는다
+ * - 기억은 메모리에만 — 봇을 다시 띄우면 첫 답에 한 번 더 붙는다(덜 비싼 쪽)
+ */
+let lastMarked = '';
+export function shouldMark(engine: string, block: Block | null, handover?: number): boolean {
+  if (handover !== undefined) return true;
+  const key = `${engine}|${block?.since ?? '-'}`;
+  if (key === lastMarked) return false;
+  lastMarked = key;
+  return true;
+}
+/** 시험용 — 기억을 비운다. */
+export function resetMarked(): void { lastMarked = ''; }
+
+/**
  * 대체 엔진이 답했다는 작은 줄(슬랙 context 블록) — 넘겨받았으면 그 줄이 먼저.
  * `handover` 는 Claude 가 이미 한 쓰기 건수(넘겨받지 않았으면 생략).
  */
