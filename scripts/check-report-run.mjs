@@ -300,6 +300,64 @@ const opensOf = (rl) => rl.of('open').map((c) => [argOf(c, '--type'), argOf(c, '
   ok('완료 메시지가 미실행을 적는다', sent.some((t) => t.includes('중단으로 미실행: third, digest')));
 }
 {
+  // 실제 연결 — 위 두 절은 「폴백이 받나」를 갈아 끼웠다. 여기서는 진짜 `analysisFallbackOpen` 과
+  // `spawnOrFallback` 의 「Claude 막힘 → 1차 안 띄움 → codex」 길을 탄다(가짜는 codex 한 차례와 한도 조회뿐).
+  // 둘째 종류가 쓰기 뒤 한도에 걸리는 순간 엔진 상태에 Claude 막힘이 적힌다(실제로는 전송 탭이 적는다).
+  const { engineState } = require('../dist/engine-state.js');
+  const { codexQuota } = require('../dist/codex-quota.js');
+  const realFetch = codexQuota.fetch;
+  const until = Math.floor(Date.now() / 1000) + 3600;
+  const LIMITED = { ...WORKED, sessionId: 'sW', writeToolCalls: 7, rateLimited: true, rateLimitResetsAt: until };
+  const reset = () => {
+    engineState.clearBlocked('claude', 'usage');
+    engineState.clearBlocked('codex', 'usage');
+    codexQuota.forget();
+  };
+  /** 같은 모양을 한 번 돌린다 — `codexBlocked` 면 둘째에서 codex 막힘도 같이 적는다. */
+  const run = async (codexBlocked) => {
+    resetJournal();
+    reset();
+    codexQuota.fetch = async () => null;        // 한도 조회 실패 = 모름(막힘으로 안 침)
+    const rl = fakeReportLog();
+    const h = harness({ rl, results: [WORKED, LIMITED], onSpawn: (n) => {
+      if (n !== 2) return;
+      engineState.recordBlocked('claude', { kind: 'usage', until });
+      if (codexBlocked) engineState.recordBlocked('codex', { kind: 'usage', until });
+    } });
+    delete h.sched.analysisFallbackOpen;        // 하네스가 꽂은 가짜를 걷어 진짜 함수로
+    const asked = [];
+    wa.codexTurn = codexSays(async (prompt) => {
+      const out = outIn(prompt);
+      asked.push(out);
+      if (out) fs.writeFileSync(out, '# third\n본문\n', 'utf-8');
+      return 'codex 가 보고서를 썼다';
+    });
+    let queue = null;
+    h.sched.scheduleAnalysisRetry = (schedule, origin, q) => { queue = q; };
+    try {
+      await h.sched.runAnalysisGroup('saturday-00:00', ['probe', 'second', 'third'], { slot: '2026-10-03', trigger: 'scheduled' });
+    } finally {
+      wa.codexTurn = quietCodex;
+      codexQuota.fetch = realFetch;
+      reset();
+    }
+    return { ...h, asked, queue };
+  };
+
+  const a = await run(false);
+  eq('실제 — Claude 막힘이면 셋째는 1차 세션을 안 띄운다', a.spawns.length, 2);
+  eq('실제 — 셋째는 codex 가 한 번 받는다', a.asked.length, 1);
+  eq('실제 — 큐에는 쓰기 뒤 한도에 걸린 둘째만(이어받기)',
+    a.queue && a.queue.map((q) => [q.type, q.sessionId ?? null]), [['second', 'sW']]);
+  eq('실제 — 셋째 결과 줄은 완료',
+    journal().filter((r) => r.kind === 'outcome').map((r) => [r.type, r.outcome]),
+    [['probe', 'completed'], ['second', 'rate_limited'], ['third', 'completed']]);
+
+  const b = await run(true);
+  eq('실제 — codex 도 막혔으면 셋째를 안 돌린다(세션 · codex 둘 다)', [b.spawns.length, b.asked.length], [2, 0]);
+  eq('실제 — codex 도 막혔으면 뒤쪽을 큐에 넣는다', b.queue && b.queue.map((q) => q.type), ['second', 'third']);
+}
+{
   // 앞에서 밀린 것이 없으면 모으는 종류도 그냥 돈다.
   const rl = fakeReportLog();
   const { sched, spawns } = harness({ rl, results: [WORKED, WORKED] });
