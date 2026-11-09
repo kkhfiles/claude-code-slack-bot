@@ -14,6 +14,7 @@
  *   ③ 아무것도 안 걸리면 통과시키는가 (막기만 하는 문도 고장이다)
  *   ④ 처리 제안 세션(report-log 작업 잡기 표시)이 도는 중이면 멈추는가 · 시간 지난 표시는 막지 않는가
  *   ⑥ 지금 떠 있는 봇이 연 분석 회차(open · editing)가 있으면 멈추는가 · 봇이 뜨기 전에 열린 회차는 막지 않는가
+ *   ⑦ 시각 예약이 도는 중이거나 예정 2분 안이면 멈추는가 · 주기 타이머와 옛 pid 상태 파일은 막지 않는가
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -87,7 +88,7 @@ function run(env, extra = []) {
     encoding: 'utf-8',
     timeout: 30_000,
     env: { ...process.env, WORK_CAPTURE_STATE_DIR: noLive, REPORT_LOG_STATE: noJob, SDK_UPDATE_RESULT: noSdk,
-      SDK_UPDATE_SELF: '', ...env },
+      SDK_UPDATE_SELF: '', BOT_TIMERS_FILE: path.join(tmp, 'timers-none.json'), ...env },
   });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
@@ -203,6 +204,34 @@ const forcedRun = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, 
 if (forcedRun.code !== 0) fails.push('도는 분석 회차가 있을 때 --force 로도 못 지나간다');
 else if (!forcedRun.out.includes('--force 라 그냥')) fails.push('--force 로 도는 분석 회차를 끊는데 그 사실을 안 남긴다');
 
+// ⑦ 시각 예약이 도는 중이거나 예정 2분 안이면 멈춘다 — 분석 회차는 종류 사이 · 회차 파일을 열기 전에
+//    ⑥ 이 못 본다. 예정 직전에 재시작하면 기동 때 따라잡기가 없어 그 회차가 조용히 사라진다(2부 재검토 2026-11-09).
+//    상태 파일의 pid 가 지금 봇과 다르면(옛 파일) 보지 않는다.
+const timerState = (name, tasks, pid = 4242) => {
+  const f = path.join(tmp, `${name}.json`);
+  fs.writeFileSync(f, JSON.stringify({ pid, bootAt: ago(60 * 60_000), writtenAt: ago(5_000), tasks }));
+  return f;
+};
+const soon = (ms) => new Date(Date.now() + ms).toISOString();
+const ONCE = { kind: 'once', live: 1, running: 0 };
+const timerEnv = (f) => ({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: quietLog, BOT_TIMERS_FILE: f, BOT_PID: '4242' });
+const busyOnce = run(timerEnv(timerState('t-running', {
+  'scheduler:analysis:daily-12:00': { ...ONCE, live: 0, running: 1, runningSince: ago(10 * 60_000) } })));
+if (busyOnce.code === 0) fails.push('정오 분석 그룹이 도는 중(회차 사이)인데 그냥 재시작한다');
+else if (!busyOnce.out.includes('scheduler:analysis:daily-12:00')) fails.push('시각 예약으로 막기는 했는데 어느 것인지 안 보여준다');
+const dueSoon = run(timerEnv(timerState('t-soon', { 'scheduler:summary': { ...ONCE, dueAt: soon(60_000) } })));
+if (dueSoon.code === 0) fails.push('요약 예정 1분 전인데 그냥 재시작한다 — 예정을 넘기면 그 회차가 사라진다');
+const dueLater = run(timerEnv(timerState('t-later', { 'scheduler:summary': { ...ONCE, dueAt: soon(10 * 60_000) } })));
+if (dueLater.code !== 0) fails.push('예정 10분 전 시각 예약으로 재시작을 막는다');
+const everyBusy = run(timerEnv(timerState('t-every', {
+  'seat:jobs': { kind: 'every', live: 1, running: 1, runningSince: ago(3_000) } })));
+if (everyBusy.code !== 0) fails.push('주기 타이머가 잠깐 도는 것으로 재시작을 막는다 — 10초마다 도는 것도 있다');
+const oldPid = run(timerEnv(timerState('t-oldpid', {
+  'scheduler:summary': { ...ONCE, live: 0, running: 1, runningSince: ago(60_000) } }, 1111)));
+if (oldPid.code !== 0) fails.push('지금 봇이 아닌 옛 pid 의 상태 파일로 재시작을 막는다');
+const forcedTimer = run(timerEnv(timerState('t-force', { 'scheduler:summary': { ...ONCE, dueAt: soon(60_000) } })), ['--force']);
+if (forcedTimer.code !== 0) fails.push('예정 직전 시각 예약이 있을 때 --force 로도 못 지나간다');
+
 // ② 큐가 방금 움직였으면 기다린다 (여기서는 기다리기 시작하는 것까지만 본다)
 const busy = run({ WORK_ASSISTANT_ROOT: cleanRoot, BOT_LOG_PATH: busyLog });
 if (!busy.out.includes('기다립니다')) {
@@ -216,5 +245,5 @@ if (fails.length) {
   for (const f of fails) console.log(`  ✗ ${f}`);
   process.exitCode = 1;
 } else {
-  console.log('통과 — 깨끗하면 지나가고 · 도는 사람 말이 있으면 멈추고 · 도는 처리 제안 세션도 멈추고 · 도는 SDK 판 맞춤도 멈추고(자신은 통과) · 지금 봇이 연 분석 회차도 멈추고(주인 없는 회차는 알리기만) · 끝난 오래된 캡처는 알리기만 · 큐가 돌면 기다리고 · --force 는 뚫린다');
+  console.log('통과 — 깨끗하면 지나가고 · 도는 사람 말이 있으면 멈추고 · 도는 처리 제안 세션도 멈추고 · 도는 SDK 판 맞춤도 멈추고(자신은 통과) · 지금 봇이 연 분석 회차도 멈추고(주인 없는 회차는 알리기만) · 도는 시각 예약과 2분 안 예정도 멈추고 · 끝난 오래된 캡처는 알리기만 · 큐가 돌면 기다리고 · --force 는 뚫린다');
 }

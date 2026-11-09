@@ -36,6 +36,7 @@
  *   ② 방금 큐가 움직였나 — 마지막 `[BoardQueue]` 줄이 최근이면 **기다린다**.
  *      곧 끝나므로 멈출 것 없이 몇 초 쉬었다 다시 본다.
  *   ③ 지금 떠 있는 봇이 연 분석 회차가 아직 안 닫혔나 — 있으면 **멈춘다**(아래 `openAnalysisRuns`).
+ *   ④ 시각 예약이 도는 중이거나 2분 안에 예정인가 — 있으면 **멈춘다**(아래 `busyOnceTimers`).
  */
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -203,6 +204,31 @@ function openAnalysisRuns(startedAtMs) {
   return { live, orphan };
 }
 
+/** 시각 예약이 이 안에 예정이면 곧 도는 것으로 본다 — 기동이 1초 안쪽이라 넉넉히 잡았다. */
+const DUE_SOON_MS = 2 * 60_000;
+
+/**
+ * 도는 중이거나 예정 `DUE_SOON_MS` 안인 시각 예약(`once`) — 반복 타이머 상태 파일(`recurring.ts`)을 읽는다.
+ * ③ 이 못 보는 틈을 막는다: 분석 그룹의 종류 사이와 회차 파일을 열기 전, 브리핑 · 요약 · 외부 백업.
+ * 예정 직전에 재시작하면 기동 때 따라잡기가 없어 그 회차가 다음 날로 밀린다(2부 재검토 2026-11-09).
+ * 주기 타이머(`every`)는 안 본다 — 10초마다 도는 것도 있고 다음 주기에 다시 돈다.
+ * **파일이 없거나 pid 가 지금 봇과 다르면(옛 파일) 빈 목록** — 검사 때문에 재시작이 막히면 안 된다.
+ */
+function busyOnceTimers(botPid) {
+  const file = process.env.BOT_TIMERS_FILE || path.join(os.homedir(), '.claude', 'state', 'bot-timers.json');
+  let state;
+  try { state = JSON.parse(fs.readFileSync(file, 'utf-8')); } catch { return []; }
+  if (!state || state.pid !== botPid) return [];
+  const now = Date.now();
+  return Object.entries(state.tasks || {})
+    .filter(([, t]) => t?.kind === 'once')
+    .filter(([, t]) => {
+      const due = Date.parse(t.dueAt || '');
+      return t.running > 0 || (t.live > 0 && Number.isFinite(due) && due >= now && due - now <= DUE_SOON_MS);
+    })
+    .map(([name, t]) => ({ name, ...t }));
+}
+
 /** 로그 꼬리에서 마지막 큐 활동 시각. 없으면 null. 파일이 19MB 라 끝만 읽는다. */
 function lastQueueActivity(logPath) {
   if (!logPath) return null;
@@ -290,6 +316,19 @@ if (runs.live.length && !force) {
 }
 if (runs.live.length && force) {
   console.log(`⚠️ 분석 회차 ${runs.live.length}건이 도는 중인데 --force 라 그냥 합니다 — 판정 없이 남습니다`);
+}
+
+const timers = busyOnceTimers(process.env.BOT_PID ? Number(process.env.BOT_PID) : proc.pid);
+const timerLine = (t) => `   ${t.name}  ${t.running ? `${String(t.runningSince || '').slice(11, 16)}Z 부터 실행 중` : `예정 ${String(t.dueAt).slice(11, 19)}Z`}`;
+if (timers.length && !force) {
+  console.log(`⛔ 시각 예약 ${timers.length}건이 도는 중이거나 곧 돕니다 — 재시작하지 않았습니다`);
+  for (const t of timers) console.log(timerLine(t));
+  console.log('\n   끝나거나 예정 시각이 지난 뒤에 다시 하세요 (예정을 넘겨 기동하면 그 회차는 다음 날로 밀립니다)');
+  console.log('   그래도 지금 해야 하면 —  npm run restart -- --force');
+  process.exit(1);
+}
+if (timers.length && force) {
+  console.log(`⚠️ 시각 예약 ${timers.length}건이 도는 중이거나 곧 도는데 --force 라 그냥 합니다`);
 }
 
 const sdkUpdate = activeSdkUpdate();
