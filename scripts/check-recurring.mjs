@@ -96,7 +96,8 @@ try {
     eq('① once 가 울리면 run 하고 살아 있는 수 0', [fired, R.snapshot().c.live], [1, 0]);
     o.stop('reload');
     eq('① 이미 울린 once 의 stop 은 아무것도 안 지움', clearedList.length, 0);
-    eq('① 울린 once 는 멈춤으로 안 적힘', R.snapshot().c.stopReason, undefined);
+    // 2부 2번에서 바꿈 — 울린 뒤 지우면 까닭만 남긴다(끝난 회차가 다시 안 걸 때 「사라진 타이머」 오탐 막기)
+    eq('① 울린 once 를 지우면 까닭만 남고 살아 있는 수는 그대로', [R.snapshot().c.stopReason, R.snapshot().c.live], ['reload', 0]);
   }
 
   // ② 오류 결과가 직접 건 것과 같다

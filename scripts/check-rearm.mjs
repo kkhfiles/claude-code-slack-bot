@@ -1,5 +1,5 @@
 /**
- * 설정 다시 읽기 — 2부 1번(계획 「2부 재검토」).
+ * 설정 다시 읽기와 시각 예약 다시 걸기 — 2부 1번 · 2번(계획 「2부 재검토」).
  *
  *   npm run build
  *   npm run check:rearm
@@ -9,6 +9,10 @@
  *   ① 형식은 맞고 묶음이 빠진 설정(2026-03-25 모양)을 다시 읽어도 봇이 안 끝나고, 앞 설정과 예약이
  *      그대로 남고, 상태 파일에 실패가 남는다. 고친 설정은 다시 읽힌다
  *   ② 새 설정을 걸다 던지면 앞 설정으로 되돌려 다시 건다
+ *   ③ 시각 예약 여섯(브리핑 · 업무 넛지 · 요약 · 개선 제안 · 외부 백업 · 집중) —
+ *      - 아무 일 없으면 끝난 회차가 다음 회차를 건다
+ *      - 도는 사이 설정을 다시 읽으면 예약이 하나(둘이면 다음 예정 시각에 같은 일이 두 번 돈다)
+ *      - 도는 사이 그 기능을 끄면 다시 안 걸고, 멈춘 까닭(`reload`)이 남는다(「사라진 타이머」 오탐 막기)
  */
 import './lib/fresh-dist.mjs';
 import fs from 'node:fs';
@@ -131,6 +135,54 @@ try {
     live('scheduler:briefing') === 1 && live('scheduler:analysis:saturday-00:00') === 1);
   ok(`② 실패가 상태 파일에 안 남는다 (${JSON.stringify(configState())})`, configState()?.ok === false);
 
+  // ③ 시각 예약 여섯 — 도는 사이(첫 await 전) 설정 다시 읽기 · 기능 끔
+  const origNonWorking = sched.isNonWorkingDay;
+  let during = null;
+  // 콜백은 인자 없이 부르고, 다음 업무일 계산은 날짜를 넘긴다 — 콜백 쪽만 가로챈다
+  sched.isNonWorkingDay = function (date) {
+    if (date === undefined && during) { const d = during; during = null; d(); return { skip: true, reason: '시험' }; }
+    return origNonWorking.call(this, date);
+  };
+  sched.runCommitHarvest = async () => { if (during) { const d = during; during = null; d(); } };
+  sched.runOffsitePush = async () => {};
+  const SIX = [
+    { name: 'scheduler:briefing', field: 'briefingTimer', arm: 'scheduleBriefing' },
+    { name: 'scheduler:work-nudge', field: 'workNudgeTimer', arm: 'scheduleWorkNudge' },
+    { name: 'scheduler:summary', field: 'summaryTimer', arm: 'scheduleSummary' },
+    { name: 'scheduler:improve', field: 'improveTimer', arm: 'scheduleImprove' },
+    { name: 'scheduler:offsite-push', field: 'offsitePushTimer', arm: 'scheduleOffsitePush' },
+    { name: 'scheduler:focus', field: 'focusTimer', arm: 'scheduleFocus' },
+  ];
+  for (const t of SIX) {
+    /** 그 예약만 건 상태에서 한 회차를 돌리고, 도는 사이 `act` 를 한다. */
+    const round = async (act) => {
+      sched.clearAllTimers('stop');
+      sched[t.arm]();
+      const own = sched[t.field];
+      if (!own) { fails.push(`③ ${t.name} — 걸리지 않았다`); return; }
+      during = act;
+      const err = fire(own.handle);
+      await wait(20);
+      if (err) fails.push(`③ ${t.name} — 콜백이 던졌다(${err.message})`);
+      if (during) fails.push(`③ ${t.name} — 도는 사이를 못 만들었다(가로채기가 안 불림)`);
+      during = null;
+    };
+
+    await round(() => {});
+    ok(`③ ${t.name} — 끝난 회차가 다음 회차를 안 건다 (${live(t.name)}개)`,
+      live(t.name) === 1 && pending.has(sched[t.field]?.handle));
+
+    await round(() => { sched.clearAllTimers(); sched[t.arm](); });
+    ok(`③ ${t.name} — 도는 사이 설정을 다시 읽으면 예약 ${live(t.name)}개 — 하나여야 한다`
+      + ' (둘이면 다음 예정 시각에 같은 일이 두 번 돈다)', live(t.name) === 1);
+
+    await round(() => { sched.clearAllTimers(); });
+    const e = R.snapshot()[t.name];
+    ok(`③ ${t.name} — 도는 사이 그 기능을 껐는데 끝난 회차가 다시 건다 (${live(t.name)}개)`, live(t.name) === 0);
+    ok(`③ ${t.name} — 다시 안 걸 때 멈춘 까닭이 안 남는다 (${e?.stopReason}) — 점검기가 「사라진 타이머」로 잡는다`,
+      e?.stopReason === 'reload');
+  }
+  sched.isNonWorkingDay = origNonWorking;
 } finally {
   sched.stop();
   globalThis.setTimeout = real.setTimeout;
@@ -147,5 +199,5 @@ if (fails.length) {
   process.exitCode = 1;
 } else {
   console.log('통과 — 묶음 빠진 설정(앞 설정 · 예약 유지 · 실패 기록) · 거는 중 던짐(되돌림)'
-);
+    + ' · 시각 예약 여섯(다음 회차 · 도는 사이 다시 읽기 하나 · 끄면 안 걸고 까닭 남김)');
 }

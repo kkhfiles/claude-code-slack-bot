@@ -1756,7 +1756,7 @@ export class AssistantScheduler {
     const nextFire = this.getNextWorkingDay(WORK_NUDGE_TIME);
     this.logger.info('Scheduled work nudge', { time: WORK_NUDGE_TIME, nextFire: nextFire.toISOString() });
 
-    this.workNudgeTimer = once({ name: 'scheduler:work-nudge', run: async () => {
+    const timer: Task = once({ name: 'scheduler:work-nudge', run: async () => {
       try {
         const nonWorking = this.isNonWorkingDay();
         if (nonWorking.skip) {
@@ -1792,8 +1792,9 @@ export class AssistantScheduler {
           '⏰ 업무 조회가 안 됩니다 — 넛지를 못 만들었습니다. 노션 연결을 확인하세요.',
         ).catch(() => { });
       }
-      this.scheduleWorkNudge();
+      if (this.workNudgeTimer === timer) this.scheduleWorkNudge();
     }, ms: nextFire.getTime() - Date.now() });
+    this.workNudgeTimer = timer;
   }
 
   /**
@@ -1847,7 +1848,7 @@ export class AssistantScheduler {
     this.logger.info('Scheduled card summaries', {
       time: SUMMARY_TIME, nextFire: nextFire.toISOString(),
     });
-    this.summaryTimer = once({ name: 'scheduler:summary', run: async () => {
+    const timer: Task = once({ name: 'scheduler:summary', run: async () => {
       try {
         const nonWorking = this.isNonWorkingDay();
         if (nonWorking.skip) {
@@ -1864,9 +1865,10 @@ export class AssistantScheduler {
           why: error instanceof Error ? error.message : String(error),
         });
       } finally {
-        this.scheduleSummary();
+        if (this.summaryTimer === timer) this.scheduleSummary();
       }
     }, ms: nextFire.getTime() - Date.now() });
+    this.summaryTimer = timer;
   }
 
   /** 한 판 돈다. **절대 던지지 않는다** — 부르는 쪽의 `finally` 가 재예약한다. */
@@ -1946,7 +1948,7 @@ export class AssistantScheduler {
   private scheduleImprove(): void {
     const nextFire = this.getNextWorkingDay(IMPROVE_TIME);
     this.logger.info('Scheduled improvement proposals', { time: IMPROVE_TIME, nextFire: nextFire.toISOString() });
-    this.improveTimer = once({ name: 'scheduler:improve', run: async () => {
+    const timer: Task = once({ name: 'scheduler:improve', run: async () => {
       try {
         const nonWorking = this.isNonWorkingDay();
         if (nonWorking.skip) {
@@ -1960,9 +1962,10 @@ export class AssistantScheduler {
       } catch (error) {
         this.logger.warn('개선 제안 실패', { why: error instanceof Error ? error.message : String(error) });
       } finally {
-        this.scheduleImprove();
+        if (this.improveTimer === timer) this.scheduleImprove();
       }
     }, ms: nextFire.getTime() - Date.now() });
+    this.improveTimer = timer;
   }
 
   /**
@@ -2061,14 +2064,15 @@ export class AssistantScheduler {
       time: OFFSITE_PUSH_TIME, nextFire: nextFire.toISOString(),
     });
 
-    this.offsitePushTimer = once({ name: 'scheduler:offsite-push', run: async () => {
+    const timer: Task = once({ name: 'scheduler:offsite-push', run: async () => {
       // **걷기가 내보내기보다 먼저다** — 순서를 뒤집으면 그날 걷은 커밋이
       // 하루를 꼬박 PC 안에만 머문다. 걷기가 실패해도 내보내기는 그대로 돈다
       // (백업이 다른 일 때문에 멈추면 방향이 거꾸로다).
       await this.runCommitHarvest();
       await this.runOffsitePush('daily');
-      this.scheduleOffsitePush();
+      if (this.offsitePushTimer === timer) this.scheduleOffsitePush();
     }, ms: nextFire.getTime() - Date.now() });
+    this.offsitePushTimer = timer;
   }
 
   /**
@@ -2366,7 +2370,7 @@ export class AssistantScheduler {
     const waitMs = next.getTime() - Date.now();
     this.logger.info('Scheduled board focus', { nextFire: next.toISOString() });
 
-    this.focusTimer = once({ name: 'scheduler:focus', run: async () => {
+    const timer: Task = once({ name: 'scheduler:focus', run: async () => {
       const hour = new Date().getHours();
       const nonWorking = this.isNonWorkingDay();
       try {
@@ -2393,9 +2397,10 @@ export class AssistantScheduler {
         });
       } finally {
         this.focusBusy = false;
-        this.scheduleFocus();
+        if (this.focusTimer === timer) this.scheduleFocus();
       }
     }, ms: waitMs });
+    this.focusTimer = timer;
   }
 
   private async runFocus(): Promise<void> {
@@ -2648,12 +2653,12 @@ export class AssistantScheduler {
       nextFire: nextFire.toISOString(),
     });
 
-    this.briefingTimer = once({ name: 'scheduler:briefing', run: async () => {
+    const timer: Task = once({ name: 'scheduler:briefing', run: async () => {
       // Double-check working day at fire time
       const nonWorking = this.isNonWorkingDay();
       if (nonWorking.skip) {
         this.logger.info(`Skipping briefing (${nonWorking.reason})`);
-        this.scheduleBriefing();
+        if (this.briefingTimer === timer) this.scheduleBriefing();
         return;
       }
 
@@ -2695,8 +2700,9 @@ export class AssistantScheduler {
       await this.postMorningProposals();
 
       // Reschedule for next working day
-      this.scheduleBriefing();
+      if (this.briefingTimer === timer) this.scheduleBriefing();
     }, ms: msUntil });
+    this.briefingTimer = timer;
   }
 
   /** If briefing was missed today (e.g. bot restarted after briefing time), run it now. */

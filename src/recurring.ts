@@ -201,9 +201,11 @@ export function once(opts: { name: string; ms: number; run: () => unknown; unref
   e.dueAt = Number.isFinite(opts.ms) ? new Date(Date.now() + Math.max(0, opts.ms)).toISOString() : undefined;
   armed(e);
   let done = false;
+  let fired = false;
   const handle = setTimeout(() => {
     if (!done) {
       done = true;
+      fired = true;
       try { e.live = Math.max(0, e.live - 1); } catch { /* 기록은 던지지 않는다 */ }
     }
     fire(e, opts.run);
@@ -214,12 +216,27 @@ export function once(opts: { name: string; ms: number; run: () => unknown; unref
     name: opts.name,
     handle,
     stop(reason = 'stop') {
+      // 이미 울린 예약을 지우면 셀 것은 없지만 까닭은 남긴다 — 도는 사이 설정에서 그 기능을 꺼
+      // 끝난 회차가 다시 안 걸면, 까닭이 없을 때 점검기가 「사라진 타이머」로 잡는다(2부 2번).
+      // 다시 걸면 `armed` 가 지운다.
+      if (fired) { fired = false; noteStop(e, reason); return; }
       if (done) return;
       done = true;
       clearTimeout(handle);
       stopped(opts.name, e, reason);
     },
   };
+}
+
+function noteStop(e: Entry, reason: string): void {
+  try {
+    if (e.live) return;
+    e.stoppedAt = new Date().toISOString();
+    e.stopReason = safe(reason) ?? 'other';
+    touch();
+  } catch {
+    // 기록은 던지지 않는다
+  }
 }
 
 interface ConfigState { at: string; ok: boolean; code?: string }
