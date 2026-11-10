@@ -27,6 +27,25 @@ try {
   fs.writeFileSync(path.join(DIR, 'card.txt'), '[세나 기억 카드 11/06 19:00 기준 — 앞 카드를 대체]\n답 대기 1건\n', 'utf-8');
   eq('카드 파일을 그대로', mc.readCard(path.join(DIR, 'card.txt')), '[세나 기억 카드 11/06 19:00 기준 — 앞 카드를 대체]\n답 대기 1건');
 
+  // 답 대기 판정(E1 V3 운영 반영 11/10) — 원천이 카드 계산 뒤에 바뀌었으면 낡음, 아니면 그대로, 옆 파일이 없으면 줄 없음
+  const led = path.join(DIR, 'answers.jsonl');
+  const acts = path.join(DIR, 'actions');
+  fs.writeFileSync(led, '{}\n', 'utf-8');
+  fs.mkdirSync(acts);
+  fs.writeFileSync(path.join(acts, 'a-1.md'), 'x', 'utf-8');
+  const tc = Date.now() / 1000;
+  fs.utimesSync(led, tc - 100, tc - 100);
+  fs.utimesSync(path.join(acts, "a-1.md"), tc - 100, tc - 100);
+  fs.utimesSync(acts, tc - 100, tc - 100);
+  fs.writeFileSync(path.join(DIR, 'card.json'), JSON.stringify({ at: tc - 50, ledger: [led, acts, path.join(DIR, 'nope')] }), 'utf-8');
+  eq('판정 — 원천이 카드보다 앞이면 그대로', mc.ledgerVerdict(path.join(DIR, 'card.txt')).startsWith('답 대기 판정 — 카드 그대로'), true);
+  fs.utimesSync(path.join(acts, "a-1.md"), tc - 10, tc - 10);
+  eq('판정 — 폴더 안 파일이 카드 뒤에 바뀌면 낡음', mc.ledgerVerdict(path.join(DIR, 'card.txt')).startsWith('답 대기 판정 — 카드가 낡음'), true);
+  eq('판정 — 카드에 붙음', mc.readCard(path.join(DIR, 'card.txt')).split('\n').pop().startsWith('답 대기 판정'), true);
+  fs.writeFileSync(path.join(DIR, 'card.json'), '{', 'utf-8');
+  eq('판정 — 옆 파일이 깨지면 줄 없이 카드만', mc.readCard(path.join(DIR, 'card.txt')), '[세나 기억 카드 11/06 19:00 기준 — 앞 카드를 대체]\n답 대기 1건');
+  fs.rmSync(path.join(DIR, 'card.json'));
+
   const now = new Date('2026-11-06T10:00:00Z');   // 한국 19:00
   eq('열쇠 — 업무 번호 둘까지', mc.prefetchKeys('TSK-1 TSK-2 TSK-3 TSK-1', now), ['TSK-1', 'TSK-2']);
   eq('열쇠 — 「어제」는 어제 날짜(한국)', mc.prefetchKeys('어제 뭐 했지', now), ['2026-11-05']);
