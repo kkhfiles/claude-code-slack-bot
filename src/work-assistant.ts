@@ -580,6 +580,8 @@ export interface RemindItem {
   title: string;
   at: string;
   next: string;
+  /** 시각 알림 꼴(⏰ 시각 — …)을 안 씌우고 제목 줄 그대로 보낸다 — 세션 결과 알림(2026-11-10) */
+  plain?: boolean;
 }
 
 /**

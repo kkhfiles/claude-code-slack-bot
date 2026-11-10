@@ -610,7 +610,7 @@ try {
     ok('[실행] · [버림] 버튼이 걸려 있다', /this\.action\('held_run'/.test(src) && /this\.action\('held_drop'/.test(src));
     ok('[버림] 은 캡처와 보관 첨부를 버린다', /dropCapture\(id, '7일 지남 — 사람이 버림'\);\s*dropHeldFiles\(id\);/.test(src));
     ok('재시작 안내 — 자동으로 이어질 것만 「다시 보내지 않으셔도」',
-      src.includes('재시작으로 끊긴 요청 ${g.n}건 — 자동으로 이어서 처리합니다(다시 보내지 않으셔도 됩니다)'));
+      src.includes('재시작으로 끊긴 요청 ${g.n}건 — 자동으로 이어서 처리(다시 보낼 필요 없음)'));
     ok('처리 중 기록이 도구 · 세션을 싣는다(도구 하나에 한 번)',
       /if \(stepLog\.see\(event\)\) \{\s*patchInflight\(sessionKey, \{ steps: stepLog\.steps, sessionId: session\?\.sessionId \}\);/.test(src));
     const gi = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf-8');

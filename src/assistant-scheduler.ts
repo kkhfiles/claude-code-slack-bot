@@ -854,7 +854,7 @@ function analysisRetryFile(): string {
 /** 한도가 풀려 브리핑을 다시 돌리는 마지막 시각(한국 시각) — 넘으면 그날 브리핑은 없다. */
 const BRIEFING_RECOVER_UNTIL = '12:00';
 /** 브리핑이 한도로 못 나갔을 때의 한 줄 — 회복 타이머가 정오 전에 다시 돌린다(`recoverBriefingIfNeeded`). */
-const BRIEFING_LIMIT_NOTICE = '⏳ 브리핑 실행 중 rate limit 도달. 한도가 정오 전에 풀리면 그때 다시 돌립니다.';
+const BRIEFING_LIMIT_NOTICE = '⏳ 브리핑 중 사용량 한도 — 정오 전에 풀리면 그때 다시 돌림';
 const BRIEFING_CATCHUP_LIMIT_NOTICE = '⏳ Catch-up 브리핑 중 rate limit 도달.';
 
 /**
@@ -1087,11 +1087,11 @@ export class AssistantScheduler {
     this.recordSessionCost('briefing', result);
     const got = briefingOutcome(result);
     if (got === 'limited') {
-      return { text: '⏳ 브리핑을 못 만들었습니다 — rate limit 도달(대신 받을 엔진도 못 함).', ok: false };
+      return { text: '⏳ 브리핑 못 만듦 — 사용량 한도(대신 받을 엔진도 못 함)', ok: false };
     }
     if (got === 'failed') {
       this.logger.error('Manual briefing failed', { subtype: result.subtype, servedBy: result.servedBy });
-      return { text: '❌ 브리핑을 못 만들었습니다. 로그를 보세요.', ok: false };
+      return { text: '❌ 브리핑 못 만듦 — 봇 로그 확인', ok: false };
     }
     return { text: result.text + this.formatErrorReport() + this.formatCostLine(), ok: true, servedBy: result.servedBy };
   }
@@ -1789,7 +1789,7 @@ export class AssistantScheduler {
         // 것을 확인 — 실패율 50% 이상). 하루 한 번뿐이라 소음이 되지 않는다.
         this.logger.error('Work nudge failed', error);
         await this.sendMessage(
-          '⏰ 업무 조회가 안 됩니다 — 넛지를 못 만들었습니다. 노션 연결을 확인하세요.',
+          '⚠️ 넛지 못 만듦 — 업무 조회 실패, 봇 로그 확인',
         ).catch(() => { });
       }
       if (this.workNudgeTimer === timer) this.scheduleWorkNudge();
@@ -2189,8 +2189,9 @@ export class AssistantScheduler {
         const key = `${it.id}@${it.at}`;
         if (this.remindSent.has(key)) continue;
         const when = it.at.slice(11);
+        // 결과 알림은 줄 그대로 — ⏰ 는 실장님이 정한 시각에 울리는 업무 알림 표지이고, 보낸 시각은 슬랙이 이미 보인다(11/10)
         await this.sendMessage(
-          `⏰ ${when} — ${it.title}` + (it.next ? `\n다음 행동: ${it.next}` : ''));
+          (it.plain ? it.title : `⏰ ${when} — ${it.title}`) + (it.next ? `\n다음 행동: ${it.next}` : ''));
         // **보낸 뒤에 찍는다** — 먼저 찍고 보내다 실패하면 영영 안 울린다.
         this.remindSent.add(key);
         if (!await remindDone(it.id, it.at)) {
@@ -2601,19 +2602,18 @@ export class AssistantScheduler {
         // **원인을 좁혀 말하지 않는다.** rc 2 는 「업무를 못 찾음」과 「형식이
         // 안 맞음」을 함께 뜻하는데, 봇이 둘을 가르려면 판정을 복제해야 한다.
         // 대신 **다음에 무엇을 할지**를 준다 — 받는 쪽에 필요한 것은 그것이다.
+        // 로직 알림이라 말투 없이 개조식(11/10 실장님) — 무엇, 까닭, 할 일
         await this.sendMessage(
-          `⚠️ ${boardLabel()} 에서 누른 「${item.label || item.text}」을 반영하지 못했습니다 ` +
-          '— 그 업무를 찾지 못했거나 형식이 맞지 않습니다.\n' +
-          `누른 것은 취소됐습니다. ${boardLabel()} 을 새로고침해 다시 누르거나, ` +
-          '카드를 눌러 편집창에서 바꾸세요.',
+          `⚠️ 판 누름 반영 못 함 — ${item.label || item.text}\n` +
+          '· 까닭: 업무를 못 찾았거나 형식이 안 맞음\n' +
+          `· 누른 것: 취소됨 — ${boardLabel()} 새로고침 뒤 다시 누르거나 카드 편집창에서 고침`,
         ).catch(() => { });
       }
       for (const item of r.lost) {
         // **원문을 그대로 돌려준다.** 한 번만 시도하는 대가라, 여기서 안 돌려주면
         // 사람이 쓴 글이 조용히 사라진다. 붙여넣기만 하면 다시 갈 수 있게 둔다.
         await this.sendMessage(
-          `⚠️ ${boardLabel()} 에서 보낸 말을 넘기지 못했습니다. 원문은 아래 그대로입니다 ` +
-          '— 다시 보내시려면 이 방에 붙여넣으세요.\n\n' + item.text,
+          `⚠️ ${boardLabel()} 에서 보낸 말 못 넘김 — 원문은 아래, 다시 보내려면 이 방에 붙여넣기\n\n` + item.text,
         ).catch(() => { });
       }
     } catch (error) {

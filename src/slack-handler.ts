@@ -1679,8 +1679,8 @@ export class SlackHandler {
         // 있으므로(앞 항목은 이미 반영됐을 수 있다) 여기서 멈추고 원문만 남긴다.
         captureToInbox(text, 'slack', thread_ts);
         await say({
-          text: `⚠️ 갱신이 깨졌습니다 — ${quick.message}\n` +
-            '원문은 캡처해 뒀습니다. 어디까지 반영됐는지 확인이 필요합니다.',
+          text: `⚠️ 갱신 깨짐 — ${quick.message}\n` +
+            '· 원문: 캡처해 둠 · 어디까지 반영됐는지 확인 필요',
           thread_ts: replyTs,
         });
         return;
@@ -4494,15 +4494,14 @@ export class SlackHandler {
       await this.app.client.chat.postMessage({
         channel: r.channel,
         thread_ts: r.threadTs,
-        text: '⚠️ 봇이 다시 시작되면서 처리 중이던 요청이 끊겼습니다 — 답을 못 드렸습니다.\n> '
-          + r.text + '\n다시 보내주세요.',
+        text: '⚠️ 봇 재시작으로 처리 중이던 요청 끊김 — 답 못 함, 다시 보내기 필요\n> ' + r.text,
       }).catch(() => { });
     }
     for (const g of groups.values()) {
       await this.app.client.chat.postMessage({
         channel: g.channel,
         thread_ts: g.threadTs,
-        text: `⚠️ 재시작으로 끊긴 요청 ${g.n}건 — 자동으로 이어서 처리합니다(다시 보내지 않으셔도 됩니다)`,
+        text: `⚠️ 재시작으로 끊긴 요청 ${g.n}건 — 자동으로 이어서 처리(다시 보낼 필요 없음)`,
       }).catch(() => { });
     }
   }
