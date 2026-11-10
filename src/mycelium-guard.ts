@@ -61,8 +61,8 @@ export function buttonsTail(who: string | null): any[] {
 /** 한 번 더 묻기 — 막기와 닫기. */
 export function confirmTail(pick: GuardPick): any[] {
   const ask = pick.id === 'block'
-    ? `정말 이 계정(\`${pick.who}\`)을 막을까요? 다음 요청부터 막힙니다.`
-    : '정말 사이트를 닫을까요? 새 질문을 받지 않고 화면 위에 안내를 냅니다.';
+    ? `이 계정(\`${pick.who}\`) 차단 — 다음 요청부터 막힘`
+    : '사이트 닫기 — 새 질문을 받지 않고 화면 위에 안내 표시';
   return [
     { type: 'section', block_id: `${TAIL}_ask`, text: { type: 'mrkdwn', text: ask } },
     { type: 'actions', block_id: TAIL, elements: [

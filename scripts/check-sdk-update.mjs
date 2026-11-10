@@ -169,7 +169,7 @@ const click = (channel = 'D1') => ({
   eq('누르면 한 번 띄운다', log.launched, [su.requestPath]);
   const req = JSON.parse(fs.readFileSync(su.requestPath, 'utf-8'));
   ok('요청은 방금 만든 것 · 스레드가 카드', requestFresh(req, Date.now()) && req.thread === '111.1');
-  ok('카드 글은 「시작했습니다」로', log.updates[0]?.t.includes('시작했습니다'));
+  ok('카드 글은 「⏳ 시작」으로', log.updates[0]?.t.includes('⏳ 시작'));
   eq('카드에서 버튼을 걷는다', (log.updates[0]?.b ?? []).filter((b) => b.type === 'actions').length, 0);
   fs.writeFileSync(su.resultPath, JSON.stringify({
     id: req.id, thread: '111.1', status: 'running', startedAt: new Date().toISOString(), steps: [],
@@ -189,15 +189,15 @@ const click = (channel = 'D1') => ({
 {
   const { su, log } = harness();
   await su.onSkip(click());
-  ok('건너뛰기는 카드 글만 바꾼다', log.updates[0]?.t.includes('건너뜁니다') && log.launched.length === 0);
+  ok('건너뛰기는 카드 글만 바꾼다', log.updates[0]?.t.includes('건너뜀') && log.launched.length === 0);
 }
 ok('다른 작업 중으로 멈춘 결과는 다시 누르라고', formatResult({
   status: 'failed', busy: true, startedAt: 'x', steps: [{ name: '점검', ok: false, detail: '다른 작업 중(봇 저장소) — x' }],
-}).includes('다시 누르세요'));
+}).includes('다시 누름'));
 ok('실패는 멈춘 단계 이름이 앞에', formatResult({
   status: 'failed', startedAt: '2026-10-05T00:31:00Z', finishedAt: '2026-10-05T00:33:00Z',
   steps: [{ name: '점검', ok: true }, { name: '봇 시험', ok: false, detail: '두 번 다 실패 · 되돌림' }],
-}).startsWith('❌ 「봇 시험」에서 멈췄습니다'));
+}).startsWith('❌ 「봇 시험」 단계에서 멈춤'));
 
 // ── 재검토 반영(2026-09-29) ────────────────────────────────
 // 커밋 직전 — 시작 때 그대로인가
@@ -300,7 +300,7 @@ ok('판 맞춤은 당겨 오지 않는다(원격과 같아야만 진행)', !src(
   // 슬랙에 뜨는 모양 — 버튼을 누른 스레드에 이 글이 간다
   const shown = formatResult({ status: 'failed', startedAt: '2026-10-19T00:30:00Z', finishedAt: '2026-10-19T00:30:01Z',
     steps: [{ name: '점검', ok: false, detail: STOP }] });
-  eq('슬랙 알림 — 멈춘 단계 · 그 줄', shown, `❌ 「점검」에서 멈췄습니다 (1초)\n✗ 점검 — ${STOP}`);
+  eq('슬랙 알림 — 멈춘 단계 · 그 줄', shown, `❌ 「점검」 단계에서 멈춤 (1초)\n✗ 점검 — ${STOP}`);
 
   // 실제로 돌려 본다 — 엔진 상태 · 결과 · 기록은 임시 파일. 파이썬은 없는 이름이라 막힘 문을 지나면 첫 조회
   // (llm-playbook 찾기)에서 바로 넘어진다 — 문이 빠져도 아무것도 깔지 않는다. `--dry-run` 이라 더 안전하다.

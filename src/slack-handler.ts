@@ -637,8 +637,8 @@ export class SlackHandler {
       // 소인이 방에 걸 글(`lunch-pulse` — 주간 판단 · 실장이 시킨 것) — 점심원정대·친목 방·시험 방 · 소인 이름으로.
       const lunchKinds: Record<string, NoticeKind> = lunchClient ? {
         'lunch-pulse': {
-          title: '소인이 방에 올릴 글', ask: '소인이 방에 글을 올리려 합니다.', header: '',
-          hint: '소인 이름으로 나갑니다. 여기서 고칠 수 있습니다.',
+          title: '소인이 방에 올릴 글', ask: '소인이 방에 올릴 글 확인', header: '',
+          hint: '소인 이름으로 올라감 · 여기서 수정 가능',
           rooms: rooms(config.lunchBot.chatChannel).map((id) => ({ id, label: roomLabel('lunch', id) })),
           // 소인이 쓴 글이라 이름·멘션 빗장은 건다(카드 만들 때와 실장이 고친 뒤 둘 다) — 숫자는 모임 제안의 내용이라 둔다.
           guard: 'names', speaker: '소인', poster: lunchClient,
@@ -648,8 +648,8 @@ export class SlackHandler {
       // 방에 안 올리고 받아들이기만 한다(`accept`). 정하면 파이썬이 다음 턴에 커피챗 방 맡은 일로 옮긴다.
       const goalKinds: Record<string, NoticeKind> = config.letter.chatChannel ? {
         goal: {
-          title: '커피콩이 세운 목표', ask: '커피콩이 스스로 세운 목표를 제안합니다.', header: '',
-          hint: '고쳐서 정하면 커피콩의 맡은 일이 됩니다. 방에는 안 나갑니다.',
+          title: '커피콩이 세운 목표', ask: '커피콩이 스스로 세운 목표 제안', header: '',
+          hint: '고쳐서 정하면 커피콩의 맡은 일로 등록 · 방에는 안 올라감',
           rooms: [{ id: config.letter.chatChannel, label: '커피챗' }],
           accept: true, submitLabel: '목표로 정하기',
         },
@@ -718,8 +718,8 @@ export class SlackHandler {
         host: {
           initiate: (client, key, brief, name, extra) => (lunchHost
             ? lunchHost.initiate(client, key, brief, name, extra)
-            : Promise.resolve({ reply: '', error: '소인 대화 호스트가 없습니다' })),
-          follow: (f) => (lunchHost ? lunchHost.follow(f) : Promise.resolve({ reply: '', error: '소인 대화 호스트가 없습니다' })),
+            : Promise.resolve({ reply: '', error: '소인 대화 호스트 없음' })),
+          follow: (f) => (lunchHost ? lunchHost.follow(f) : Promise.resolve({ reply: '', error: '소인 대화 호스트 없음' })),
         },
         offer: lunchNotice?.enabled ? lunchNotice.offer : undefined,
         historyPath: path.join(lunchData, 'proposals.jsonl'),
@@ -3003,21 +3003,21 @@ export class SlackHandler {
    */
   private async runHeldNow(id: string): Promise<{ text: string; settle: boolean }> {
     // **겹 누름은 첫 await 앞에서 막는다** — 뒤에서 막으면 두 번째 누름이 기다리는 사이를 지나 같은 건을 두 번 돌린다.
-    if (this.heldNowBusy) return { text: '이미 처리하는 중입니다 — 끝난 뒤 결과를 알려 드립니다', settle: false };
+    if (this.heldNowBusy) return { text: '이미 처리 중 — 끝나면 결과 알림', settle: false };
     this.heldNowBusy = true;
     try {
       if (dmFallbackOn()) await codexQuota.refresh();
-      if (this.drainBlocked()) return { text: '⏳ 아직 사용량 한도에 막혀 있습니다 — 풀린 뒤 다시 눌러 주세요', settle: false };
+      if (this.drainBlocked()) return { text: '⏳ 아직 사용량 한도로 막힘 — 풀린 뒤 다시 누름', settle: false };
       if (this.drainRun) await this.drainRun;
-      if (this.draining) return { text: '밀린 요청을 처리하는 중입니다 — 끝난 뒤 다시 눌러 주세요', settle: false };
+      if (this.draining) return { text: '밀린 요청 처리 중 — 끝난 뒤 다시 누름', settle: false };
       // 드레인 문도 확인한 그 자리에서 잡는다 — 목록을 읽는 사이에 드레인이 끼어들지 않게.
       this.draining = true;
       try {
         const { run, tell } = await pendingHeld(50);
         const item = [...tell, ...run].find((x) => x.id === id);
-        if (!item) return { text: '이미 처리했거나 버린 요청입니다', settle: true };
+        if (!item) return { text: '이미 처리했거나 버린 요청', settle: true };
         // 지금 남은 칸이 이 건을 못 맡으면(첨부 · 「Claude·GPT 몫」) 돌리지 않는다 — 6단계.
-        if (this.drainSkip(item)) return { text: '⏳ 이 요청을 맡을 엔진이 아직 막혀 있습니다 — 풀린 뒤 다시 눌러 주세요', settle: false };
+        if (this.drainSkip(item)) return { text: '⏳ 이 요청을 맡을 엔진이 아직 막힘 — 풀린 뒤 다시 누름', settle: false };
         const release = this.holdGate.hold([replayTarget(item, config.assistant.dmChannel).channel]);
         try {
           await markCaptureTried(id);
@@ -3025,10 +3025,10 @@ export class SlackHandler {
           if (out.outcome === 'ok') {
             await markCaptureReplayed(id);
             dropHeldFiles(id);
-            return { text: '▶ 처리했습니다', settle: true };
+            return { text: '▶ 처리함', settle: true };
           }
-          if (isHeldOutcome(out)) return { text: '⏳ 다시 한도에 막혔습니다 — 풀린 뒤 다시 눌러 주세요', settle: false };
-          return { text: '⚠️ 처리하다 문제가 났습니다 — 확인이 필요합니다', settle: true };
+          if (isHeldOutcome(out)) return { text: '⏳ 다시 한도로 막힘 — 풀린 뒤 다시 누름', settle: false };
+          return { text: '⚠️ 처리 중 오류 — 확인 필요', settle: true };
         } finally {
           release();
         }
@@ -3304,7 +3304,7 @@ export class SlackHandler {
     patchInflight(sessionKey, { engine: rung, steps: [...a.claudeSteps], sessionId: a.sessionId });
     const model = agyModel(rung);
     const display = agyDisplay(rung, model.label);
-    a.status(`↪ ${display} 가 이어 받는 중${rung === 'agy-gemini' ? '(답이 느립니다)' : ''}`);
+    a.status(`↪ ${display} 가 이어 받는 중${rung === 'agy-gemini' ? '(답이 느림)' : ''}`);
     const fail = async (kind: string, detail?: string): Promise<FallbackResult> => {
       appendLedger({ channel, engine: rung, model: display, captureId, outcome: kind });
       const next = await a.nextAfter(rung);
@@ -3856,7 +3856,7 @@ export class SlackHandler {
     try {
       const blocks = await buildNasQueueBlocks(await listNasQueue());
       if (!blocks) {
-        await say({ text: '📦 NAS 이동 컨펌 대기 큐가 비어 있습니다.', thread_ts: threadTs });
+        await say({ text: '📦 NAS 이동 확인 대기 — 0건', thread_ts: threadTs });
         return;
       }
       await say({ text: '📦 NAS 이동 컨펌 대기', blocks, thread_ts: threadTs });
@@ -3880,7 +3880,7 @@ export class SlackHandler {
           text: note,
           blocks: [noteBlock, {
             type: 'section',
-            text: { type: 'mrkdwn', text: '📦 컨펌 대기 큐가 비었습니다. 🎉' },
+            text: { type: 'mrkdwn', text: '📦 확인 대기 — 모두 처리 🎉' },
           }],
         });
       } else {
@@ -3888,7 +3888,7 @@ export class SlackHandler {
       }
     } catch (error) {
       this.logger.error('NAS message rerender failed', error);
-      await respond(noticeReply(`${note}\n⚠️ 목록 갱신 실패 — \`-nas\`로 재조회하세요.`));
+      await respond(noticeReply(`${note}\n⚠️ 목록 갱신 실패 — \`-nas\` 로 다시 조회`));
     }
   }
 
@@ -3922,7 +3922,7 @@ export class SlackHandler {
   /** CLI 결과를 사용자 표시용 한 줄로 (락 충돌은 안내 메시지). */
   private nasResultNote(ok: boolean, detail: string, okText: string): string {
     if (ok) return okText;
-    if (detail === 'lock') return '⏳ 다른 sync 작업이 진행 중입니다 — 잠시 후 다시 시도하세요.';
+    if (detail === 'lock') return '⏳ 다른 동기화 작업 진행 중 — 잠시 뒤 다시 시도';
     return `❌ 처리 실패:\n\`\`\`${detail.slice(0, 500)}\`\`\``;
   }
 
@@ -4595,7 +4595,7 @@ export class SlackHandler {
       const put = (tail: any[]) => respond({ replace_original: true, text, blocks: swapTail(blocks, tail) });
       try {
         if (!pick || (step !== 'yes' && step !== 'no' && step !== pick.id) || (step === 'yes' && !needsConfirm(pick.id))) {
-          await put(resultTail('버튼', { ok: false, message: '버튼 값을 못 읽었습니다' }));
+          await put(resultTail('버튼', { ok: false, message: '버튼 값 읽기 실패' }));
           return;
         }
         if (step === 'no') { await put(buttonsTail(pick.who)); return; }
@@ -4629,7 +4629,7 @@ export class SlackHandler {
       try {
         const id = (body as any).actions[0].value as string;
         const r = await rejectItems([id]).catch(e => ({ ok: false, detail: String(e) }));
-        await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `❌ 거부 처리 — 파일은 Z:\\ABYSS에 남습니다 (\`${id}\`)`));
+        await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `❌ 거부 — 파일은 Z:\\ABYSS 에 그대로 (\`${id}\`)`));
       } catch (error) {
         this.logger.error('NAS reject item failed', error);
         await respond(noticeReply('❌ 처리 실패')).catch(() => {});
@@ -4639,7 +4639,7 @@ export class SlackHandler {
     this.action('nas_hold_item', async ({ ack, respond }) => {
       await ack();
       // DB 무변경 — 큐에 남아 다음 브리핑에 다시 표시 (무기한 대기 + 7일 🔴 정책)
-      await respond(noticeReply('⏸️ 보류 — 다음 브리핑에 다시 표시됩니다.'));
+      await respond(noticeReply('⏸️ 보류 — 다음 브리핑에 다시 표시'));
     });
 
     this.action('nas_confirm_all_safe', async ({ ack, body, respond }) => {
@@ -4659,7 +4659,7 @@ export class SlackHandler {
       try {
         const { ids } = JSON.parse((body as any).actions[0].value);
         const r = await rejectItems(ids);
-        await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `❌ ${ids.length}건 거부 — 파일은 Z:\\ABYSS에 남습니다`));
+        await this.rerenderNasMessage(respond, this.nasResultNote(r.ok, r.detail, `❌ ${ids.length}건 거부 — 파일은 Z:\\ABYSS 에 그대로`));
       } catch (error) {
         this.logger.error('NAS bulk reject failed', error);
         await respond(noticeReply('❌ 일괄 거부 실패'));
@@ -4974,8 +4974,8 @@ export class SlackHandler {
       dropHeldFiles(id);
       const blocks = (body as any)?.message?.blocks;
       if (Array.isArray(blocks)) {
-        await respond({ replace_original: true, text: (body as any).message.text ?? '버렸습니다',
-          blocks: markChoice(blocks, id, '🗑 버렸습니다') }).catch(() => { });
+        await respond({ replace_original: true, text: (body as any).message.text ?? '버림',
+          blocks: markChoice(blocks, id, '🗑 버림') }).catch(() => { });
       }
     });
 
@@ -4998,7 +4998,7 @@ export class SlackHandler {
       try {
         await respond({
           replace_original: true,
-          text: `🔇 *${title}* — 이 일정의 알림을 껐습니다.`,
+          text: `🔇 *${title}* — 이 일정 알림 끔`,
         });
       } catch (error) {
         this.logger.error('Failed to respond to mute action', error);

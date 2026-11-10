@@ -1709,7 +1709,7 @@ export class AssistantScheduler {
 
   /** 버튼 결정 — 진행이면 곧바로 실행을 시작한다. */
   async decideAction(id: string, decision: string): Promise<{ ok: boolean; note: string; stale?: boolean }> {
-    if (!reportLogAvailable()) return { ok: false, note: '⚠️ report-log 자동 기록 클론이 없습니다' };
+    if (!reportLogAvailable()) return { ok: false, note: '⚠️ report-log 자동 기록 클론 없음' };
     return this.actionPipeline.decide(id, decision);
   }
 
@@ -2051,7 +2051,7 @@ export class AssistantScheduler {
   /** 버튼 결정 — 등록이면 업무가 하나 생긴다. 번호 · 결정 이름은 여기서도 다시 본다(버튼 값은 믿지 않는다). */
   async decideImprove(id: string, decision: string): Promise<{ ok: boolean; note: string }> {
     if (!IMPROVE_ID_RE.test(id) || !(IMPROVE_DECISIONS as readonly string[]).includes(decision)) {
-      return { ok: false, note: '⚠️ 버튼 값이 올바르지 않습니다' };
+      return { ok: false, note: '⚠️ 버튼 값 오류' };
     }
     const r = await improveDecide(id, decision);
     const at = new Date().toTimeString().slice(0, 5);
@@ -2531,7 +2531,7 @@ export class AssistantScheduler {
       last = (out && out.lastText) || '';
       ok = !out || out.outcome === 'ok';
     } catch (err) {
-      await finishDrawerTurn(item.reply.tid, { error: '세나 세션에 넘기지 못했어요 — 잠시 뒤 다시 보내 주세요' });
+      await finishDrawerTurn(item.reply.tid, { error: '세나 세션 넘기기 실패 — 잠시 뒤 다시 보냄' });
       throw err;
     }
     const r = await finishDrawerTurn(item.reply.tid, { answer: last });

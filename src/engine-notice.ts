@@ -123,11 +123,11 @@ function rank(r: Rung): number {
 /** 「누구로 이어 가나」 부분. */
 function target(to: Engine, labels: ModelLabels): string {
   switch (to) {
-    case 'claude': return 'Claude 로 이어 갑니다';
-    case 'claude-api': return 'Claude API(Sonnet)로 이어 갑니다';
-    case 'codex': return `${labels.codex ? `GPT(${labels.codex})` : 'GPT'}로 이어 갑니다`;
-    case 'agy-claude': return `agy 의 ${labels.agyClaude || 'Claude'}로 이어 갑니다 · 업무 조회·등록·수정까지`;
-    case 'agy-gemini': return `${labels.gemini || 'Gemini'}로 이어 갑니다 · 답이 느리고 업무 조회·등록·수정까지`;
+    case 'claude': return 'Claude 로 이어 감';
+    case 'claude-api': return 'Claude API(Sonnet)로 이어 감';
+    case 'codex': return `${labels.codex ? `GPT(${labels.codex})` : 'GPT'}로 이어 감`;
+    case 'agy-claude': return `agy 의 ${labels.agyClaude || 'Claude'}로 이어 감 · 업무 조회, 등록, 수정만 가능`;
+    case 'agy-gemini': return `${labels.gemini || 'Gemini'}로 이어 감 · 답이 느림 · 업무 조회, 등록, 수정만 가능`;
   }
 }
 
@@ -156,10 +156,10 @@ export function composeTransition(
       .filter((u): u is number => u !== null)
       .sort((a, b) => a - b)[0];
     const when = next !== undefined ? formatKst(next) : '시각 모름';
-    return `⏸ 모든 엔진 소진 — 받은 말은 모아 두고 가장 빠른 회복(${when})에 차례대로 처리합니다`
-      + ' · 다시 보내지 않으셔도 됩니다';
+    return `⏸ 모든 엔진 소진 — 받은 말은 모아 두었다가 가장 빠른 회복(${when}) 때 차례대로 처리`
+      + ' · 다시 보낼 필요 없음';
   }
-  if (rank(to) < rank(from) && to === 'claude') return '✅ Claude 회복 — 돌아왔습니다';
+  if (rank(to) < rank(from) && to === 'claude') return '✅ Claude 회복';
   // Claude 가 아닌 칸으로 올라가면(모두 막힘 → GPT 가 풀림 · 폴백을 켬) 「회복」이라 하지 않고 지금 모양을
   // 그대로 말한다 — 폴백을 켜는 순간에는 GPT 가 막힌 적이 없는데 「✅ GPT 회복」이 나갔다(5단계 검토).
   const above = ladder.slice(0, Math.max(0, ladder.indexOf(to)));
@@ -171,7 +171,7 @@ export function composeTransition(
     what = `${above.map((e) => SHORT[e]).join('·')} ${above.length === 2 && allUsage ? '사용량 소진' : '소진'}`;
   }
   // agy 칸은 지시문이 Claude 세션과 달라 답이 다를 수 있다 — 모델이 같다고 단정하지 않는다(사용자 지적).
-  const tail = to === 'agy-claude' || to === 'agy-gemini' ? ' · 지시문이 달라 답이 다를 수 있습니다' : '';
+  const tail = to === 'agy-claude' || to === 'agy-gemini' ? ' · 지시문이 달라 답이 다를 수 있음' : '';
   return `🔁 ${what} — ${target(to, labels)}${tail}`;
 }
 

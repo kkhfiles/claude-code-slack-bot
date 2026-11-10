@@ -181,7 +181,7 @@ const tryPost = async (channel, text, method = 'postMessage', extra = {}) => {
 
 // ── 5. 알림 — 실장에게 「막았다」만 ─────────────────────────────────────────
 {
-  const alerts = sent.filter((s) => s.channel === `D-${BOSS}` && /막혔습니다/.test(s.text ?? ''));
+  const alerts = sent.filter((s) => s.channel === `D-${BOSS}` && /보내려다 차단됨/.test(s.text ?? ''));
   ok('막히면 실장 DM 에 알린다', alerts.length >= 1);
   ok('⛔ 알림에 내용이 안 실린다', alerts.every((a) => !SECRETS.some((x) => a.text.replace(/\s+/g, '').includes(x.replace(/\s+/g, '').slice(0, 8)))));
   ok('같은 봇이 잇달아 막혀도 알림은 10분에 한 번', alerts.length === 1, `${alerts.length}번`);

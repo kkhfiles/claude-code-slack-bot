@@ -138,19 +138,19 @@ export class SdkUpdate {
     const ts: string | undefined = body?.message?.ts;
     if (body?.channel?.id !== this.opts.dmChannel || !ts) return;
     if (this.launching) {
-      await this.opts.reply(ts, '방금 누르신 것을 띄우는 중입니다.');
+      await this.opts.reply(ts, '방금 누른 판 맞춤을 띄우는 중');
       return;
     }
     const cur = this.result();
     if (cur?.status === 'running' && Date.now() - Date.parse(cur.startedAt) < STALE_RUN_MS) {
-      await this.opts.reply(ts, '이미 판 맞춤이 돌고 있습니다 — 끝나면 그 스레드에 알립니다.');
+      await this.opts.reply(ts, '이미 판 맞춤 진행 중 — 끝나면 그 스레드에 알림');
       return;
     }
     this.launching = true;
     try {
       const busy = await (this.opts.busyReason ?? (() => this.busy()))();
       if (busy) {
-        await this.opts.reply(ts, `지금은 못 올립니다. ${busy}. 끝난 뒤 버튼을 다시 누르세요.`);
+        await this.opts.reply(ts, `지금은 못 올림 — ${busy} · 끝난 뒤 버튼 다시 누름`);
         return;
       }
       const card = textOf(body);
@@ -168,7 +168,7 @@ export class SdkUpdate {
         await this.watchResult();                     // 곧바로 알리고 버튼을 되살린다
         return;
       }
-      const text = `${card}\n\n⏳ 시작했습니다 — 몇 분 걸립니다. 끝나면 이 스레드에 알립니다.`;
+      const text = `${card}\n\n⏳ 시작 — 몇 분 걸림 · 끝나면 이 스레드에 알림`;
       await this.opts.update(ts, text, [section(text)]);
       this.logger.info('판 맞춤을 띄웠습니다', { id: req.id });
     } finally {
@@ -181,7 +181,7 @@ export class SdkUpdate {
     await ack();
     const ts: string | undefined = body?.message?.ts;
     if (body?.channel?.id !== this.opts.dmChannel || !ts) return;
-    const text = `${textOf(body)}\n\n이번 주는 건너뜁니다 — 다음 주에 다시 묻습니다.`;
+    const text = `${textOf(body)}\n\n이번 주는 건너뜀 — 다음 주에 다시 물음`;
     await this.opts.update(ts, text, [section(text)]);
   }
 
@@ -195,7 +195,7 @@ export class SdkUpdate {
     if (r.status === 'running') {
       // 스크립트가 최종 결과를 못 남기고 죽었으면 `running` 에 머문다 — 오래되면 멈춘 것으로 알린다(검토 2026-09-29).
       if (Date.now() - Date.parse(r.startedAt) < STALE_RUN_MS) return false;
-      text = `⚠️ 판 맞춤이 끝났다는 기록 없이 ${STALE_RUN_MS / 3_600_000}시간이 지났습니다 — 멈춘 것으로 봅니다. `
+      text = `⚠️ 판 맞춤 끝 기록 없이 ${STALE_RUN_MS / 3_600_000}시간 경과 — 멈춘 것으로 봄 · `
         + '기록: `~/.claude/state/sdk-update.log`';
     } else {
       text = formatResult(r);
@@ -212,7 +212,7 @@ export class SdkUpdate {
     const req = this.request();
     const card = req?.id === r.id && req.cardText ? String(req.cardText) : '';
     if (!card || !r.thread) return;
-    const text = `${card}\n\n↻ 지난 시도가 끝까지 못 갔습니다 — 스레드를 보고 다시 누를 수 있습니다.`;
+    const text = `${card}\n\n↻ 지난 시도 중단 — 스레드 확인 뒤 다시 누를 수 있음`;
     try {
       await this.opts.update(r.thread, text, [section(text), actionsBlock()]);
     } catch (e) {
@@ -305,10 +305,10 @@ export function cardText(c: SdkCheck): string {
   const line = (label: string, s: SdkSide) =>
     `• ${label} ${s.version} (짝 ${s.pair})${s.target ? ` → *${s.target}*` : ' — 그대로'}`;
   return [
-    `:arrows_counterclockwise: *Agent SDK 판 맞춤* — Claude Code 가 ${c.cli} 로 올라 SDK 판이 벌어졌습니다.`,
+    `:arrows_counterclockwise: *Agent SDK 판 맞춤* — Claude Code 가 ${c.cli} 로 올라 SDK 판과 어긋남`,
     line('봇 SDK', c.ts),
     line('파이썬 SDK', c.py),
-    '누르면 설치 → 시험 → 실제 호출 → 커밋·푸시 → 봇 재시작까지 합니다(몇 분). 실패하면 그 단계에서 되돌립니다.',
+    '누르면 설치 → 시험 → 실제 호출 → 커밋과 푸시 → 봇 재시작(몇 분) · 실패하면 그 단계에서 되돌림',
   ].join('\n');
 }
 
@@ -333,10 +333,10 @@ export function formatResult(r: UpdateResult): string {
   if (r.status === 'done') return [`✅ 판 맞춤 끝 (${took})`, ...lines].join('\n');
   if (r.busy) {
     const why = r.steps.find((s) => !s.ok)?.detail ?? '';
-    return `⏸ 못 올렸습니다. ${why}. 끝난 뒤 카드의 [업데이트]를 다시 누르세요.`;
+    return `⏸ 못 올림 — ${why} · 끝난 뒤 카드의 [업데이트] 다시 누름`;
   }
   const bad = r.steps.find((s) => !s.ok);
-  return [`❌ 「${bad?.name ?? '?'}」에서 멈췄습니다 (${took})`, ...lines].join('\n');
+  return [`❌ 「${bad?.name ?? '?'}」 단계에서 멈춤 (${took})`, ...lines].join('\n');
 }
 
 function section(text: string): any {

@@ -187,7 +187,7 @@ export function summaryLine(r: DrainReport): string {
 
 /** 7일 지난 것 — 건마다 [실행]·[버림]. */
 export function oldListMessage(items: readonly HeldItem[]): { text: string; blocks: any[] } {
-  const head = `⏳ 받은 지 7일이 지나 자동으로 다시 처리하지 않은 요청 ${items.length}건 — 건마다 골라 주세요`;
+  const head = `⏳ 받은 지 7일 지나 자동 처리하지 않은 요청 ${items.length}건 — 건마다 처리나 버림 선택`;
   const blocks: any[] = [{ type: 'section', text: { type: 'mrkdwn', text: head } }];
   for (const it of items) {
     blocks.push({

@@ -264,7 +264,7 @@ try {
       hr.oldListMessage([item('o1'), item('o2')]).blocks.filter((b) => b.type === 'actions')
         .map((b) => b.elements.map((e) => `${e.action_id}:${JSON.parse(e.value).id}`)),
       [['held_run:o1', 'held_drop:o1'], ['held_run:o2', 'held_drop:o2']]);
-    const after = hr.markChoice(hr.oldListMessage([item('o1'), item('o2')]).blocks, 'o1', '🗑 버렸습니다');
+    const after = hr.markChoice(hr.oldListMessage([item('o1'), item('o2')]).blocks, 'o1', '🗑 버림');
     eq('누른 건만 결과 한 줄로', after.filter((b) => b.type === 'actions').length, 1);
   }
 
@@ -331,7 +331,7 @@ try {
     eq('v2 — 끝까지 간 것만 걷음', b.log.filter((x) => x[0] === 'replayed').map((x) => x[1]), ['a']);
     eq('v2 — 7일 지난 것을 물었다고 적음', b.log.filter((x) => x[0] === 'told'), [['told', 'o1']]);
     const texts = posts.map((p) => p.text);
-    ok('v2 — 7일 지난 목록을 올림', texts.some((t) => t.startsWith('⏳ 받은 지 7일이 지나')));
+    ok('v2 — 7일 지난 목록을 올림', texts.some((t) => t.startsWith('⏳ 받은 지 7일 지나')));
     ok('v2 — 요약 한 줄', texts.includes('▶ 밀린 1건 처리 — 완료 1 · 확인 필요 0 · 다시 막혀 2건은 회복 뒤에'));
     eq('v2 — 끝나면 겹침 막기를 푼다', [h.draining, h.drainRun], [false, null]);
     // 다음 판 — 이미 물은 것은 다시 안 묻는다.
@@ -481,7 +481,7 @@ try {
     b = bridge({});
     ({ h } = handler());
     r = await h.runHeldNow('없음');
-    eq('[실행] — 이미 처리한 것', [r.settle, r.text], [true, '이미 처리했거나 버린 요청입니다']);
+    eq('[실행] — 이미 처리한 것', [r.settle, r.text], [true, '이미 처리했거나 버린 요청']);
     // 두 번 눌러도 한 번만 — 문을 첫 await 앞에서 잡는다
     b = bridge({ tell: [item('o2', { old: true, channel: 'D_DM' })] });
     ({ h, replays } = handler([OKO, OKO]));

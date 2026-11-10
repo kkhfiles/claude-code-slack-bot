@@ -512,10 +512,10 @@ export class ProcessMemoryWatchdog {
   /** 재시작은 두 단계. 첫 버튼은 묻기만 하고 아무것도 예약하지 않는다. */
   async handleRebootAsk(messageTs: string): Promise<void> {
     const text = [
-      '🔄 *재시작을 예약할까요?*',
+      '🔄 *PC 재시작 예약*',
       '',
-      '예약하면 60초 뒤에 이 PC가 재시작합니다. 저장 안 한 작업이 있으면 먼저 저장하세요.',
-      '예약 뒤에도 60초 안에는 취소 버튼으로 되돌릴 수 있습니다.',
+      '예약하면 60초 뒤 이 PC 재시작 · 저장 안 한 작업은 먼저 저장',
+      '예약 뒤 60초 안에는 취소 버튼으로 되돌림 가능',
     ].join('\n');
     const blocks = [
       { type: 'section', text: { type: 'mrkdwn', text } },
@@ -532,7 +532,7 @@ export class ProcessMemoryWatchdog {
 
   /** 버튼을 거둔다. 조치는 안 한다. */
   async handleHealthDismiss(messageTs: string): Promise<void> {
-    await this.updateMessage(messageTs, '조치하지 않았습니다. 아침 브리핑에 계속 뜹니다.')
+    await this.updateMessage(messageTs, '조치 안 함 — 아침 브리핑에 계속 표시')
       .catch(() => {});
   }
 
@@ -564,8 +564,8 @@ export class ProcessMemoryWatchdog {
       : outcome === 'gone'
         ? t('watchdog.alreadyGone', this.locale, { pid: String(pid), name: pending.name })
         : outcome === 'recycled'
-          ? `PID ${pid} 은 이제 다른 프로세스입니다 — ${pending.name} 은 이미 끝났고 번호가 재사용됐습니다. 죽이지 않았습니다.`
-          : `PID ${pid} (${pending.name}) 종료 실패 — 권한이거나 확인이 안 됐습니다.`;
+          ? `PID ${pid} 은 이제 다른 프로세스 — ${pending.name} 은 이미 끝났고 번호 재사용 · 종료 안 함`
+          : `PID ${pid} (${pending.name}) 종료 실패 — 권한 부족 또는 확인 실패`;
 
     await this.updatePendingMessage(pending.messageTs, text).catch(e =>
       this.logger.error('Failed to update watchdog message', e),
@@ -659,7 +659,7 @@ export class ProcessMemoryWatchdog {
       const refs: string[] = (item.refs || [])
         .map((r: any) => `• 진단·복구 절차: \`${r.path}\``);
       const text = [
-        `${mark} *시스템 점검 — 전에 진단해 둔 문제가 다시 잡혔습니다*`,
+        `${mark} *시스템 점검 — 전에 진단한 문제 재발*`,
         '',
         `*${item.title}*`,
         item.detail,
@@ -920,7 +920,7 @@ export class ProcessMemoryWatchdog {
 
   /** 대안 묶음의 메시지 블록 — 앞 글 · (자동 종료가 아직 기다리면) Kill · Ignore · 분석 · 남은 버튼 */
   private groupBlocks(gid: string, g: OptionGroup, pending: boolean): any[] {
-    const body = analysisText(g.head, g.analysis, g.results) + (g.dismissed ? '\n\n그대로 두었습니다.' : '');
+    const body = analysisText(g.head, g.analysis, g.results) + (g.dismissed ? '\n\n그대로 둠' : '');
     const buttons = g.dismissed ? null : optionButtons(gid, g.analysis, new Set(Object.keys(g.results).map(Number)));
     return [
       { type: 'section', text: { type: 'mrkdwn', text: g.prefix.slice(0, 2900) } },
@@ -1014,7 +1014,7 @@ export class ProcessMemoryWatchdog {
     const [gid, idxRaw] = value.split(':');
     const g = this.loadGroups()[gid];
     if (!g) {
-      await this.updateMessage(messageTs, '이 대안은 만료됐습니다(이틀이 지났거나 상태 파일을 못 읽음). 아무것도 하지 않았습니다.').catch(() => {});
+      await this.updateMessage(messageTs, '이 대안은 만료(이틀 지남 또는 상태 파일을 못 읽음) — 실행 안 함').catch(() => {});
       return;
     }
     // 자동 종료가 아직 기다리면 Kill · Ignore · Exclude 를 지우지 않는다 — 지우면 타이머를 멈출 버튼이 없다
@@ -1173,7 +1173,7 @@ export class ProcessMemoryWatchdog {
         : outcome === 'gone'
           ? t('watchdog.alreadyGone', this.locale, { pid: String(target.pid), name: target.name })
           : outcome === 'recycled'
-            ? `PID ${target.pid} 은 이제 다른 프로세스입니다 — ${target.name} 은 이미 끝났습니다. 죽이지 않았습니다.`
+            ? `PID ${target.pid} 은 이제 다른 프로세스 — ${target.name} 은 이미 끝남 · 종료 안 함`
             : `PID ${target.pid} (${target.name}) 자동 종료 실패.`;
 
       await this.updatePendingMessage(pending.messageTs, autoText).catch(e =>

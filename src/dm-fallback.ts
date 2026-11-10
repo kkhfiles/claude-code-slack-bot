@@ -98,7 +98,7 @@ export function resetMarked(): void { lastMarked = ''; }
 export function markerLines(o: { model: string; block: Block | null; handover?: number }): string[] {
   const lines: string[] = [];
   if (o.handover !== undefined) {
-    lines.push(`↪ Claude 가 하다 끊겨 GPT 가 이어서 마무리했습니다(이미 한 것: ${o.handover}건)`);
+    lines.push(`↪ Claude 중단 — GPT 가 이어서 마무리(이미 한 것 ${o.handover}건)`);
   }
   lines.push(`↪ GPT(${o.model}) 가 답함 · ${claudeWhy(o.block)}`);
   return lines;
@@ -108,7 +108,7 @@ export function markerLines(o: { model: string; block: Block | null; handover?: 
 export function claudeApiMarkerLines(o: { block: Block | null; handover?: number }): string[] {
   const lines: string[] = [];
   if (o.handover !== undefined) {
-    lines.push(`↪ Claude 가 하다 끊겨 Claude API(Sonnet)가 이어서 마무리했습니다(이미 한 것: ${o.handover}건)`);
+    lines.push(`↪ Claude 중단 — Claude API(Sonnet)가 이어서 마무리(이미 한 것 ${o.handover}건)`);
   }
   lines.push(`↪ Claude API(Sonnet) 가 답함 · ${claudeWhy(o.block)}`);
   return lines;
@@ -133,7 +133,7 @@ export function agyMarkerLines(o: {
 }): string[] {
   const lines: string[] = [];
   if (o.handover !== undefined) {
-    lines.push(`↪ 앞 엔진이 하다 끊겨 ${o.display} 가 이어서 마무리했습니다(이미 한 것: ${o.handover}건)`);
+    lines.push(`↪ 앞 엔진 중단 — ${o.display} 가 이어서 마무리(이미 한 것 ${o.handover}건)`);
   }
   const why = o.above.map((e) => (e === 'claude' ? claudeWhy(o.claudeBlock) : engineWhy(e, o.st.engines[e].blocked, o.nowSec)));
   lines.push(`↪ ${o.display} 가 답함 · ${why.join(' · ')}`);
@@ -141,9 +141,9 @@ export function agyMarkerLines(o: {
 }
 
 /** Claude·GPT 가 돌아오면 이어서 처리할 몫이 남았다는 줄(`needs_full`). */
-export const NEEDS_FULL_LINE = '⏸ 이 부분은 Claude·GPT 가 돌아오면 이어서 처리합니다';
+export const NEEDS_FULL_LINE = '⏸ 이 부분은 Claude 나 GPT 가 회복되면 이어서 처리';
 /** agy 칸의 명령이 일부 안 됐다는 줄 — 실패 · 허용 목록 밖 · 앞이 실패해 안 돈 것이 있을 때(2026-10-15 검토). */
-export const INCOMPLETE_LINE = '⏸ 못 한 명령은 Claude·GPT 가 돌아오면 이어서 처리합니다';
+export const INCOMPLETE_LINE = '⏸ 못 한 명령은 Claude 나 GPT 가 회복되면 이어서 처리';
 
 /** agy 칸이 안 돌린 명령을 보류 칸의 「안 함」 줄로 — 쓰기가 아니다(`write: false`). */
 export function notRunSteps(rung: string, summaries: readonly string[]): TurnStep[] {

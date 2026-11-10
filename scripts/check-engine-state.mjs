@@ -451,27 +451,27 @@ try {
     eq('Claude 가 막히면 GPT 차례', dmRung(s.load(), nowSec()), 'codex');
     eq('Claude 소진 → GPT',
        composeTransition('claude', 'codex', s.load(), L, nowSec()),
-       '🔁 Claude 사용량 소진(풀림 10/19(월) 10:00) — GPT(gpt-T1-astra)로 이어 갑니다');
+       '🔁 Claude 사용량 소진(풀림 10/19(월) 10:00) — GPT(gpt-T1-astra)로 이어 감');
     s.recordBlocked('codex', { kind: 'usage', until: U + 3600 });
     // 6단계 순서(2026-10-14 사용자 결정) — Gemini 먼저, 그다음 agy 의 Claude Sonnet. 「같은 모델」이라고 안 쓴다.
     eq('Claude·GPT 소진 → Gemini',
        composeTransition('codex', 'agy-gemini', s.load(), L, nowSec()),
-       '🔁 Claude·GPT 사용량 소진 — Gemini T1 Flash (High)로 이어 갑니다 · 답이 느리고 업무 조회·등록·수정까지'
-       + ' · 지시문이 달라 답이 다를 수 있습니다');
+       '🔁 Claude·GPT 사용량 소진 — Gemini T1 Flash (High)로 이어 감 · 답이 느림 · 업무 조회, 등록, 수정만 가능'
+       + ' · 지시문이 달라 답이 다를 수 있음');
     eq('Claude·GPT 가 막히면 Gemini 차례', dmRung(s.load(), nowSec()), 'agy-gemini');
     s.recordBlocked('agy-gemini', { kind: 'usage', until: U + 7200 });
     eq('Gemini 도 소진 → agy Sonnet',
        composeTransition('agy-gemini', 'agy-claude', s.load(), L, nowSec()),
-       '🔁 Claude·GPT·Gemini 소진 — agy 의 Claude Sonnet T1 (High)로 이어 갑니다 · 업무 조회·등록·수정까지'
-       + ' · 지시문이 달라 답이 다를 수 있습니다');
+       '🔁 Claude·GPT·Gemini 소진 — agy 의 Claude Sonnet T1 (High)로 이어 감 · 업무 조회, 등록, 수정만 가능'
+       + ' · 지시문이 달라 답이 다를 수 있음');
     ok('안내에 「같은 모델」이 없다', !fs.readFileSync(path.join(SRC, 'engine-notice.ts'), 'utf-8').includes('같은 모델'));
     s.recordBlocked('agy-claude', { kind: 'unknown' }); // 지금 + 60분 = 10/14(수) 11:00 이 가장 빠르다
     eq('다 막히면 없음', dmRung(s.load(), nowSec()), 'none');
     eq('모두 소진 → 모아 두기',
        composeTransition('agy-claude', 'none', s.load(), L, nowSec()),
-       '⏸ 모든 엔진 소진 — 받은 말은 모아 두고 가장 빠른 회복(10/14(수) 11:00)에 차례대로 처리합니다'
-       + ' · 다시 보내지 않으셔도 됩니다');
-    eq('Claude 회복', composeTransition('none', 'claude', s.load(), L, nowSec()), '✅ Claude 회복 — 돌아왔습니다');
+       '⏸ 모든 엔진 소진 — 받은 말은 모아 두었다가 가장 빠른 회복(10/14(수) 11:00) 때 차례대로 처리'
+       + ' · 다시 보낼 필요 없음');
+    eq('Claude 회복', composeTransition('none', 'claude', s.load(), L, nowSec()), '✅ Claude 회복');
     eq('차례가 같으면 안내 없음', composeTransition('codex', 'codex', s.load(), L, nowSec()), null);
 
     // 2026-11-05 사용자 결정 — 봇은 크레딧을 안 쓴다. 구독이 막히면 크레딧 칸(claude-api)으로 안내하지 않고 다음 칸(GPT).
@@ -497,7 +497,7 @@ try {
     o.recordBlocked('claude', { kind: 'overload' });
     eq('과부하는 「서버 과부하 · 다시 확인」',
        composeTransition('claude', 'codex', o.load(), L, nowSec()),
-       '🔁 Claude 서버 과부하(다시 확인 10/14(수) 10:10) — GPT(gpt-T1-astra)로 이어 갑니다');
+       '🔁 Claude 서버 과부하(다시 확인 10/14(수) 10:10) — GPT(gpt-T1-astra)로 이어 감');
 
     // 표를 바꾸면 다음 안내부터 따라온다 — 글자로 박았으면 여기서 걸린다.
     writeTable('gpt-T2-zeta', 'Claude Sonnet T2 (High)', 'Gemini T2 Flash (High)');
@@ -528,7 +528,7 @@ try {
     delete process.env.ENGINE_NOTICE;
     const off = new EngineNotice({ store: st, post: async (t) => { posts.push(t); }, log });
     const line = await off.check();
-    eq('꺼짐: 지은 줄을 돌려준다', line, '🔁 Claude 사용량 소진(풀림 10/19(월) 10:00) — GPT(gpt-T2-zeta)로 이어 갑니다');
+    eq('꺼짐: 지은 줄을 돌려준다', line, '🔁 Claude 사용량 소진(풀림 10/19(월) 10:00) — GPT(gpt-T2-zeta)로 이어 감');
     eq('꺼짐: 안 보낸다', posts, []);
     eq('꺼짐: 로그에만 남긴다', logs, [line]);
     eq('같은 차례는 다시 안 짓는다', await off.check(), null);
@@ -538,7 +538,7 @@ try {
     on.init();
     st.recordOk('claude');
     await new Promise((r) => setImmediate(r));
-    eq('켜짐: 회복을 한 줄 보낸다', posts, ['✅ Claude 회복 — 돌아왔습니다']);
+    eq('켜짐: 회복을 한 줄 보낸다', posts, ['✅ Claude 회복']);
     on.stop();
 
     // 막힘 시각이 지난 것만으로는 「회복」을 안 보낸다(2026-10-15 검토) — 된 차례(`recordOk`)가 막힘을 지울 때 한 번.
@@ -557,7 +557,7 @@ try {
       eq('되기 전에 다시 막히면 아무 줄도 없음', await n4.check(), null);
       nowMs += 700_000;
       s4.recordOk('claude');
-      eq('된 뒤에 회복 한 줄', await n4.check(), '✅ Claude 회복 — 돌아왔습니다');
+      eq('된 뒤에 회복 한 줄', await n4.check(), '✅ Claude 회복');
       eq('같은 회복은 다시 안 냄', await n4.check(), null);
       eq('보낸 것 — GPT 로 넘김 · 회복 하나', p4.length, 2);
       nowMs = T0;
@@ -589,7 +589,7 @@ try {
       second();
       await new Promise((r) => setImmediate(r));
       eq('마지막을 놓으면 한 줄 — 사이 칸(Gemini) 없이 실제로 맡는 엔진', p5.slice(1),
-        ['🔁 Claude·GPT·Gemini 소진 — agy 의 Sonnet H로 이어 갑니다 · 업무 조회·등록·수정까지 · 지시문이 달라 답이 다를 수 있습니다']);
+        ['🔁 Claude·GPT·Gemini 소진 — agy 의 Sonnet H로 이어 감 · 업무 조회, 등록, 수정만 가능 · 지시문이 달라 답이 다를 수 있음']);
       eq('놓은 뒤 차례를 적음', s5.ladderRung(), 'agy-claude');
       // 끝까지 다 막혀 모아 둠 — ⏸ 한 줄 · 놓지 못하고 넘어진 차례도 상한에 스스로 놓는다
       const leaked = n5.hold(30);
@@ -604,7 +604,7 @@ try {
       // 차례 밖 — 회복은 바로
       s5.recordOk('claude');
       await new Promise((r) => setImmediate(r));
-      eq('차례 밖 — 회복은 바로 한 줄', p5.slice(3), ['✅ Claude 회복 — 돌아왔습니다']);
+      eq('차례 밖 — 회복은 바로 한 줄', p5.slice(3), ['✅ Claude 회복']);
       n5.stop();
     }
   }

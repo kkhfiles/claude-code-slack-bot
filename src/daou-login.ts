@@ -147,9 +147,9 @@ export class DaouLoginNotifier {
     if (notice && notice.key === key) return;   // 이 만료는 이미 알렸다
 
     const text = [
-      '🔴 *다우 세션 만료* — 그룹웨어 적재가 멈춰 있습니다',
+      '🔴 *다우 세션 만료* — 그룹웨어 적재 멈춤',
       '버튼을 누르면 *이 PC 에* 로그인 창이 뜹니다 · 5분 안에 계정·비밀번호·보안문자',
-      '지금 당장이 아니어도 됩니다 — 나중에 눌러도 그때 상태를 다시 보고 엽니다',
+      '급하지 않음 — 나중에 눌러도 그때 상태를 다시 보고 로그인 창을 엶',
     ].join('\n');
     try {
       const ts = await this.sendMessage(text, this.buttonBlocks(text));
@@ -170,7 +170,7 @@ export class DaouLoginNotifier {
     const update = opts.update ?? this.updateMessage;
     const value = opts.value === 'renew' ? 'renew' : ALERT_ID;
     if (this.inFlight) {
-      const busy = '⏳ 이미 로그인 창이 열려 있습니다 — 그 창에서 로그인하세요';
+      const busy = '⏳ 로그인 창이 이미 열려 있음 — 그 창에서 로그인';
       await update(messageTs, busy, this.plainBlocks(busy)).catch(() => {});
       return;
     }
@@ -179,19 +179,19 @@ export class DaouLoginNotifier {
       // 하루 뒤에 눌렀을 수 있다 — 그사이 다른 길로 로그인했으면 창을 띄울 이유가 없다.
       const alive = value === 'renew' ? false : await this.probeAlive();
       if (alive) {
-        const already = '✅ 다우 세션이 이미 살아 있습니다 (다른 곳에서 로그인됨) — 알림을 내립니다';
+        const already = '✅ 다우 세션이 이미 살아 있음(다른 곳에서 로그인) — 알림 내림';
         await update(messageTs, already, this.plainBlocks(already));
         await this.clearAlert();
         return;
       }
 
-      const opened = '⏳ 이 PC 에 로그인 창을 띄웠습니다 — 5분 안에 계정·비밀번호·보안문자를 넣으세요';
+      const opened = '⏳ 이 PC 에 로그인 창 띄움 — 5분 안에 계정, 비밀번호, 보안문자 입력';
       await update(messageTs, opened, this.plainBlocks(opened));
       const result = await this.runLogin();
       if (!result.ok) {
         const text = result.timedOut
-          ? '⚠️ 5분 안에 로그인이 없어 창을 닫았습니다 — 다시 누르면 다시 엽니다'
-          : `⚠️ 로그인 창을 못 띄웠습니다 — ${result.error}\n다시 누르면 다시 시도합니다`;
+          ? '⚠️ 5분 안에 로그인 없어 창 닫음 — 다시 누르면 다시 엶'
+          : `⚠️ 로그인 창 띄우기 실패 — ${result.error} · 다시 누르면 다시 시도`;
         await update(messageTs, text, this.buttonBlocks(text, value));
         return;
       }
@@ -207,7 +207,7 @@ export class DaouLoginNotifier {
         this.writeNotice({ ...notice, resolvedAt: new Date().toISOString() });
       }
     } catch (e) {
-      const text = `⚠️ 처리 중 오류 — ${(e as Error).message}\n다시 누르면 다시 시도합니다`;
+      const text = `⚠️ 처리 중 오류 — ${(e as Error).message} · 다시 누르면 다시 시도`;
       await update(messageTs, text, this.buttonBlocks(text, value)).catch(() => {});
     } finally {
       this.inFlight = false;

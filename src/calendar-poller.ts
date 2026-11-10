@@ -774,8 +774,8 @@ export class CalendarPoller {
       // 2026-08-21 까지 38번이 같은 문장으로 쌓였다. 무엇을 고치면 되는지 같이 낸다.
       const capped = /maximum budget|max_budget/i.test(msg);
       errorCollector.add('CalendarPoller', capped
-        ? `회의 알림 판단이 예산 상한($${config.reminders.maxBudgetUsd ?? 0.15})에 걸렸다`
-          + ' — 그 차례는 알림을 못 보낸다. assistant/config.json 의 reminders.maxBudgetUsd 를 올릴 것'
+        ? `회의 알림 판단 예산 상한($${config.reminders.maxBudgetUsd ?? 0.15}) 도달`
+          + ' — 그 차례 알림 못 보냄 · assistant/config.json 의 reminders.maxBudgetUsd 를 올릴 것'
         : `AI 판단 실패: ${msg}`);
       this.logger.error('AI judgment failed', error);
       return this.judgeByLadder(prompt, diff, config.reminders.beforeMinutes, 'Claude 실패');

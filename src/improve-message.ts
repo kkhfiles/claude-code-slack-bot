@@ -67,11 +67,11 @@ export function buildImproveBlocks(day: ImproveDay | null): unknown[] | null {
     type: 'section',
     text: {
       type: 'mrkdwn',
-      text: `*💡 개선 제안* — 지난 7일 기록에서 ${items.length}건 · 「업무로 등록」을 누르면 판에 업무로 들어갑니다`,
+      text: `*💡 개선 제안* — 지난 7일 기록에서 ${items.length}건 · 「업무로 등록」을 누르면 판에 업무로 등록`,
     },
   }];
   items.forEach((it, i) => blocks.push(...itemBlocks(it, i + 1)));
-  const tail = ['처음 2주는 등록까지만 · 고치는 일은 등록된 업무로 합니다'];
+  const tail = ['처음 2주는 등록까지만 · 수정은 등록된 업무에서 진행'];
   if (day?.note) tail.unshift(plain(day.note));
   blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: tail.join(' · ') }] });
   return blocks;

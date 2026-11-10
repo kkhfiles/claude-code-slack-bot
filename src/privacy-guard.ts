@@ -238,9 +238,9 @@ async function alertOwner(client: any, call: Function, bot: string, where: strin
     if (!im?.channel?.id) return;
     await call.call(client, 'chat.postMessage', {
       channel: im.channel.id,
-      text: `:no_entry: *${bot}* 이(가) 개인 글 조각이 든 글을 ${where} 에 보내려다 막혔습니다 (\`${method}\`).\n`
-        + (held ? `_(앞 알림 뒤로 ${held}번 더 막혔습니다)_\n` : '')
-        + '_내용은 어디에도 적지 않았습니다. 같은 일이 되풀이되면 그 기능을 봐야 합니다._',
+      text: `:no_entry: *${bot}* — 개인 글 조각이 든 글을 ${where} 에 보내려다 차단됨 (\`${method}\`)\n`
+        + (held ? `_(앞 알림 뒤 ${held}번 더 차단)_\n` : '')
+        + '_내용은 어디에도 안 적음 · 되풀이되면 그 기능 점검 필요_',
     });
   } catch (error) {
     logger.warn('막았다는 알림을 못 보냈습니다', error);

@@ -561,10 +561,10 @@ try {
       [[], [['cap-1', 'partial', 'full']]]);
     eq('보류 칸 — 돈 둘은 완료 · 안 돈 넷은 안 함', (bridge.failed[0]?.[2]?.done_steps ?? []).map((l) => l.split(' · ')[0]),
       ['완료', '완료', '안 함', '안 함', '안 함', '안 함']);
-    ok('⏸ 못 한 명령 줄', body.includes('⏸ 못 한 명령은 Claude·GPT 가 돌아오면 이어서 처리합니다'));
+    ok('⏸ 못 한 명령 줄', body.includes('⏸ 못 한 명령은 Claude 나 GPT 가 회복되면 이어서 처리'));
     eq('장부', ledgerRows().map((r) => [r.engine, r.outcome]), [['agy-gemini', 'hold']]);
     ok(`안내 — Claude·GPT 소진 → Gemini · 「같은 모델」 없음 — ${s.notices.at(-1)}`,
-      (s.notices.at(-1) ?? '').includes('Gemini T Flash (High)로 이어 갑니다') && !s.notices.join('').includes('같은 모델'));
+      (s.notices.at(-1) ?? '').includes('Gemini T Flash (High)로 이어 감') && !s.notices.join('').includes('같은 모델'));
   }
 
   // ================================================================ ⑦-m 메일 후보 차례 — 봇이 본문을 붙이고 판정 기록을 셸 없이(2026-10-19)
@@ -622,7 +622,7 @@ try {
       [bridge.failed.map((f) => [f[0], f[1], f[2]?.needs]), (bridge.failed[0]?.[2]?.done_steps ?? []).map((l) => l.split(' · ')[0])],
       [[['cap-rp', 'partial', 'full']], ['완료', '실패', '안 함']]);
     const t = allText(s.posts);
-    ok('사람에게 실패 줄과 ⏸ 줄', t.includes('⚠️ 실패 — ') && t.includes('⏸ 못 한 명령은 Claude·GPT 가 돌아오면'));
+    ok('사람에게 실패 줄과 ⏸ 줄', t.includes('⚠️ 실패 — ') && t.includes('⏸ 못 한 명령은 Claude 나 GPT 가 회복되면'));
     // **명령 하나가 끝나면 다음 명령 전에 기록한다** — 둘째 명령이 뜬 순간의 처리 중 기록에 첫 명령이 「완료」로 있어야
     // 재시작에 끊겨도 다음 엔진이 그것을 다시 하지 않는다.
     const at2 = JSON.parse(w[1]?.inflight || '{}');
@@ -667,7 +667,7 @@ try {
     eq(`① 차례 앞 — GPT 로 이어 감 한 줄 — ${s.notices[0]}`, [s.notices.length - s.turnNotices.length, (s.notices[0] ?? '').includes('GPT')], [1, true]);
     eq('① 차례 안 — 안내 한 줄(사이 칸 Gemini 줄 없음)', s.turnNotices.length, 1);
     ok(`① 그 한 줄은 실제로 답한 엔진 — ${s.turnNotices[0]}`,
-      /^🔁 Claude·GPT·Gemini 소진 — agy 의 Claude T Sonnet \(High\)로 이어 갑니다/.test(s.turnNotices[0] ?? ''));
+      /^🔁 Claude·GPT·Gemini 소진 — agy 의 Claude T Sonnet \(High\)로 이어 감/.test(s.turnNotices[0] ?? ''));
 
     // ② 끝까지 다 막힘 — 켜짐
     s = await scenario({ watch: true, modes: { 'flash-high': 'quota', 'sonnet-thinking': 'quota' } });
@@ -734,7 +734,7 @@ try {
     let s = await scenario({ replies: { 'flash-high': plan({ reply: '등록은 했습니다. 메일 확인은 나중에 하겠습니다.', needs_full: true,
       needs_full_reason: '메일을 읽어야 함', actions: [{ op: 'add', title: '메일 회신 확인', est: 1, soft: '2026-10-16' }] }) } });
     const t = allText(s.posts);
-    ok('⏸ 줄과 까닭', t.includes('⏸ 이 부분은 Claude·GPT 가 돌아오면 이어서 처리합니다 — 메일을 읽어야 함'));
+    ok('⏸ 줄과 까닭', t.includes('⏸ 이 부분은 Claude 나 GPT 가 회복되면 이어서 처리 — 메일을 읽어야 함'));
     eq('명령은 돌았다', writes().map((c) => c.argv.slice(0, 2)), [['add', '--title=메일 회신 확인']]);
     eq('실패 표시 partial + needs full', bridge.failed.map((f) => [f[1], f[2]?.needs, f[2]?.hold]), [['partial', 'full', 'v2']]);
     eq('결과는 막힘(드레인이 멈춤) · 엔진 Gemini', [s.sink.outcome, s.sink.engine], ['limited', 'agy-gemini']);
@@ -769,7 +769,7 @@ try {
     const p = s.agy[0]?.prompt ?? '';
     ok('넘겨줄 메모에 GPT 명령(완료)', p.includes('[앞 엔진(Claude·GPT)이') && p.includes('- 완료 · GPT 명령 · python -X utf8 bin/tasks.py log'));
     const mk = markers(s.posts)[0]?.text ?? '';
-    ok(`넘겨받음 줄 — ${mk}`, mk.startsWith('↪ 앞 엔진이 하다 끊겨 Gemini T Flash (High) 가 이어서 마무리했습니다(이미 한 것: 1건)'));
+    ok(`넘겨받음 줄 — ${mk}`, mk.startsWith('↪ 앞 엔진 중단 — Gemini T Flash (High) 가 이어서 마무리(이미 한 것 1건)'));
     ok(`GPT 는 이 차례에 한도로 막힘 — ${mk}`, mk.includes('GPT 사용량 소진'));
   }
 

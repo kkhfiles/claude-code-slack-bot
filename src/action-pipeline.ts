@@ -530,11 +530,11 @@ export function buildDigestLinkBlocks(d: FlowDigest, links: Record<string, strin
   chunks(shownMain.map(line));
   const shownRejects = rejects.slice(0, Math.max(0, DIGEST_MAX_LINES - shownMain.length));
   if (shownRejects.length) {
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '폐기 제안 — 사유를 보고 확정하거나 다시 엽니다' }] });
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '폐기 제안 — 사유 확인 뒤 확정 또는 다시 열기' }] });
     chunks(shownRejects.map(line));
   }
   const tail: string[] = [];
-  if (need.length) tail.push('결정 버튼은 제안마다 스레드에 있습니다 — 줄을 누르면 그 스레드');
+  if (need.length) tail.push('결정 버튼은 제안마다 스레드에 있음 — 줄을 누르면 그 스레드로 이동');
   const rest = need.length - shownMain.length - shownRejects.length;
   if (rest > 0) tail.push(`그 외 ${rest}건 — <${d.site}/actions/|desk>`);
   for (const s of stuck.slice(0, 5)) tail.push(`⏸ <${links[s.id] || s.url}|${plain(clip(s.title, 80))}> — ${clip(s.text, 120)}`);
@@ -577,7 +577,7 @@ export function buildDigestBlocks(d: FlowDigest): unknown[] | null {
   // 폐기 제안은 뒤로 — 검토가 이미 「하지 말자」고 본 것이라 확정만 하면 된다.
   if (rejects.length && shown < DIGEST_MAX_ITEMS) {
     blocks.push({ type: 'divider' });
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '폐기 제안 — 사유를 보고 확정하거나 다시 엽니다' }] });
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '폐기 제안 — 사유 확인 뒤 확정 또는 다시 열기' }] });
     for (const n of rejects) {
       if (shown >= DIGEST_MAX_ITEMS) break;
       blocks.push(...itemBlocks(n));
@@ -619,7 +619,7 @@ export function buildReportReplyBlocks(
         + (hits.length > REPORT_LINKS_MAX ? ` 외 ${hits.length - REPORT_LINKS_MAX}종` : '')
       : `「${plain(type)}」에 맞는 보고서 종류 없음 · ${home}`;
   }
-  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `📚 ${where} · 새 보고서는 회차가 끝나면 바로 올라옵니다` }] });
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `📚 ${where} · 새 보고서는 회차가 끝나면 바로 올라옴` }] });
   return blocks;
 }
 
@@ -1228,7 +1228,7 @@ export class ActionPipeline {
   /** 버튼 결정. 진행이면 곧바로 차례를 청한다(승인 즉시 실행 · 2026-09-29 사용자 결정). */
   async decide(id: string, decision: string): Promise<{ ok: boolean; note: string; stale?: boolean }> {
     if (!ACTION_ID_RE.test(id) || !(DECISIONS as readonly string[]).includes(decision)) {
-      return { ok: false, note: '⚠️ 버튼 값이 올바르지 않습니다' };
+      return { ok: false, note: '⚠️ 버튼 값 오류' };
     }
     const r = await this.deps.run('report_log', ['decide', id, decision, '--by', 'slack']);
     if (r?.error && r.code === 'state') {
@@ -1236,7 +1236,7 @@ export class ActionPipeline {
       const at = new Date().toTimeString().slice(0, 5);
       return { ok: false, stale: true, note: `⚠️ 이미 「${r.state_label ?? r.state}」 상태 · 바꾸지 않음 · ${at}` };
     }
-    if (!r || r.error) return { ok: false, note: `⚠️ ${r?.error ?? '결정을 기록하지 못했습니다'}` };
+    if (!r || r.error) return { ok: false, note: `⚠️ ${r?.error ?? '결정 기록 실패'}` };
     const label = DECISION_LABEL[decision as Decision];
     const at = new Date().toTimeString().slice(0, 5);
     let tail = '';
@@ -1245,12 +1245,12 @@ export class ActionPipeline {
     if (decision === 'approve' && r.state === 'queued') {
       // 계획이 없던 제안 — 이 결정을 전제로 지금 다시 검토한다(report-log `cmd_decide`).
       void this.request('one', id);
-      tail = ` — 계획이 없어 이 결정으로 다시 검토합니다 · ${where}`;
+      tail = ` — 계획이 없어 이 결정으로 다시 검토 · ${where}`;
     } else if (decision === 'approve') {
       void this.request('run');
-      tail = r.state === 'executing' ? ` — 실행합니다 · ${where}` : ` — 실행 준비를 시작합니다 · ${where}`;
+      tail = r.state === 'executing' ? ` — 실행 · ${where}` : ` — 실행 준비 시작 · ${where}`;
     } else if (decision === 'reopen') {
-      tail = ' — 다음 밤 검토에 다시 올라갑니다';
+      tail = ' — 다음 밤 검토에 다시 올림';
     }
     // 굵게 없이 — 바깥 메시지가 「지금 *…*」으로 감싼다(겹치면 별표가 그대로 보였다 · 2026-10-12 다시 검토)
     await this.markThread(id, `${label} · ${at}`);

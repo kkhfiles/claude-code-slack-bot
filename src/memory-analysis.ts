@@ -212,7 +212,7 @@ export function analysisText(head: string, a: Analysis, results: Record<number, 
   const L = [head];
   if (a.text) L.push(`🧠 ${a.text}`);
   if (a.options.length) {
-    L.push('', '*대안* — 눌러야 실행됩니다');
+    L.push('', '*대안* — 누르면 실행');
     a.options.forEach((o, i) => {
       const gain = o.expectGB !== undefined ? `, 회수 약 ${o.expectGB.toFixed(1)}GB` : '';
       const loss = o.loss ? `, 잃는 것: ${o.loss}` : '';
@@ -224,10 +224,10 @@ export function analysisText(head: string, a: Analysis, results: Record<number, 
 }
 
 const CONFIRM_TEXT: Partial<Record<OptionAction, string>> = {
-  kill: '이 프로세스를 끕니다. 저장 안 한 작업은 사라집니다.',
-  kill_tree: '이 프로세스와 그 자식을 모두 끕니다. 세션이면 터미널의 지난 출력이 사라집니다.',
-  explorer: '창 없는 유령 Explorer 를 정리합니다.',
-  watchers: '끝난 작업의 감시 프로세스를 정리합니다.',
+  kill: '이 프로세스 종료 — 저장 안 한 작업은 사라짐',
+  kill_tree: '이 프로세스와 자식 프로세스 모두 종료 — 세션이면 터미널의 지난 출력이 사라짐',
+  explorer: '창 없는 Explorer 프로세스 정리',
+  watchers: '끝난 작업의 감시 프로세스 정리',
 };
 
 /** 버튼 블록 — 이미 실행한 것과 직접 할 일(manual)은 버튼이 없다 · 끝에 「그대로 둠」 */

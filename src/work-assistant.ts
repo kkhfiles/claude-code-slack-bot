@@ -794,7 +794,7 @@ export async function improvePosted(): Promise<void> {
 export async function improveDecide(id: string, decision: string):
     Promise<{ ok: boolean; note: string; task?: string }> {
   const r = await improveRun(['decide', '--id', id, '--decision', decision], 240_000);
-  return r ?? { ok: false, note: '⚠️ 결정을 기록하지 못했습니다' };
+  return r ?? { ok: false, note: '⚠️ 결정 기록 실패' };
 }
 
 /** `bin/mail.py` 가 내는 스레드 하나. 뜻은 파이썬만 알고 여기서는 나르기만 한다. */
@@ -967,12 +967,12 @@ export async function checkinNow(): Promise<string> {
     const { code, stdout, stderr } = await runTasks(['checkin', '--now', '--slack'], 60_000);
     if (code !== 0) {
       logger.error(`tasks.py checkin --now 실패 (rc=${code})`, (stderr || stdout).trim());
-      return '⚠️ 체크인을 못 만들었습니다 — 노션 연결을 확인하세요.';
+      return '⚠️ 체크인 생성 실패 — 업무 볼트 읽기 확인';
     }
     return stdout.trim();
   } catch (err) {
     logger.error('checkin --now failed', err);
-    return '⚠️ 체크인을 못 만들었습니다 — 노션 연결을 확인하세요.';
+    return '⚠️ 체크인 생성 실패 — 업무 볼트 읽기 확인';
   }
 }
 

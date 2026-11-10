@@ -432,7 +432,7 @@ try {
     ok('완료한 쓰기', p.includes(`- 완료 · Bash · ${CMD1}`));
     ok('결과 모름은 먼저 확인', p.includes(`- 결과 모름 — 먼저 확인 · Bash · ${CMD2}`));
     const mk = markers(s.posts)[0]?.text ?? '';
-    ok(`넘겨받음 줄이 먼저 — ${mk}`, mk.split('\n')[0] === '↪ Claude 가 하다 끊겨 GPT 가 이어서 마무리했습니다(이미 한 것: 2건)'
+    ok(`넘겨받음 줄이 먼저 — ${mk}`, mk.split('\n')[0] === '↪ Claude 중단 — GPT 가 이어서 마무리(이미 한 것 2건)'
       && mk.split('\n')[1]?.startsWith('↪ GPT(gpt-test-sol) 가 답함'));
     eq('Claude 가 썼으면 캡처를 안 버린다(tasks.py 가 닫았다)', bridge.dropped, []);
     eq('결과 — Claude 쓰기 + GPT', [s.sink.outcome, s.sink.writeRan], ['ok', true]);
@@ -754,11 +754,11 @@ try {
     await n.check();
     st.recordOk('claude');
     await n.check();
-    ok(`Claude → GPT — ${posted[0]}`, /^🔁 Claude 사용량 소진\(풀림 .+\) — GPT\(gpt-T-astra\)로 이어 갑니다$/.test(posted[0] ?? ''));
+    ok(`Claude → GPT — ${posted[0]}`, /^🔁 Claude 사용량 소진\(풀림 .+\) — GPT\(gpt-T-astra\)로 이어 감$/.test(posted[0] ?? ''));
     ok(`GPT → 모아 둠 — ${posted[1]}`, (posted[1] ?? '').startsWith('⏸ 모든 엔진 소진'));
     ok(`모아 둠 → GPT 가 풀림: 「회복」이 아니라 지금 모양 — ${posted[2]}`,
-      /^🔁 Claude 사용량 소진\(풀림 .+\) — GPT\(gpt-T-astra\)로 이어 갑니다$/.test(posted[2] ?? ''));
-    eq('Claude 회복', posted.slice(3), ['✅ Claude 회복 — 돌아왔습니다']);
+      /^🔁 Claude 사용량 소진\(풀림 .+\) — GPT\(gpt-T-astra\)로 이어 감$/.test(posted[2] ?? ''));
+    eq('Claude 회복', posted.slice(3), ['✅ Claude 회복']);
     // Claude 가 막힌 채로 폴백을 켬(차례가 모아 둠 → GPT) — GPT 는 막힌 적이 없으니 「GPT 회복」이 아님
     {
       const f2 = path.join(TMP, 'notice-switch.json');
@@ -771,7 +771,7 @@ try {
       await n2.check();
       lad = ['claude', 'codex'];
       await n2.check();
-      ok(`폴백을 켜는 순간 — ${p2[1]}`, /^🔁 Claude 사용량 소진\(풀림 .+\) — GPT\(gpt-T-astra\)로 이어 갑니다$/.test(p2[1] ?? ''));
+      ok(`폴백을 켜는 순간 — ${p2[1]}`, /^🔁 Claude 사용량 소진\(풀림 .+\) — GPT\(gpt-T-astra\)로 이어 감$/.test(p2[1] ?? ''));
       fs.rmSync(f2, { force: true });
     }
     // 폴백이 꺼져 있으면 안 붙은 GPT 를 「이어 갑니다」로 알리지 않는다
@@ -868,7 +868,7 @@ try {
     // 대화 차례 전체 — 도구 뒤 끊김을 넘김(D7)
     const s7 = await scenario({ claude: 'tool-then-more', before: () => writeDrill({ claude: 'usage-after-tool', expiresAt: nowSec() + 600 }) });
     ok('D7 — 넘겨줄 메모에 도구', (s7.codex[0]?.prompt ?? '').includes(`- 완료 · Bash · ${CMD1}`));
-    ok('D7 — 넘겨받음 줄', (markers(s7.posts)[0]?.text ?? '').startsWith('↪ Claude 가 하다 끊겨 GPT 가 이어서 마무리했습니다(이미 한 것: 1건)'));
+    ok('D7 — 넘겨받음 줄', (markers(s7.posts)[0]?.text ?? '').startsWith('↪ Claude 중단 — GPT 가 이어서 마무리(이미 한 것 1건)'));
     // 대화 차례 전체 — 둘 다 막힘(D4)
     const s4 = await scenario({ claude: 'ok', hold: true,
       before: () => writeDrill({ claude: 'usage', codex: 'usage', expiresAt: nowSec() + 600 }) });
@@ -943,7 +943,7 @@ try {
       s = await scenario({ claude: 'limited-after-write' });
       const p = apiCalls()[0]?.prompt ?? '';
       ok('쓰기 뒤 막힘 — API 칸 프롬프트에 이미 한 것', p.includes('이미 한 것') && p.includes(CMD1));
-      ok('쓰기 뒤 막힘 — 표시 줄이 넘겨받은 건수를 말함', allText(s.posts).includes('이어서 마무리했습니다(이미 한 것: 2건)'));
+      ok('쓰기 뒤 막힘 — 표시 줄이 넘겨받은 건수를 말함', allText(s.posts).includes('이어서 마무리(이미 한 것 2건)'));
 
       // 키가 거부됨(401) → 인증 막힘 · GPT · 다음 차례는 건너뜀
       apiScript = 'api-auth';

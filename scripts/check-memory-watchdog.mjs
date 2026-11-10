@@ -186,7 +186,7 @@ const TOP = [
   await wd.checkMemory();
   ok('③ AI 가 고른 브라우저로 종료 예약', wd.pendingKills.has(40) && sent[0].includes('chrome'));
   await new Promise((r) => setTimeout(r, 400));
-  ok(`④ 쏘기 직전 89.4% → 취소 · 안 죽임 (${updated.join(' / ')})`, kills.length === 0 && updated.some((u) => u.includes('압박이 풀려')));
+  ok(`④ 쏘기 직전 89.4% → 취소 · 안 죽임 (${updated.join(' / ')})`, kills.length === 0 && updated.some((u) => u.includes('메모리 압박 해소')));
   wd.stop();
 }
 {

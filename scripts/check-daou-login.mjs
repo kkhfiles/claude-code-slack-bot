@@ -68,9 +68,9 @@ const notifier = new DaouLoginNotifier(
   await new Promise((r) => setTimeout(r, 50));
   await notifier.handleAction('1700000002.000');
   await first;
-  const busy = updated.filter((u) => /이미 로그인 창이 열려/.test(u.text));
+  const busy = updated.filter((u) => /로그인 창이 이미 열려/.test(u.text));
   ok('진행 중에 다시 누르면 「이미 열려 있음」', busy.length === 1, JSON.stringify(updated.slice(-3)));
-  ok('살아 있으면 창 없이 「이미 살아 있음」', updated.some((u) => /이미 살아 있습니다/.test(u.text)));
+  ok('살아 있으면 창 없이 「이미 살아 있음」', updated.some((u) => /이미 살아 있음/.test(u.text)));
 
   // ── 소인 DM 버튼 — 그 앱의 메시지를 고치고, 「곧 끊김」(renew)은 살아 있어도 창을 연다 ──────────
   let logins = 0;
@@ -86,7 +86,7 @@ const notifier = new DaouLoginNotifier(
      JSON.stringify(lunch.at(-1)));
   lunch.length = 0;
   await notifier.handleAction('1800000002.000', { value: 'daou-session', update: lunchUpdate });
-  ok('끊김 버튼 — 그새 살아났으면 창 없이 「이미 살아 있음」', logins === 1 && /이미 살아 있습니다/.test(lunch.at(-1)?.text || ''),
+  ok('끊김 버튼 — 그새 살아났으면 창 없이 「이미 살아 있음」', logins === 1 && /이미 살아 있음/.test(lunch.at(-1)?.text || ''),
      JSON.stringify(lunch));
 
   fs.rmSync(home, { recursive: true, force: true });
