@@ -174,7 +174,7 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   c = fakeClient();
   await submit(c, 'UBOSS', 'C_GENERAL', EDITED, btn2.value);
   ok('닫힌 카드로는 다른 방으로도 못 보낸다 (제출 때 카드를 다시 본다)',
-    !c.posted.some((m) => m.channel === 'C_GENERAL') && c.posted.some((m) => String(m.text).includes('만료됐거나 이미 처리')), c.posted);
+    !c.posted.some((m) => m.channel === 'C_GENERAL') && c.posted.some((m) => String(m.text).includes('만료 또는 이미 처리')), c.posted);
   c = fakeClient();
   await n.offer(c, [{ name: 'notice', text: EDITED }], { user: 'UBOSS', channel: 'DM' });
   const btn2b = buttonOf(c.posted[c.posted.length - 1]);
@@ -188,7 +188,7 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   const btnK = buttonOf(c.posted[0]);
   c = fakeClient();
   await submit(c, 'UBOSS', 'C_TEST', '갈래 대조용 글입니다', btnK.value, 'agenda');
-  ok('창의 갈래가 카드와 다르면 안 나간다', c.posted.every((m) => m.channel !== 'C_TEST') && c.posted.some((m) => String(m.text).includes('만료됐거나')));
+  ok('창의 갈래가 카드와 다르면 안 나간다', c.posted.every((m) => m.channel !== 'C_TEST') && c.posted.some((m) => String(m.text).includes('만료 또는')));
   ok('갈래가 다른 제출은 카드도 지운다 (한 번 쓰는 표)', n.pendingCount() === 0);
   c = fakeClient();
   await submit(c, 'UBOSS', 'C_TEST', '아무 글', 'no-such-id');
@@ -410,8 +410,8 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
       ack: async () => {}, client: cx,
       body: { user: { id: 'UBOSS' }, trigger_id: 'T', actions: [{ value: first }] },
     });
-    ok('닫힌 앞 카드의 버튼을 눌러도 창이 안 열리고 「아무것도 보내지 않았습니다」',
-      cx.opened.length === 0 && cx.posted.some((m) => String(m.text).includes('아무것도 보내지 않았습니다')), cx.posted);
+    ok('닫힌 앞 카드의 버튼을 눌러도 창이 안 열리고 「아무것도 안 보냄」',
+      cx.opened.length === 0 && cx.posted.some((m) => String(m.text).includes('아무것도 안 보냄')), cx.posted);
     const reloaded = make({ logPath: path.join(dir, 'retire.jsonl'), pendingPath: path.join(dir, 'retire-pending.json') });
     ok('재시작해도 닫힌 카드는 안 살아나고, 산 카드는 글 위치(msg)를 들고 있다',
       !reloaded['pending'].has(first) && reloaded['pending'].get(second)?.msg?.ts === '1700000000.000100');
@@ -472,7 +472,7 @@ const buttonOf = (msg) => (msg.blocks || []).flatMap((b) => b.elements || []).fi
   const cardF = c.posted.find((m) => m.channel === 'DM_UBOSS');
   const cardFText = cardF ? JSON.stringify(cardF.blocks) : '';
   ok('주간 제안은 실장 DM 카드가 되고 머리에 누가 어느 방에 말을 꺼내려는지 보인다',
-    cardFText.includes('소인이 놀이 방에 먼저 말을 꺼내려 합니다') && cardFText.includes('팀데이'), cardFText.slice(0, 300));
+    cardFText.includes('소인이 놀이 방에 먼저 꺼낼 말') && cardFText.includes('팀데이'), cardFText.slice(0, 300));
   ok('카드를 띄워도 방에는 아무것도 안 갔다', c.posted.every((m) => m.channel === 'DM_UBOSS') && lunchPosted.length === 0);
   const btnF = buttonOf(cardF);
   c = fakeClient();

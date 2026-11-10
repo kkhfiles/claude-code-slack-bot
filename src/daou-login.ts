@@ -148,7 +148,7 @@ export class DaouLoginNotifier {
 
     const text = [
       '🔴 *다우 세션 만료* — 그룹웨어 적재 멈춤',
-      '버튼을 누르면 *이 PC 에* 로그인 창이 뜹니다 · 5분 안에 계정·비밀번호·보안문자',
+      '버튼을 누르면 *이 PC 에* 로그인 창 표시 · 5분 안에 계정, 비밀번호, 보안문자 입력',
       '급하지 않음 — 나중에 눌러도 그때 상태를 다시 보고 로그인 창을 엶',
     ].join('\n');
     try {
@@ -260,12 +260,12 @@ export class DaouLoginNotifier {
         { cwd: path.join(this.repo, 'mycelium'), timeout: 900_000, windowsHide: true },
       );
       const r = JSON.parse(stdout.trim().split('\n').pop() || '{}');
-      if (r.session_expired) return '⚠️ 적재 단계에서 세션이 다시 만료로 읽혔습니다 — 다음 회차에 확인';
+      if (r.session_expired) return '⚠️ 적재 단계에서 세션이 다시 만료로 읽힘 — 다음 회차에 확인';
       return `적재 새 글 ${r.fetched_new ?? 0}건 · 문서 ${r.ingested_docs ?? 0}건 · 알림 해소`;
     } catch (e) {
       // 적재는 다음 회차가 메운다 — 마커만이라도 걷어 옛 🔴 가 안 남게 한다.
       await this.clearAlert();
-      return `적재는 못 돌렸습니다(${(e as Error).message.slice(0, 80)}) — 다음 회차가 메웁니다 · 알림 해소`;
+      return `적재 실패(${(e as Error).message.slice(0, 80)}) — 다음 회차가 메웁니다 · 알림 해소`;
     }
   }
 

@@ -199,14 +199,14 @@ export class LetterNotice {
       if (!found || !kind || this.expired(found)) {
         this.pending.delete(id);
         this.save();
-        await this.tell(client, user, '이 카드는 만료됐습니다 — *아무것도 보내지 않았습니다.* 다시 말씀해 주세요.');
+        await this.tell(client, user, '카드 만료 — *아무것도 안 보냄* · 다시 말하면 새 카드');
         return;
       }
       try {
         await client.views.open({ trigger_id: (body as any).trigger_id, view: this.confirmView(found, kind) });
       } catch (error) {
         this.logger.warn('확인 창을 못 열었습니다', error);
-        await this.tell(client, user, `확인 창을 열지 못했습니다. 카드의 버튼을 한 번 더 눌러 주세요.\n\`${String(error).slice(0, 200)}\``);
+        await this.tell(client, user, `확인 창 열기 실패 — 카드 버튼 한 번 더 누름\n\`${String(error).slice(0, 200)}\``);
       }
     });
 
@@ -225,8 +225,8 @@ export class LetterNotice {
         try {
           await client.chat.update({
             channel: where.channel, ts: where.ts,
-            text: '버린 카드입니다 — 아무것도 보내지 않았습니다.',
-            blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: '~버린 카드~ — *아무것도 보내지 않았습니다.* 봇이 이 결과를 기억합니다.' }] }],
+            text: '버린 카드 — 아무것도 안 보냄',
+            blocks: [{ type: 'context', elements: [{ type: 'mrkdwn', text: '~버린 카드~ — *아무것도 안 보냄* · 봇이 이 결과를 기억함' }] }],
           });
         } catch (error) {
           this.logger.warn('버린 카드 글을 못 고쳤습니다', error);
@@ -240,17 +240,17 @@ export class LetterNotice {
       const to = view.state.values[BLOCK_TO]?.[BLOCK_TO]?.selected_option?.value ?? '';
       const text = (view.state.values[BLOCK_TEXT]?.[BLOCK_TEXT]?.value ?? '').trim();
       if (!to) {
-        await ack({ response_action: 'errors', errors: { [BLOCK_TO]: '올릴 방을 고르세요.' } });
+        await ack({ response_action: 'errors', errors: { [BLOCK_TO]: '올릴 방 선택 필요' } });
         return;
       }
       if (!text) {
-        await ack({ response_action: 'errors', errors: { [BLOCK_TEXT]: '빈 글은 보내지 않습니다.' } });
+        await ack({ response_action: 'errors', errors: { [BLOCK_TEXT]: '빈 글은 안 보냄' } });
         return;
       }
       if (text.length > MAX_LEN) {
         await ack({
           response_action: 'errors',
-          errors: { [BLOCK_TEXT]: `${MAX_LEN}자까지만 됩니다 (지금 ${text.length}자).` },
+          errors: { [BLOCK_TEXT]: `${MAX_LEN}자까지만 가능 (지금 ${text.length}자)` },
         });
         return;
       }
@@ -271,7 +271,7 @@ export class LetterNotice {
       const room = kind?.rooms.find((r) => r.id === to);
       if (!kind || !room) {
         this.logger.warn(`목록에 없는 갈래(${meta.kind})나 방(${to}) — 보내지 않습니다`);
-        await this.tell(client, body.user.id, '목록에 없는 방이라 *아무것도 보내지 않았습니다.*');
+        await this.tell(client, body.user.id, '목록에 없는 방 — *아무것도 안 보냄*');
         return;
       }
       // **제출할 때 카드를 다시 본다** — 창을 미리 열어 두고 카드가 만료·소진된 뒤에 눌러도 나가면
@@ -281,7 +281,7 @@ export class LetterNotice {
       if (!found || found.kind !== meta.kind || this.expired(found)) {
         if (meta.id) { this.pending.delete(meta.id); this.save(); }
         this.logger.warn(`카드가 없거나 만료됨(${meta.id}) — 보내지 않습니다`);
-        await this.tell(client, body.user.id, '이 카드는 만료됐거나 이미 처리됐습니다 — *아무것도 보내지 않았습니다.* 다시 말씀해 주세요.');
+        await this.tell(client, body.user.id, '카드 만료 또는 이미 처리됨 — *아무것도 안 보냄* · 다시 말하면 새 카드');
         return;
       }
       this.pending.delete(found.id);
@@ -292,7 +292,7 @@ export class LetterNotice {
         if (why) {
           this.logger.warn(`보내기 직전 빗장에 막힘 — ${why}`);
           this.logProposal({ ev: 'blocked', id: found.id, at: new Date().toISOString() });
-          await this.tell(client, body.user.id, `:no_entry_sign: 고친 글이 *빗장에 막혔습니다* — ${why}\n_아무것도 안 나갔습니다. 카드는 닫혔으니 다시 말씀해 주세요._`);
+          await this.tell(client, body.user.id, `:no_entry_sign: 고친 글이 *빗장에 막힘* — ${why}\n_아무것도 안 나감 · 카드는 닫힘, 다시 말하면 새 카드_`);
           return;
         }
       }
@@ -301,7 +301,7 @@ export class LetterNotice {
         // 받아들이는 갈래(목표) — 방에 안 올린다. 이력에 적으면 파이썬이 다음 턴에 그 방 맡은 일로 옮긴다.
         this.logProposal({ ev: 'accepted', id: found.id, at: new Date().toISOString(), edited, room: room.id, text });
         this.logger.info(`${kind.title} 받아들임 → ${room.label} (${text.length}자)`);
-        await this.tell(client, body.user.id, `정했습니다 · ${room.label} — 다음 턴부터 이 목표로 움직입니다.\n> ${text.slice(0, 200).replace(/\n/g, '\n> ')}`);
+        await this.tell(client, body.user.id, `정함 · ${room.label} — 다음 턴부터 이 목표로 움직임\n> ${text.slice(0, 200).replace(/\n/g, '\n> ')}`);
         return;
       }
       if (await this.send(client, body.user.id, meta.kind || '', kind, room, text)) {
@@ -351,7 +351,7 @@ export class LetterNotice {
         const why = await this.guard(client, text, kind.guard);
         if (why) {
           this.logger.warn(`카드 만들기 전 빗장에 막힘 — ${why}`);
-          await this.tell(client, this.opts.managerUserId, `:no_entry_sign: ${kind.title} 글이 *빗장에 막혀 카드를 안 만들었습니다* — ${why}`);
+          await this.tell(client, this.opts.managerUserId, `:no_entry_sign: ${kind.title} 글이 *빗장에 막혀 카드 안 만듦* — ${why}`);
           continue;
         }
       }
@@ -389,10 +389,10 @@ export class LetterNotice {
     const rooms = kind.rooms.map((r) => r.label).join(' · ');
     const shown = item.text.length > 600 ? `${item.text.slice(0, 600)}…` : item.text;
     const where = item.room ? kind.rooms.find((r) => r.id === item.room)?.label : '';
-    const lead = kind.speaker ? `*${kind.speaker}이 ${where || '방'}에 먼저 말을 꺼내려 합니다.*` : `*${kind.ask}*`;
+    const lead = kind.speaker ? `*${kind.speaker}이 ${where || '방'}에 먼저 꺼낼 말*` : `*${kind.ask}*`;
     const head = alt
-      ? `${lead} 후보 ${alt.n}/${alt.of} — *하나만* 골라 보내세요. 나머지는 그냥 두면 하루 뒤 만료됩니다.`
-      : `${lead} 아직 아무 데도 안 나갔습니다.`;
+      ? `${lead} 후보 ${alt.n}/${alt.of} — *하나만* 골라 보냄 · 나머지는 두면 하루 뒤 만료`
+      : `${lead} 아직 아무 데도 안 나감`;
     try {
       const im = await client.conversations.open({ users: this.opts.managerUserId });
       if (!im.channel?.id) throw new Error('DM 방을 못 열었습니다');
@@ -423,10 +423,10 @@ export class LetterNotice {
             elements: [{
               type: 'mrkdwn',
               text: kind.accept
-                ? `창에서 고쳐 「${kind.submitLabel ?? '보내기'}」를 누르면 정해집니다(방에는 안 나갑니다). `
-                  + '「버리기」나 그냥 두기(하루 뒤 만료) — 어느 쪽이든 봇이 결과를 기억하고 고쳐 다시 가져옵니다.'
-                : `창에서 방(${rooms})을 고르고 글을 고칠 수 있습니다. 「보내기」를 눌러야 나갑니다. `
-                  + '안 올리려면 「버리기」나 그냥 두세요(하루 뒤 만료) — 봇이 결과를 기억합니다.',
+                ? `창에서 고쳐 「${kind.submitLabel ?? '보내기'}」를 누르면 정해짐(방에는 안 나감) · `
+                  + '「버리기」나 그냥 두기(하루 뒤 만료) — 어느 쪽이든 봇이 결과를 기억하고 고쳐 다시 가져옴'
+                : `창에서 방(${rooms})을 고르고 글 수정 가능 · 「보내기」를 눌러야 나감 · `
+                  + '안 올리려면 「버리기」나 그냥 두기(하루 뒤 만료) — 봇이 결과를 기억함',
             }],
           },
         ],
