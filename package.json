@@ -77,6 +77,7 @@
     "check:singlemsg": "node scripts/check-single-message.mjs",
     "check:issuesummary": "node scripts/check-issue-summary.mjs",
     "check:recurring": "node scripts/check-recurring.mjs",
+    "check:rearm": "node scripts/check-rearm.mjs",
     "check:timerdirect": "node scripts/check-timer-direct.mjs",
     "check:timernames": "node scripts/check-timer-names.mjs",
     "check:schedgaps": "node scripts/check-scheduled-gaps.mjs",

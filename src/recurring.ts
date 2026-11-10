@@ -222,6 +222,27 @@ export function once(opts: { name: string; ms: number; run: () => unknown; unref
   };
 }
 
+interface ConfigState { at: string; ok: boolean; code?: string }
+let configLoad: ConfigState | undefined;
+
+/**
+ * 설정을 읽은 결과를 남긴다 — 실패하면 앞 설정과 예약을 그대로 두므로 겉으로는 멀쩡해 보인다.
+ * 점검기가 상태 파일의 `config` 로 「설정 읽기 실패」를 본다. `code` 는 정해진 글자만 담는다.
+ */
+export function noteConfig(ok: boolean, code?: string): void {
+  try {
+    configLoad = { at: new Date().toISOString(), ok, ...(ok ? {} : { code: safe(code) ?? 'other' }) };
+    touch();
+  } catch {
+    // 기록은 던지지 않는다
+  }
+}
+
+/** 마지막 설정 읽기 결과 — 검사가 본다. */
+export function configState(): Readonly<ConfigState> | undefined {
+  return configLoad ? { ...configLoad } : undefined;
+}
+
 /** 운영 진입점(`index.ts`)만 부른다. 부르지 않으면 상태 파일을 쓰지 않는다. */
 export function setStatusFile(file: string | null): void {
   if (file) keepPrevious(file);
@@ -264,6 +285,7 @@ export function snapshot(): Record<string, Readonly<Entry>> {
 /** 검사 전용 — 기록을 비운다. */
 export function resetForTest(): void {
   entries.clear();
+  configLoad = undefined;
   statusFile = null;
   lastWrite = 0;
   dirty = false;
@@ -290,6 +312,7 @@ function write(now: number): void {
       pid: process.pid,
       bootAt,
       writtenAt: new Date(now).toISOString(),
+      ...(configLoad ? { config: configLoad } : {}),
       tasks: snapshot(),
     }, null, 1);
     fs.mkdirSync(path.dirname(file), { recursive: true });

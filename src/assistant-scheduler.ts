@@ -28,7 +28,7 @@ export function withSena(rules: string): string {
 }
 import { engineState } from './engine-state';
 import { codexQuota } from './codex-quota';
-import { every, once, type RunFailure, type Task } from './recurring';
+import { every, noteConfig, once, type RunFailure, type Task } from './recurring';
 import { dmFallbackOn, dmLadder } from './dm-fallback';
 import { isHeldOutcome, READ_ONLY_TOOLS, type TurnOutcome } from './turn-outcome';
 import { buildImproveBlocks, improveEnabled, improvePreviewText,
@@ -1212,21 +1212,90 @@ export class AssistantScheduler {
   // --- Config management ---
 
   private loadConfig(): void {
+    if (!fs.existsSync(this.configPath)) {
+      this.logger.warn('Assistant config not found', { path: this.configPath });
+      return;
+    }
+    const next = this.readConfig();
+    if ('code' in next) return;
+    this.config = next.config;
+    noteConfig(true);
+    this.logger.info('Loaded assistant config', {
+      briefingTime: next.config.briefing.time,
+      reminderEnabled: next.config.reminders.enabled,
+      analysisSchedule: next.config.analysis.schedule,
+    });
+  }
+
+  /**
+   * 설정 파일을 읽어 검사한다 — **받아들이지는 않는다.** 실패하면 알리고 상태 파일에 남긴다.
+   * 검사는 `scheduleAll` 이 바로 읽는 묶음만 본다 — 형식은 맞고 묶음이 빠진 설정(2026-03-25 모양)이
+   * `scheduleAll` 에서 던져 봇이 끝나던 것.
+   */
+  private readConfig(): { config: AssistantConfig } | { code: string } {
+    let code: string;
+    let why: string;
     try {
-      if (fs.existsSync(this.configPath)) {
-        const raw = fs.readFileSync(this.configPath, 'utf-8');
-        this.config = JSON.parse(raw);
-        this.logger.info('Loaded assistant config', {
-          briefingTime: this.config?.briefing.time,
-          reminderEnabled: this.config?.reminders.enabled,
-          analysisSchedule: this.config?.analysis.schedule,
-        });
-      } else {
-        this.logger.warn('Assistant config not found', { path: this.configPath });
-      }
+      const raw = JSON.parse(fs.readFileSync(this.configPath, 'utf-8'));
+      const bad = AssistantScheduler.configProblem(raw);
+      if (!bad) return { config: raw as AssistantConfig };
+      [code, why] = bad;
     } catch (error) {
-      errorCollector.add('AssistantScheduler', `설정 파일 로드 실패: ${(error as Error).message}`);
-      this.logger.error('Failed to load assistant config', error);
+      code = error instanceof SyntaxError ? 'bad-json' : 'read-failed';
+      why = (error as Error).message;
+    }
+    noteConfig(false, code);
+    errorCollector.add('AssistantScheduler', `설정 파일 로드 실패: ${why}`);
+    this.logger.error('Failed to load assistant config', { code, why });
+    return { code };
+  }
+
+  private static configProblem(c: any): [string, string] | null {
+    const isObj = (v: unknown) => typeof v === 'object' && v !== null && !Array.isArray(v);
+    if (!isObj(c)) return ['not-object', '설정이 객체가 아님'];
+    for (const k of ['briefing', 'reminders', 'analysis'] as const) {
+      if (!isObj(c[k])) return [`missing-${k}`, `「${k}」 묶음이 없음`];
+    }
+    if (typeof c.briefing.time !== 'string' || !/^\d{1,2}:\d{2}$/.test(c.briefing.time)) {
+      return ['bad-briefing-time', `briefing.time 이 HH:MM 이 아님(${String(c.briefing.time)})`];
+    }
+    if (!isObj(c.analysis.types)) return ['missing-analysis-types', '「analysis.types」 묶음이 없음'];
+    return null;
+  }
+
+  /**
+   * 설정 파일이 바뀌었을 때 — **새 설정이 검사를 통과할 때만** 지우고 다시 건다. 검사에서 떨어지면
+   * 지금 설정과 예약을 그대로 둔다(예전에는 먼저 다 지우고 읽다 던져 봇이 끝났다). 검사를 통과했는데
+   * 거는 중에 던지면 앞 설정으로 되돌려 다시 건다.
+   */
+  private reloadConfig(): void {
+    if (!fs.existsSync(this.configPath)) {
+      this.logger.warn('Assistant config not found — 지금 설정 유지', { path: this.configPath });
+      return;
+    }
+    const next = this.readConfig();
+    if ('code' in next) {
+      this.logger.warn('새 설정이 검사에서 떨어져 지금 설정과 예약을 유지합니다', { code: next.code });
+      return;
+    }
+    const prev = this.config;
+    this.clearAllTimers();
+    this.config = next.config;
+    try {
+      this.scheduleAll();
+      noteConfig(true);
+      this.logger.info('Loaded assistant config', {
+        briefingTime: next.config.briefing.time,
+        reminderEnabled: next.config.reminders.enabled,
+        analysisSchedule: next.config.analysis.schedule,
+      });
+    } catch (error) {
+      noteConfig(false, 'schedule-threw');
+      errorCollector.add('AssistantScheduler', `새 설정으로 예약을 걸다 실패해 앞 설정으로 되돌림: ${(error as Error).message}`);
+      this.logger.error('새 설정으로 예약을 걸다 실패해 앞 설정으로 되돌립니다', error);
+      this.clearAllTimers();
+      this.config = prev;
+      this.scheduleAll();
     }
   }
 
@@ -1247,9 +1316,7 @@ export class AssistantScheduler {
         if (this.watchDebounceTimer) clearTimeout(this.watchDebounceTimer);
         this.watchDebounceTimer = setTimeout(() => {
           this.logger.info('Config file changed, reloading');
-          this.clearAllTimers();
-          this.loadConfig();
-          this.scheduleAll();
+          this.reloadConfig();
         }, 1000);
       });
       this.logger.info('Started config file watcher');
