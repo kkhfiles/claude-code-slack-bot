@@ -1043,7 +1043,7 @@ try {
   // ================================================================ ⑯ 판 번호를 소스에 적지 않는다
   {
     const SRC = path.join(ROOT, 'src');
-    const VERSION = /gpt-\d|GPT-\d|claude-(opus|sonnet|haiku)-\d|\b(Opus|Sonnet|Haiku) \d|Gemini \d+(\.\d+)?\s*(Flash|Pro|Ultra)|gemini-\d|\d\.\d+ Flash/;
+    const VERSION = /gpt-\d|GPT-\d|claude-(opus|sonnet|haiku|fable|mythos)-\d|\b(Opus|Sonnet|Haiku|Fable|Mythos) \d|Gemini \d+(\.\d+)?\s*(Flash|Pro|Ultra)|gemini-\d|\d\.\d+ Flash/;
     // 허용 — 표를 못 읽을 때의 기본값 상수 둘(환경 변수가 이기고 대응표가 그다음)뿐. 이 밖의 새 글자는 실패.
     const ALLOWED = [
       /^const NARROW_CODEX_MODEL = '[^']+';/,
