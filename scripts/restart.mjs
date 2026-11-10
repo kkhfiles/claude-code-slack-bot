@@ -210,6 +210,12 @@ const DUE_SOON_MS = 2 * 60_000;
 const DUE_JUST_MS = 60_000;
 /** 「실행 중」 기록이 이보다 오래면 멈춘 것으로 보고 막지 않는다 — 점검기의 「오래 돎」(시각 예약 60분)과 같은 값. */
 const RUNNING_STALE_MS = 60 * 60_000;
+/**
+ * 분석 그룹은 따로 둔다 — 점검기 `pc-jobs.py` 의 `ANALYSIS_LONG_S` 와 같은 값(2026-11-10 봇 로그 실측:
+ * 하루 그룹 41~69분, 토요 그룹 103~176분). 앞에서부터 처음 맞는 이름 앞부분을 쓴다.
+ */
+const ANALYSIS_STALE_MS = [['scheduler:analysis:saturday', 4 * 60 * 60_000], ['scheduler:analysis:', 90 * 60_000]];
+const staleLimit = (name) => ANALYSIS_STALE_MS.find(([p]) => name.startsWith(p))?.[1] ?? RUNNING_STALE_MS;
 
 /**
  * 도는 중이거나 예정 `DUE_SOON_MS` 안인 시각 예약(`once`) — 반복 타이머 상태 파일(`recurring.ts`)을 읽는다.
@@ -226,9 +232,9 @@ function busyOnceTimers(botPid) {
   const now = Date.now();
   return Object.entries(state.tasks || {})
     .filter(([, t]) => t?.kind === 'once')
-    .filter(([, t]) => {
+    .filter(([name, t]) => {
       const since = Date.parse(t.runningSince || '');
-      if (t.running > 0 && Number.isFinite(since) && now - since < RUNNING_STALE_MS) return true;
+      if (t.running > 0 && Number.isFinite(since) && now - since < staleLimit(name)) return true;
       const due = Date.parse(t.dueAt || '');
       if (!Number.isFinite(due)) return false;
       if (t.live > 0 && due >= now && due - now <= DUE_SOON_MS) return true;

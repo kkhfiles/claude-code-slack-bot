@@ -231,10 +231,24 @@ const oldPid = run(timerEnv(timerState('t-oldpid', {
 if (oldPid.code !== 0) fails.push('지금 봇이 아닌 옛 pid 의 상태 파일로 재시작을 막는다');
 const forcedTimer = run(timerEnv(timerState('t-force', { 'scheduler:summary': { ...ONCE, dueAt: soon(60_000) } })), ['--force']);
 if (forcedTimer.code !== 0) fails.push('예정 직전 시각 예약이 있을 때 --force 로도 못 지나간다');
-// ⑦-b 60분 넘게 「실행 중」인 기록은 막지 않는다 — 끝나지 않는 Promise 하나가 SDK 판 맞춤의 재시작까지 영영 막는다
+// ⑦-b 기준보다 오래 「실행 중」인 기록은 막지 않는다 — 끝나지 않는 Promise 하나가 SDK 판 맞춤의 재시작까지 영영 막는다
+//    기준은 점검기의 「오래 돎」과 같다 — 시각 예약 60분, 하루 분석 그룹 90분, 토요 분석 그룹 4시간
 const staleRun = run(timerEnv(timerState('t-stale', {
-  'scheduler:analysis:daily-12:00': { ...ONCE, live: 0, running: 1, runningSince: ago(90 * 60_000) } })));
-if (staleRun.code !== 0) fails.push('90분째 「실행 중」으로 남은 기록으로 재시작을 막는다 — 멈춘 것으로 봐야 한다');
+  'scheduler:analysis:daily-12:00': { ...ONCE, live: 0, running: 1, runningSince: ago(100 * 60_000) } })));
+if (staleRun.code !== 0) fails.push('100분째 「실행 중」으로 남은 하루 분석 기록으로 재시작을 막는다 — 멈춘 것으로 봐야 한다');
+const staleOnce = run(timerEnv(timerState('t-stale-once', {
+  'scheduler:summary': { ...ONCE, live: 0, running: 1, runningSince: ago(65 * 60_000) } })));
+if (staleOnce.code !== 0) fails.push('65분째 「실행 중」으로 남은 요약 기록으로 재시작을 막는다 — 멈춘 것으로 봐야 한다');
+// ⑦-b2 분석 그룹은 60분을 넘겨도 돈다 — 봇 로그 10/27~11/10 하루 그룹 18회 중 9회가 60분 넘음(최장 69분), 토요 그룹 103~176분
+const longDaily = run(timerEnv(timerState('t-long-daily', {
+  'scheduler:analysis:daily-22:00': { ...ONCE, live: 0, running: 1, runningSince: ago(65 * 60_000) } })));
+if (longDaily.code === 0) fails.push('하루 분석 그룹이 65분째 도는데 멈춘 것으로 보고 재시작한다 — 회차 끝부분이 끊긴다');
+const longSat = run(timerEnv(timerState('t-long-sat', {
+  'scheduler:analysis:saturday-00:00': { ...ONCE, live: 0, running: 1, runningSince: ago(3 * 60 * 60_000) } })));
+if (longSat.code === 0) fails.push('토요 분석 그룹이 3시간째 도는데 멈춘 것으로 보고 재시작한다');
+const staleSat = run(timerEnv(timerState('t-stale-sat', {
+  'scheduler:analysis:saturday-00:00': { ...ONCE, live: 0, running: 1, runningSince: ago(250 * 60_000) } })));
+if (staleSat.code !== 0) fails.push('250분째 「실행 중」으로 남은 토요 분석 기록으로 재시작을 막는다');
 // ⑦-c 예정이 막 지났는데 시작 기록이 아직 없으면 막는다 — 상태 파일은 30초 간격으로 써서 방금 시작한 회차가 늦게 보인다
 const justDue = run(timerEnv(timerState('t-justdue', {
   'scheduler:summary': { ...ONCE, dueAt: ago(20_000), lastStart: ago(86_400_000) } })));
