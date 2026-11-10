@@ -42,6 +42,11 @@ try {
   fs.utimesSync(path.join(acts, "a-1.md"), tc - 10, tc - 10);
   eq('판정 — 폴더 안 파일이 카드 뒤에 바뀌면 낡음', mc.ledgerVerdict(path.join(DIR, 'card.txt')).startsWith('답 대기 판정 — 카드가 낡음'), true);
   eq('판정 — 카드에 붙음', mc.readCard(path.join(DIR, 'card.txt')).split('\n').pop().startsWith('답 대기 판정'), true);
+  // 11/10 「좁힘」 — 표시 파일은 시각이 지나 창 밖으로 빠지는 것을 모른다. 카드 옆 until 이 지나면 원천이 그대로여도 낡음
+  fs.utimesSync(path.join(acts, "a-1.md"), tc - 100, tc - 100);
+  fs.writeFileSync(path.join(DIR, 'card.json'), JSON.stringify({ at: tc - 50, ledger: [led, acts], until: tc + 60 }), 'utf-8');
+  eq('판정 — 빠질 시각 전이면 그대로', mc.ledgerVerdict(path.join(DIR, 'card.txt')).startsWith('답 대기 판정 — 카드 그대로'), true);
+  eq('판정 — 빠질 시각이 지나면 낡음', mc.ledgerVerdict(path.join(DIR, 'card.txt'), (tc + 61) * 1000).startsWith('답 대기 판정 — 카드가 낡음(세션 결정이'), true);
   fs.writeFileSync(path.join(DIR, 'card.json'), '{', 'utf-8');
   eq('판정 — 옆 파일이 깨지면 줄 없이 카드만', mc.readCard(path.join(DIR, 'card.txt')), '[세나 기억 카드 11/06 19:00 기준 — 앞 카드를 대체]\n답 대기 1건');
   fs.rmSync(path.join(DIR, 'card.json'));

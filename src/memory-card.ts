@@ -54,12 +54,18 @@ const hms = (ms: number) => new Date(ms + 9 * 3600_000).toISOString().slice(11, 
  * --write` 가 씀)을 읽어, 차례 시작 때 원천의 가장 늦은 수정 시각과 맞댄다. 장부가 카드 뒤에 바뀌었으면 「낡음」. 세나 정체성이
  * 이 줄을 따라 「카드 그대로」면 도구 없이 답한다(먼저 조회하면 그 질문마다 2.4초 늦었다). 옆 파일을 못 읽으면 줄을 안 붙이고,
  * 그때 세나는 예전처럼 `pending` 을 돈다.
+ *
+ * `until`(11/10 실장님 「좁힘」) — 세션 결정은 장부 대신 「열린 결정이 바뀔 때만 고치는 표시 파일」을 원천으로 보는데, 사흘 창
+ * 밖으로 빠지는 것은 시각이라 그 파일이 안 바뀐다. 카드에 실린 세션 결정 중 가장 먼저 빠지는 시각이 지났으면 낡음으로 본다.
  */
-export function ledgerVerdict(file: string = cardFile()): string {
+export function ledgerVerdict(file: string = cardFile(), now: number = Date.now()): string {
   try {
-    const meta = JSON.parse(fs.readFileSync(file.replace(/\.txt$/, '.json'), 'utf-8')) as { at?: number; ledger?: string[] };
+    const meta = JSON.parse(fs.readFileSync(file.replace(/\.txt$/, '.json'), 'utf-8')) as { at?: number; ledger?: string[]; until?: number };
     if (typeof meta.at !== 'number' || !Array.isArray(meta.ledger)) return '';
     const at = meta.at * 1000;
+    if (typeof meta.until === 'number' && now > meta.until * 1000) {
+      return `답 대기 판정 — 카드가 낡음(세션 결정이 ${hms(meta.until * 1000)}에 사흘 창 밖으로 빠짐): pending 을 돌려 그 목록으로 답함`;
+    }
     const last = latestMtime(meta.ledger);
     if (last === null) return '';
     return last > at
