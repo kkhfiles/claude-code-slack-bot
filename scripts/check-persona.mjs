@@ -47,8 +47,8 @@ try {
   const note = personaNote(repo, humor);
   eq('정체성 글이 맨 앞 제목 뒤에 실림', note.includes('세나는 실장님 한 사람의 개인 비서다.'), true);
   // 값은 시스템 프롬프트에 안 둔다(2026-11-06) — 이어 가는 세션은 그것을 첫 차례 것으로 고정한다. 말 끝 줄이 값을 싣는다
-  eq('슬랙 정체성에는 유머 값이 안 실림(말 끝 줄을 가리킴)', !note.includes('지금 유머 값: 20') && note.includes('「[지금 유머 값: N]」'), true);
-  eq('말 끝 유머 값 줄', humorValueLine(humor), '[지금 유머 값: 20]');
+  eq('슬랙 정체성에는 유머 값이 안 실림(말 끝 줄을 가리킴)', !note.includes('지금 Tension 값: 20') && note.includes('「[지금 Tension 값: N]」'), true);
+  eq('말 끝 유머 값 줄', humorValueLine(humor), '[지금 Tension 값: 20]');
   eq('업무 비서 레포가 없으면 빈 글', personaNote(null, humor), '');
   eq('정체성 파일이 없으면 빈 글', personaNote(path.join(DIR, 'none'), humor), '');
 
@@ -73,7 +73,7 @@ try {
   // 정해진 형식을 만드는 차례(2026-11-02 결정 F 「전부」) — 형식이 위트보다 앞선다
   const out = personaNote(repo, humor, 'output');
   eq('형식 차례에는 형식 우선 안내', out.includes('출력 형식은 아래 지시가 정한다') && !out.includes('슬랙에서 이 정체성을'), true);
-  eq('형식 차례에도 유머 값', out.includes('지금 유머 값: 20'), true);
+  eq('형식 차례에도 유머 값', out.includes('지금 Tension 값: 20'), true);
   const sched = fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8');
   eq('카드 요약, 개선 제안, 집중 줄, 아침 브리핑 — 네 곳에 정체성', (sched.match(/appendSystemPrompt: withSena\(/g) || []).length, 4);
   eq('좁은 길은 규칙 글을 읽는 자리에서 정체성을 붙임(1차와 폴백이 같은 글)', /const rulesText = withSena\(fs\.readFileSync\(rules/.test(sched), true);
@@ -81,9 +81,16 @@ try {
   // 차례 끝 유머 상기(2026-11-05) — 값마다 눈금, 0 과 끄는 문에서는 빈 글, 사람 DM 과 서랍 차례의 말 끝에만
   fs.writeFileSync(humor, JSON.stringify({ humor: 100 }), 'utf-8');
   const r100 = humorReminder(humor);
-  eq('유머 100 상기 — 블록 제목도 농담, 길이 고정, 새 사실 금지', r100.includes('[유머 100]') && r100.includes('블록 제목도 농담')
+  eq('유머 100 상기 — 블록 제목도 농담, 길이 고정, 새 사실 금지', r100.includes('[Tension 100]') && r100.includes('블록 제목도 농담')
     && r100.includes('줄을 더하지 않는다') && r100.includes('새 사실은 농담에도 넣지 않는다'), true);
   eq('유머 100 상기 — 서랍 facts 칸은 건조하게(시안 04c)', r100.includes('facts 칸만 건조하게'), true);
+  // 11/10 실장님 「지금 100이 80 정도, 진짜 100이면 더 까불어도 된다」 — 100 은 수다처럼 풀고, 옛 100 은 80 으로
+  eq('Tension 100 상기 — 말투를 수다처럼, 존댓말은 그대로', r100.includes('친한 동료의 수다') && r100.includes('존댓말은 그대로'), true);
+  fs.writeFileSync(humor, JSON.stringify({ humor: 80 }), 'utf-8');
+  const r80 = humorReminder(humor);
+  eq('Tension 80 상기 — 옛 100(일부러 과하게), 수다는 아님', r80.includes('일부러 과하게') && !r80.includes('수다'), true);
+  fs.writeFileSync(humor, JSON.stringify({ humor: 65 }), 'utf-8');
+  eq('Tension 65 상기 — 매번 말맛', humorReminder(humor).includes('첫 줄부터 매번 말맛'), true);
   fs.writeFileSync(humor, JSON.stringify({ humor: 50 }), 'utf-8');
   eq('유머 50 상기 — 어울릴 때 한 마디', humorReminder(humor).includes('어울릴 때 한 마디'), true);
   fs.writeFileSync(humor, JSON.stringify({ humor: 0 }), 'utf-8');

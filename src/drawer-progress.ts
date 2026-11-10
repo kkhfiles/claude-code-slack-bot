@@ -17,7 +17,7 @@ const COMMANDS: Array<[RegExp, string]> = [
   [/mail\.py/, '메일 보는 중'],
   [/cal\.py/, '달력 보는 중'],
   [/sena_mycelium\.py|mycelium/i, 'Mycelium 보는 중'],
-  [/sena_humor\.py/, '유머 설정 바꾸는 중'],
+  [/sena_humor\.py/, 'Tension 설정 바꾸는 중'],
   [/llm_playbook\.credits/, '크레딧 장부 보는 중'],
   [/\bgit\b/, '저장소 기록 보는 중'],
   [/\bgh\b/, 'GitHub 보는 중'],
