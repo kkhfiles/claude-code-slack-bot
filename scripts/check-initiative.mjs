@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const { LetterInitiative, lastWeekMonday, mondayOf } = await import('../dist/letter-initiative.js');
+const { LetterInitiative, lastWeekMonday, mondayOf, setWeeklyDir } = await import('../dist/letter-initiative.js');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'check-initiative-'));
 const script = path.join(dir, 'fake_pulse.py');
@@ -432,6 +432,59 @@ ok('방도 방 여럿도 없으면 꺼진다', make({ room: undefined, rooms: []
   const wires = [...src.matchAll(/initiate:\s*\(([^)]*)\)\s*=>[\s\S]{0,80}?\.initiate\(([^)]*)\)/g)];
   ok('실제 연결부(slack-handler.ts)가 둘 다 넷째 칸(extra)을 받아 그대로 넘긴다',
     wires.length >= 2 && wires.every((m) => /extra/.test(m[1]) && /extra/.test(m[2])), wires.map((m) => m[0].slice(0, 80)));
+}
+
+// ── 주간 판단 결과 기록 — 바깥 점검이 「창이 닫힐 때까지 성공 없음」을 본다(2부 5번 · 2026-11-11) ──────────
+// 시각 예약 상태 파일은 창 밖에서 `not-time` 만 남고, 상태 파일은 깨진 턴에도 그 주를 표시해 둘 다 못 가른다.
+{
+  const wdir = path.join(dir, 'weekly');
+  const read = (role = 'letter') => {
+    try { return JSON.parse(fs.readFileSync(path.join(wdir, `bot-weekly-${role}.json`), 'utf-8')); } catch { return null; }
+  };
+  {
+    const { it } = make();
+    await it.tick(fakeClient(), MON);
+    ok('진입점이 폴더를 안 정하면 결과를 안 남긴다 — 검사가 실제 상태 폴더에 안 쓰게', read() === null);
+  }
+  setWeeklyDir(wdir);
+  {
+    process.env.FAKE_PULSE_FAIL = '1';
+    const { it } = make();
+    await it.tick(fakeClient(), MON);
+    ok('현황판 실패는 그날 no-brief 로 적힌다', read()?.days?.['2026-09-21']?.outcome === 'no-brief', read());
+    delete process.env.FAKE_PULSE_FAIL;
+    await it.tick(fakeClient(), new Date(2026, 8, 21, 13, 1));
+    const w = read();
+    ok('다음 분에 성공하면 같은 날을 proposed 로 덮고, 시각과 창 길이도 함께 남긴다',
+      w?.days?.['2026-09-21']?.outcome === 'proposed' && w.at === '13:00' && w.windowMin === 120, w);
+    await it.tick(fakeClient(), new Date(2026, 8, 22, 13, 0));
+    ok('기한 확인(wake) 날은 안 남긴다', !read()?.days?.['2026-09-22'], read());
+  }
+  {
+    const host = fakeHost();
+    host.initiate = async () => ({ reply: '', error: '모델 응답 없음' });
+    const { it } = make({ role: 'lunch' }, host);
+    await it.tick(fakeClient(), MON);
+    ok('주간 턴이 깨지면 error 로 남는다(그 주는 다시 안 돌므로 점검기만 알 수 있다) · 역할마다 다른 파일',
+      read('lunch')?.days?.['2026-09-21']?.outcome === 'error', read('lunch'));
+  }
+  {
+    const host = fakeHost();
+    host.initiate = async () => { throw new Error('던짐'); };
+    const { it } = make({ role: 'thrown' }, host);
+    let threw = false;
+    try { await it.tick(fakeClient(), MON); } catch { threw = true; }
+    const w = read('thrown');
+    ok('주간 턴이 던져도 error 로 남기고 던짐은 그대로', w?.days?.['2026-09-21']?.outcome === 'error', { threw, w });
+  }
+  {
+    process.env.FAKE_WORKDAY = '0';
+    const { it } = make({ role: 'rest' });
+    await it.tick(fakeClient(), MON);
+    delete process.env.FAKE_WORKDAY;
+    ok('쉬는 날은 holiday 로 남는다 — 점검기가 그날을 놓친 날로 안 센다', read('rest')?.days?.['2026-09-21']?.outcome === 'holiday', read('rest'));
+  }
+  setWeeklyDir(null);
 }
 
 console.log(`\n${fail ? `실패 ${fail}건` : '모두 통과.'}`);

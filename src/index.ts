@@ -12,6 +12,7 @@ import { getVersionInfo, checkForUpdates } from './version';
 import { ReportServer } from './report-server';
 import { isSessionEnv } from './child-env';
 import { setStatusFile } from './recurring';
+import { setWeeklyDir } from './letter-initiative';
 import { useDefaultErrorsFile } from './error-collector';
 
 const logger = new Logger('Main');
@@ -51,7 +52,10 @@ async function start() {
 
     // 반복 타이머 상태 — PC 점검기가 이 파일로 멈춤 · 놓침 · 연속 실패를 본다(2026-11-03). **운영 진입점만 켠다** —
     // 검사가 공통 장치를 불러도 실제 파일에 안 쓰게. 저장소 밖(사용자 상태 폴더)이라 공개 저장소에 안 섞인다.
-    setStatusFile(process.env.BOT_TIMERS_FILE || path.join(os.homedir(), '.claude', 'state', 'bot-timers.json'));
+    const timersFile = process.env.BOT_TIMERS_FILE || path.join(os.homedir(), '.claude', 'state', 'bot-timers.json');
+    setStatusFile(timersFile);
+    // 주간 판단 결과도 같은 폴더에 — 점검기가 창이 닫힌 뒤 그 주에 성공이 있는지 본다(2026-11-11).
+    setWeeklyDir(path.dirname(timersFile));
 
     // 봇이 한 일을 로컬에 남긴다. **슬랙에 붙기 전에** 길목을 감싸야 첫 말부터 잡힌다.
     installActivityLog();

@@ -44,6 +44,13 @@ import type { FollowUp, TurnAsk, TurnResult } from './chat-host';
 const DEFAULT_AT = '13:00';
 /** 시각 뒤 이만큼 안에서만 돈다 — 저녁 재시작이 낮의 일을 대신 하지 않게. */
 const WINDOW_MIN = 120;
+/** 주간 판단 결과 기록(`bot-weekly-<역할>.json`)에 남기는 날 수 — 판단한 날만 적히므로 몇 주치. */
+const WEEKLY_KEEP_DAYS = 21;
+/** 주간 판단 결과를 남길 폴더 — 운영 진입점(`index.ts`)만 정한다. 비면 안 남긴다(검사가 실제 파일에 안 쓰게). */
+let weeklyDir: string | null = null;
+export function setWeeklyDir(dir: string | null): void {
+  weeklyDir = dir;
+}
 /** 방에서 읽어 오는 말의 상한 — 줄 수와 줄 길이. 넘치면 오래된 것부터 버린다. */
 const RECENT_MAX_LINES = 25;
 const RECENT_MAX_CHARS = 280;
@@ -187,7 +194,14 @@ export class LetterInitiative {
     this.ranWeek = week;
     this.wokeDay = today;
     this.saveState({ week, wake: today });
-    const out = await this.runOnce(client, now);
+    let out: Outcome;
+    try {
+      out = await this.runOnce(client, now);
+    } catch (error) {
+      this.recordWeekly(today, 'error', now);
+      throw error;
+    }
+    this.recordWeekly(today, out, now);
     if (out === 'holiday') {
       // 오늘은 쉬는 날 — 이번 주 표시는 되돌리고(다음 업무일에 돈다) 오늘 표시만 남긴다.
       this.ranWeek = '';
@@ -434,6 +448,29 @@ export class LetterInitiative {
       return JSON.parse(fs.readFileSync(this.opts.statePath, 'utf-8'));
     } catch {
       return {};
+    }
+  }
+
+  /**
+   * 주간 판단 결과를 날짜별로 남긴다 — 바깥 점검(`pc-jobs.py`)이 창이 닫힌 뒤 그 주에 성공(`proposed` · `quiet`)이
+   * 있는지 본다(2부 5번 · 2026-11-11). 시각 예약 상태 파일은 마지막 결과만 남아 창 밖에서는 `not-time` 이고,
+   * `initiative-state.json` 은 깨진 턴에도 그 주를 표시해 둘 다 「그 주에 됐나」를 못 가른다.
+   * 기한 확인(`wake`)은 안 남긴다. 같은 날은 마지막 결과로 덮는다(`no-brief` 뒤 성공). 기록은 던지지 않는다.
+   */
+  private recordWeekly(day: string, outcome: Outcome, now: Date): void {
+    if (!weeklyDir) return;
+    const file = path.join(weeklyDir, `bot-weekly-${this.opts.role ?? 'letter'}.json`);
+    try {
+      let days: Record<string, { outcome: string; ts: string }> = {};
+      try { days = JSON.parse(fs.readFileSync(file, 'utf-8')).days ?? {}; } catch { /* 처음이거나 깨짐 — 새로 */ }
+      days[day] = { outcome, ts: now.toISOString() };
+      const keep = Object.keys(days).sort().slice(-WEEKLY_KEEP_DAYS);
+      const body = { at: this.opts.at, windowMin: WINDOW_MIN, days: Object.fromEntries(keep.map((d) => [d, days[d]])) };
+      fs.mkdirSync(weeklyDir, { recursive: true });
+      fs.writeFileSync(`${file}.tmp`, JSON.stringify(body), 'utf-8');
+      fs.renameSync(`${file}.tmp`, file);
+    } catch (error) {
+      this.logger.warn('주간 판단 결과를 못 적었습니다', error);
     }
   }
 
