@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { wakeEnabled, WAKE_POLL_MS, WAKE_TIMEOUT_MS } = require(path.join(ROOT, 'dist', 'sena-wake.js'));
+const { wakeEnabled, dmOf, WAKE_POLL_MS, WAKE_TIMEOUT_MS } = require(path.join(ROOT, 'dist', 'sena-wake.js'));
 
 let pass = 0;
 const fails = [];
@@ -26,6 +26,9 @@ const check = (name, ok, got) => {
 check('기본은 켜짐(A4 관찰 기간 없음)', wakeEnabled({}));
 check('SENA_WAKE=off 면 꺼짐(대소문자 무관)', !wakeEnabled({ SENA_WAKE: 'OFF' }));
 check('한 번 깨움 상한이 타이머 간격보다 짧음 — 겹쳐 돌지 않게', WAKE_TIMEOUT_MS < WAKE_POLL_MS, [WAKE_TIMEOUT_MS, WAKE_POLL_MS]);
+check('tick 출력의 dm 을 보낼 글로 꺼냄', dmOf('{"slot": "x", "dm": "세나 각성 10:07\\n• ① 무엇"}') === '세나 각성 10:07\n• ① 무엇');
+check('dm 이 없거나 건너뜀이면 안 보냄', dmOf('{"skip": "시간 밖"}') === '' && dmOf('') === '' && dmOf('깨진 글') === '');
+check('여러 줄 출력이면 마지막 JSON 줄만 봄', dmOf('경고 한 줄\n{"dm": "끝"}') === '끝');
 const wa = process.env.WORK_ASSISTANT_ROOT || 'P:/github/work-assistant';
 const py = path.join(wa, 'bin', 'sena_wake.py');
 if (fs.existsSync(py)) {

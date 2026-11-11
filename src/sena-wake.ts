@@ -5,9 +5,12 @@
  * work-assistant `docs/sena-autonomy-design.md` 「정한 것」). 여기는 부르기만 — 기다리지 않는 판단이 봇 타이머에 섞이지 않게.
  *
  * - **끄는 문** — `.env` 의 `SENA_WAKE=off`(기본 켜짐 · A4 관찰 기간 없음). 파이썬 쪽도 같은 변수를 본다
- * - **DM 은 아직 안 보냄** — 파이썬이 「보냈을 글」만 적는다(`SENA_WAKE_DM`, 시안 확인 뒤 켬)
+ * - **DM** — 파이썬이 보낼 글을 정하면(tick 출력 JSON 의 `dm`) 여기서 실장 DM 으로 보낸다. 11/11 시안을 보고 실장님 「고쳐서 켬」 —
+ *   보내기 시작하는 날과 끄는 문(`SENA_WAKE_DM=off`)은 파이썬이 본다. 봇이 보내야 활동 기록, 개인 글 문, 부른곳을 그대로 지난다
  * - 실패는 로그 한 줄 — 다음 10분에 다시 보고, 회차를 놓쳐도 다음 시각에 깨운다
  */
+import type { WebClient } from '@slack/web-api';
+import { config } from './config';
 import { every } from './recurring';
 import { Logger } from './logger';
 import { isWorkAssistantEnabled, runTasks } from './work-assistant';
@@ -21,7 +24,18 @@ export function wakeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return (env.SENA_WAKE || 'on').toLowerCase() !== 'off';
 }
 
-export function startSenaWake(): void {
+/** tick 출력의 마지막 JSON 줄에서 보낼 글 — 없거나 못 읽으면 빈 글. */
+export function dmOf(stdout: string): string {
+  const last = stdout.trim().split('\n').pop() || '';
+  try {
+    const o = JSON.parse(last) as { dm?: unknown };
+    return typeof o.dm === 'string' ? o.dm.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+export function startSenaWake(client?: Pick<WebClient, 'chat'>): void {
   if (!wakeEnabled()) {
     logger.info('세나 각성 꺼짐(SENA_WAKE=off)');
     return;
@@ -38,6 +52,14 @@ export function startSenaWake(): void {
       }
       const out = r.stdout.trim();
       if (out && !out.includes('"skip"')) logger.info('세나 각성', out.slice(0, 300));
+      const dm = dmOf(out);
+      if (dm && client && config.assistant.dmChannel) {
+        try {
+          await client.chat.postMessage({ channel: config.assistant.dmChannel, text: dm });
+        } catch (err) {
+          logger.warn('세나 각성 DM 실패', err);
+        }
+      }
     },
   });
   logger.info(`세나 각성 켬 — ${WAKE_POLL_MS / 60_000}분마다 깨울 때인지 봄`);

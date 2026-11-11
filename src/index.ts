@@ -110,8 +110,8 @@ async function start() {
     // Start the app
     await app.start();
     logger.info(`⚡️ Claude Code Slack bot ${versionTag} is running!`);
-    // 세나 한 시간 각성(자율성 2단계, 2026-11-11) — 깨울 때인지는 업무 비서 쪽이 정함
-    startSenaWake();
+    // 세나 한 시간 각성(자율성 2단계, 2026-11-11) — 깨울 때인지와 보낼 글은 업무 비서 쪽이 정하고, 보내는 것은 이 앱의 클라이언트
+    startSenaWake(app.client);
     logger.info('Configuration:', {
       usingBedrock: config.claude.useBedrock,
       usingVertex: config.claude.useVertex,
