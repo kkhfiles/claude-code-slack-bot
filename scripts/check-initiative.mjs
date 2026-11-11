@@ -486,6 +486,15 @@ ok('방도 방 여럿도 없으면 꺼진다', make({ room: undefined, rooms: []
   }
   setWeeklyDir(null);
 }
+// 실제 진입점이 기록 폴더를 타이머 상태 파일과 같은 폴더로 정하나 — 점검기 `pc-jobs.py` 가 거기서 읽는다.
+// 위 검사들은 폴더를 직접 정해서 이 연결을 안 거친다. 빠지면 기록이 아예 안 남고 점검기는 「기록 없음」으로 침묵한다.
+{
+  const src = fs.readFileSync(new URL('../src/index.ts', import.meta.url), 'utf-8');
+  const file = src.match(/const (\w+) = process\.env\.BOT_TIMERS_FILE \|\|/)?.[1];
+  ok('실제 진입점(index.ts)이 주간 판단 기록 폴더를 타이머 상태 파일의 폴더로 정한다',
+    Boolean(file) && new RegExp(`setStatusFile\\(${file}\\)`).test(src)
+    && new RegExp(`setWeeklyDir\\(path\\.dirname\\(${file}\\)\\)`).test(src), file);
+}
 
 console.log(`\n${fail ? `실패 ${fail}건` : '모두 통과.'}`);
 fs.rmSync(dir, { recursive: true, force: true });
