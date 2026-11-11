@@ -13,7 +13,8 @@ import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
 import { errorCollector } from './error-collector';
 import { event as recordEvent } from './board-queue';
-import { withApiKey, withoutApiKey } from './child-env';
+import { withApiKey, withoutApiKey, withoutAutoMemory } from './child-env';
+import { config } from './config';
 import { ClaudeTap } from './engine-tap';
 import { engineState, type Engine } from './engine-state';
 import { afterFirstToolResult, claudeDrill, claudeDrillEvents, drillQuery, limitTail, type DrillScope } from './engine-drill';
@@ -492,6 +493,8 @@ export class SdkHandler {
     sdkOptions.env = opts.billing === 'api'
       ? withApiKey({ ...process.env, ...opts.env })
       : withoutApiKey({ ...process.env, ...opts.env });
+    // 세나는 Claude 자동 메모리를 안 쓴다(11/11 실장님) — 업무 비서 폴더에서 도는 세션만. 미리 띄운 세션도 이 길을 지나 같은 값이다
+    sdkOptions.env = withoutAutoMemory(sdkOptions.env, opts.workingDirectory, config.workAssistant.root || undefined);
     if (opts.canUseTool) sdkOptions.canUseTool = opts.canUseTool;
 
     if (opts.effort) sdkOptions.effort = opts.effort;

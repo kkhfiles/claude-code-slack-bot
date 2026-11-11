@@ -42,6 +42,7 @@
     "check:quiet": "node scripts/check-quiet-rooms.mjs",
     "check:activity": "node scripts/check-activity-log.mjs",
     "check:activitycaller": "node scripts/check-activity-caller.mjs",
+    "check:automemory": "node scripts/check-auto-memory.mjs",
     "check:slackui": "node scripts/check-slack-queue.mjs",
     "check:prewarm": "node scripts/check-prewarm.mjs",
     "check:push": "node scripts/check-board-push.mjs",

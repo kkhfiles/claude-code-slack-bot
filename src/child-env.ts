@@ -35,6 +35,23 @@ export function withoutApiKey(env: Record<string, string | undefined>): Record<s
   return out;
 }
 
+/**
+ * 세나(업무 비서 폴더에서 도는 세션)는 Claude 자동 메모리를 쓰지도 읽지도 않는다 — 2026-11-11 실장님 「쓸데없는 건 막도록 하고,
+ * 명확한 것만 세나가 직접 관리하고 기억하도록」. 세나의 기억은 일지, 장부, 판단 기록이다(work-assistant `docs/sena-agency.md`).
+ *
+ * 까닭 — 그 메모리는 같은 폴더의 터미널 세션이 모두 읽는다. 운영과 같은 조건의 실험(E8)에서 실장님 한 문장을 받은 세션이 장부 대신
+ * 메모리 파일을 만들며 하지 않은 규칙을 덧붙였다(3번 중 1번). 이 변수를 준 세션은 3번 다 메모리를 안 쓰고 장부에 적었고, 메모리
+ * 색인도 읽지 않았다(`P:/d/autonomy-lab/e8/results.md`). 다른 폴더의 세션은 그대로 둔다.
+ */
+export function withoutAutoMemory(env: Record<string, string>, cwd: string | undefined, root: string | undefined): Record<string, string> {
+  if (!cwd || !root) return env;
+  const norm = (p: string) => {
+    const r = path.resolve(p).replace(/[\\/]+$/, '');
+    return process.platform === 'win32' ? r.toLowerCase() : r;
+  };
+  return norm(cwd) === norm(root) ? { ...env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : env;
+}
+
 /** 월 API 크레딧 키 파일 — llm-playbook 과 같은 파일(`claude_api.DEFAULT_KEY_FILE`). 시험은 `CLAUDE_API_KEY_FILE` 로 옮긴다. */
 export function apiKeyFile(): string {
   return process.env.CLAUDE_API_KEY_FILE || path.join(os.homedir(), '.config', 'llm-playbook', '.anthropic-api-key');
