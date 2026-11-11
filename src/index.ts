@@ -14,6 +14,7 @@ import { isSessionEnv } from './child-env';
 import { setStatusFile } from './recurring';
 import { setWeeklyDir } from './letter-initiative';
 import { useDefaultErrorsFile } from './error-collector';
+import { startSenaWake } from './sena-wake';
 
 const logger = new Logger('Main');
 
@@ -109,6 +110,8 @@ async function start() {
     // Start the app
     await app.start();
     logger.info(`⚡️ Claude Code Slack bot ${versionTag} is running!`);
+    // 세나 한 시간 각성(자율성 2단계, 2026-11-11) — 깨울 때인지는 업무 비서 쪽이 정함
+    startSenaWake();
     logger.info('Configuration:', {
       usingBedrock: config.claude.useBedrock,
       usingVertex: config.claude.useVertex,
