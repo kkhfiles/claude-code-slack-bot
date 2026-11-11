@@ -230,6 +230,53 @@ function inbound(body: any): Record<string, unknown> | null {
   return null;
 }
 
+/** 부른곳을 적는 슬랙 호출 — 사람에게 글이 가는 것만(나머지는 스택을 안 만든다). */
+const CALLER_METHODS = new Set(['chat.postMessage', 'chat.update', 'chat.postEphemeral', 'chat.scheduleMessage']);
+
+/**
+ * 이 호출을 부른 봇 코드 자리 — 「파일:함수」, 함수 이름이 없으면 「파일:줄」.
+ *
+ * 세나 알림 문 1단계(2026-11-11, work-assistant `docs/sena-agency.md`)가 실장 DM 으로 나간 글을 갈래별로 세는 열쇠다.
+ * 글 모양으로 가르면 문구를 고칠 때마다 갈래가 깨진다 — 보내는 자리는 문구를 고쳐도 그대로다. 이 길목을 감싼 것들
+ * (활동 기록, 개인 글 문)과 라이브러리 줄은 건너뛴다. 못 찾으면 빈 글.
+ */
+export function callerOf(stack: string | undefined): string {
+  for (const line of String(stack ?? '').split('\n').slice(1)) {
+    const m = line.match(/at (?:async )?(?:([^\s(]+) \()?(.*?):(\d+):\d+\)?\s*$/);
+    if (!m) continue;
+    const file = m[2].replace(/\\/g, '/');
+    if (/node_modules|^node:|\/activity-log\.[jt]s$|\/privacy-guard\.[jt]s$/.test(file)) continue;
+    const base = (file.split('/').pop() || file).replace(/\.js$/, '.ts');
+    const fn = (m[1] || '').split('.').pop() || '';
+    return fn && fn !== '<anonymous>' ? `${base}:${fn}` : `${base}:${m[3]}`;
+  }
+  return '';
+}
+
+/** 가장 바깥 겹이 잰 부른곳 — 안쪽 겹(개인 글 문)이 먼저 await 하면 기다리지 않고 보낸 호출의 스택이 끊긴다. */
+const probed = new WeakMap<object, string>();
+let probeInstalled = false;
+
+/**
+ * 부른곳을 **가장 바깥에서 동기로** 잰다 — 활동 기록과 개인 글 문을 다 건 뒤에 부른다(`index.ts`).
+ * `.catch()` 로 던져 두고 기다리지 않는 발신은 async 스택이 안 이어져 안쪽에서는 못 잰다. 같은 options 객체가
+ * 안쪽까지 그대로 가므로 그것을 열쇠로 넘긴다. 아무것도 바꾸지 않고 넘어지지도 않는다.
+ */
+export function installCallerProbe(): void {
+  if (probeInstalled) return;
+  probeInstalled = true;
+  const inner = WebClient.prototype.apiCall;
+  WebClient.prototype.apiCall = function probe(this: any, method: string, options?: any) {
+    if (CALLER_METHODS.has(method) && options && typeof options === 'object') {
+      try {
+        const from = callerOf(new Error().stack);
+        if (from) probed.set(options, from);
+      } catch { /* 기록 때문에 넘어지지 않는다 */ }
+    }
+    return inner.call(this, method, options);
+  } as typeof inner;
+}
+
 /** 길목 두 곳을 감싼다. **한 번만 부른다.** */
 export function installActivityLog(): void {
   if (installed) return;
@@ -264,18 +311,26 @@ export function installActivityLog(): void {
   // ── 나가는 말 ────────────────────────────────────────────────────────
   const origCall = WebClient.prototype.apiCall;
   WebClient.prototype.apiCall = function patched(this: any, method: string, options?: any) {
+    // 부른 자리는 호출과 같은 틱에 잰다 — 결과를 기다린 뒤에는 스택이 비어 있다
+    let from = '';
+    if (CALLER_METHODS.has(method)) {
+      try {
+        from = (options && typeof options === 'object' && probed.get(options)) || callerOf(new Error().stack);
+      } catch { /* 기록 때문에 넘어지지 않는다 */ }
+    }
     const done = origCall.call(this, method, options);
     if (!SKIP.has(method)) {
       const bot = byToken.get(this?.token ?? '') ?? '?';
       const said = readable(options);
+      const where = from ? { 부른곳: from } : {};
       Promise.resolve(done).then(
         (res: any) => note(bot, '보냄', {
           어디: options?.channel ?? options?.user ?? '', 무엇: method,
-          말: said, 잘됨: res?.ok !== false,
+          말: said, 잘됨: res?.ok !== false, ...where,
         }),
         (error: any) => note(bot, '못 보냄', {
           어디: options?.channel ?? options?.user ?? '', 무엇: method,
-          말: said, 왜: String(error?.data?.error ?? error?.message ?? error).slice(0, 200),
+          말: said, 왜: String(error?.data?.error ?? error?.message ?? error).slice(0, 200), ...where,
         }),
       );
     }

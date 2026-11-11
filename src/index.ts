@@ -6,7 +6,7 @@ import { CliHandler } from './cli-handler';
 import { SlackHandler } from './slack-handler';
 import { McpManager } from './mcp-manager';
 import { Logger } from './logger';
-import { installActivityLog, tagApp, tagToken } from './activity-log';
+import { installActivityLog, installCallerProbe, tagApp, tagToken } from './activity-log';
 import { installPrivacyGuard } from './privacy-guard';
 import { getVersionInfo, checkForUpdates } from './version';
 import { ReportServer } from './report-server';
@@ -66,6 +66,8 @@ async function start() {
         keyPath: path.join(bots, '_shared', 'data', 'private-registry.key'),
       });
     }
+    // 보낸 코드 자리 — 개인 글 문보다도 바깥에서 동기로 잰다(세나 알림 문 1단계, 2026-11-11). 막지도 바꾸지도 않는다.
+    installCallerProbe();
 
     // Initialize Slack app
     const app = new App({
