@@ -35,6 +35,23 @@ export function dmOf(stdout: string): string {
   }
 }
 
+/**
+ * DM 보내기 — 한 번 실패하면 잠시 뒤 한 번 더. 파이썬은 보낼 글을 넘기며 장부에 「보냄」을 적고, 같은 일은 그날 다시 안 넘기므로
+ * 여기서 놓치면 그 알림은 그날 안 간다(11/11 재검토). 두 번째도 실패하면 로그만 — 다음 각성이 새로 생긴 일을 따로 알린다.
+ */
+export async function postWithRetry(client: Pick<WebClient, 'chat'>, channel: string, text: string, waitMs = 60_000): Promise<boolean> {
+  for (let i = 0; i < 2; i++) {
+    try {
+      await client.chat.postMessage({ channel, text });
+      return true;
+    } catch (err) {
+      logger.warn(`세나 각성 DM 실패(${i + 1}/2)`, err);
+      if (i === 0) await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  return false;
+}
+
 export function startSenaWake(client?: Pick<WebClient, 'chat'>): void {
   if (!wakeEnabled()) {
     logger.info('세나 각성 꺼짐(SENA_WAKE=off)');
@@ -45,7 +62,14 @@ export function startSenaWake(client?: Pick<WebClient, 'chat'>): void {
     name: 'sena:wake',
     everyMs: WAKE_POLL_MS,
     run: async () => {
-      const r = await runTasks(['tick'], WAKE_TIMEOUT_MS, 'bin/sena_wake.py');
+      let r: Awaited<ReturnType<typeof runTasks>>;
+      try {
+        r = await runTasks(['tick'], WAKE_TIMEOUT_MS, 'bin/sena_wake.py');
+      } catch (err) {
+        // 띄우기부터 실패(폴더 없음, spawn 오류) — 던지면 타이머 묶음이 처리 안 된 거부로 내보낸다. 로그만 남기고 다음 10분에
+        logger.warn('세나 각성을 못 띄움', err);
+        return;
+      }
       if (r.code !== 0) {
         logger.warn(`세나 각성 실패 rc ${r.code}`, r.stderr.slice(-300));
         return;
@@ -53,13 +77,7 @@ export function startSenaWake(client?: Pick<WebClient, 'chat'>): void {
       const out = r.stdout.trim();
       if (out && !out.includes('"skip"')) logger.info('세나 각성', out.slice(0, 300));
       const dm = dmOf(out);
-      if (dm && client && config.assistant.dmChannel) {
-        try {
-          await client.chat.postMessage({ channel: config.assistant.dmChannel, text: dm });
-        } catch (err) {
-          logger.warn('세나 각성 DM 실패', err);
-        }
-      }
+      if (dm && client && config.assistant.dmChannel) await postWithRetry(client, config.assistant.dmChannel, dm);
     },
   });
   logger.info(`세나 각성 켬 — ${WAKE_POLL_MS / 60_000}분마다 깨울 때인지 봄`);

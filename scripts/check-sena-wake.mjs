@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { wakeEnabled, dmOf, WAKE_POLL_MS, WAKE_TIMEOUT_MS } = require(path.join(ROOT, 'dist', 'sena-wake.js'));
+const { wakeEnabled, dmOf, postWithRetry, WAKE_POLL_MS, WAKE_TIMEOUT_MS } = require(path.join(ROOT, 'dist', 'sena-wake.js'));
 
 let pass = 0;
 const fails = [];
@@ -29,6 +29,15 @@ check('한 번 깨움 상한이 타이머 간격보다 짧음 — 겹쳐 돌지 
 check('tick 출력의 dm 을 보낼 글로 꺼냄', dmOf('{"slot": "x", "dm": "세나 각성 10:07\\n• ① 무엇"}') === '세나 각성 10:07\n• ① 무엇');
 check('dm 이 없거나 건너뜀이면 안 보냄', dmOf('{"skip": "시간 밖"}') === '' && dmOf('') === '' && dmOf('깨진 글') === '');
 check('여러 줄 출력이면 마지막 JSON 줄만 봄', dmOf('경고 한 줄\n{"dm": "끝"}') === '끝');
+{
+  // 11/11 재검토 — 보내기가 한 번 실패하면 그 알림은 그날 안 갔다(파이썬은 이미 「보냄」으로 적음)
+  let n = 0;
+  const flaky = { chat: { postMessage: async () => { n++; if (n === 1) throw new Error('slack 일시 오류'); return { ok: true }; } } };
+  check('DM 보내기 한 번 실패하면 한 번 더 보냄', await postWithRetry(flaky, 'D1', '글', 0) === true && n === 2, n);
+  let m = 0;
+  const down = { chat: { postMessage: async () => { m++; throw new Error('계속 실패'); } } };
+  check('두 번 실패하면 그만둠(무한 재시도 없음)', await postWithRetry(down, 'D1', '글', 0) === false && m === 2, m);
+}
 const wa = process.env.WORK_ASSISTANT_ROOT || 'P:/github/work-assistant';
 const py = path.join(wa, 'bin', 'sena_wake.py');
 if (fs.existsSync(py)) {
