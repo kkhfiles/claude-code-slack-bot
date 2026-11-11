@@ -38,6 +38,11 @@ check('라이브러리와 길목은 건너뜀',
     === 'assistant-scheduler.ts:briefing');
 check('이름 없는 함수는 파일:줄', callerOf('Error\n    at C:\\bot\\dist\\mail-poll.js:55:3') === 'mail-poll.ts:55');
 check('못 찾으면 빈 글', callerOf('Error\n    at node:internal/process:1:1') === '');
+check('공통 도우미를 지나면 그것을 부른 자리까지 두 단(11/11 — 첫 단만 적으면 예약 작업이 다 sendMessage 였다)',
+  callerOf('Error\n    at probe (C:\\bot\\dist\\activity-log.js:1:1)\n    at SlackHandler.sendMessage (C:\\bot\\dist\\slack-handler.js:3:3)\n'
+    + '    at async AssistantScheduler.runResultPoll (C:\\bot\\dist\\assistant-scheduler.js:9:9)\n    at async x (C:\\bot\\dist\\index.js:1:1)')
+    === 'slack-handler.ts:sendMessage ← assistant-scheduler.ts:runResultPoll');
+check('같은 자리가 이어지면 한 번만', callerOf('Error\n    at a (C:\\bot\\dist\\x.js:1:1)\n    at a (C:\\bot\\dist\\x.js:1:1)') === 'x.ts:a');
 
 // --- 실제 길목 — async 로 감싸고 먼저 await 하는 바깥 문이 있어도 부른 자리가 남나 --------------------
 WebClient.prototype.apiCall = async function fake(method) { return { ok: true, method }; };
@@ -59,7 +64,7 @@ async function sendMorningNudge() {
 await sendMorningNudge();
 await new Promise((r) => setTimeout(r, 30));
 check('바깥 문이 먼저 await 해도 기다리는 호출은 부른 자리가 남는다',
-  sentText('시험 넛지')?.부른곳 === 'check-activity-caller.mjs:sendMorningNudge', sentText('시험 넛지'));
+  String(sentText('시험 넛지')?.부른곳).startsWith('check-activity-caller.mjs:sendMorningNudge'), sentText('시험 넛지'));
 
 function fireAndForget() {   // 기다리지 않고 던져 두는 발신 — async 스택이 안 이어진다
   client.chat.postMessage({ channel: 'D_ME', text: '던져 둔 알림' }).catch(() => {});
@@ -67,7 +72,7 @@ function fireAndForget() {   // 기다리지 않고 던져 두는 발신 — asy
 fireAndForget();
 await new Promise((r) => setTimeout(r, 30));
 check('바깥 재기 없이는 던져 둔 발신의 부른 자리를 잃는다(이 검사가 재는 것이 맞는지)',
-  sentText('던져 둔 알림')?.부른곳 !== 'check-activity-caller.mjs:fireAndForget', sentText('던져 둔 알림'));
+  !String(sentText('던져 둔 알림')?.부른곳).startsWith('check-activity-caller.mjs:fireAndForget'), sentText('던져 둔 알림'));
 
 installCallerProbe();
 // 클라이언트는 메서드를 만들 때 그때의 apiCall 을 묶는다 — 운영도 길목을 다 건 뒤에 App 을 만든다(index.ts)
@@ -78,7 +83,15 @@ function fireAndForget2() {
 fireAndForget2();
 await new Promise((r) => setTimeout(r, 30));
 check('가장 바깥 재기가 있으면 던져 둔 발신도 부른 자리가 남는다',
-  sentText('던져 둔 알림 2')?.부른곳 === 'check-activity-caller.mjs:fireAndForget2', sentText('던져 둔 알림 2'));
+  String(sentText('던져 둔 알림 2')?.부른곳).startsWith('check-activity-caller.mjs:fireAndForget2'), sentText('던져 둔 알림 2'));
+async function viaHelper() {   // 운영처럼 공통 도우미를 지나는 발신 — 두 단이 다 남나
+  const helper = async (text) => { await client2.chat.postMessage({ channel: 'D_ME', text }); };
+  await helper('도우미 지남');
+}
+await viaHelper();
+await new Promise((r) => setTimeout(r, 30));
+check('공통 도우미를 지나도 부른 쪽 함수가 남는다(실제 길목)',
+  String(sentText('도우미 지남')?.부른곳).includes('← check-activity-caller.mjs:viaHelper'), sentText('도우미 지남'));
 await sendMorningNudge();
 await new Promise((r) => setTimeout(r, 30));
 check('들어오지 않은 다른 메서드는 부른곳을 안 적는다',

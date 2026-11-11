@@ -239,8 +239,12 @@ const CALLER_METHODS = new Set(['chat.postMessage', 'chat.update', 'chat.postEph
  * 세나 알림 문 1단계(2026-11-11, work-assistant `docs/sena-agency.md`)가 실장 DM 으로 나간 글을 갈래별로 세는 열쇠다.
  * 글 모양으로 가르면 문구를 고칠 때마다 갈래가 깨진다 — 보내는 자리는 문구를 고쳐도 그대로다. 이 길목을 감싼 것들
  * (활동 기록, 개인 글 문)과 라이브러리 줄은 건너뛴다. 못 찾으면 빈 글.
+ *
+ * **두 단까지 적는다**(「가까운 자리 ← 그것을 부른 자리」) — 예약 작업은 공통 도우미 `sendMessage` 하나로 보내서 첫 단만 적으면
+ * 처리 제안, 개선 제안, 지시 결과가 다 같은 이름이 됐다(11/11 운영 첫 기록 4건이 전부 `slack-handler.ts:sendMessage`).
  */
 export function callerOf(stack: string | undefined): string {
+  const out: string[] = [];
   for (const line of String(stack ?? '').split('\n').slice(1)) {
     const m = line.match(/at (?:async )?(?:([^\s(]+) \()?(.*?):(\d+):\d+\)?\s*$/);
     if (!m) continue;
@@ -248,9 +252,11 @@ export function callerOf(stack: string | undefined): string {
     if (/node_modules|^node:|\/activity-log\.[jt]s$|\/privacy-guard\.[jt]s$/.test(file)) continue;
     const base = (file.split('/').pop() || file).replace(/\.js$/, '.ts');
     const fn = (m[1] || '').split('.').pop() || '';
-    return fn && fn !== '<anonymous>' ? `${base}:${fn}` : `${base}:${m[3]}`;
+    const at = fn && fn !== '<anonymous>' ? `${base}:${fn}` : `${base}:${m[3]}`;
+    if (out[out.length - 1] !== at) out.push(at);
+    if (out.length === 2) break;
   }
-  return '';
+  return out.join(' ← ');
 }
 
 /** 가장 바깥 겹이 잰 부른곳 — 안쪽 겹(개인 글 문)이 먼저 await 하면 기다리지 않고 보낸 호출의 스택이 끊긴다. */
