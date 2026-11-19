@@ -126,7 +126,9 @@ export class SdkProcess {
     const tap = new ClaudeTap(engineState, this.engine);
     // **이어 갈 지점을 못 찾은 차례는 그 지점 없이 한 번 더 띄운다**(2026-11-19). 세션에 적힌 지점이 대화에서 빠진
     // 메시지(도구를 부르다 끊긴 것)면 Claude 는 「No message found with message.uuid」로 아무 글 없이 끝나고, 그 세션의
-    // 다음 차례도 전부 같다. 아직 아무것도 내보내지 않았을 때만 다시 한다 — 그때까지 오류 결과는 들고 있는다.
+    // 다음 차례도 전부 같다. 아직 대화 글을 내보내지 않았을 때만 다시 한다 — 그때까지 오류 결과는 들고 있는다.
+    // ⚠️ 시작 알림(`system` init)과 한도 알림은 「내보냄」으로 안 센다 — 실제 SDK 는 그 오류 결과보다 init 을 먼저
+    // 내보내서, 그것까지 세면 다시 띄우는 길이 한 번도 안 열렸다(10:43 메일 차례, 7cee60b)
     const held: CliEvent[] = [];
     let sent = false;
     const unresolved = (s: string) => /No message found with message\.uuid/.test(s);
@@ -139,7 +141,7 @@ export class SdkProcess {
           continue;
         }
         for (const h of held.splice(0)) { tap.see(h); yield h; }
-        sent = true;
+        if (event.type !== 'system' && event.type !== 'rate_limit_event') sent = true;
         tap.see(event);
         yield event;
       }

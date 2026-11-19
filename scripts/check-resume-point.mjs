@@ -33,7 +33,11 @@ const assistant = { type: 'assistant', uuid: 'u-new', message: { content: [{ typ
 const success = { type: 'result', subtype: 'success', is_error: false, result: '답',
   session_id: 's', total_cost_usd: 0, duration_ms: 1, permission_denials: [] };
 
+// 실제 SDK 모양 그대로 — 무엇보다 먼저 시작 알림(init)이 온다. 이것을 빼고 쟀더니 시험은 통과하고 운영에서는 한 번도
+// 다시 띄우지 않았다(7cee60b · 10:43 메일 차례)
+const init = { type: 'system', subtype: 'init', session_id: 's', model: 'opus', tools: [] };
 async function* gen(events, throwMsg) {
+  yield init;
   for (const e of events) yield e;
   if (throwMsg) throw new Error(throwMsg);
 }
@@ -82,7 +86,7 @@ const isOk = (out) => out.some((e) => e.type === 'result' && e.subtype === 'succ
 }
 {
   const out = await run(gen([assistant, success]), freshOk);
-  ok('평소 차례 — 그대로', isOk(out) && !isErr(out) && out.length === 2);
+  ok('평소 차례 — 그대로', isOk(out) && !isErr(out) && out.length === 3);
 }
 
 // 배선
