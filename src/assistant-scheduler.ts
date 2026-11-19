@@ -2534,7 +2534,12 @@ export class AssistantScheduler {
       await finishDrawerTurn(item.reply.tid, { error: '세나 세션 넘기기 실패 — 잠시 뒤 다시 보냄' });
       throw err;
     }
-    const r = await finishDrawerTurn(item.reply.tid, { answer: last });
+    // **빈 답은 오류로 쓴다**(2026-11-19) — 빈 답을 쓰면 서랍은 빈 말풍선을 그린다(오류 칸이 아니라). 세나 세션이 오류로
+    // 끝나 글이 없을 때다. 세나가 `sena_drawer.py reply` 로 이미 썼으면 이 쓰기는 비켜 간다(차례가 이미 끝남). 문구는
+    // 서랍이 오류 칸에 쓰는 기본 문구 그대로
+    const r = last.trim()
+      ? await finishDrawerTurn(item.reply.tid, { answer: last })
+      : await finishDrawerTurn(item.reply.tid, { error: '답을 받지 못했어요' });
     if (r !== 'gone') {
       // **Claude 가 막힌 차례는 캡처를 닫지 않는다**(2026-11-06) — 대체 엔진이 다 했으면 그쪽이 이미 닫았고, 못 해 「Claude·GPT
       // 몫」으로 모아 둔 차례(보류 v2)를 여기서 닫으면 풀린 뒤 다시 돌 것이 사라진다(11/06 10:32 「agy 세션작업 현황」이 그랬다)

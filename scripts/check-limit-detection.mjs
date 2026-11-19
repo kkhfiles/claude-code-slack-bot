@@ -63,6 +63,12 @@ eq('정상 완료한 회의 판단 본문은 리미트가 아니다',
 eq('그 본문에 낱말은 분명히 들어 있다', isRateLimitText(CLI_USAGE_08_22), true);
 eq('브리핑 본문에도 들어 있다', isRateLimitText(BRIEFING_TEXT), true);
 
+// 오류 글 속 메시지 번호의 「429」는 HTTP 429 가 아니다 — 2026-11-19 08:47 「No message found with message.uuid of:
+// 9e301743-…-9d6fee4299bd」를 한도로 읽어 Claude 를 한 시간 막힘으로 적었고, 그동안 모든 차례가 GPT 로 갔다.
+eq('메시지 번호 속 429 는 한도가 아니다', isRateLimitText(
+  'Claude Code returned an error result: No message found with message.uuid of: 9e301743-49c2-4827-b99e-9d6fee4299bd'), false);
+eq('HTTP 429 는 그대로 한도', isRateLimitText('API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}'), true);
+
 // 진짜 신호 — SDK 가 보내는 rate_limit_event(status: 'rejected')에서 세운 값.
 eq('구조화 신호가 서면 본문과 무관하게 리미트',
    isSessionRateLimited({ rateLimited: true, text: '보고서 작성 완료' }), true);

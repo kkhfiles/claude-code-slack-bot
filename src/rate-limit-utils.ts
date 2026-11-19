@@ -3,7 +3,9 @@
  * Used by slack-handler (user sessions), assistant-scheduler, and calendar-poller.
  */
 
-const RATE_LIMIT_PATTERN = /rate.?limit|overloaded|429|too many requests|capacity|usage limit|spending.?cap|hit your limit|resets\s+\d{1,2}\s*(am|pm)/i;
+// `429` 는 낱말 경계로만 — 맨 숫자로 두면 오류 글 속 메시지 번호(…-9d6fee4299bd)를 한도로 읽는다(2026-11-19 08:47
+// 「No message found with message.uuid」 한 번에 Claude 를 한 시간 막힘으로 적음 · `classifyClaudeErrorText` 의 RATE_PATTERN 과 같은 모양)
+const RATE_LIMIT_PATTERN = /rate.?limit|overloaded|\b429\b|too many requests|capacity|usage limit|spending.?cap|hit your limit|resets\s+\d{1,2}\s*(am|pm)/i;
 
 export function isRateLimitText(text: string): boolean {
   return RATE_LIMIT_PATTERN.test(text);

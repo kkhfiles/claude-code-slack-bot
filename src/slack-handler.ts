@@ -1183,7 +1183,7 @@ export class SlackHandler {
       const mk = typeof msg !== 'string' && Array.isArray(msg?.blocks) && msg.blocks.length > 0
         && msg.blocks.every((b: any) => b?.type === 'context');
       // 진행 상태 한 줄(「🤔 *생각 중...*」)은 답이 아니다 — 세나 세션이 중간에 끊기면 이 줄만 남아 서랍 답이 「생각 중」으로
-      // 굳었다(2026-11-19). 걸러 두면 빈 답이 되고 서랍 서버가 「답을 받지 못했어요 — 다시 보내 주세요」로 쓴다(`singleSay` 와 같음)
+      // 굳었다(2026-11-19). 걸러 두면 빈 답이 되고, 빈 답은 `askFromDrawer` 가 서랍 차례에 오류(「답을 받지 못했어요」)로 쓴다
       if (!mk && isStatusLine(text)) return {};
       seen(text, mk);
       const [first, ...rest] = text.split('\n');
@@ -2476,6 +2476,12 @@ export class SlackHandler {
 
         // ⏸ 안내가 말하는 차례면 ⏳ 안내 · 「취소」 버튼을 안 올린다(2026-10-16 · 사용자 결정) — 셋이 한꺼번에 나갔다.
         if (!heldQuiet) await this.handleRateLimitUI(channel, thread_ts || ts, finalPrompt, block, locale, say, ts, captureId);
+      } else if (cliError && !fallbackDone && !claudeStopped && captureId && (event as any).pushed && !event.drawer) {
+        // **봇이 넣은 차례(메일 · 판)가 Claude 오류로 끝났으면 실패로 적어 드레인이 다시 돌리게 한다**(2026-11-19). SDK 는
+        // 던진 오류도 결과 이벤트로 바꿔 주므로 아래 `catch` 의 실패 표시에 안 닿았고, 캡처는 실패 표시 없이 열린 채
+        // 남아 아무도 다시 안 돌렸다 — 메일은 확인 지점이 이미 지나 그 후보가 사라졌다(10:04 · 10:14 · 10:43 메일 차례).
+        // 사람이 친 DM 은 ❌ 를 보고 다시 보내고, 서랍 차례는 서랍에 오류로 남는다(`askFromDrawer`).
+        markDone = this.markTurnFailed(captureId, 'error', stepLog, session?.sessionId, event, processedFiles);
       }
 
       // Clean up temp files

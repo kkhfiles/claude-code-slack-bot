@@ -100,6 +100,13 @@ const sdk = fs.readFileSync(path.join(ROOT, 'src', 'sdk-handler.ts'), 'utf-8');
 ok('지점을 준 차례에만 다시 띄우는 길을 붙임', /resumeSessionAt \? \(\) =>/.test(sdk)
   && /new SdkProcess\(q, ac, 'claude', retry\)/.test(sdk));
 
+// 같은 사고의 다른 고리 둘(2026-11-19) — 오류로 끝난 봇 차례가 조용히 사라지지 않게
+ok('봇이 넣은 차례(메일 · 판)가 Claude 오류로 끝나면 실패로 적음(드레인이 다시 돌림)',
+  /else if \(cliError && !fallbackDone && !claudeStopped && captureId && \(event as any\)\.pushed && !event\.drawer\) \{[\s\S]{0,600}?markTurnFailed\(captureId, 'error'/.test(handler));
+const sched = fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8');
+ok('서랍 차례가 빈 답으로 끝나면 빈 말풍선 대신 오류로 씀',
+  /last\.trim\(\)\s*\?\s*await finishDrawerTurn\(item\.reply\.tid, \{ answer: last \}\)\s*:\s*await finishDrawerTurn\(item\.reply\.tid, \{ error: /.test(sched));
+
 fs.rmSync(TMP, { recursive: true, force: true });
 if (fails.length) {
   console.error(`❌ 이어 갈 지점 ${fails.length}건 실패`);
