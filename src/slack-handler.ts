@@ -1817,6 +1817,8 @@ export class SlackHandler {
     const toolUsageCounts = new Map<string, number>();
     const channelModel = SlackHandler.resolveModelAlias(this.channelModels.get(channel) || config.defaultModel);
     let cliError = false;
+    /** 이 차례에서 본 마지막 어시스턴트 메시지 — 차례가 성공으로 끝나야 세션의 이어 갈 지점이 된다. */
+    let pendingAssistantUuid: string | undefined;
     // **띄우기 전 준비가 얼마나 먹나** (2026-08-29). 판 한 건 23.1초 중 이 구간이
     // 1.12초인데(75건 중앙값) **안에 로그가 하나도 없어 무엇이 도는지 몰랐다.**
     // 줄일 값이 있는지는 재 봐야 안다 — 짐작으로 손대지 않는다.
@@ -2144,11 +2146,10 @@ export class SlackHandler {
           const apiError = (assistantEvent as any).error;
           if (apiError === 'rate_limit' || apiError === 'overloaded') limitSeen = true;
 
-          // Track last assistant message UUID for session continuity
-          if (assistantEvent.uuid && session) {
-            session.lastAssistantUuid = assistantEvent.uuid;
-            this.cliHandler.scheduleSave();
-          }
+          // 이어 갈 지점(`resumeSessionAt`)은 차례가 성공으로 끝났을 때만 적는다(아래 `result`) — 도구를 부르다 끊긴
+          // 메시지를 적으면 Claude 가 대화를 읽을 때 그 메시지를 빼서 「No message found with message.uuid」로 다음
+          // 차례가 전부 바로 실패한다(2026-11-19 08:47 서랍 차례가 메일 차례에 끊긴 뒤 그 대화가 그랬다)
+          if (assistantEvent.uuid) pendingAssistantUuid = assistantEvent.uuid;
 
           const contentParts = assistantEvent.message.content || [];
           const hasToolUse = contentParts.some((part: any) => part.type === 'tool_use');
@@ -2235,6 +2236,12 @@ export class SlackHandler {
               channel, replyTs, user,
               denials, sid, say, locale
             );
+          }
+
+          // 끝까지 간 차례만 이어 갈 지점을 옮긴다(위 `pendingAssistantUuid`)
+          if (resultEvent.subtype === 'success' && !resultEvent.is_error && pendingAssistantUuid && session) {
+            session.lastAssistantUuid = pendingAssistantUuid;
+            this.cliHandler.scheduleSave();
           }
 
           // Track error state

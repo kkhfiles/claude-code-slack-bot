@@ -42,6 +42,7 @@ import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const APP = 'claude-slack-bot';
 /**
@@ -356,6 +357,39 @@ if (sdkUpdate && !force) {
     + '— 재시작하지 않았습니다(판 맞춤이 끝에 스스로 재시작합니다)');
   console.log('   그래도 지금 해야 하면 —  npm run restart -- --force');
   process.exit(1);
+}
+
+// **`dist` 가 `src` 보다 낡았으면 먼저 짓는다**(2026-11-19). pm2 는 `dist/index.js` 를 띄우는데 이 스크립트는 짓지 않아서,
+// 작업 트리에서 시험하고 합친 수정이 기본 checkout 의 낡은 `dist` 로 재시작돼 고친 줄 알았던 것이 안 돌았다
+// (f5f8e1f — 09:34 재시작 뒤 10:13 서랍 차례가 고친 동작과 다르게 끝남). 짓다 실패하면 재시작하지 않는다.
+{
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const newest = (dir, ext) => {
+    let best = 0;
+    const walk = (d) => {
+      let entries;
+      try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith(ext)) best = Math.max(best, fs.statSync(p).mtimeMs);
+      }
+    };
+    walk(dir);
+    return best;
+  };
+  const src = newest(path.join(root, 'src'), '.ts');
+  const dist = newest(path.join(root, 'dist'), '.js');
+  if (src > dist + 1000) {
+    if (dry) console.log('· dist 가 src 보다 낡았습니다 — 재시작 전에 지을 것입니다(--dry 라 안 지음)');
+    else {
+      console.log('· dist 가 src 보다 낡았습니다 — 먼저 짓습니다(npm run build)');
+      try { execSync('npm run build', { cwd: root, stdio: 'inherit', env: PM2_ENV }); } catch {
+        console.log('⛔ 짓기 실패 — 재시작하지 않았습니다(낡은 코드가 그대로 돕니다)');
+        process.exit(1);
+      }
+    }
+  }
 }
 
 // **검사가 진짜 로그를 안 건드리게 경로를 넣을 수 있게 둔다.** 검사가 실제

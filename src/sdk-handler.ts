@@ -111,8 +111,12 @@ export class SdkProcess {
   private done = false;
   private logger = new Logger('SdkProcess');
 
-  /** `engine` — 엔진 상태를 어느 열쇠에 적나. 월 API 크레딧 세션은 `claude-api`(`billing: 'api'`). */
-  constructor(q: Query, abortController: AbortController, private engine: Engine = 'claude') {
+  /**
+   * `engine` — 엔진 상태를 어느 열쇠에 적나. 월 API 크레딧 세션은 `claude-api`(`billing: 'api'`).
+   * `retryFresh` — 이어 갈 지점(`resumeSessionAt`)을 Claude 가 못 찾으면 그 지점 없이 다시 띄우는 길(한 번만).
+   */
+  constructor(q: Query, abortController: AbortController, private engine: Engine = 'claude',
+              private retryFresh?: () => { q: Query; ac: AbortController }) {
     this.query = q;
     this.abortController = abortController;
   }
@@ -120,15 +124,36 @@ export class SdkProcess {
   async *[Symbol.asyncIterator](): AsyncIterableIterator<CliEvent> {
     // 엔진 상태를 적는 곳 — 내보내는 이벤트를 하나도 빼지 않고 본다(`engine-tap.ts`).
     const tap = new ClaudeTap(engineState, this.engine);
+    // **이어 갈 지점을 못 찾은 차례는 그 지점 없이 한 번 더 띄운다**(2026-11-19). 세션에 적힌 지점이 대화에서 빠진
+    // 메시지(도구를 부르다 끊긴 것)면 Claude 는 「No message found with message.uuid」로 아무 글 없이 끝나고, 그 세션의
+    // 다음 차례도 전부 같다. 아직 아무것도 내보내지 않았을 때만 다시 한다 — 그때까지 오류 결과는 들고 있는다.
+    const held: CliEvent[] = [];
+    let sent = false;
+    const unresolved = (s: string) => /No message found with message\.uuid/.test(s);
     try {
       for await (const sdkMsg of this.query) {
         const event = interpretSdkMessage(sdkMsg);
-        if (event) {
-          tap.see(event);
-          yield event;
+        if (!event) continue;
+        if (!sent && this.retryFresh && event.type === 'result' && (event as CliResultEvent).is_error) {
+          held.push(event);
+          continue;
         }
+        for (const h of held.splice(0)) { tap.see(h); yield h; }
+        sent = true;
+        tap.see(event);
+        yield event;
       }
+      if (!sent && this.retryFresh && held.some((h) => unresolved(String((h as CliResultEvent).result ?? '')))) {
+        yield* this.again();
+        return;
+      }
+      for (const h of held.splice(0)) { tap.see(h); yield h; }
     } catch (err: any) {
+      if (!sent && this.retryFresh && unresolved(String(err?.message || err))) {
+        yield* this.again();
+        return;
+      }
+      for (const h of held.splice(0)) { tap.see(h); yield h; }
       const isAbort = err?.name === 'AbortError' || /abort/i.test(String(err?.message || ''));
       if (!isAbort) {
         this.logger.error('SDK query threw', err);
@@ -149,6 +174,19 @@ export class SdkProcess {
     } finally {
       this.done = true;
     }
+  }
+
+  /** 이어 갈 지점 없이 다시 띄워 그 이벤트를 내보낸다 — 한 번만(`retryFresh` 를 비운다). */
+  private async *again(): AsyncIterableIterator<CliEvent> {
+    const make = this.retryFresh!;
+    this.retryFresh = undefined;
+    this.logger.warn('이어 갈 지점을 못 찾음 — 그 지점 없이 다시 띄웁니다');
+    try { this.abortController.abort(); } catch { /* 이미 끝났다 */ }
+    const fresh = make();
+    this.query = fresh.q;
+    this.abortController = fresh.ac;
+    this.done = false;
+    yield* this[Symbol.asyncIterator]();
   }
 
   interrupt(): void {
@@ -392,10 +430,15 @@ export class SdkHandler {
       const ac = new AbortController();
       return new SdkProcess(drillQuery(claudeDrillEvents(drill, sid), ac.signal) as unknown as Query, ac);
     }
+    const built = this.buildOptions(prompt, opts);
+    // 이어 갈 지점을 못 찾으면 그 지점 없이 다시 띄우는 길(`SdkProcess.again`) — 지점을 준 차례에만
+    const retry = built.sdkOptions.resumeSessionAt ? () => {
+      const b = this.buildOptions(prompt, { ...opts, session: { ...opts.session!, lastAssistantUuid: undefined } });
+      return { q: SdkHandler.queryFn({ prompt, options: b.sdkOptions }), ac: b.abortController };
+    } : undefined;
     const wrap = (q: Query, ac: AbortController): SdkProcess => (drill === 'usage-after-tool'
       ? new SdkProcess(afterFirstToolResult(q, () => ac.abort(), () => limitTail(sid)) as unknown as Query, ac)
-      : new SdkProcess(q, ac));
-    const built = this.buildOptions(prompt, opts);
+      : new SdkProcess(q, ac, 'claude', retry));
     const key = this.keyOf(built.sdkOptions);
 
     // **미리 띄운 것이 맞으면 그것을 쓴다.** 지문이 같은 자리만 본다 — 남의 옵션으로 뜬
