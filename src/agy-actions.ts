@@ -261,8 +261,10 @@ export async function mailBodies(root: string, subjects: readonly string[], time
  */
 export function codexMailBlock(listed: readonly string[], threads: readonly MailThreadBody[] | null): string {
   if (!listed.length) return '';
-  const head = '[메일함 안내] 이 차례의 실행 환경에서는 Outlook 이 열리지 않는다 — `mail.py show` · `mail.py scan` 처럼 '
-    + '메일함을 읽는 명령을 돌리지 말고 아래 본문으로 판단한다. `mail.py judge` 는 메일함을 안 읽으므로 그대로 쓴다.';
+  // 메일함을 읽는 하위 명령은 `candidates` · `show` · `autodone` 셋(`read_outlook` 을 부르는 것) — 후보는 이미 글에 있다.
+  const head = '[메일함 안내] 이 차례의 실행 환경에서는 Outlook 이 열리지 않는다 — `mail.py candidates`, `mail.py show`, '
+    + '`mail.py autodone` 처럼 메일함을 읽는 명령을 돌리지 말고 위 후보 글과 아래 본문으로 판단한다. '
+    + '`mail.py judge` 는 메일함을 안 읽으므로 그대로 쓴다.';
   if (!threads) return `${head}\n(봇도 본문을 못 읽었다 — 본문 없이 요청 내용을 짐작하지 말고 「물음」으로 돌린다)`;
   return `${head}\n${mailBodiesBlock(threads)}`;
 }

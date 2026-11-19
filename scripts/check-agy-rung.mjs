@@ -879,7 +879,7 @@ try {
     const m = await gpt(MAIL_TEXT);
     eq('메일 차례(GPT) — 답함 · 봇이 mail.py show 한 번', [m.r.result, m.shows.length], ['ok', 1]);
     ok('메일 차례(GPT) — 본문이 실림 · 실제 제목', m.prompt.includes('[메일 본문') && m.prompt.includes('본문 — 검토 요청 잘린 끝까지'));
-    ok('메일 차례(GPT) — 메일함 읽는 명령을 돌리지 말라고 적음', m.prompt.includes('[메일함 안내]') && m.prompt.includes('`mail.py show`'));
+    ok('메일 차례(GPT) — 메일함 읽는 명령을 돌리지 말라고 적음', m.prompt.includes('[메일함 안내]') && m.prompt.includes('`mail.py candidates`') && !m.prompt.includes('mail.py scan'));
     const f = await gpt(MAIL_TEXT.replace('검토 요청 잘린', 'FAIL-SHOW 제목'));
     ok('메일 차례(GPT) — 봇도 못 읽으면 물음으로', f.r.result === 'ok' && f.prompt.includes('봇도 본문을 못 읽었다') && !f.prompt.includes('[메일 본문'));
     const n = await gpt('진행 남겨 줘');
