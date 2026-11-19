@@ -1026,7 +1026,9 @@ try {
   }
 } finally {
   fake.cleanup();
-  fs.rmSync(TMP, { recursive: true, force: true });
+  // 재시도 — 시험이 끝난 뒤에도 비동기 기록이 `home/.claude/state/sena` 에 쓰고 있으면 지우는 도중 ENOTEMPTY 가
+  // 나서 검사가 실패했다(2026-11-19 연속 실행 세 번에 한 번꼴).
+  fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 if (fails.length) {
