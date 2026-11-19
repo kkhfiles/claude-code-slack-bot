@@ -371,6 +371,8 @@ interface MessageEvent {
 
 // result 이벤트 후 스트림이 닫히기를 기다리는 한계 (자식 프로세스/훅 hang 대비)
 const RESULT_GRACE_MS = 120_000;
+/** 봇이 넣은 차례가 앞 차례를 기다리는 상한 — 서랍과 메일 차례는 대개 1~3분에 끝난다 */
+const PUSHED_WAIT_MS = 10 * 60_000;
 
 /** 한 회차에 다시 돌릴 상한. 실측 최대가 2건이라 넉넉하다(2026-08-31). */
 const DRAIN_MAX = Number(process.env.DRAIN_MAX ?? 5);
@@ -1180,6 +1182,9 @@ export class SlackHandler {
       // 표시 줄 — 블록이 전부 context 인 글(대체 엔진의 「↪ … 가 답함」)
       const mk = typeof msg !== 'string' && Array.isArray(msg?.blocks) && msg.blocks.length > 0
         && msg.blocks.every((b: any) => b?.type === 'context');
+      // 진행 상태 한 줄(「🤔 *생각 중...*」)은 답이 아니다 — 세나 세션이 중간에 끊기면 이 줄만 남아 서랍 답이 「생각 중」으로
+      // 굳었다(2026-11-19). 걸러 두면 빈 답이 되고 서랍 서버가 「답을 받지 못했어요 — 다시 보내 주세요」로 쓴다(`singleSay` 와 같음)
+      if (!mk && isStatusLine(text)) return {};
       seen(text, mk);
       const [first, ...rest] = text.split('\n');
       if (/^\s*\[슬랙\]/.test(first)) {
@@ -1741,7 +1746,16 @@ export class SlackHandler {
     this.originalMessages.set(sessionKey, { channel, ts: originalMessageTs });
 
     // Cancel any existing CLI process for this conversation
-    const existingProcess = this.activeProcesses.get(sessionKey);
+    let existingProcess = this.activeProcesses.get(sessionKey);
+    // **봇이 스스로 넣는 차례는 앞 차례를 끊지 않고 끝나기를 기다린다**(2026-11-19) — 메일 후보가 같은 세나 세션에 들어오며
+    // 실장님의 서랍 차례를 끊었고, 서랍 답이 진행 표시 「생각 중」으로 남았다. 사람이 슬랙에 바로 친 말만 앞 차례를 끊는다(예전대로).
+    // 상한을 넘기면 예전처럼 끊는다 — 앞 차례가 매달려 있으면 기다리는 쪽까지 영영 멈추지 않게
+    if (existingProcess && ((event as any).pushed || event.replay)) {
+      const until = Date.now() + PUSHED_WAIT_MS;
+      while (this.activeProcesses.get(sessionKey) && Date.now() < until) await new Promise((r) => setTimeout(r, 1000));
+      existingProcess = this.activeProcesses.get(sessionKey);
+      this.logger.info('봇이 넣은 차례 — 앞 차례가 끝나기를 기다렸습니다', { sessionKey, stillRunning: !!existingProcess });
+    }
     if (existingProcess) {
       this.logger.debug('Cancelling existing CLI process for session', { sessionKey });
       existingProcess.interrupt();

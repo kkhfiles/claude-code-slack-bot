@@ -45,6 +45,14 @@ const handler = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf
 ok('메일 폴러가 한 통으로 넘김(single)', /📬 메일 후보 \$\{r\.threads\.length\}건`, '', \{ single: true \}\)/.test(sched));
 ok('봇이 넘긴 차례에는 명령어 안내를 안 붙임', /isNewSession && !event\.drawer && !\(event as any\)\.pushed && !this\.hintShownThreads/.test(handler));
 ok('한 통 길은 끝에 singleMessage 한 번', /chat\.postMessage\(singleMessage\(channel, head, lastText, lastMarker\)\)/.test(handler));
+// 2026-11-19 — 메일 후보가 서랍 차례를 끊어 서랍 답이 「🤔 생각 중...」으로 굳었다
+const drawerSay = handler.slice(handler.indexOf('private drawerSay'), handler.indexOf('private singleSay'));
+ok('서랍 차례도 상태 줄을 답으로 안 셈', drawerSay.includes('if (!mk && isStatusLine(text)) return {};')
+  && drawerSay.indexOf('isStatusLine(text)') < drawerSay.indexOf('seen(text, mk)'));
+const cancelAt = handler.indexOf('Cancelling existing CLI process for session');
+const beforeCancel = handler.slice(Math.max(0, cancelAt - 1500), cancelAt);
+ok('봇이 넣은 차례는 앞 차례를 끊기 전에 기다림', beforeCancel.includes('(event as any).pushed || event.replay')
+  && beforeCancel.includes('while (this.activeProcesses.get(sessionKey) && Date.now() < until)'));
 
 if (fails.length) {
   console.error(`실패 ${fails.length}건\n`);
