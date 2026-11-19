@@ -69,7 +69,7 @@ import { readDrill } from './engine-drill';
 import { waitForFreshToken } from './token-wait';
 import { agyDisplay, agyModel, agyRungsOn, agyTurn, type AgyRung } from './agy-turn';
 import {
-  AGY_DM_RULES, actionReport, actionSteps, agyDmPrompt, fetchTaskList, isMailTurn, mailBodies, mailBodiesBlock,
+  AGY_DM_RULES, actionReport, actionSteps, agyDmPrompt, codexMailBlock, fetchTaskList, isMailTurn, mailBodies, mailBodiesBlock,
   mailSubjectMap, parseMailSubjects, runActions, validateActions,
 } from './agy-actions';
 import {
@@ -3224,7 +3224,13 @@ export class SlackHandler {
         .then((botUserId) => readUnseen(this.app.client as any, channel, {
           currentTs: a.ts, threadTs: a.thread_ts, isNewSession: true, botUserId, isPrivate: containsPrivate,
         })).catch(() => '');
-      const prompt = [handoverNote(a.claudeSteps), context, a.finalPrompt + filesNote(a.files)].filter(Boolean).join('\n');
+      // 메일 후보 차례 — codex 모래상자 안에서는 Outlook 이 안 열리므로 봇이 밖에서 본문을 읽어 붙인다(`codexMailBlock`).
+      const mailListed = isMailTurn(a.finalPrompt) ? parseMailSubjects(a.finalPrompt) : [];
+      const waRoot = workAssistantRoot();
+      const mailThreads = mailListed.length && waRoot ? await mailBodies(waRoot, mailListed) : null;
+      if (mailListed.length && !mailThreads) this.logger.warn('DM 폴백(GPT) — 메일 본문을 못 읽음 · 물음으로 돌리라고 적습니다');
+      const prompt = [handoverNote(a.claudeSteps), context, a.finalPrompt + filesNote(a.files),
+        codexMailBlock(mailListed, mailThreads)].filter(Boolean).join('\n');
       // 모델은 서비스 폴백 대응표(`service_fallback` · 한 급 낮게) — 표가 없으면 예전처럼 같은 등급 · 기본 모델.
       const svc = serviceCodex(a.claudeModel, INTERACTIVE_EFFORT);
       const model = svc?.model

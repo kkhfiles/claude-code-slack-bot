@@ -250,6 +250,23 @@ export async function mailBodies(root: string, subjects: readonly string[], time
   return r.code === 0 ? parseMailBodies(r.stdout) : null;
 }
 
+/**
+ * GPT 칸(codex 모래상자)의 메일 후보 차례에 붙이는 덩이 (2026-11-19).
+ *
+ * codex 모래상자(제한 토큰) 안에서는 Outlook COM 이 안 열린다 — `codex sandbox -- python bin/mail.py show …` 가
+ * `Outlook 을 못 열었습니다: (-2146959355, '서버 실행이 실패했습니다.')` 로 rc 2(모래상자 밖에서는 같은 명령이 됨).
+ * 그래서 GPT 가 「Outlook 실행 실패로 본문을 읽지 못했다」고 답했다. agy 칸처럼 봇이 밖에서 읽어 붙이고,
+ * GPT 에게는 메일함을 읽는 명령을 돌리지 말라고 적는다. 판정 기록(`mail.py judge`)은 메일함을 안 읽어 그대로 된다.
+ * 봇도 못 읽었으면 본문 없이 짐작하지 말고 물음으로 돌리라고 적는다. 메일 차례가 아니면 빈 글자.
+ */
+export function codexMailBlock(listed: readonly string[], threads: readonly MailThreadBody[] | null): string {
+  if (!listed.length) return '';
+  const head = '[메일함 안내] 이 차례의 실행 환경에서는 Outlook 이 열리지 않는다 — `mail.py show` · `mail.py scan` 처럼 '
+    + '메일함을 읽는 명령을 돌리지 말고 아래 본문으로 판단한다. `mail.py judge` 는 메일함을 안 읽으므로 그대로 쓴다.';
+  if (!threads) return `${head}\n(봇도 본문을 못 읽었다 — 본문 없이 요청 내용을 짐작하지 말고 「물음」으로 돌린다)`;
+  return `${head}\n${mailBodiesBlock(threads)}`;
+}
+
 // ---------------------------------------------------------------- 예약 일의 agy 칸
 
 /** 「지금 집중할 것」 프롬프트(`focus.md`) 뒤에 붙인다 — 도구 대신 한 줄(JSON)만 받는다. */

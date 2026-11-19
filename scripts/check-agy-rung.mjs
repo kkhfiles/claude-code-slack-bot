@@ -855,6 +855,37 @@ try {
     }
   }
 
+  // ================================================================ ⑬-4 메일 후보 차례의 GPT 칸 — 봇이 본문을 붙임(2026-11-19)
+  //   codex 모래상자 안에서는 Outlook COM 이 안 열려(`서버 실행이 실패했습니다`) GPT 가 「Outlook 실행 실패로 본문을
+  //   못 읽었다」고 답했다. agy 칸처럼 봇이 밖에서 `mail.py show` 로 읽어 붙이고, 못 읽었으면 물음으로 돌리라고 적는다.
+  {
+    reset();
+    for (const k of SWITCHES) delete process.env[k];
+    Object.assign(process.env, { DM_FALLBACK: 'on', HOLD_V2: 'on', FAKE_CODEX_MODE: 'ok-noop' });
+    blockClaude();
+    const gpt = async (text) => {
+      const t = makeHandler();
+      const c0 = fakeCodex.calls().length;
+      const n0 = taskCalls().length;
+      const r = await t.h.runDmFallback({
+        event: { user: 'U_ME', channel: 'D_DM', ts: '1.1', text }, channel: 'D_DM',
+        sessionKey: 'U_ME-D_DM-direct', ts: '1.1', captureId: 'cap-m', surfaceNote: '', slotMap: '', finalPrompt: text,
+        files: [], claudeSteps: [], claudeModel: 'claude-opus-T', block: engineState.blocked('claude'), sessionId: 's',
+        locale: 'ko', say: t.say, status: () => {}, nextAfter: async () => 'hold',
+      });
+      const shows = taskCalls().slice(n0).filter((c) => c.script === 'mail' && c.argv[0] === 'show');
+      return { r, prompt: fakeCodex.calls().slice(c0)[0]?.prompt ?? '', shows };
+    };
+    const m = await gpt(MAIL_TEXT);
+    eq('메일 차례(GPT) — 답함 · 봇이 mail.py show 한 번', [m.r.result, m.shows.length], ['ok', 1]);
+    ok('메일 차례(GPT) — 본문이 실림 · 실제 제목', m.prompt.includes('[메일 본문') && m.prompt.includes('본문 — 검토 요청 잘린 끝까지'));
+    ok('메일 차례(GPT) — 메일함 읽는 명령을 돌리지 말라고 적음', m.prompt.includes('[메일함 안내]') && m.prompt.includes('`mail.py show`'));
+    const f = await gpt(MAIL_TEXT.replace('검토 요청 잘린', 'FAIL-SHOW 제목'));
+    ok('메일 차례(GPT) — 봇도 못 읽으면 물음으로', f.r.result === 'ok' && f.prompt.includes('봇도 본문을 못 읽었다') && !f.prompt.includes('[메일 본문'));
+    const n = await gpt('진행 남겨 줘');
+    eq('메일 차례 아님(GPT) — 본문 안 읽음 · 안내 없음', [n.shows.length, n.prompt.includes('[메일함 안내]')], [0, false]);
+  }
+
   // ================================================================ ⑭ 드레인 — 어느 칸이든 비면 돈다 · 맡을 칸이 없는 건은 남긴다
   {
     for (const k of SWITCHES) delete process.env[k];
