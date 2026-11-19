@@ -24,6 +24,7 @@ import { engineState, type Block, type Engine } from './engine-state';
 import { currentClaudeBlock, thrownClaudeBlock } from './engine-tap';
 import { EngineRecovery } from './engine-recovery';
 import { EngineNotice, loadModelLabels, type ModelLabels } from './engine-notice';
+import { TurnFailAlert } from './turn-fail-alert';
 import { ProcessMemoryWatchdog } from './process-memory-watchdog';
 import { SdkUpdate, RUN_ACTION as SDK_UPDATE_RUN, SKIP_ACTION as SDK_UPDATE_SKIP } from './sdk-update';
 import { DaouLoginNotifier, ACTION_ID as DAOU_LOGIN_ACTION } from './daou-login';
@@ -445,6 +446,14 @@ export class SlackHandler {
       if (!config.assistant.dmChannel) return;
       await this.app.client.chat.postMessage({ channel: config.assistant.dmChannel, text });
     },
+  });
+  // 같은 대화의 차례가 한도가 아닌 오류로 연달아 끝나면 DM 한 줄 — 기본 꺼짐(`TURN_FAIL_ALERT=on`) · 꺼져 있으면 로그만.
+  private turnFailAlert = new TurnFailAlert({
+    post: async (text) => {
+      if (!config.assistant.dmChannel) return;
+      await this.app.client.chat.postMessage({ channel: config.assistant.dmChannel, text });
+    },
+    log: (text) => this.logger.warn(text),
   });
   /** GPT 칸이 마지막으로 실제로 부른 모델 — 대응표에 칸이 없을 때 엔진 안내가 이것을 쓴다. */
   private lastCodexModel: string | null = null;
@@ -1843,6 +1852,9 @@ export class SlackHandler {
     const stepLog = new StepLog();
     let turnBlock: Block | null = null;
     let turnThrew = false;
+    /** 연속 오류 알림이 쓰는 것 — 오류 글과 사람이 끊었는지(끊은 것은 오류로 안 센다). */
+    let turnErrorText = '';
+    let turnStopped = false;
     let markDone: Promise<void> | null = null;
     // 일하다 끊긴 차례를 같은 세션으로 이어 갔으면, 끝나고 이 대화의 세션을 원래대로 돌린다 —
     // 안 돌리면 이 방의 다음 차례가 옛 세션을 이어받아 그 사이의 대화를 잃는다.
@@ -2247,6 +2259,7 @@ export class SlackHandler {
           // Track error state
           if (resultEvent.is_error) {
             cliError = true;
+            if (!turnErrorText) turnErrorText = String(resultEvent.result || resultEvent.subtype || '');
             // Handle rate limit from result
             if (!rateLimitInfo) {
               const resultText = resultEvent.result || '';
@@ -2273,6 +2286,7 @@ export class SlackHandler {
       // **사람이 `-stop` 으로 끊은 다시 돌리기는 버린다 — Claude 가 돌던 것도**(2026-10-15 검토). GPT · agy 칸은 이미
       // 그랬다. 남기면 옛 실패 표시가 그대로라 다음 드레인이 끊은 요청을 또 돌린다. 끊은 차례는 다음 칸으로도 안 넘긴다.
       const claudeStopped = this.stoppedTurns?.has(cliProcess) ?? false;
+      turnStopped = claudeStopped;
       if (claudeStopped && event.replay && captureId) {
         await dropCapture(captureId, '다시 돌리던 것을 사람이 끊음');
         dropHeldFiles(captureId);
@@ -2499,6 +2513,8 @@ export class SlackHandler {
         : this.isRateLimitError(error) ? thrownClaudeBlock(error) : null;
       turnBlock = block;
       turnThrew = true;
+      turnErrorText = turnErrorText || String(error?.message || error);
+      if (turnHandle && this.stoppedTurns?.has(turnHandle)) turnStopped = true;
       // 막혀 터졌고 ⏸ 안내가 말하는 차례면 ❌ · ⏳ 대신 「⏸ 모아 둠」과 ✋(위 완료 표시와 같은 규칙).
       const quiet = !!block && this.holdToldByNotice(channel);
 
@@ -2566,6 +2582,13 @@ export class SlackHandler {
           engine: turnEngine, outcome: outcomeFrom(turnBlock, cliError || turnThrew),
           answer: currentMessages[currentMessages.length - 1] ?? '', session: session?.sessionId,
         });
+      }
+
+      // 같은 대화가 한도가 아닌 오류로 연달아 끝나면 DM 한 줄(`turn-fail-alert.ts`) — 사람이 끊은 차례는 안 셈. 기다리지 않는다.
+      if (!turnStopped) {
+        const where = event.drawer ? '서랍 대화'
+          : channel === config.assistant.dmChannel ? 'DM 대화' : `<#${channel}>`;
+        void this.turnFailAlert?.record(sessionKey, outcomeFrom(turnBlock, cliError || turnThrew), where, turnErrorText);
       }
 
       // **다음 차례를 미리 띄워 둔다** — 방금 쓴 것과 **한 글자도 안 고친** 옵션으로.
