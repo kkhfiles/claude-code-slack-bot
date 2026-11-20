@@ -50,6 +50,9 @@ eq('꺼 두면 빈손으로 곧바로 돌아온다', await narrowCodex('규칙',
 delete process.env.BOARD_NARROW_FALLBACK;
 
 // ── ③ 실행체가 없어도 안 던진다 ────────────────────────────────
+// 좁은 길의 GPT 단계는 사다리(`python -m llm_playbook.ladder`)로 간다(2026-11-21) — 없는 파이썬으로 바꿔
+// 진짜 GPT 를 안 부르고 「빈손으로 물러나나」를 잰다. codex 실행체도 없는 이름으로 둔다(세션 길 쪽).
+process.env.LADDER_PYTHON = 'python-없는-이름-2026';
 process.env.BOARD_NARROW_CODEX_BIN = NOBIN;
 const t0 = Date.now();
 let threw = null;

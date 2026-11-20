@@ -26,7 +26,7 @@ import { classifyCodexErrorText } from './rate-limit-utils';
 import { STEP_INPUT_MAX, STEP_MAX } from './turn-outcome';
 import type { HeldItem, HoldExtra } from './hold-replay';
 import { codexDrill, drillBlockUntil, type DrillScope } from './engine-drill';
-import { codexModelId, serviceCodex } from './model-ladder';
+import { codexModelId, ladderCodexOnce, serviceCodex } from './model-ladder';
 
 export type { HoldExtra };
 
@@ -1196,52 +1196,21 @@ export function sessionCodexModel(): string | undefined {
 const SESSION_CODEX_EFFORT = process.env.SESSION_FALLBACK_CODEX_EFFORT || 'low';
 
 /**
- * 마지막 답의 모양을 codex 에게 강제한다.
+ * 받은 답의 `sets` 배열을 규칙 글의 사전 모양으로 되돌린다 — 파이썬이 받는 모양은 그대로다.
  *
- * SDK 쪽은 프롬프트로만 시키는데 여기는 문이 하나 더 있다 — 재는 자리에서는
- * 유리한 조건이지만, **실제로 쓸 때는 이 문이 있는 편이 맞다**(파싱이 안 깨진다).
- *
- * ⚠️ **`sets` 는 `[{key, value}]` 배열이다**(2026-11-20) — 규칙 글과 파이썬은 「칸 이름 → 값」 사전을 쓰지만,
- * 사전 모양(`properties` 없이 `additionalProperties` 만 둔 object)은 OpenAI 엄격 모드가 400 으로 거절한다
- * (`object schema must define properties`). 받은 답은 `narrowSetsToObject` 가 사전으로 되돌려 넘긴다.
- * 엄격 모드 규칙(모든 object 에 properties · additionalProperties false · required 전부)은 `check:narrowschema` 가 본다.
- */
-const NARROW_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['log', 'sets', 'ask', 'say'],
-  properties: {
-    log: { type: ['string', 'null'] },
-    sets: {
-      type: ['array', 'null'],
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['key', 'value'],
-        properties: {
-          key: { type: 'string' },
-          // 빈 문자열과 null 은 둘 다 「지움」 — 파이썬(`cmd_narrow`)이 같은 뜻으로 읽는다.
-          value: { type: ['string', 'null'] },
-        },
-      },
-    },
-    ask: { type: ['string', 'null'] },
-    say: { type: ['string', 'null'] },
-  },
-};
-
-/** 규칙 글은 사전 모양을 가르치므로 codex 에게만 스키마의 배열 모양을 알린다. */
-const NARROW_SETS_NOTE =
-  '\n\n(출력 모양 — `sets` 는 사전이 아니라 `[{"key": "칸이름", "value": "값"}]` 배열로 쓴다. 바꿀 칸이 없으면 `[]`.)';
-
-/**
- * codex 답의 `sets` 배열을 규칙 글의 사전 모양으로 되돌린다 — 파이썬이 받는 모양은 그대로다.
- * 같은 칸이 둘이면 뒤 것(파이썬 `json.loads` 가 겹친 열쇠를 읽는 방식). **모양이 다르면 손대지 않는다** —
- * 파이썬이 거절하고 세션으로 떨어지는 길을 그대로 둔다.
+ * 규칙 글과 파이썬은 「칸 이름 → 값」 사전을 쓴다. 11/20 의 응답 스키마 판은 `[{key, value}]` 배열로 받았고
+ * (사전 모양 스키마를 OpenAI 엄격 모드가 400 으로 거절), 스키마를 뺀 지금도 모델이 그 모양을 낼 수 있어 둘 다 읽는다.
+ * 코드 울타리(```json) 안의 배열도 읽는다. 같은 칸이 둘이면 뒤 것(파이썬 `json.loads` 가 겹친 열쇠를 읽는 방식).
+ * **사전이거나 모양이 다르면 글을 손대지 않는다** — 파이썬이 읽거나 거절하고 세션으로 떨어지는 길을 그대로 둔다.
  */
 export function narrowSetsToObject(text: string): string {
+  const fence = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
+  const body = fence ? fence[1] : text;
+  const i = body.indexOf('{');
+  const j = body.lastIndexOf('}');
+  if (i < 0 || j < i) return text;
   let got: any;
-  try { got = JSON.parse(text); } catch { return text; }
+  try { got = JSON.parse(body.slice(i, j + 1)); } catch { return text; }
   if (!got || typeof got !== 'object' || Array.isArray(got) || !Array.isArray(got.sets)) return text;
   const sets: Record<string, string | null> = {};
   for (const it of got.sets) {
@@ -1252,8 +1221,14 @@ export function narrowSetsToObject(text: string): string {
 }
 
 /**
- * 좁은 길을 codex 로 한 번. 못 하면 **빈 글자**를 돌려준다 — 부르는 쪽이
+ * 좁은 길을 GPT 로 한 번 — **모델만 부르는 가벼운 길**(2026-11-21). 못 하면 **빈 글자**를 돌려준다 — 부르는 쪽이
  * 오늘까지와 같은 길(세션)로 떨어뜨린다.
+ *
+ * 좁은 길은 「글 → 정해진 JSON 하나」라 하네스(`codex exec`)가 할 일이 없다 — 파일 · 도구 · 업무 비서 규칙을 안 쓴다.
+ * 그래서 봇의 다른 글 전용 호출(`ladderText`)과 같은 사다리(`llm_playbook.ladder` → `codex_http`)의 codex 칸 하나로
+ * 부른다. 실측(11/21 · sol low): 하네스 길 약 7만 입력 토큰, 가벼운 길 약 3,950. 막힘과 「됐다」는 사다리가 같은
+ * 엔진 상태 파일에 적는다. 응답 스키마는 안 넘긴다 — 모양은 규칙 글이 시키고 `narrowSetsToObject` 가 읽는다.
+ * 세션 길(업무 비서 규칙과 도구를 쓰는 GPT 폴백)은 그대로 `codexTurn`.
  *
  * ⚠️ **여기서 던지지 않는다.** 폴백이 터져서 본 경로까지 막으면 안 되므로
  * 무엇이 나든 빈 글자로 물러난다.
@@ -1265,25 +1240,15 @@ export async function narrowCodex(
 ): Promise<string> {
   if (process.env.BOARD_NARROW_FALLBACK === 'off') return '';
   try {
-    // `codexTurn` 한 곳을 지난다 — 한도에 걸리면 엔진 상태에 적히고(되면 「됐다」도) 예약 세션 폴백이 그것을 본다.
-    const r = await codexTurn(user, {
-      // 시스템 프롬프트를 앞에 이어 붙인다 — `codex exec` 에 그 칸이 따로 없다.
-      appendSystemPrompt: system + NARROW_SETS_NOTE,
-      // 읽기 전용 — 이 호출은 파일을 건드릴 일이 없다. 쓰는 것은 파이썬이 한다.
-      sandbox: 'read-only',
-      // 이 저장소를 작업 뿌리로 주지 않는다 — 규칙은 위 `system` 이 다 들고 있고,
-      // 주면 `CLAUDE.md` 가 따라 들어와 좁은 길이 아니게 된다.
-      workingDirectory: os.tmpdir(),
-      model: narrowCodexModel(claudeModel),
+    const got = await ladderCodexOnce('좁은 길', user, {
+      // 표를 아예 못 읽으면 별칭으로 — 사다리가 제 표에서 푼다(그것도 못 하면 빈손).
+      model: narrowCodexModel(claudeModel) ?? NARROW_CODEX_ALIAS,
       effort: narrowCodexEffort(claudeModel),
-      outputSchema: NARROW_SCHEMA,
+      system,
       timeoutMs,
     });
-    if (r.kind !== 'ok') {
-      logger.warn(`좁은 길 폴백(codex) ${r.kind}${r.detail ? ` — ${r.detail}` : ''}`);
-      return '';
-    }
-    return narrowSetsToObject(r.text);
+    if (!got) return '';
+    return narrowSetsToObject(got.text);
   } catch (err) {
     logger.warn('좁은 길 폴백(codex)이 터졌습니다 — 세션으로 갑니다', err);
     return '';
@@ -1642,8 +1607,6 @@ export interface CodexTurnOpts {
   writableDirs?: string[];
   /** 자식에게 얹을 환경 변수 — 1차 세션에 주던 것 그대로(`CLAUDE_SCHEDULED` 등). */
   env?: Record<string, string>;
-  /** 마지막 답의 모양(JSON Schema) — 좁은 길이 쓴다. */
-  outputSchema?: object;
   /** 띄운 직후 죽이는 손잡이를 넘긴다. */
   onSpawn?: (kill: () => void) => void;
   /** 엔진 상태 — 시험이 바꿔 끼운다. */
@@ -1673,7 +1636,7 @@ export interface CodexTurnResult {
 }
 
 /** `codexTurn` 이 넘기는 깃발 묶음. **내보내는 이유는 검사가 모래상자 · 쓰기 범위를 세기 위해서다.** */
-export function codexTurnArgs(opts: CodexTurnOpts, outFile: string, schemaFile?: string): string[] {
+export function codexTurnArgs(opts: CodexTurnOpts, outFile: string): string[] {
   const write = opts.sandbox === 'workspace-write';
   return [
     'exec', '--json', '--ephemeral', '--skip-git-repo-check',
@@ -1691,7 +1654,6 @@ export function codexTurnArgs(opts: CodexTurnOpts, outFile: string, schemaFile?:
     // 모델을 모르면(표를 못 읽음) `-m` 을 빼 codex 기본 모델에 맡긴다 — 판 번호를 코드에 적지 않는다.
     ...((m) => (m ? ['-m', m] : []))(opts.model ?? sessionCodexModel()),
     '-c', `model_reasoning_effort=${opts.effort ?? SESSION_CODEX_EFFORT}`,
-    ...(schemaFile ? ['--output-schema', schemaFile] : []),
     '-o', outFile, '-',
   ];
 }
@@ -1702,7 +1664,6 @@ export async function codexTurn(prompt: string, opts: CodexTurnOpts): Promise<Co
   const id = randomId();
   const pf = path.join(os.tmpdir(), `wa-cx-${id}.txt`);
   const of = path.join(os.tmpdir(), `wa-cx-${id}.out.txt`);
-  const sf = opts.outputSchema ? path.join(os.tmpdir(), `wa-cx-${id}.schema.json`) : undefined;
   // 쓰기 차례는 `tasks.py` 의 커밋을 봇에 미룬다 — 메시지가 이 파일에 한 줄씩 쌓이고 차례 뒤 대신 커밋이 읽는다.
   // 임시 폴더에 둔다: codex 쓰기 모래상자가 그곳 쓰기를 연다(`.git` 은 막고 · `codex sandbox` 로 확인 2026-10-19).
   const write = opts.sandbox === 'workspace-write';
@@ -1721,9 +1682,8 @@ export async function codexTurn(prompt: string, opts: CodexTurnOpts): Promise<Co
   try {
     const head = opts.appendSystemPrompt ? `${opts.appendSystemPrompt}\n\n----\n\n` : '';
     fs.writeFileSync(pf, head + prompt, 'utf-8');
-    if (sf) fs.writeFileSync(sf, JSON.stringify(opts.outputSchema), 'utf-8');
     const env = df ? { ...(opts.env ?? {}), WORK_ASSISTANT_DEFER_COMMIT: df } : opts.env;
-    const run = await runCodex(codexTurnArgs(opts, of, sf), pf, {
+    const run = await runCodex(codexTurnArgs(opts, of), pf, {
       timeoutMs: opts.timeoutMs ?? 600_000, env, onSpawn: opts.onSpawn,
     });
     const ev = run.events;
@@ -1756,7 +1716,7 @@ export async function codexTurn(prompt: string, opts: CodexTurnOpts): Promise<Co
     return fail(String((err as Error)?.message ?? err));
   } finally {
     if (write) codexWriteTurns -= 1;
-    for (const f of [pf, of, sf, df]) {
+    for (const f of [pf, of, df]) {
       if (f) { try { fs.unlinkSync(f); } catch { /* 이미 없다 */ } }
     }
   }

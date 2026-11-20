@@ -331,6 +331,18 @@ export async function ladderText(
   return ladderOnce(label, prompt, { ...opts, vendors });
 }
 
+/**
+ * 사다리의 codex 칸 한 번만 — 글만 주고받는 호출(좁은 길 · 2026-11-21). `model` 은 별칭이나 id(`--tier` 가 푼다),
+ * 깊이는 그대로. agy 로 넘기지 않는다. 못 하면 null.
+ */
+export function ladderCodexOnce(
+  label: string,
+  prompt: string,
+  opts: { model: string; effort?: string; system?: string; timeoutMs?: number },
+): Promise<{ text: string; backend: string; model: string } | null> {
+  return ladderOnce(label, prompt, { ...opts, vendors: ['codex'] });
+}
+
 async function ladderOnce(
   label: string,
   prompt: string,

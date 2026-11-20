@@ -55,7 +55,7 @@
     "check:privacy": "node scripts/check-privacy-guard.mjs",
     "check:initiative": "node scripts/check-initiative.mjs",
     "check:narrow": "node scripts/check-narrow-fallback.mjs",
-    "check:narrowschema": "node scripts/check-narrow-schema.mjs",
+    "check:narrowlight": "node scripts/check-narrow-light.mjs",
     "check:sessionfb": "node scripts/check-session-fallback.mjs",
     "check:actions": "node scripts/check-action-pipeline.mjs",
     "check:watchdog": "node scripts/check-memory-watchdog.mjs",

@@ -39,6 +39,8 @@ process.env.ACTIONS_RESUME_FILE = RESUME_FILE;
 const THREADS_FILE = path.join(os.tmpdir(), `actions-check-threads-${Date.now()}.json`);
 process.env.ACTIONS_THREADS_FILE = THREADS_FILE;
 process.env.BOARD_NARROW_CODEX_BIN = 'codex-없는-이름-2026';
+// 좁은 길의 GPT 단계는 사다리(파이썬)로 간다(2026-11-21) — 없는 파이썬이면 진짜 GPT 를 안 부르고 빈손.
+process.env.LADDER_PYTHON = 'python-없는-이름-2026';
 // report-log 자동 기록 클론 · 비용 원장 — 스케줄러를 만드는 절이 진짜 것을 부르지 않게(없는 자리)
 process.env.REPORT_LOG_STATE = path.join(os.tmpdir(), `actions-check-rl-${Date.now()}`);
 process.env.REPORT_LOG_REPO = path.join(process.env.REPORT_LOG_STATE, '없는-클론');
