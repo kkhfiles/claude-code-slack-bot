@@ -62,6 +62,7 @@
     "check:turnserve": "node scripts/check-turn-serve.mjs",
     "check:replaynarrow": "node scripts/check-replay-narrow.mjs",
     "check:sdkupdate": "node scripts/check-sdk-update.mjs",
+    "check:seatoutlet": "node scripts/check-seat-outlet.mjs",
     "check:reportrun": "node scripts/check-report-run.mjs",
     "check:discoverygate": "node scripts/check-discovery-report-gate.mjs",
     "check:xroom": "node scripts/check-rooms-recent.mjs",

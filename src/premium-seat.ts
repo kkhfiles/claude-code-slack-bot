@@ -81,6 +81,29 @@ function proUsers(a: any): any[] {
 
 const SERVICES = ['CHATGPT', 'CLAUDE'];
 
+/** 관리자 로그인 창을 여는 버튼 — 소인 DM(수동 점검)과 세나 DM(자동 만료 알림) 둘 다에 달린다. */
+export const SEAT_LOGIN_ACTION = 'premium_open_login_browser';
+
+type LoginText = Record<'busy' | 'openedShort' | 'opened' | 'done' | 'fail', (label: string) => string>;
+/** 소인 DM 의 버튼(수동 점검 결과)에서 시작한 로그인 — 소인 말투. */
+const LOGIN_TEXT_LUNCH: LoginText = {
+  busy: (l) => `이미 호스트 PC에 *${l}* 로그인 창이 열려 있사옵니다.`,
+  openedShort: (l) => `⏳ 소인, 호스트 PC에 *${l}* 로그인 창을 띄웠사옵니다...`,
+  opened: (l) => `⏳ 소인, 호스트 PC에 *${l}* 로그인 창을 띄웠사옵니다.\n화면에 브라우저가 뜨면 관리자 계정으로 로그인을 완료해 주시옵소서.\n\n_(로그인 후 회원 목록 표가 감지되면 자동으로 창이 닫히고 완료 보고를 올리겠사옵니다)_`,
+  done: (l) => `🎉 소인, *${l}* 관리자 로그인이 확인되어 세션을 정상 갱신하였사옵니다!`,
+  fail: (l) => `⚠️ 소인, *${l}* 로그인 창이 완료되지 못하고 닫혔거나 제한 시간(10분)이 초과되었사옵니다.\n다시 진행하시려면 아래 버튼을 눌러 주시옵소서.`,
+};
+/** 세나 DM 의 자동 만료 알림 — 세나가 실장님께 하는 말(2026-11-20 운영알림 이전). */
+export const SEAT_TEXT_SENA: LoginText & Record<'expired' | 'recovered', (label: string) => string> = {
+  expired: (l) => `실장님, AI 시트 *${l}* 관리자 세션이 만료됐습니다. 관리자 로그인을 갱신할 때까지 자동 좌석 교환이 대기합니다.\n아래 버튼을 누르면 이 PC 에 로그인 창이 뜹니다.`,
+  recovered: (l) => `실장님, AI 시트 *${l}* 관리자 세션이 다시 살아났습니다.`,
+  busy: (l) => `이미 이 PC 에 *${l}* 로그인 창이 열려 있습니다.`,
+  openedShort: (l) => `⏳ 이 PC 에 *${l}* 로그인 창을 띄웠습니다`,
+  opened: (l) => `⏳ 이 PC 에 *${l}* 로그인 창을 띄웠습니다. 관리자 계정으로 로그인해 주세요.\n_(회원 목록이 보이면 창이 저절로 닫히고 여기에 결과를 적습니다)_`,
+  done: (l) => `✅ *${l}* 관리자 로그인을 확인해 세션을 갱신했습니다.`,
+  fail: (l) => `⚠️ *${l}* 로그인 창이 완료 전에 닫혔거나 10분이 지났습니다. 다시 하시려면 아래 버튼을 눌러 주세요.`,
+};
+
 /** 계정 주소는 현황판의 좁은 열에 다 안 들어간다. @ 앞만 이름으로 쓴다. */
 function accountShort(account: string): string {
   return account.split('@')[0] || account;
@@ -247,6 +270,8 @@ export class PremiumSeatSlack {
   private notifyPending: NodeJS.Timeout | null = null;
   private notifiedExpiredServices = new Set<string>();
   private loginBusy = new Set<string>();
+  /** 실장님께만 가는 관리자 세션 알림의 출구 — 세나 앱과 세나 DM. 없으면 예전처럼 소인 DM. */
+  private outlet: { client: App['client']; channel: string } | null = null;
   private lastSessionCheckAt = 0;
   /**
    * Premium 교환을 마친 서비스. 파이썬이 설정 시각을 보고 판정하고, 여기서는
@@ -281,6 +306,27 @@ export class PremiumSeatSlack {
   private bookingLink(label: string, style?: 'primary'): any | null {
     if (!this.bookingPage) return null;
     return { ...this.button(label, 'premium_booking_link', style), url: this.bookingPage };
+  }
+
+  // ------------------------------------------------------------- 세나 출구
+  /** 관리자 세션 만료와 복구 알림을 세나 DM 으로 — 소인(친목) 역할 밖이라 옮김(2026-11-20 실장 「운영알림」). */
+  useManagerOutlet(app: App, channel: string): void {
+    this.outlet = { client: app.client, channel };
+  }
+
+  /** 세나 DM 의 로그인 버튼 — 세나 앱 소켓으로 온다. 관리자만. */
+  async handleOutletLogin(body: any, service: string): Promise<void> {
+    if (!service || !this.isManager(this.userOf(body))) return;
+    void this.launchInteractiveLogin(service, body, 'sena');
+  }
+
+  private async postOutlet(text: string, blocks?: any[]): Promise<void> {
+    if (!this.outlet) return;
+    try {
+      await this.outlet.client.chat.postMessage({ channel: this.outlet.channel, text, ...(blocks ? { blocks } : {}) });
+    } catch (error) {
+      this.logger.warn('세나 DM 으로 못 보냄', error);
+    }
   }
 
   // ------------------------------------------------------------- 등록
@@ -1875,15 +1921,24 @@ export class PremiumSeatSlack {
               ],
             },
           ];
-          await this.dmBlocks(managerId, text, blocks);
+          if (this.outlet) {
+            const say = SEAT_TEXT_SENA.expired(name);
+            await this.postOutlet(say, [{ type: 'section', text: { type: 'mrkdwn', text: say } }, blocks[1]]);
+          } else {
+            await this.dmBlocks(managerId, text, blocks);
+          }
         }
       } else {
         if (this.notifiedExpiredServices.has(svc)) {
           this.notifiedExpiredServices.delete(svc);
-          await this.dm(
-            managerId,
-            `소인 여쭙사옵니다. :white_check_mark: *${name}* 관리자 세션이 정상 복구되었음을 확인하였사옵니다.`,
-          );
+          if (this.outlet) {
+            await this.postOutlet(SEAT_TEXT_SENA.recovered(name));
+          } else {
+            await this.dm(
+              managerId,
+              `소인 여쭙사옵니다. :white_check_mark: *${name}* 관리자 세션이 정상 복구되었음을 확인하였사옵니다.`,
+            );
+          }
         }
       }
     }
@@ -1891,16 +1946,34 @@ export class PremiumSeatSlack {
 
   /**
    * 실장님이 버튼을 눌렀을 때 호스트 PC 화면에 대화형 브라우저를 띄워 로그인을 대기한다.
+   * `voice` 가 sena 면 버튼이 세나 DM 에 달린 것 — 세나 앱 클라이언트로 그 메시지를 고치고 세나 말투로 쓴다.
    */
-  private async launchInteractiveLogin(service: string, body: any): Promise<void> {
+  private async launchInteractiveLogin(service: string, body: any, voice: 'lunch' | 'sena' = 'lunch'): Promise<void> {
     const serviceLabel = SERVICE_LABEL[service] ?? service;
     const serviceShort = SERVICE_SHORT[service] ?? service;
     const channel = body?.channel?.id;
     const ts = body?.message?.ts;
     const user = this.userOf(body);
+    const sena = voice === 'sena' && this.outlet !== null;
+    const ui = sena ? this.outlet!.client : this.app!.client;
+    const say = sena ? SEAT_TEXT_SENA : LOGIN_TEXT_LUNCH;
+    // 메시지를 못 고치면 새 글로 — 세나 쪽은 세나 DM, 소인 쪽은 소인 DM
+    const fallback = async (text: string, blocks?: any[]): Promise<void> => {
+      if (sena) await this.postOutlet(text, blocks);
+      else if (blocks) await this.dmBlocks(user, text, blocks);
+      else await this.dm(user, text);
+    };
 
     if (this.loginBusy.has(service)) {
-      await this.onlyYou(body, `이미 호스트 PC에 *${serviceLabel}* 로그인 창이 열려 있사옵니다.`);
+      if (!sena) {
+        await this.onlyYou(body, say.busy(serviceLabel));
+        return;
+      }
+      try {
+        await ui.chat.postEphemeral({ channel, user, text: say.busy(serviceLabel) });
+      } catch {
+        await fallback(say.busy(serviceLabel));
+      }
       return;
     }
     this.loginBusy.add(service);
@@ -1908,16 +1981,16 @@ export class PremiumSeatSlack {
     // 낙관적 UI 갱신: 중복 클릭 방지 및 상태 안내
     if (channel && ts) {
       try {
-        await this.app!.client.chat.update({
+        await ui.chat.update({
           channel,
           ts,
-          text: `⏳ 소인, 호스트 PC에 *${serviceLabel}* 로그인 창을 띄웠사옵니다...`,
+          text: say.openedShort(serviceLabel),
           blocks: [
             {
               type: 'section',
               text: {
                 type: 'mrkdwn',
-                text: `⏳ 소인, 호스트 PC에 *${serviceLabel}* 로그인 창을 띄웠사옵니다.\n화면에 브라우저가 뜨면 관리자 계정으로 로그인을 완료해 주시옵소서.\n\n_(로그인 후 회원 목록 표가 감지되면 자동으로 창이 닫히고 완료 보고를 올리겠사옵니다)_`,
+                text: say.opened(serviceLabel),
               },
             },
           ],
@@ -1958,10 +2031,10 @@ export class PremiumSeatSlack {
 
       if (code === 0) {
         this.notifiedExpiredServices.delete(service);
-        const doneText = `🎉 소인, *${serviceLabel}* 관리자 로그인이 확인되어 세션을 정상 갱신하였사옵니다!`;
+        const doneText = say.done(serviceLabel);
         if (channel && ts) {
           try {
-            await this.app!.client.chat.update({
+            await ui.chat.update({
               channel,
               ts,
               text: doneText,
@@ -1977,17 +2050,17 @@ export class PremiumSeatSlack {
             });
           } catch (err) {
             this.logger.warn('Failed to update success message', err);
-            await this.dm(user, doneText);
+            await fallback(doneText);
           }
         } else {
-          await this.dm(user, doneText);
+          await fallback(doneText);
         }
         // 대기 중인 큐가 있으면 즉시 진행
         void this.pumpJobs();
         this.markDashboardDirty();
       } else {
         this.logger.warn(`interactive login for ${service} exited with code ${code}`, { stderr: stderr.trim() });
-        const failText = `⚠️ 소인, *${serviceLabel}* 로그인 창이 완료되지 못하고 닫혔거나 제한 시간(10분)이 초과되었사옵니다.\n다시 진행하시려면 아래 버튼을 눌러 주시옵소서.`;
+        const failText = say.fail(serviceLabel);
         const retryBlocks = [
           {
             type: 'section',
@@ -2010,7 +2083,7 @@ export class PremiumSeatSlack {
         ];
         if (channel && ts) {
           try {
-            await this.app!.client.chat.update({
+            await ui.chat.update({
               channel,
               ts,
               text: failText,
@@ -2018,10 +2091,10 @@ export class PremiumSeatSlack {
             });
           } catch (err) {
             this.logger.warn('Failed to update failure message', err);
-            await this.dmBlocks(user, failText, retryBlocks);
+            await fallback(failText, retryBlocks);
           }
         } else {
-          await this.dmBlocks(user, failText, retryBlocks);
+          await fallback(failText, retryBlocks);
         }
       }
     });

@@ -37,7 +37,7 @@ import { WebClient } from '@slack/web-api';
 import { LetterInitiative } from './letter-initiative';
 import { LetterBooking } from './letter-booking';
 import { LetterBoost } from './letter-boost';
-import { PremiumSeatSlack } from './premium-seat';
+import { PremiumSeatSlack, SEAT_LOGIN_ACTION } from './premium-seat';
 import { LetterCoffeechat } from './letter-coffeechat';
 import { ReportServer } from './report-server';
 import { listNasQueue, buildNasQueueBlocks, confirmAndApply, rejectItems, retargetItem } from './nas-confirm';
@@ -5180,7 +5180,20 @@ export class SlackHandler {
       this.action(DAOU_LOGIN_ACTION, async ({ ack, body }) => {
         await ack();
         const ts = (body as any).message?.ts;
-        if (ts) await this.daouLogin?.handleAction(ts);
+        // 버튼 값도 넘긴다 — 소인이 보내던 「곧 끊깁니다」(`renew`)를 세나가 보내게 되면(2026-11-20 운영알림 이전)
+        // 값이 없을 때 살아 있는 세션으로 보고 창을 안 띄운다.
+        if (ts) await this.daouLogin?.handleAction(ts, { value: (body as any).actions?.[0]?.value });
+      });
+    }
+
+    // AI 시트 관리자 세션 만료와 복구 알림은 세나 DM 으로 — 소인(친목) 역할 밖이라 옮김(2026-11-20 실장 「운영알림」).
+    // 그 알림의 로그인 버튼은 세나 앱 소켓으로 오므로 여기서 받는다. 실원에게 가는 좌석 교환 흐름은 소인 그대로.
+    if (this.premiumSeat && config.assistant.dmChannel) {
+      const seat = this.premiumSeat;
+      seat.useManagerOutlet(this.app, config.assistant.dmChannel);
+      this.action(SEAT_LOGIN_ACTION, async ({ ack, body, action }) => {
+        await ack();
+        await seat.handleOutletLogin(body, (action as any)?.value);
       });
     }
   }
