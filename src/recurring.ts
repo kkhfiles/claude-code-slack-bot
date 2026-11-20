@@ -19,6 +19,19 @@ import { Logger } from './logger';
 /** `run` 이 실패를 알리는 꼴 — 안에서 오류를 받아 정상으로 끝나는 함수가 쓴다. */
 export interface RunFailure { ok: false; code?: string }
 
+/**
+ * 넘어진 회차를 로그에 남기고 **실패로 기록**한다 — `run: () => this.poll().catch(caught((e) => log(e)))`.
+ * 그냥 `.catch(log)` 로 받으면 처리 안 된 거부는 막지만 회차가 성공으로 남아, 바깥 점검의 「연속 실패」가 못 본다
+ * (점심 글이 커밋 안 된 코드로 일주일 막혔는데 타이머는 성공이었다 · 2026-11-20). `check-recurring` 이 `every` 의
+ * `run` 에서 이것 없이 `.catch(` 로 받는 곳을 막는다.
+ */
+export function caught(log: (error: unknown) => void, code = 'threw'): (error: unknown) => RunFailure {
+  return (error) => {
+    log(error);
+    return { ok: false, code };
+  };
+}
+
 export interface Task {
   readonly name: string;
   /** 밑의 `setInterval` · `setTimeout` 핸들 — 시험이 가짜 타이머 장부와 대조할 때만 쓴다. */

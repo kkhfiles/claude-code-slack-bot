@@ -3,7 +3,7 @@ import { spawn } from 'child_process';
 import { pythonCommand } from './python-command';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
-import { every, type Task } from './recurring';
+import { caught, every, type RunFailure, type Task } from './recurring';
 import { coffeechatMessage } from './coffeechat-message';
 
 /**
@@ -462,10 +462,11 @@ export class LetterCoffeechat {
     this.timer = every({
       name: 'coffeechat:letter',
       everyMs: 60 * 1000,
-      run: () => {
-        void this.maybeDigest(app).catch((error) => this.logger.warn('주간 알림에서 넘어졌습니다', error));
-        void this.maybeSendQueued(app).catch((error) => this.logger.warn('예약 발송에서 넘어졌습니다', error));
-      },
+      // 둘을 기다려 하나라도 넘어지면 실패로 남긴다 — 띄워 놓고 바로 끝나면 회차가 늘 성공이라 바깥 점검이 못 본다(2026-11-20).
+      run: () => Promise.all([
+        this.maybeDigest(app).catch(caught((error) => this.logger.warn('주간 알림에서 넘어졌습니다', error))),
+        this.maybeSendQueued(app).catch(caught((error) => this.logger.warn('예약 발송에서 넘어졌습니다', error))),
+      ]).then((r) => r.find((x): x is RunFailure => !!x && typeof x === 'object' && x.ok === false)),
       unref: true,
     });
   }

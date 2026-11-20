@@ -3,7 +3,7 @@ import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
-import { every, type Task } from './recurring';
+import { caught, every, type Task } from './recurring';
 import { pythonCommand } from './python-command';
 import type { FollowUp, TurnAsk, TurnResult } from './chat-host';
 
@@ -148,7 +148,7 @@ export class LetterInitiative {
     this.timer = every({
       name: `initiative:${this.opts.role ?? 'letter'}`,
       everyMs: 60 * 1000,
-      run: () => this.tick(app.client).catch((error) => this.logger.warn('주간 턴에서 넘어졌습니다', error)),
+      run: () => this.tick(app.client).catch(caught((error) => this.logger.warn('주간 턴에서 넘어졌습니다', error))),
       unref: true,
     });
     this.logger.info(`준비됨 — 월요일(못 돌면 다음 업무일) ${this.opts.at} 실장 DM 으로 「이번 주 이렇게 할까요」`

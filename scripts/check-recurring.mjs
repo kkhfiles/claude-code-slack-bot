@@ -13,6 +13,8 @@
  *   ③ 앞 회차가 돌아도 다음 회차가 돈다(겹친 수만 셈) · 같은 이름을 두 번 걸면 둘 다 산다
  *   ④ `{ ok: false }` 는 실패로 세고, 성공하면 연속 실패가 0 으로 돌아간다
  *   ⑤ 상태 파일 — 켜지 않으면 안 씀 · 30초에 한 번까지 · 오류 문구는 안 담음 · 못 써도 안 던짐
+ *   ⑥ caught — 넘어진 회차는 실패로(처리 안 된 거부 없이) · ⑦ every 의 run 에서 caught 없이 .catch( 로 받는 곳이 없음
+ *   ⑧ 점심 스크립트가 0 이 아닌 값으로 끝나면 실패로 돌려줌
  */
 import './lib/fresh-dist.mjs';
 import { createRequire } from 'node:module';
@@ -195,6 +197,61 @@ try {
     resolveIt({ ok: false });
     await settle();
     eq('④ 비동기 { ok: false } 도 실패 · 걸린 시간', [R.snapshot().p.fails, R.snapshot().p.lastCode, R.snapshot().p.lastMs, R.snapshot().p.maxMs], [1, 'failed', 2500, 2500]);
+  }
+
+  // ⑥ caught — 넘어진 회차를 로그에 남기고 실패로 기록 · 처리 안 된 거부는 안 생김
+  {
+    reset();
+    const before = rejections.length;
+    const logged = [];
+    R.every({ name: 'c', everyMs: 1000, run: () => Promise.reject(new Error('넘어짐')).catch(R.caught((e) => logged.push(e.message))) });
+    armedList[0].fn();
+    await settle();
+    eq('⑥ caught 는 실패로 셈(code threw)', [R.snapshot().c.fails, R.snapshot().c.lastOk, R.snapshot().c.lastCode], [1, false, 'threw']);
+    eq('⑥ caught 는 로그 함수를 부름', logged, ['넘어짐']);
+    eq('⑥ caught 는 처리 안 된 거부를 안 만듦', rejections.length, before);
+  }
+
+  // ⑦ 실제 코드 — every 의 run 에서 caught 없이 .catch( 로 받는 곳이 없어야 함(받으면 실패가 성공으로 남음)
+  {
+    const swallows = (text) => {
+      const out = [];
+      for (let i = text.indexOf('every({'); i >= 0; i = text.indexOf('every({', i + 1)) {
+        const end = text.indexOf('});', i);
+        const block = text.slice(i, end < 0 ? undefined : end);
+        const run = block.slice(Math.max(0, block.indexOf('run:')));
+        // `.catch(` 하나하나가 caught 여야 한다 — 하나만 caught 이고 다른 하나는 그냥 받는 꼴도 잡는다.
+        const all = (run.match(/\.catch\(/g) ?? []).length;
+        const viaCaught = (run.match(/\.catch\(\s*caught\(/g) ?? []).length;
+        if (block.includes('run:') && all > viaCaught) out.push(block.split('\n')[1]?.trim() ?? block.slice(0, 60));
+      }
+      return out;
+    };
+    ok('⑦ 검사가 삼키는 꼴을 실제로 잡음', swallows("x = every({\n  name: 'a',\n  run: () => this.poll().catch((e) => log(e)),\n});").length === 1);
+    ok('⑦ 둘 중 하나만 caught 인 꼴도 잡음', swallows("x = every({\n  name: 'a',\n  run: () => Promise.all([a().catch(caught(log)), b().catch((e) => log(e))]),\n});").length === 1);
+    ok('⑦ caught 로 받은 꼴은 통과',swallows("x = every({\n  name: 'a',\n  run: () => this.poll().catch(caught((e) => log(e))),\n});").length === 0);
+    const srcDir = path.join(ROOT, 'src');
+    const found = [];
+    for (const f of fs.readdirSync(srcDir).filter((n) => n.endsWith('.ts'))) {
+      for (const s of swallows(fs.readFileSync(path.join(srcDir, f), 'utf-8'))) found.push(`${f}: ${s}`);
+    }
+    eq('⑦ every 의 run 이 caught 없이 오류를 삼키는 곳(caught 로 받기)', found, []);
+  }
+
+  // ⑧ 점심 — 스크립트가 0 이 아닌 값으로 끝나면 실패로 돌려줌(경고 로그만 남기고 성공으로 끝나던 것 · 2026-11-20)
+  {
+    const { LunchPoller } = require(path.join(ROOT, 'dist', 'lunch-poller.js'));
+    const script = path.join(TMP, 'lunch_fail.py');
+    fs.writeFileSync(script, 'import sys\nsys.stderr.write("blocked")\nsys.exit(3)\n', 'utf-8');
+    const okScript = path.join(TMP, 'lunch_ok.py');
+    fs.writeFileSync(okScript, 'print("")\n', 'utf-8');
+    restore();
+    try {
+      eq('⑧ 점심 스크립트 실패는 { ok: false, exit-N }', await new LunchPoller('python', script, 2, '00:00', '23:59').runScript(), { ok: false, code: 'exit-3' });
+      eq('⑧ 점심 스크립트 성공은 그대로 성공', await new LunchPoller('python', okScript, 2, '00:00', '23:59').runScript(), undefined);
+    } finally {
+      install();
+    }
   }
 
   // ⑤ 상태 파일

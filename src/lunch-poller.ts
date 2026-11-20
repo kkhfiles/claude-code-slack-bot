@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import Holidays from 'date-holidays';
 import { Logger } from './logger';
-import { every, type Task } from './recurring';
+import { caught, every, type RunFailure, type Task } from './recurring';
 import { pythonCommand } from './python-command';
 
 /**
@@ -37,7 +37,7 @@ export class LunchPoller {
     this.timer = every({
       name: 'lunch:poll',
       everyMs: intervalMs,
-      run: () => this.tick().catch((error) => this.logger.warn('Lunch tick failed', error)),
+      run: () => this.tick().catch(caught((error) => this.logger.warn('Lunch tick failed', error))),
     });
 
     this.logger.info('Lunch poller started', {
@@ -73,7 +73,7 @@ export class LunchPoller {
     return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
   }
 
-  private async tick(): Promise<void> {
+  private async tick(): Promise<void | RunFailure> {
     // A previous run has not finished (network stall). Skip rather than pile up.
     if (this.running) {
       this.logger.debug('Previous lunch run still in progress, skipping');
@@ -89,13 +89,17 @@ export class LunchPoller {
 
     this.running = true;
     try {
-      await this.runScript();
+      return await this.runScript();
     } finally {
       this.running = false;
     }
   }
 
-  private runScript(): Promise<void> {
+  /**
+   * 스크립트가 0 이 아닌 값으로 끝나면 실패로 돌려준다 — 바깥 점검의 「연속 실패」가 이 기록을 본다.
+   * 예전에는 경고 로그만 남기고 성공으로 끝나, 커밋 안 된 코드 때문에 글이 일주일 막힌 것을 아무도 못 봤다(2026-11-20).
+   */
+  private runScript(): Promise<void | RunFailure> {
     return new Promise((resolve) => {
       const py = pythonCommand(this.pythonPath);
       const child = spawn(py, [this.scriptPath, 'tick'], {
@@ -120,7 +124,7 @@ export class LunchPoller {
       child.on('error', (error) => {
         clearTimeout(killTimer);
         this.logger.warn('Failed to run lunch script', error);
-        resolve();
+        resolve({ ok: false, code: 'spawn' });
       });
 
       child.on('close', (code) => {
@@ -129,13 +133,14 @@ export class LunchPoller {
         if (code === 0) {
           // Quiet by design: the script prints nothing on an idle tick.
           if (output) this.logger.info(`Lunch: ${output}`);
-        } else {
-          this.logger.warn(`Lunch script exited with ${code}`, {
-            stdout: output,
-            stderr: stderr.trim(),
-          });
+          resolve();
+          return;
         }
-        resolve();
+        this.logger.warn(`Lunch script exited with ${code}`, {
+          stdout: output,
+          stderr: stderr.trim(),
+        });
+        resolve({ ok: false, code: code === null ? 'killed' : `exit-${code}` });
       });
     });
   }

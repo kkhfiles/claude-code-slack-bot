@@ -4,7 +4,7 @@ import * as path from 'path';
 import { execFile } from 'child_process';
 import Holidays from 'date-holidays';
 import { Logger } from './logger';
-import { every, type Task } from './recurring';
+import { caught, every, type RunFailure, type Task } from './recurring';
 import { offDays, ymd } from './work-assistant';
 
 /**
@@ -79,10 +79,11 @@ export class SdkUpdate {
     this.timer = every({
       name: 'sdk-update',
       everyMs: 60 * 1000,
-      run: () => {
-        void this.tick().catch((e) => this.logger.warn('판 대조에서 넘어졌습니다', e));
-        void this.watchResult().catch((e) => this.logger.warn('결과 알림에서 넘어졌습니다', e));
-      },
+      // 둘을 기다려 하나라도 넘어지면 실패로 남긴다 — 띄워 놓고 바로 끝나면 회차가 늘 성공이라 바깥 점검이 못 본다(2026-11-20).
+      run: () => Promise.all([
+        this.tick().catch(caught((e) => this.logger.warn('판 대조에서 넘어졌습니다', e))),
+        this.watchResult().catch(caught((e) => this.logger.warn('결과 알림에서 넘어졌습니다', e))),
+      ]).then((r) => r.find((x): x is RunFailure => !!x && typeof x === 'object' && x.ok === false)),
       unref: true,
     });
     this.logger.info(`준비됨 — 주 첫 업무일 ${this.opts.at} 에 Agent SDK 판 대조 · 어긋나면 DM 에 [업데이트] 버튼`);

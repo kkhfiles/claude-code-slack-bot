@@ -17,7 +17,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import { Logger } from './logger';
-import { every, type Task } from './recurring';
+import { caught, every, type Task } from './recurring';
 import { errorCollector } from './error-collector';
 import type { SpawnOpts, SessionResult } from './assistant-scheduler';
 import { isRateLimitText, isSessionRateLimited } from './rate-limit-utils';
@@ -176,18 +176,14 @@ export class CalendarPoller {
     this.pollTimer = every({
       name: 'calendar:poll',
       everyMs: intervalMs,
-      run: () => this.poll().catch(err => {
-        this.logger.error('Poll failed', err);
-      }),
+      run: () => this.poll().catch(caught((err) => this.logger.error('Poll failed', err))),
     });
 
     // Dispatch timer: every 1 minute
     this.dispatchTimer = every({
       name: 'calendar:dispatch',
       everyMs: 60_000,
-      run: () => this.dispatchNotifications().catch(err => {
-        this.logger.error('Dispatch failed', err);
-      }),
+      run: () => this.dispatchNotifications().catch(caught((err) => this.logger.error('Dispatch failed', err))),
     });
 
     this.logger.info('CalendarPoller started', {

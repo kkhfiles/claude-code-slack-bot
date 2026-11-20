@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
 import { Logger } from './logger';
-import { every, type Task } from './recurring';
+import { caught, every, type Task } from './recurring';
 import { pythonCommand } from './python-command';
 
 const execFileAsync = promisify(execFile);
@@ -61,7 +61,7 @@ export class DaouLoginNotifier {
     this.timer = every({
       name: 'daou-login:watch',
       everyMs: this.intervalSec * 1000,
-      run: () => this.poll().catch(e => this.logger.error('다우 알림 점검 실패', e)),
+      run: () => this.poll().catch(caught((e) => this.logger.error('다우 알림 점검 실패', e))),
     });
     this.logger.info(`다우 세션 알림 시작 (${this.intervalSec}s)`);
   }

@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
 import { Logger } from './logger';
-import { every, type Task } from './recurring';
+import { caught, every, type Task } from './recurring';
 import { errorCollector } from './error-collector';
 import { t, Locale } from './messages';
 import { pythonCommand } from './python-command';
@@ -434,7 +434,7 @@ export class ProcessMemoryWatchdog {
     this.checkTimer = every({
       name: 'memory-watchdog',
       everyMs: this.checkIntervalSec * 1000,
-      run: () => this.checkMemory().catch(e => this.logger.error('Memory check failed', e)),
+      run: () => this.checkMemory().catch(caught((e) => this.logger.error('Memory check failed', e))),
     });
   }
 

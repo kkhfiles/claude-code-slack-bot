@@ -6,7 +6,7 @@ import { CliHandler, type CliEvent, type CliAssistantEvent, type CliInitEvent, t
 import { SdkHandler, SdkProcess, SdkRunOptions } from './sdk-handler';
 import { PendingDenial } from './types';
 import { Logger } from './logger';
-import { every, type Task } from './recurring';
+import { caught, every, type Task } from './recurring';
 import { WorkingDirectoryManager } from './working-directory-manager';
 import { FileHandler, ProcessedFile } from './file-handler';
 import { TodoManager, Todo } from './todo-manager';
@@ -5093,9 +5093,7 @@ export class SlackHandler {
     every({
       name: 'chat:token-health',
       everyMs: 60 * 60 * 1000,
-      run: () => this.checkTokenHealth().catch(err =>
-        this.logger.error('Token health check failed', err),
-      ),
+      run: () => this.checkTokenHealth().catch(caught((err) => this.logger.error('Token health check failed', err))),
     });
     // Run once at startup (after 30 seconds to let Slack connect)
     setTimeout(() => {

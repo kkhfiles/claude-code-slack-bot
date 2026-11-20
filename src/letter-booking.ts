@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App } from '@slack/bolt';
 import { Logger } from './logger';
-import { every, type Task } from './recurring';
+import { caught, every, type Task } from './recurring';
 
 /**
  * 레터의 **1on1 신청 창구** — 반기 정기 1on1 말고, 하고 싶을 때 여는 자리.
@@ -605,7 +605,7 @@ export class LetterBooking {
     this.nudgeTimer = every({
       name: 'booking:nudge',
       everyMs: 60 * 1000,
-      run: () => this.maybeNudge(app).catch((error) => this.logger.warn('알림에서 넘어졌습니다', error)),
+      run: () => this.maybeNudge(app).catch(caught((error) => this.logger.warn('알림에서 넘어졌습니다', error))),
       unref: true,
     });
   }
