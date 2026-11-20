@@ -36,9 +36,10 @@ import type { FollowUp, TurnAsk, TurnResult } from './chat-host';
  *
  * **소인도 같은 시계를 쓴다**(실장 2026-09-24 「봇 모두 주체적 판단은 주 1회 후 나에게 DM 으로 제안 · 필요하면
  * 뉴스·웹 검색」). 다른 것은 넷 — 읽을 방(`rooms` · 점심원정대·친목 방) · 방 이력을 읽는 클라이언트(`reader` · 소인
- * 토큰 — 커피콩 앱은 그 방에 없다) · 현황판(`lunch_pulse.py` · `pulseArgs`) · DM 머리(`prefix`). DM 과 카드는 둘 다
- * 커피콩 앱으로 간다(소인 앱에는 실장 DM 이 없다) — 카드를 「보내기」하면 소인 이름으로 오른다(`LetterNotice` 의
- * `poster`). 판단 턴은 파이썬이 웹 검색을 열고(`WEB_NOTE`) 제안만 받는다.
+ * 토큰 — 커피콩 앱은 그 방에 없다) · 현황판(`lunch_pulse.py` · `pulseArgs`) · DM 머리(`prefix`). 소인 DM 과 카드는
+ * 소인 앱으로 간다(2026-10-30부터 — 실장이 그 DM 에서 답하면 소인이 받는다, `slack-handler.ts` 의 주간 판단 묶는 곳).
+ * 카드를 「보내기」하면 소인 이름으로 오른다(`LetterNotice` 의 `poster`). 판단 턴은 파이썬이 웹 검색을 열고(`WEB_NOTE`)
+ * 제안만 받는다.
  */
 
 const DEFAULT_AT = '13:00';
