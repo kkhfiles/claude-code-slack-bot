@@ -290,6 +290,7 @@
 - **옛 모양**(집안마다 별칭 하나 + `effort_up`) — 그 표가 오면 예전처럼 1차 깊이를 `effort_up` 만큼 올림. 지금 정본은 위 대응표
 - **쓰는 곳** — DM 의 GPT 칸, 예약 일 폴백(`spawnOrFallback`), 도구 없는 사다리의 codex 칸, 판의 좁은 길
   - 좁은 길은 `BOARD_NARROW_CODEX_MODEL`, `BOARD_NARROW_CODEX_EFFORT` 가 먼저
+  - 좁은 길의 응답 스키마에서 `sets` 는 `[{key, value}]` 배열(2026-11-20) — 사전 모양은 OpenAI 엄격 모드가 400 으로 거절함(`object schema must define properties`). 봇이 답을 사전으로 되돌려 `tasks.py narrow --apply` 에 넘김, 검사 `npm run check:narrowschema`
 - **agy 칸의 별칭** — `service_fallback.agy` 의 앞이 Gemini 칸, 뒤가 agy Claude 칸(1차 모델과 무관). 칸의 차례는 `ladders` 가 정함
 - **표에 칸이 없으면** — 예전 그대로(같은 등급 `sameTier`, 기본 모델), WARN 한 번
 - **`after_agy`** — `sol-low`(agy 두 칸을 다 못 쓸 때) · 부서 대화 봇 몫이라 이 봇은 안 읽음

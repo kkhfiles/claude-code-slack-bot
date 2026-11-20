@@ -8,7 +8,7 @@
  *
  * 받은 것을 한 줄 JSON 으로 남긴다 — 인자 전부 · 부르는 쪽이 얹은 환경 변수 둘(`CLAUDE_SCHEDULED` ·
  * `WORK_ASSISTANT_CAPTURE_FILE`) · DM 폴백이 얹는 둘(`dmEnv` — `WORK_ASSISTANT_CAPTURE` · `CLAUDE_BOT_SESSION`) ·
- * API 키가 넘어왔나 · 받은 프롬프트(표준 입력) · 띄운 시각. 답은 `-o` 파일과 `--json` 이벤트 둘로 낸다
+ * API 키가 넘어왔나 · 받은 프롬프트(표준 입력) · 받은 응답 스키마(`schema`) · 띄운 시각. 답은 `-o` 파일과 `--json` 이벤트 둘로 낸다
  * (`FAKE_CODEX_REPLY` 로 답 글을 바꾼다). `slow` 는 `FAKE_CODEX_SLOW_MS`(기본 1500) 쉬었다 답하고, 끝난 시각을
  * 따로 남긴다(`fake.ends()`) — 같은 방의 두 차례가 겹치는지 잰다.
  * **한도 글의 모양은 지어낸 것이다** — codex 가 실제로 한도에 걸린 글은 아직 봇 로그에 없다.
@@ -24,8 +24,12 @@ const mode = process.env.FAKE_CODEX_MODE || 'ok';
 let prompt = '';
 try { prompt = fs.readFileSync(0, 'utf-8'); } catch { /* 표준 입력이 없다 */ }
 const startedAt = Date.now();
+// 받은 응답 스키마(--output-schema 파일) — 봇이 차례 뒤 지우므로 여기서 읽어 둔다.
+let schema = null;
+const si = argv.indexOf('--output-schema');
+if (si >= 0) { try { schema = JSON.parse(fs.readFileSync(argv[si + 1], 'utf-8')); } catch { schema = 'unreadable'; } }
 fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({
-  argv, mode,
+  argv, mode, schema,
   env: {
     CLAUDE_SCHEDULED: process.env.CLAUDE_SCHEDULED ?? null,
     WORK_ASSISTANT_CAPTURE_FILE: process.env.WORK_ASSISTANT_CAPTURE_FILE ?? null,

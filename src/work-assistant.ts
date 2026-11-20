@@ -1190,6 +1190,11 @@ const SESSION_CODEX_EFFORT = process.env.SESSION_FALLBACK_CODEX_EFFORT || 'low';
  *
  * SDK 쪽은 프롬프트로만 시키는데 여기는 문이 하나 더 있다 — 재는 자리에서는
  * 유리한 조건이지만, **실제로 쓸 때는 이 문이 있는 편이 맞다**(파싱이 안 깨진다).
+ *
+ * ⚠️ **`sets` 는 `[{key, value}]` 배열이다**(2026-11-20) — 규칙 글과 파이썬은 「칸 이름 → 값」 사전을 쓰지만,
+ * 사전 모양(`properties` 없이 `additionalProperties` 만 둔 object)은 OpenAI 엄격 모드가 400 으로 거절한다
+ * (`object schema must define properties`). 받은 답은 `narrowSetsToObject` 가 사전으로 되돌려 넘긴다.
+ * 엄격 모드 규칙(모든 object 에 properties · additionalProperties false · required 전부)은 `check:narrowschema` 가 본다.
  */
 const NARROW_SCHEMA = {
   type: 'object',
@@ -1197,11 +1202,44 @@ const NARROW_SCHEMA = {
   required: ['log', 'sets', 'ask', 'say'],
   properties: {
     log: { type: ['string', 'null'] },
-    sets: { type: ['object', 'null'], additionalProperties: { type: ['string', 'null'] } },
+    sets: {
+      type: ['array', 'null'],
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['key', 'value'],
+        properties: {
+          key: { type: 'string' },
+          // 빈 문자열과 null 은 둘 다 「지움」 — 파이썬(`cmd_narrow`)이 같은 뜻으로 읽는다.
+          value: { type: ['string', 'null'] },
+        },
+      },
+    },
     ask: { type: ['string', 'null'] },
     say: { type: ['string', 'null'] },
   },
 };
+
+/** 규칙 글은 사전 모양을 가르치므로 codex 에게만 스키마의 배열 모양을 알린다. */
+const NARROW_SETS_NOTE =
+  '\n\n(출력 모양 — `sets` 는 사전이 아니라 `[{"key": "칸이름", "value": "값"}]` 배열로 쓴다. 바꿀 칸이 없으면 `[]`.)';
+
+/**
+ * codex 답의 `sets` 배열을 규칙 글의 사전 모양으로 되돌린다 — 파이썬이 받는 모양은 그대로다.
+ * 같은 칸이 둘이면 뒤 것(파이썬 `json.loads` 가 겹친 열쇠를 읽는 방식). **모양이 다르면 손대지 않는다** —
+ * 파이썬이 거절하고 세션으로 떨어지는 길을 그대로 둔다.
+ */
+export function narrowSetsToObject(text: string): string {
+  let got: any;
+  try { got = JSON.parse(text); } catch { return text; }
+  if (!got || typeof got !== 'object' || Array.isArray(got) || !Array.isArray(got.sets)) return text;
+  const sets: Record<string, string | null> = {};
+  for (const it of got.sets) {
+    if (!it || typeof it !== 'object' || typeof it.key !== 'string') return text;
+    sets[it.key] = it.value === null || it.value === undefined ? null : String(it.value);
+  }
+  return JSON.stringify({ ...got, sets });
+}
 
 /**
  * 좁은 길을 codex 로 한 번. 못 하면 **빈 글자**를 돌려준다 — 부르는 쪽이
@@ -1220,7 +1258,7 @@ export async function narrowCodex(
     // `codexTurn` 한 곳을 지난다 — 한도에 걸리면 엔진 상태에 적히고(되면 「됐다」도) 예약 세션 폴백이 그것을 본다.
     const r = await codexTurn(user, {
       // 시스템 프롬프트를 앞에 이어 붙인다 — `codex exec` 에 그 칸이 따로 없다.
-      appendSystemPrompt: system,
+      appendSystemPrompt: system + NARROW_SETS_NOTE,
       // 읽기 전용 — 이 호출은 파일을 건드릴 일이 없다. 쓰는 것은 파이썬이 한다.
       sandbox: 'read-only',
       // 이 저장소를 작업 뿌리로 주지 않는다 — 규칙은 위 `system` 이 다 들고 있고,
@@ -1235,7 +1273,7 @@ export async function narrowCodex(
       logger.warn(`좁은 길 폴백(codex) ${r.kind}${r.detail ? ` — ${r.detail}` : ''}`);
       return '';
     }
-    return r.text;
+    return narrowSetsToObject(r.text);
   } catch (err) {
     logger.warn('좁은 길 폴백(codex)이 터졌습니다 — 세션으로 갑니다', err);
     return '';
