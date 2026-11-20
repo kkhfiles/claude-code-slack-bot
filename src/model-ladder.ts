@@ -203,6 +203,14 @@ export function serviceCodex(claudeModel: string | undefined, effort?: string, f
   return { alias, model, ...(effort ? { effort: raiseEffort(effort, t.effortUp[alias] ?? 0, t.codexEfforts[alias] ?? []) } : {}) };
 }
 
+/**
+ * 표의 codex 별칭 → 실제 id(`codex.models.<별칭>.id`). 표를 못 읽으면 `undefined` — 부르는 쪽은 `-m` 을 안 넘겨
+ * codex 의 기본 모델에 맡긴다. **모델 판 번호를 코드에 적지 않으려고 둔다**(2026-11-20 · 새 모델은 표만 고친다).
+ */
+export function codexModelId(alias: string, file?: string): string | undefined {
+  return serviceFallbackTable(file)?.codexIds[alias];
+}
+
 /** 1차 깊이를 모를 때 쓰는 대응표 줄 — Claude 의 기본 사고 깊이. */
 export const PRIMARY_DEFAULT_EFFORT = 'high';
 

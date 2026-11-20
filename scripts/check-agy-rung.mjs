@@ -1027,9 +1027,23 @@ try {
     process.env.BOARD_NARROW_CODEX_MODEL = 'gpt-env-override';
     eq('좁은 길 — 환경 변수가 이긴다', wa.narrowCodexModel('opus'), 'gpt-env-override');
     delete process.env.BOARD_NARROW_CODEX_MODEL;
+    // 대응 칸이 없는 모델 — 표의 sol id(판 번호를 코드에 안 적는다 · 2026-11-20)
+    eq('좁은 길 — 대응 칸이 없는 모델이면 표의 sol id', wa.narrowCodexModel('gpt-x'), TABLE.codex.models.sol.id);
+    {
+      const keep = process.env.SESSION_FALLBACK_CODEX_MODEL;
+      delete process.env.SESSION_FALLBACK_CODEX_MODEL;
+      eq('주 작업 폴백 모델 — 표의 sol id', wa.sessionCodexModel(), TABLE.codex.models.sol.id);
+      process.env.SESSION_FALLBACK_CODEX_MODEL = keep;
+    }
     process.env.LLM_PLAYBOOK_MODELS = noSf;
-    const dflt = wa.narrowCodexModel('opus');
-    ok(`좁은 길 — 표에 칸이 없으면 예전 기본값(${dflt})`, !!dflt && !dflt.startsWith('gpt-T-'));
+    eq('좁은 길 — 표를 못 읽으면 모델을 안 정함(codex 기본 모델)', wa.narrowCodexModel('opus'), undefined);
+    {
+      const keep = process.env.SESSION_FALLBACK_CODEX_MODEL;
+      delete process.env.SESSION_FALLBACK_CODEX_MODEL;
+      const a = wa.codexTurnArgs({ workingDirectory: TMP, sandbox: 'read-only' }, path.join(TMP, 'o.txt'));
+      eq('표를 못 읽으면 -m 을 안 넘긴다', a.includes('-m'), false);
+      process.env.SESSION_FALLBACK_CODEX_MODEL = keep;
+    }
     // agy 칸 별칭 순서도 표에서 — 뒤집으면 따라온다
     fs.writeFileSync(noSf, JSON.stringify({ ...TABLE, service_fallback: { ...TABLE.service_fallback, agy: ['sonnet-thinking', 'flash-high'] } }), 'utf-8');
     eq('agy 칸 별칭은 service_fallback.agy 순서', [agy.agyModel('agy-gemini').alias, agy.agyModel('agy-claude').alias],
@@ -1047,8 +1061,10 @@ try {
       const got = Object.fromEntries(Object.entries(WANT).map(([f, row]) => [f, Object.fromEntries(Object.keys(row)
         .map((e) => { const r = ml.serviceCodex(f, e, real); return [e, r ? `${r.alias} ${r.effort}` : null]; }))]));
       eq('실제 표 — 대응표 15칸', got, WANT);
+      // id 는 표의 sol 칸에서 — 새 모델(예: 11/20 의 6.2)마다 이 시험을 고치지 않게
+      const solId = JSON.parse(fs.readFileSync(real, 'utf-8')).codex.models.sol.id;
       eq('실제 표 — 깊이를 모르면 high 줄 · 전체 id 도', [ml.serviceCodex('sonnet', undefined, real)?.effort,
-        ml.serviceCodex('claude-opus-5-5', 'medium', real)?.model], ['high', 'gpt-6.1-sol']);
+        ml.serviceCodex('claude-opus-5-5', 'medium', real)?.model], ['high', solId]);
     }
   }
 
@@ -1075,11 +1091,8 @@ try {
   {
     const SRC = path.join(ROOT, 'src');
     const VERSION = /gpt-\d|GPT-\d|claude-(opus|sonnet|haiku|fable|mythos)-\d|\b(Opus|Sonnet|Haiku|Fable|Mythos) \d|Gemini \d+(\.\d+)?\s*(Flash|Pro|Ultra)|gemini-\d|\d\.\d+ Flash/;
-    // 허용 — 표를 못 읽을 때의 기본값 상수 둘(환경 변수가 이기고 대응표가 그다음)뿐. 이 밖의 새 글자는 실패.
-    const ALLOWED = [
-      /^const NARROW_CODEX_MODEL = '[^']+';/,
-      /^export const SESSION_CODEX_MODEL = process\.env\.SESSION_FALLBACK_CODEX_MODEL \|\| '[^']+';/,
-    ];
+    // 허용 없음(2026-11-20) — 전에는 표를 못 읽을 때의 기본값 상수 둘을 허용했다. 이제 그 둘도 표의 `sol` id 를 읽는다.
+    const ALLOWED = [];
     const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`\\])\/\/.*$/gm, '$1');
     const bad = [];
     for (const f of fs.readdirSync(SRC).filter((x) => x.endsWith('.ts'))) {
@@ -1089,9 +1102,6 @@ try {
         }
       }
     }
-    eq('허용한 기본값 상수는 둘 다 실제로 있다(낡은 허용 목록 방지)',
-      ALLOWED.map((re) => strip(fs.readFileSync(path.join(SRC, 'work-assistant.ts'), 'utf-8')).split(/\r?\n/).some((l) => re.test(l.trim()))),
-      [true, true]);
     eq('소스의 글자에 모델 판 번호가 없다', bad, []);
     const whole = ['agy-turn.ts', 'agy-actions.ts', 'dm-fallback.ts', 'engine-ladder.ts', 'engine-notice.ts']
       .filter((f) => VERSION.test(fs.readFileSync(path.join(SRC, f), 'utf-8')));

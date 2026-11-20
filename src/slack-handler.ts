@@ -45,7 +45,7 @@ import { decisionReply, noticeReply, reportLogAvailable } from './action-pipelin
 import type { ThreadApi } from './action-pipeline';
 import { captureToInbox, checkinMap, checkinNow, codexTurn, dropCapture, isWorkAssistantEnabled,
   markCaptureFailed, markCaptureReplayed, markCaptureTold, markCaptureTried, pendingCaptures,
-  pendingHeld, quickUpdate, SESSION_CODEX_MODEL, workAssistantRoot } from './work-assistant';
+  pendingHeld, quickUpdate, sessionCodexModel, workAssistantRoot } from './work-assistant';
 import { personaNote, humorReminder, humorValueLine } from './persona';
 import { identityNotice, recordSnapshot } from './identity-note';
 import { startEpisode, endEpisode } from './episodes';
@@ -3283,8 +3283,10 @@ export class SlackHandler {
         codexMailBlock(mailListed, mailThreads)].filter(Boolean).join('\n');
       // 모델은 서비스 폴백 대응표(`service_fallback` · 한 급 낮게) — 표가 없으면 예전처럼 같은 등급 · 기본 모델.
       const svc = serviceCodex(a.claudeModel, INTERACTIVE_EFFORT);
-      const model = svc?.model
-        ?? (await sameTier(a.claudeModel, 'codex'))?.model ?? SESSION_CODEX_MODEL;
+      // 표를 아예 못 읽으면 모델을 안 정한다(`-m` 없이 codex 기본 모델) — 표시 줄 · 장부에는 「codex 기본」.
+      const picked = svc?.model
+        ?? (await sameTier(a.claudeModel, 'codex'))?.model ?? sessionCodexModel();
+      const model = picked ?? 'codex 기본';
       // 엔진 안내가 이 이름을 쓴다(대응표에 칸이 없을 때) — 기본 모델이 아니라 실제로 부른 모델.
       this.lastCodexModel = model;
       this.logger.warn('DM 폴백 — GPT 가 이어 받습니다', { model, claudeWrites, origin: event.replay ? 'replay' : 'dm' });
@@ -3295,7 +3297,7 @@ export class SlackHandler {
         timeoutMs: FALLBACK_TIMEOUT_MS,
         // 깊이는 1차(Claude 대화 차례)의 것 — 대응표가 luna 면 한 단계 위(`effort_up`). 표의 등급 깊이가 아니다.
         effort: svc?.effort ?? INTERACTIVE_EFFORT,
-        model,
+        model: picked,
         env: fallbackEnv(captureId),
         onSpawn: (k) => { kill = k; if (stopped) k(); },
         drillScope: 'interactive',

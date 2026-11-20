@@ -26,7 +26,7 @@ import { classifyCodexErrorText } from './rate-limit-utils';
 import { STEP_INPUT_MAX, STEP_MAX } from './turn-outcome';
 import type { HeldItem, HoldExtra } from './hold-replay';
 import { codexDrill, drillBlockUntil, type DrillScope } from './engine-drill';
-import { serviceCodex } from './model-ladder';
+import { codexModelId, serviceCodex } from './model-ladder';
 
 export type { HoldExtra };
 
@@ -1156,15 +1156,19 @@ export async function narrowApply(json: string, task: string,
 //    `SDK query 실패` 0건 · rate_limit 5건 · Overloaded 6건. 자주 쓰려고 둔 것이
 //    아니라 **터지면 전부 멈추기 때문에** 둔다.
 
-/** 좁은 길 폴백 엔진. 값을 바꾸려면 여기 한 줄 — 잰 것은 `sol` · `low` 다. */
-const NARROW_CODEX_MODEL = 'gpt-6.1-sol';   // 2026-09-23 5.6 → 6 · 09-30 → 6.1 (위 측정은 5.6 때 것)
+/**
+ * 좁은 길 폴백 엔진의 별칭 — 잰 것은 `sol` · `low` 다(위 측정은 5.6 때 것).
+ * **id 는 표(`codex.models.sol.id`)에서 읽는다**(2026-11-20) — 전에는 판 번호를 여기 적어 새 모델마다 고쳤다.
+ */
+const NARROW_CODEX_ALIAS = 'sol';
 
 /**
  * 좁은 길 폴백 모델 — 환경 변수(`BOARD_NARROW_CODEX_MODEL`)가 이기고, 없으면 서비스 폴백 대응표
- * (`service_fallback` · 1차 Claude 모델에 맞춘 칸), 표가 없으면 위 기본값(2026-10-14).
+ * (`service_fallback` · 1차 Claude 모델에 맞춘 칸), 그 칸이 없으면 표의 `sol` id(2026-10-14).
+ * 표를 아예 못 읽으면 `undefined` — `-m` 을 안 넘겨 codex 기본 모델에 맡긴다.
  */
-export function narrowCodexModel(claudeModel?: string): string {
-  return process.env.BOARD_NARROW_CODEX_MODEL || serviceCodex(claudeModel)?.model || NARROW_CODEX_MODEL;
+export function narrowCodexModel(claudeModel?: string): string | undefined {
+  return process.env.BOARD_NARROW_CODEX_MODEL || serviceCodex(claudeModel)?.model || codexModelId(NARROW_CODEX_ALIAS);
 }
 const NARROW_CODEX_EFFORT = 'low';
 
@@ -1179,10 +1183,16 @@ export function narrowCodexEffort(claudeModel?: string): string {
  * 좁은 길은 판을 재는 실험이라 `sol`·`low` 가 그 실험의 조건이다. 여기서 같이
  * 쓰면 주 작업 쪽 사정으로 실험 조건이 바뀌어 앞뒤 회차를 못 비교한다.
  *
- * 등급 대응은 **Opus 5.5 ↔ GPT-6.1 Sol**(2026-09-23 둘 다 한 세대 올림 · Sol 은 09-30 에 6.1) 이고 effort 는 부르는 쪽 값을 그대로
- * 받는다(2026-09-08 사용자). 정기 작업에 Astra·Fable 급은 쓰지 않는다.
+ * 등급 대응은 **Opus ↔ GPT Sol** 이고 effort 는 부르는 쪽 값을 그대로 받는다(2026-09-08 사용자).
+ * 정기 작업에 Astra·Fable 급은 쓰지 않는다.
+ *
+ * **id 는 표(`codex.models.sol.id`)에서 읽는다**(2026-11-20) — 환경 변수(`SESSION_FALLBACK_CODEX_MODEL`)가 이기고,
+ * 표를 못 읽으면 `undefined`(`-m` 없이 codex 기본 모델).
  */
-export const SESSION_CODEX_MODEL = process.env.SESSION_FALLBACK_CODEX_MODEL || 'gpt-6.1-sol';
+const SESSION_CODEX_ALIAS = 'sol';
+export function sessionCodexModel(): string | undefined {
+  return process.env.SESSION_FALLBACK_CODEX_MODEL || codexModelId(SESSION_CODEX_ALIAS);
+}
 const SESSION_CODEX_EFFORT = process.env.SESSION_FALLBACK_CODEX_EFFORT || 'low';
 
 /**
@@ -1678,7 +1688,8 @@ export function codexTurnArgs(opts: CodexTurnOpts, outFile: string, schemaFile?:
     ...(write ? ['--approve-for-me'] : ['-s', 'read-only']),
     '--color', 'never',
     '-C', opts.workingDirectory,
-    '-m', opts.model ?? SESSION_CODEX_MODEL,
+    // 모델을 모르면(표를 못 읽음) `-m` 을 빼 codex 기본 모델에 맡긴다 — 판 번호를 코드에 적지 않는다.
+    ...((m) => (m ? ['-m', m] : []))(opts.model ?? sessionCodexModel()),
     '-c', `model_reasoning_effort=${opts.effort ?? SESSION_CODEX_EFFORT}`,
     ...(schemaFile ? ['--output-schema', schemaFile] : []),
     '-o', outFile, '-',
