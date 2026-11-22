@@ -286,6 +286,79 @@ const clearMark = () => fs.rmSync(MARK, { force: true });
   ok('start() 가 한도 재시도 계획을 다시 건다', start.includes('this.rearmAnalysisRetries('));
 }
 
+// ── ⑤ 한도 재시도가 공통 장치 기록에 남는다 — 점검기의 「오래 돎」 · 「연속 실패」 · 「사라진 타이머」가 본다 ─────
+//    전에는 일반 setTimeout 이라 한도에 걸린 주에는 그 주 분석의 실제 작업이 점검 밖에서 돌았다(2026-11-21 실장 「넣기」).
+{
+  const recurring = require('../dist/recurring.js');
+  const { retryTaskName } = require('../dist/assistant-scheduler.js');
+  const NAME = retryTaskName('saturday-00:00');
+  ok('재시도 이름이 토요 분석 기준(scheduler:analysis:saturday)을 받는다', NAME.startsWith('scheduler:analysis:saturday'));
+  const rec = () => recurring.snapshot()[NAME] ?? {};
+  const pick = (e, keys) => keys.map((k) => e[k] ?? null);
+  const ORIGIN = { slot: '2026-11-21', trigger: 'scheduled' };
+  const QUEUE = [{ type: 'probe', run: null }];
+  const mk = (retry) => {
+    const s = new AssistantScheduler(async () => {}, async () => { throw new Error('시험이 세션을 불렀다'); },
+      CFG_MIDNIGHT, undefined, { reportLog: async () => ({ error: '시험' }) });
+    s.runAnalysisRetry = retry;
+    return s;
+  };
+
+  // 예약 시각에 돈다 — 도는 동안 「실행 중」, 끝나면 까닭 done(한 번뿐이라 「사라진 타이머」가 아님)
+  fs.rmSync(PLANS, { force: true });
+  fs.rmSync(ENGINE, { force: true });
+  recurring.resetForTest();
+  let release;
+  let during = null;
+  const a = mk(async () => { during = { ...rec() }; await new Promise((r) => { release = r; }); });
+  a.scheduleAnalysisRetry('saturday-00:00', ORIGIN, QUEUE, new Date(Date.now() + 20));
+  eq('걸면 예정이 남는다(live 1 · dueAt)', [rec().kind, rec().live, typeof rec().dueAt], ['once', 1, 'string']);
+  await waitFor(() => during);
+  eq('도는 동안 실행 중(running 1 · runningSince)', [during?.running, typeof during?.runningSince], [1, 'string']);
+  release();
+  await waitFor(() => rec().lastEnd);
+  eq('끝나면 runs 1 · 성공 · live 0 · 까닭 done', pick(rec(), ['runs', 'running', 'live', 'lastOk', 'stopReason']),
+     [1, 0, 0, true, 'done']);
+  a.stop();
+
+  // 재시도가 던지면 실패로 남는다 — 연속 실패가 센다
+  recurring.resetForTest();
+  const b = mk(async () => { throw new Error('터짐(시험)'); });
+  b.scheduleAnalysisRetry('saturday-00:00', ORIGIN, QUEUE, new Date(Date.now() + 20));
+  await waitFor(() => rec().lastEnd);
+  eq('던지면 실패 기록(lastOk false · fails 1 · threw) · 까닭 done', pick(rec(), ['lastOk', 'fails', 'lastCode', 'stopReason']),
+     [false, 1, 'threw', 'done']);
+  b.stop();
+
+  // 기동 때 때가 지난 계획도 같은 이름으로 기록된다
+  recurring.resetForTest();
+  fs.writeFileSync(PLANS, JSON.stringify({ v: 1, plans: [{ id: 'p-due', schedule: 'saturday-00:00', origin: ORIGIN,
+    queue: QUEUE, due: Date.now() - 60_000 }] }));
+  let ranAtBoot = 0;
+  const c = mk(async () => { ranAtBoot += 1; });
+  await c.rearmAnalysisRetries();
+  eq('기동 — 때가 지난 계획도 기록에 남는다', [ranAtBoot, ...pick(rec(), ['runs', 'live', 'stopReason'])], [1, 1, 0, 'done']);
+  c.stop();
+
+  // 예약 시각에 Claude 가 막혀 있으면 안 돌고 까닭 skipped — 회복 때 돈 것도 기록된다
+  recurring.resetForTest();
+  engineState.recordBlocked('claude', { kind: 'usage', until: Math.floor(Date.now() / 1000) + 3600 });
+  let ranAfter = 0;
+  const d = mk(async () => { ranAfter += 1; });
+  d.scheduleAnalysisRetry('saturday-00:00', ORIGIN, QUEUE, new Date(Date.now() + 20));
+  await waitFor(() => rec().lastEnd);
+  eq('막혀 있으면 안 돌고 까닭 skipped(사라진 타이머 아님)', [ranAfter, ...pick(rec(), ['live', 'stopReason'])], [0, 0, 'skipped']);
+  d.onEngineRecover('한도 회복');   // 아직 막혀 있다 — 기록에 헛 회차를 안 남긴다
+  await wait(50);
+  eq('막힌 채 회복 입구가 불려도 헛 회차 없음', [ranAfter, rec().runs], [0, 1]);
+  fs.rmSync(ENGINE, { force: true });
+  d.onEngineRecover('한도 회복');
+  await waitFor(() => ranAfter > 0 && rec().runs === 2 && rec().running === 0);
+  eq('풀리면 돌고 기록(runs 2 · 까닭 done)', [ranAfter, ...pick(rec(), ['runs', 'stopReason'])], [1, 2, 'done']);
+  d.stop();
+  fs.rmSync(PLANS, { force: true });
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 
 if (fails.length) {
@@ -295,5 +368,5 @@ if (fails.length) {
 } else {
   console.log('통과 — 예약 일의 빈틈 (브리핑 자국은 올린 뒤에만 · 놓친 · 예약 · 수동 브리핑이 한도/오류 글을 안 올림 · '
     + '회복 뒤 브리핑은 업무일 · 브리핑 시각 뒤 · 정오 전만 · 한도 재시도 계획 파일 · 재시작 뒤 다시 걸림 · '
-    + 'Claude 가 막혀 있으면 기다림)');
+    + 'Claude 가 막혀 있으면 기다림 · 재시도가 공통 장치 기록에 남음)');
 }

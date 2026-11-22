@@ -851,6 +851,16 @@ function analysisRetryFile(): string {
   return process.env.ANALYSIS_RETRY_FILE || path.join(__dirname, '..', '.analysis-retry.json');
 }
 
+/**
+ * 한도 재시도의 공통 장치 이름 — 그 스케줄의 분석 그룹 이름 뒤에 `:retry`. PC 점검기(`pc-jobs.py` 의
+ * `ANALYSIS_LONG_S`)와 재시작 도구(`scripts/restart.mjs` 의 `ANALYSIS_STALE_MS`)가 이름 앞부분으로 기준을 고르므로
+ * 정규 회차와 같은 「오래 돎」 기준(토요 4시간, 그 밖 90분)을 받고, 재시도 중에는 재시작이 미뤄진다.
+ * 전에는 일반 `setTimeout` 이라 한도에 걸린 주에는 그 주 분석의 실제 작업을 점검기가 못 봤다(2026-11-21 실장 「넣기」).
+ */
+export function retryTaskName(schedule: string): string {
+  return `scheduler:analysis:${schedule}:retry`;
+}
+
 /** 한도가 풀려 브리핑을 다시 돌리는 마지막 시각(한국 시각) — 넘으면 그날 브리핑은 없다. */
 const BRIEFING_RECOVER_UNTIL = '12:00';
 /** 브리핑이 한도로 못 나갔을 때의 한 줄 — 회복 타이머가 정오 전에 다시 돌린다(`recoverBriefingIfNeeded`). */
@@ -921,8 +931,9 @@ export class AssistantScheduler {
   private analysisTimers: Map<string, Task> = new Map();
   /** 한도 재시도 — `clearAllTimers` 밖에 둔다. 설정을 다시 읽어도 살아남아야 하고(다시 걸어 줄
    *  곳이 없다) 같은 스케줄의 재시도가 둘이어도 둘 다 쥔다. 봇을 끌 때(`stop`)만 푼다.
-   *  열쇠는 계획 id — 계획은 파일에 있어 재시작해도 다시 건다(`rearmAnalysisRetries`). */
-  private analysisRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+   *  열쇠는 계획 id — 계획은 파일에 있어 재시작해도 다시 건다(`rearmAnalysisRetries`).
+   *  공통 장치의 한 번 예약이라 시작, 끝, 걸린 시간이 상태 파일에 남는다(`retryTaskName`). */
+  private analysisRetryTimers = new Map<string, Task>();
   private workNudgeTimer: Task | null = null;
   private offsitePushTimer: Task | null = null;
   private notionWatchTimer: Task | null = null;
@@ -1064,7 +1075,7 @@ export class AssistantScheduler {
   stop(): void {
     this.clearAllTimers('stop');
     // 타이머만 푼다 — 계획은 파일에 남아 다음 기동이 다시 건다.
-    for (const timer of this.analysisRetryTimers.values()) clearTimeout(timer);
+    for (const timer of this.analysisRetryTimers.values()) timer.stop('stop');
     this.analysisRetryTimers.clear();
     this.stopConfigWatcher();
     this.logger.info('AssistantScheduler stopped');
@@ -4177,19 +4188,51 @@ export class AssistantScheduler {
     const plan = plans.find((p) => p.id === id) ?? null;
     if (plan) this.saveRetryPlans(plans.filter((p) => p.id !== id));
     const t = this.analysisRetryTimers.get(id);
-    if (t) { clearTimeout(t); this.analysisRetryTimers.delete(id); }
+    if (t) { t.stop('taken'); this.analysisRetryTimers.delete(id); }
     return plan;
   }
 
   /** 계획 하나에 타이머를 건다. 때가 되면 Claude 가 풀렸을 때만 돌린다 — 막혀 있으면 회복을 기다린다. */
   private armRetryPlan(plan: RetryPlan): void {
     const prev = this.analysisRetryTimers.get(plan.id);
-    if (prev) clearTimeout(prev);
-    const timer = setTimeout(() => {
-      this.analysisRetryTimers.delete(plan.id);
-      void this.runRetryPlanIfClear(plan.id, '예약 시각');
-    }, Math.max(0, plan.due - Date.now()));
+    if (prev) prev.stop('rearm');
+    const timer: Task = once({
+      name: retryTaskName(plan.schedule),
+      ms: Math.max(0, plan.due - Date.now()),
+      run: () => this.fireRetryPlan(plan.id, timer, '예약 시각'),
+    });
     this.analysisRetryTimers.set(plan.id, timer);
+  }
+
+  /** 때가 지난 계획 하나를 지금 돌린다 — 0ms 예약으로 감싸 예약 시각에 돈 것과 같이 기록한다. 끝날 때까지 기다린다. */
+  private runRetryPlanNow(plan: RetryPlan, why: string, nowMs: number): Promise<boolean | RunFailure> {
+    return new Promise((resolve) => {
+      const timer: Task = once({
+        name: retryTaskName(plan.schedule),
+        ms: 0,
+        run: () => {
+          const r = this.fireRetryPlan(plan.id, timer, why, nowMs);
+          void r.then(resolve, () => resolve(false));
+          return r;
+        },
+      });
+    });
+  }
+
+  /**
+   * 공통 장치가 부르는 재시도 한 회차 — 돌리는 동안이 그 이름의 「실행 중」으로 남아 점검기의 「오래 돎」이 본다.
+   * 다시 걸리지 않았으면 끝난 까닭을 남긴다(`done` 돌림, `skipped` 안 돌림) — 한 번뿐인 예약이라 까닭이 없으면
+   * 점검기가 「사라진 타이머」로 잡는다. 재시도가 던지면 실패로 기록해 「연속 실패」가 본다.
+   */
+  private async fireRetryPlan(id: string, timer: Task, why: string, nowMs?: number): Promise<boolean | RunFailure> {
+    if (this.analysisRetryTimers.get(id) === timer) this.analysisRetryTimers.delete(id);
+    let r: boolean | RunFailure = false;
+    try {
+      r = await this.runRetryPlanIfClear(id, why, nowMs);
+    } finally {
+      if (!this.analysisRetryTimers.has(id)) timer.stop(r === false ? 'skipped' : 'done');
+    }
+    return r;
   }
 
   /**
@@ -4197,7 +4240,7 @@ export class AssistantScheduler {
    * `onEngineRecover` 로 다시 부른다). 막힌 채 돌리면 한 번뿐인 재시도를 헛되이 쓴다.
    * 또한 데일리 재시도가 새벽 쿼터 보호 구간에 깨어나면 06:05 로 미룬다.
    */
-  private async runRetryPlanIfClear(id: string, why: string, nowMs: number = Date.now()): Promise<boolean> {
+  private async runRetryPlanIfClear(id: string, why: string, nowMs: number = Date.now()): Promise<boolean | RunFailure> {
     if (engineState.isBlocked('claude')) {
       this.logger.info(`한도 재시도를 미룹니다 — Claude 가 아직 막혀 있음 (${why})`, { id });
       return false;
@@ -4219,6 +4262,7 @@ export class AssistantScheduler {
       await this.runAnalysisRetry(plan.schedule, plan.origin, plan.queue);
     } catch (error) {
       this.logger.error('Analysis retry failed', { schedule: plan.schedule, error });
+      return { ok: false, code: 'threw' };
     }
     return true;
   }
@@ -4238,10 +4282,11 @@ export class AssistantScheduler {
   /** 때가 지난 계획을 차례로 돌린다(겹쳐 돌지 않게). Claude 가 막혀 있으면 아무것도 안 한다. */
   async runDueAnalysisRetries(why: string, now: number = Date.now()): Promise<void> {
     if (this.retryBusy) return;
+    if (engineState.isBlocked('claude')) return;   // 안 돌릴 회차를 예약 기록에 남기지 않는다
     this.retryBusy = true;
     try {
       for (const p of this.loadRetryPlans().filter((x) => x.due <= now)) {
-        if (!(await this.runRetryPlanIfClear(p.id, why, now)) && engineState.isBlocked('claude')) break;
+        if (!(await this.runRetryPlanNow(p, why, now)) && engineState.isBlocked('claude')) break;
       }
     } finally {
       this.retryBusy = false;
