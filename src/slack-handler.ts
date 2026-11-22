@@ -359,6 +359,11 @@ interface MessageEvent {
   needsFull?: boolean;
   /** 서랍에서 온 차례(2026-11-04) — 슬랙에 글이 없고 `ts` 는 지어낸 값이다(`askFromBoard`). */
   drawer?: boolean;
+  /**
+   * 웹 도구(WebFetch, WebSearch)를 막은 차례 — 메일 후보(2026-11-23 실장님 결정 「메일실험 → 막기먼저」). 남이 쓴 메일
+   * 본문이 든 차례가 바깥 주소를 부르면 개인 자료가 밖으로 나갈 수 있다. 11/09~20 이 차례의 웹 도구 실사용 0건
+   */
+  noWeb?: boolean;
   files?: Array<{
     id: string;
     name: string;
@@ -1081,7 +1086,7 @@ export class SlackHandler {
    * 이 방에서 이어 가던 대화와 갈라진다.
    */
   private async askFromBoard(text: string, lead?: string, shown?: string,
-                             captureId?: string, opts: { drawer?: boolean; single?: boolean } = {}): Promise<TurnOutcome & { lastText?: string }> {
+                             captureId?: string, opts: { drawer?: boolean; single?: boolean; noWeb?: boolean } = {}): Promise<TurnOutcome & { lastText?: string }> {
     const channel = config.assistant.dmChannel;
     const user = config.bot.allowUsers[0];
     if (!channel || !user) throw new Error('비서 방 또는 사용자가 설정되지 않았습니다');
@@ -1122,7 +1127,7 @@ export class SlackHandler {
       const head = lead ?? `🗂 ${boardLabel()} 에서`;
       const outcomeSink: Partial<TurnOutcome> = {};
       await this.handleMessage(
-        { type: 'message', channel, user, text, ts, pushed: true, captureId, outcomeSink } as unknown as MessageEvent,
+        { type: 'message', channel, user, text, ts, pushed: true, captureId, outcomeSink, noWeb: opts.noWeb } as unknown as MessageEvent,
         this.singleSay(channel, head, (t, marker) => {
           if (!t.trim()) return;
           if (marker) lastMarker = t; else lastText = t;
@@ -1973,6 +1978,8 @@ export class SlackHandler {
         model: channelModel,
         permissionMode: isPlanMode ? 'plan' as const : botPermLevel,
         allowedTools,
+        // 메일 후보 차례는 웹 도구를 막는다 — 미리 띄운 세션은 옵션 지문이 달라 안 쓰이고 새로 띄운다(warmKey)
+        ...(event.noWeb ? { disallowedTools: ['WebFetch', 'WebSearch'] } : {}),
         env: queryEnv,
         // 엔진 연습(`.engine-drill.json`)은 대화 차례에만 — 예약 일은 `scope: all` 일 때만 받는다.
         drillScope: 'interactive' as const,

@@ -42,7 +42,9 @@ export function dmOf(stdout: string): string {
 export async function postWithRetry(client: Pick<WebClient, 'chat'>, channel: string, text: string, waitMs = 60_000): Promise<boolean> {
   for (let i = 0; i < 2; i++) {
     try {
-      await client.chat.postMessage({ channel, text });
+      // 링크 미리보기 끔 — 각성 글에는 메일 제목처럼 남이 쓴 글이 섞일 수 있고, 미리보기는 슬랙이 그 주소를 부르는 바깥
+      // 요청이다(2026-11-23 실장님 결정 「메일실험 → 막기먼저」, 관리 문서 G2 에 적혀 있었으나 코드에 없던 것)
+      await client.chat.postMessage({ channel, text, unfurl_links: false, unfurl_media: false });
       return true;
     } catch (err) {
       logger.warn(`세나 각성 DM 실패(${i + 1}/2)`, err);

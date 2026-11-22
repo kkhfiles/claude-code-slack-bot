@@ -37,6 +37,18 @@ check('여러 줄 출력이면 마지막 JSON 줄만 봄', dmOf('경고 한 줄\
   let m = 0;
   const down = { chat: { postMessage: async () => { m++; throw new Error('계속 실패'); } } };
   check('두 번 실패하면 그만둠(무한 재시도 없음)', await postWithRetry(down, 'D1', '글', 0) === false && m === 2, m);
+  // 11/23 실장님 결정 「메일실험 → 막기먼저」 — 미리보기는 슬랙이 글 속 주소를 부르는 바깥 요청이다
+  let sent;
+  await postWithRetry({ chat: { postMessage: async (a) => { sent = a; return { ok: true }; } } }, 'D1', '<https://x.example|x>', 0);
+  check('각성 DM 은 링크 미리보기를 끔', sent && sent.unfurl_links === false && sent.unfurl_media === false, sent);
+}
+{
+  // 같은 결정 — 메일 후보 차례(남이 쓴 메일 본문이 든 차례)는 웹 도구를 막는다. 소스에서 이음새 셋을 센다
+  const src = (f) => fs.readFileSync(path.join(ROOT, 'src', f), 'utf8');
+  check('메일 후보 차례가 noWeb 을 넘김', src('assistant-scheduler.ts').includes("'', { single: true, noWeb: true });"));
+  check('noWeb 차례는 WebFetch, WebSearch 를 막음',
+    src('slack-handler.ts').includes("...(event.noWeb ? { disallowedTools: ['WebFetch', 'WebSearch'] } : {}),"));
+  check('SDK 에 disallowedTools 가 실림', src('sdk-handler.ts').includes('sdkOptions.disallowedTools = opts.disallowedTools'));
 }
 const wa = process.env.WORK_ASSISTANT_ROOT || 'P:/github/work-assistant';
 const py = path.join(wa, 'bin', 'sena_wake.py');

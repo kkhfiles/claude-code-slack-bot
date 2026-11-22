@@ -42,7 +42,7 @@ ok('굵은 글로 시작하는 답은 상태 줄 아님', !isStatusLine('*처리
 // 배선 — 소스에서 본다(슬랙 통로를 띄우지 않고)
 const sched = fs.readFileSync(path.join(ROOT, 'src', 'assistant-scheduler.ts'), 'utf-8');
 const handler = fs.readFileSync(path.join(ROOT, 'src', 'slack-handler.ts'), 'utf-8');
-ok('메일 폴러가 한 통으로 넘김(single)', /📬 메일 후보 \$\{r\.threads\.length\}건`, '', \{ single: true \}\)/.test(sched));
+ok('메일 폴러가 한 통으로 넘김(single)', /📬 메일 후보 \$\{r\.threads\.length\}건`, '', \{ single: true(, noWeb: true)? \}\)/.test(sched));
 ok('봇이 넘긴 차례에는 명령어 안내를 안 붙임', /isNewSession && !event\.drawer && !\(event as any\)\.pushed && !this\.hintShownThreads/.test(handler));
 ok('한 통 길은 끝에 singleMessage 한 번', /chat\.postMessage\(singleMessage\(channel, head, lastText, lastMarker\)\)/.test(handler));
 // 2026-11-19 — 메일 후보가 서랍 차례를 끊어 서랍 답이 「🤔 생각 중...」으로 굳었다

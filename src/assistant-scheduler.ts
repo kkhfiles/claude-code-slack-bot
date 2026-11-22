@@ -1005,7 +1005,7 @@ export class AssistantScheduler {
      * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
      */
     private askFromBoard?: (text: string, lead?: string, shown?: string,
-                            opts?: { drawer?: boolean; single?: boolean; captureId?: string }) => Promise<(TurnOutcome & { lastText?: string }) | void>,
+                            opts?: { drawer?: boolean; single?: boolean; noWeb?: boolean; captureId?: string }) => Promise<(TurnOutcome & { lastText?: string }) | void>,
     deps: SchedulerDeps = {},
   ) {
     this.reportLog = deps.reportLog ?? runReportLog;
@@ -2181,6 +2181,13 @@ export class AssistantScheduler {
     return commitVaultLeftovers();
   }
 
+  // 2분 점검이 보내는 네 갈래 — 함수 이름이 곧 활동 기록의 갈래 표지다. 이름을 바꾸면 `sena_notify_census.py` KINDS 도 같이
+  private async remindTimed(text: string): Promise<void> { await this.sendMessage(text); }
+  private async remindResultAsk(text: string): Promise<void> { await this.sendMessage(text); }
+  private async remindResultNote(text: string): Promise<void> { await this.sendMessage(text); }
+  private async remindCredit(text: string): Promise<void> { await this.sendMessage(text); }
+  private async remindRelief(text: string): Promise<void> { await this.sendMessage(text); }
+
   /** 한 판 돈다. **절대 던지지 않는다** — 여기서 터지면 조용히 안 울린다. */
   private async runRemindPoll(): Promise<void> {
     const h = new Date().getHours();
@@ -2201,8 +2208,13 @@ export class AssistantScheduler {
         if (this.remindSent.has(key)) continue;
         const when = it.at.slice(11);
         // 결과 알림은 줄 그대로 — ⏰ 는 실장님이 정한 시각에 울리는 업무 알림 표지이고, 보낸 시각은 슬랙이 이미 보인다(11/10)
-        await this.sendMessage(
-          (it.plain ? it.title : `⏰ ${when} — ${it.title}`) + (it.next ? `\n다음 행동: ${it.next}` : ''));
+        const text = (it.plain ? it.title : `⏰ ${when} — ${it.title}`) + (it.next ? `\n다음 행동: ${it.next}` : '');
+        // 갈래마다 다른 함수로 보낸다 — 활동 기록의 「부른곳」이 그 함수 이름이 되어 알림 계기판(`sena_notify_census.py`)이
+        // 「섞임」 없이 센다(2026-11-23 실장님 결정 「알림줄이기 → 세기만」, 안 B). 보내는 글은 그대로
+        if (it.id.startsWith('result:')) await (it.ask ? this.remindResultAsk(text) : this.remindResultNote(text));
+        else if (it.id.startsWith('credit:')) await this.remindCredit(text);
+        else if (it.id.startsWith('relief:')) await this.remindRelief(text);
+        else await this.remindTimed(text);
         // **보낸 뒤에 찍는다** — 먼저 찍고 보내다 실패하면 영영 안 울린다.
         this.remindSent.add(key);
         if (!await remindDone(it.id, it.at)) {
@@ -2272,7 +2284,7 @@ export class AssistantScheduler {
       // **한 통으로**(2026-11-09 실장 결정 V2) — 머리 줄과 답을 끝에 한 메시지로(`single`).
       const out = await this.askFromBoard(
         `[메일] 후보 ${r.threads.length}건\n${r.text}`,
-        r.lead || `📬 메일 후보 ${r.threads.length}건`, '', { single: true });
+        r.lead || `📬 메일 후보 ${r.threads.length}건`, '', { single: true, noWeb: true });
       // **막혀 끝났으면 표시를 안 옮긴다**(2026-10-14) — 풀린 뒤 첫 회차가 같은 메일을 그때의 목록으로
       // 다시 읽는다. 그러면 이번 차례의 캡처는 **버린다** — 남겨 두면 회복 때 드레인이 옛 목록을 한 번
       // 더 넘겨 같은 후보가 두 번 나간다. 쓰기가 돈 뒤 막힌 것(일하다 끊김)은 표시를 옮기고 캡처가

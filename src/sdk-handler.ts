@@ -225,6 +225,8 @@ export interface SdkRunOptions {
   skipMcp?: boolean;
   noSessionPersistence?: boolean;
   tools?: string[];
+  /** 이 차례에서 쓸 수 없는 도구 — 권한 방식(auto 포함)과 상관없이 막힌다. 메일 후보 차례의 웹 도구(2026-11-23) */
+  disallowedTools?: string[];
   // SDK-specific extensions:
   canUseTool?: CanUseTool;
   /**
@@ -573,6 +575,7 @@ export class SdkHandler {
     // judgment) only worked because dontAsk mode silently denied unlisted tools, not
     // because tools were actually unavailable. Route each option to its real target.
     // CLI accepts permission patterns ('Bash(python:*)'); SDK expects bare names.
+    if (opts.disallowedTools?.length) sdkOptions.disallowedTools = opts.disallowedTools.map(toBaseToolName);
     if (opts.tools !== undefined) {
       sdkOptions.tools = opts.tools.length === 0 ? [] : opts.tools.map(toBaseToolName);
     }
