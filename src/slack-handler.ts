@@ -54,6 +54,7 @@ import { boardLabel, event as recordEvent } from './board-queue';
 import { TurnTimer } from './turn-timing';
 import { readUnseen } from './dm-context';
 import { containsPrivate } from './privacy-guard';
+import { LABEL_HOOKS, finishTurn, noteText, wantGuard } from './internal-labels';
 import { ChannelGate, HOLD_SWEEP_MS, REPLAY_FRAME, buildHoldExtra, drainHeld, dropHeldFiles, holdV2On,
   leadText, markChoice, needsCanary, oldListMessage, receivedSec, replayNote, replayTarget,
   type HeldFile, type HeldItem } from './hold-replay';
@@ -1838,6 +1839,9 @@ export class SlackHandler {
     // 줄일 값이 있는지는 재 봐야 안다 — 짐작으로 손대지 않는다.
     // 미리 띄우기는 차례가 **끝난 뒤**에 하므로, 그때 쓸 옵션을 여기 들어 둔다.
     let sdkOptsForWarm: SdkRunOptions | null = null;
+    // 내부 번호 점검(`internal-labels.ts`) — 이 차례에 거르나, 어느 세나 세션인가. `finally` 가 기록을 지운다
+    let labelWant = false;
+    let labelSid = '';
     // **`try` 밖에 둔다** — 차례가 터졌을 때 `catch` 에서도 캡처에 표시를 남겨야
     // 한다. 안에 두면 그 자리에서 안 보여, 정작 실패한 차례가 자국을 못 남긴다.
     const captureId = capture?.id ?? '';
@@ -2045,10 +2049,14 @@ export class SlackHandler {
       // 모델을 내리는 것보다 여기를 먼저 조이는 이유는 잃는 것이 다르기 때문이다 —
       // 등록 해석(추정·중요도·마감)의 품질은 오래 생각해서가 아니라 모델이 맥락을
       // 아는 데서 나오고, 그 해석은 어차피 사용자 컨펌을 거친다.
+      // 세나 DM 답의 내부 번호 점검(`internal-labels.ts` · 사고 ic-20261123-4) — 훅은 DM 이면 늘 얹고(미리 띄우기 지문이
+      // 차례마다 같게), 붙잡을지는 차례마다 정한다(사람이 친 말이고 번호를 묻는 말이 아닐 때)
+      labelWant = wantGuard({ isDM, pushed: !!(event as any).pushed, drawer: !!event.drawer, userText: text || '' });
       const sdkOpts: SdkRunOptions = {
         ...runOpts, env: sessionEnv, skills: 'all', effort: INTERACTIVE_EFFORT,
         appendSystemPrompt: stableNote,
         settings: { autoCompactWindow: INTERACTIVE_COMPACT_WINDOW },
+        ...(isDM ? { hooks: LABEL_HOOKS } : {}),
       };
       // 차례가 끝나면 이 옵션 그대로 하나 띄워 둔다 — 아래 `finally` 에서 쓴다.
       sdkOptsForWarm = sdkOpts;
@@ -2219,7 +2227,12 @@ export class SlackHandler {
                 }
               }
               await this.updateMessageReaction(sessionKey, '✍️');
-              await say({ text: this.formatMessage(content, false), thread_ts: replyTs });
+              // 내부 번호가 든 세나 글은 올리지 않고 맡긴다 — Stop 훅이 같은 차례 안에서 풀어 다시 쓰게 한다.
+              // `currentMessages` 에는 넣어 둔다 — 아래 결과 글(같은 글)이 다시 올리지 않게
+              labelSid = assistantEvent.session_id || labelSid;
+              if (noteText(labelSid, content, labelWant, text || '') === 'post') {
+                await say({ text: this.formatMessage(content, false), thread_ts: replyTs });
+              }
             }
           }
         } else if (event.type === 'result') {
@@ -2280,7 +2293,8 @@ export class SlackHandler {
           // 오류 결과뿐이다(`rateLimitMessageText` 는 `is_error` 일 때만 선다).
           const limited = limitSeen || !!rateLimitMessageText;
           if (resultEvent.subtype === 'success' && resultEvent.result && !limited) {
-            if (!currentMessages.includes(resultEvent.result)) {
+            if (!currentMessages.includes(resultEvent.result)
+              && noteText(resultEvent.session_id || labelSid, resultEvent.result, labelWant, text || '') === 'post') {
               await say({ text: this.formatMessage(resultEvent.result, true), thread_ts: replyTs });
               tmark('마지막 글');
             }
@@ -2289,6 +2303,14 @@ export class SlackHandler {
         }
       }
       tmark('스트림 닫힘');
+      // 붙잡았는데 훅이 돌려보내지 못한 글은 그대로 올린다 — 답을 잃는 것보다 번호가 나가는 것이 낫다(`internal-labels.ts`)
+      if (labelSid) {
+        const leftover = finishTurn(labelSid);
+        if (leftover.length && !limitSeen) {
+          this.logger.warn('내부 번호를 못 풀고 그대로 올립니다', { n: leftover.length });
+          for (const t of leftover) await say({ text: this.formatMessage(t, true), thread_ts: replyTs });
+        }
+      }
 
       // **사람이 `-stop` 으로 끊은 다시 돌리기는 버린다 — Claude 가 돌던 것도**(2026-10-15 검토). GPT · agy 칸은 이미
       // 그랬다. 남기면 옛 실패 표시가 그대로라 다음 드레인이 끊은 요청을 또 돌린다. 끊은 차례는 다음 칸으로도 안 넘긴다.
@@ -2554,6 +2576,8 @@ export class SlackHandler {
     } finally {
       // 미룬 엔진 안내를 놓는다 — 터졌어도 여기서 놓고, 놓을 때 지금 모양을 한 줄로 낸다(사이 칸은 빠진다).
       releaseNotice?.();
+      // 터진 차례의 내부 번호 기록을 지운다(끝까지 간 차례는 위 「스트림 닫힘」에서 이미 지웠다)
+      if (labelSid) finishTurn(labelSid);
       this.activeProcesses.delete(sessionKey);
       { const m = readInflight(); delete m[sessionKey]; if (waitRec) delete m[waitRec]; writeInflight(m); }
       // **차례가 끝나면 캡처 가리킴을 비운다.** 안 비우면 다음 쓰기가 앞 차례의

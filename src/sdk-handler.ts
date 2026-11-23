@@ -271,6 +271,11 @@ export interface SdkRunOptions {
    * (2026-11-05 사용자 결정 「크레딧은 Mycelium 사이트만 쓴다」 · 봇의 DM · 예약 일 · 달력 판정 · 폴백은 구독만).
    */
   billing?: 'api';
+  /**
+   * SDK 훅(봇 프로세스 안에서 도는 함수) — 지금은 세나 DM 의 내부 번호 점검 Stop 훅 하나(`internal-labels.ts`).
+   * 늘 같은 객체를 넘겨야 미리 띄우기 지문이 안 흔들린다(함수는 지문에서 `null` 로 찍힌다).
+   */
+  hooks?: Record<string, unknown>;
 }
 
 export class SdkHandler {
@@ -554,6 +559,7 @@ export class SdkHandler {
     if (opts.additionalDirectories?.length) sdkOptions.additionalDirectories = opts.additionalDirectories;
 
     if (opts.skills !== undefined) sdkOptions.skills = opts.skills;
+    if (opts.hooks) sdkOptions.hooks = opts.hooks;
 
     // System prompt: replace > append (matches cli-handler precedence)
     // Top-level `appendSystemPrompt` is NOT a public SDK option — silently dropped.
