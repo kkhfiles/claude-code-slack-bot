@@ -144,6 +144,24 @@ export function rememberDmOwner(channel: string, user: string): void {
 }
 
 /**
+ * 실장 1:1 방인가 — 봇이 연 DM(`conversations.open`, 한 사람)과 들어온 DM 에서 배운 방 주인으로 가른다. 보낸 줄에 `실장: true`
+ * 를 남겨 세나 알림 계기판이 세 봇(세나, 커피콩, 소인)의 실장 DM 발신을 같은 자로 센다(11/23 4단계 「세 DM 방 계기판」 —
+ * 그전에는 커피콩 기록에서 실장 방을 가릴 수 없었다). 모르면 안 붙인다.
+ */
+export function isOwnerDm(channel: string): boolean {
+  return !!redactor?.owner && channel.startsWith('D') && dmOwner.get(channel) === redactor.owner;
+}
+
+/** `conversations.open` 결과에서 방 주인을 배운다 — 한 사람에게 연 DM 만(여럿이 든 방은 1:1 이 아니다). */
+export function learnOpened(method: string, options: any, res: any): void {
+  const users = options?.users;
+  const id = res?.channel?.id;
+  if (method === 'conversations.open' && typeof users === 'string' && !users.includes(',') && typeof id === 'string') {
+    rememberDmOwner(id, users);
+  }
+}
+
+/**
  * **실원이 봇에게 한 말과 개인 글 조각이 든 글은 원문을 안 남긴다**(실장 2026-09-30 「가리고
  * 옮기기」 — 「DM 이나 콩에게 전달한 말이 타인이나 채널에 공유되면 절대 안 됨」). 글자 수와 까닭만.
  *   - 실장이 아닌 사람이 DM 으로 한 말 · 슬래시 명령 뒤에 적은 말
@@ -329,14 +347,18 @@ export function installActivityLog(): void {
       const bot = byToken.get(this?.token ?? '') ?? '?';
       const said = readable(options);
       const where = from ? { 부른곳: from } : {};
+      const ch = String(options?.channel ?? options?.user ?? '');
       Promise.resolve(done).then(
-        (res: any) => note(bot, '보냄', {
-          어디: options?.channel ?? options?.user ?? '', 무엇: method,
-          말: said, 잘됨: res?.ok !== false, ...where,
-        }),
+        (res: any) => {
+          try { learnOpened(method, options, res); } catch { /* 기록 때문에 넘어지지 않는다 */ }
+          note(bot, '보냄', {
+            어디: ch, 무엇: method, 말: said, 잘됨: res?.ok !== false, ...where, ...(isOwnerDm(ch) ? { 실장: true } : {}),
+          });
+        },
         (error: any) => note(bot, '못 보냄', {
-          어디: options?.channel ?? options?.user ?? '', 무엇: method,
+          어디: ch, 무엇: method,
           말: said, 왜: String(error?.data?.error ?? error?.message ?? error).slice(0, 200), ...where,
+          ...(isOwnerDm(ch) ? { 실장: true } : {}),
         }),
       );
     }

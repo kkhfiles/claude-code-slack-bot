@@ -1617,6 +1617,9 @@ export interface CodexTurnOpts {
   drillScope?: DrillScope;
   /** 볼트 대신 커밋의 메시지 이름(`[GPT 대신 커밋] <이름>`) — 사람 이름 · 글을 넣지 않는다. 생략하면 `codex 차례`. */
   label?: string;
+  /** 웹 검색을 끈다(`web_search=disabled`) — 남이 쓴 메일 본문이 든 차례(2026-11-23 「메일실험 → 막기먼저」). Claude 차례는
+   *  `disallowedTools` 로 막았는데 GPT 로 넘어간 차례는 codex 기본 웹 검색이 그대로 열려 있었다. */
+  noWeb?: boolean;
 }
 
 /** codex 가 돌린 것 하나 — `done` 성공으로 끝남 · `failed` 실패로 끝남(종료 코드 · 상태) · 둘 다 없으면 결과 모름. */
@@ -1656,6 +1659,8 @@ export function codexTurnArgs(opts: CodexTurnOpts, outFile: string): string[] {
     // 모델을 모르면(표를 못 읽음) `-m` 을 빼 codex 기본 모델에 맡긴다 — 판 번호를 코드에 적지 않는다.
     ...((m) => (m ? ['-m', m] : []))(opts.model ?? sessionCodexModel()),
     '-c', `model_reasoning_effort=${opts.effort ?? SESSION_CODEX_EFFORT}`,
+    // 따옴표 없이 — Windows 에서 셸을 지나며 `"` 가 인자를 깨뜨렸다(가짜 codex 시험이 잡음). codex 는 TOML 로 못 읽은 값을 글자로 받는다
+    ...(opts.noWeb ? ['-c', 'web_search=disabled'] : []),
     '-o', outFile, '-',
   ];
 }

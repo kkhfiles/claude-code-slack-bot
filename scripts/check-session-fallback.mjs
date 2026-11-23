@@ -448,8 +448,15 @@ try { fs.unlinkSync(evFile); } catch { /* 없으면 그만 */ }
   // 실제로 넘기는 깃발 묶음 그대로(`codexTurnArgs`) — 쓰기 · 읽기 전용 둘 다. 손으로 다시 적으면
   // 코드와 어긋난 묶음을 재게 된다.
   const outFile = path.join(STATE_DIR, 'flag-check.out.txt');
-  for (const sandbox of ['workspace-write', 'read-only']) {
-    const flags = codexTurnArgs({ workingDirectory: os.tmpdir(), sandbox, model: 'gpt-6.1-sol', effort: 'low' }, outFile);
+  // 메일 후보 차례(noWeb)는 웹 검색을 끄고, 다른 차례는 그대로(2026-11-23 「메일실험 → 막기먼저」의 GPT 칸)
+  {
+    const base = { workingDirectory: os.tmpdir(), sandbox: 'workspace-write', model: 'gpt-6.1-sol', effort: 'low' };
+    ok('noWeb 차례는 web_search=disabled 를 넘긴다(따옴표 없이 — 셸을 지나도 안 깨짐)',
+       codexTurnArgs({ ...base, noWeb: true }, outFile).includes('web_search=disabled'));
+    ok('보통 차례는 웹 검색 설정을 안 건드린다', !codexTurnArgs(base, outFile).some((f) => f.startsWith('web_search')));
+  }
+  for (const [sandbox, noWeb] of [['workspace-write', false], ['read-only', false], ['workspace-write', true]]) {
+    const flags = codexTurnArgs({ workingDirectory: os.tmpdir(), sandbox, model: 'gpt-6.1-sol', effort: 'low', noWeb }, outFile);
     ok(`${sandbox} — --sandbox 와 --approve-for-me 를 같이 안 준다`, !(flags.includes('-s') && flags.includes('--approve-for-me')));
     const r = spawnSync('codex', flags, {
       input: '', encoding: 'utf-8', shell: process.platform === 'win32', timeout: 30_000,

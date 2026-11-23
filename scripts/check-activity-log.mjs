@@ -131,5 +131,27 @@ check('대화 봇이 맡은 방을 알려 준다', registers);
   fs.rmSync(TMP, { recursive: true, force: true });
 }
 
+// --- 실장 1:1 방 표시 (2026-11-23 4단계 「세 DM 방 계기판」) ------------------------------
+// 커피콩과 소인은 실장에게 보낼 때 `conversations.open` 으로 방을 연다 — 그 방이 실장 방인지 기록에서 못 가려 세나 계기판이
+// 두 봇의 실장 DM 을 못 셌다. 연 결과에서 방 주인을 배우고, 실장 방으로 나간 줄에만 `실장: true`.
+{
+  const { learnOpened, isOwnerDm } = require(path.join(ROOT, 'dist', 'activity-log.js'));
+  setRedactor({ owner: 'U_BOSS', isPrivate: () => false });
+  learnOpened('conversations.open', { users: 'U_BOSS' }, { ok: true, channel: { id: 'D_OPENED_BOSS' } });
+  learnOpened('conversations.open', { users: 'U_A' }, { ok: true, channel: { id: 'D_OPENED_A' } });
+  learnOpened('conversations.open', { users: 'U_BOSS,U_A' }, { ok: true, channel: { id: 'D_GROUP' } });
+  check('실장에게 연 방은 실장 방', isOwnerDm('D_OPENED_BOSS'));
+  check('실원에게 연 방은 실장 방이 아님', !isOwnerDm('D_OPENED_A'));
+  check('여럿에게 연 방은 배우지 않음', !isOwnerDm('D_GROUP'));
+  check('채널은 실장 방이 아님', !isOwnerDm('C_MINE'));
+  const out = scrub('보냄', { 어디: 'D_OPENED_A', 무엇: 'chat.postMessage', 말: '실원에게 간 봇의 말' });
+  check('⛔ 봇이 연 실원 DM 방으로 나간 말도 가린다', !('말' in out), out);
+  setRedactor(null);
+  check('가림 기준이 없으면 실장 방을 모름(붙이지 않음)', !isOwnerDm('D_OPENED_BOSS'));
+  const logSrc = require('node:fs').readFileSync(path.join(ROOT, 'src', 'activity-log.ts'), 'utf-8');
+  check('나가는 말을 적는 길목이 방 주인을 배우고 표시를 붙인다',
+    /learnOpened\(method, options, res\)/.test(logSrc) && /isOwnerDm\(ch\) \? \{ 실장: true \}/.test(logSrc));
+}
+
 console.log(`\n통과 ${pass} / 실패 ${fails.length}`);
 if (fails.length) process.exitCode = 1;

@@ -3309,6 +3309,8 @@ export class SlackHandler {
         onSpawn: (k) => { kill = k; if (stopped) k(); },
         drillScope: 'interactive',
         label: 'DM 폴백',
+        // 메일 후보 차례는 Claude 칸과 같이 웹을 막는다 — 본문을 붙여 넘기므로 표시가 빠져도 메일 차례면 막음
+        noWeb: !!event.noWeb || mailListed.length > 0,
       });
       const steps = codexSteps(r.steps);
       if (stopped) {
