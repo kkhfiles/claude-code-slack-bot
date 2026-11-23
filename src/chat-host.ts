@@ -319,6 +319,17 @@ export interface FollowUp {
   n?: number;
 }
 
+/**
+ * 봇마다 생존 자국 파일 — `chatbot/bots/<이름>/data/alive.json`(대화 기록 `turns.jsonl` 옆).
+ * `CHATBOT_ALIVE_DIR` 이 있으면 그 아래 `<이름>.json` — 검사가 진짜 자국을 안 건드리게.
+ * 읽는 쪽 `chatbot/check_turn_health.py` 의 `alive_path` 와 같은 규칙이다 — 한쪽만 바꾸지 않는다.
+ */
+export function aliveMarkPath(script: string, name: string): string {
+  const over = process.env.CHATBOT_ALIVE_DIR;
+  return over ? path.join(over, `${name}.json`)
+    : path.join(path.dirname(script), 'bots', name, 'data', 'alive.json');
+}
+
 export class ChatHost {
   private app: App | null = null;
   private logger: Logger;
@@ -1354,14 +1365,42 @@ export class ChatHost {
     // 반드시 답해야 하는 자리(부름·1:1·형제 봇 말)가 그대로 묻힌다 — 훑기는 봇 말을
     // 못 집으므로 형제 말에는 여기 말고 되집는 길이 없다.
     this.drain(client);
+    let read = 0;
     for (const channel of this.opts.channels ?? []) {
       // **한도는 여기서 안 본다** — 읽는 것은 모델을 안 부르니 싸고, 부름(멘션)은 한도와
       // 무관하게 답해야 한다. 방을 읽어 본 뒤 `sweepChannel` 안에서 가른다.
       try {
         await this.sweepChannel(client, channel);
+        read++;
       } catch (error) {
         this.logger.warn(`훑어보다 넘어졌습니다 (${channel})`, error);
       }
+    }
+    // 방을 하나라도 읽었으면 살아 있다는 자국을 남긴다 — 다 넘어졌으면 안 남긴다(슬랙에 못 닿는 봇은 산 것이 아니다).
+    if (read > 0) this.markAlive(read);
+  }
+
+  /** 생존 자국 쓰기가 실패 중인가 — 30초마다 같은 경고를 찍지 않게 처음 한 번만 알린다. */
+  private aliveFailing = false;
+
+  /**
+   * **생존 자국** — 마지막으로 훑은 시각을 파일에 남긴다(2026-11-23). 봇 밖 점검
+   * (`chatbot/check_turn_health.py`)이 대화 기록이 없는 날에 이것으로 「아무도 말을 안 건 것」과
+   * 「봇이 죽은 것」을 가른다. 대화 기록만 보던 때는 조용한 평일마다 「판단 불가」가 갔다.
+   * 시각만 쓴다 — 사람 글은 안 담는다.
+   */
+  private markAlive(channels: number): void {
+    const file = aliveMarkPath(this.opts.script, this.opts.name);
+    const tmp = `${file}.tmp`;
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(tmp, JSON.stringify({ at: Date.now() / 1000, iso: new Date().toISOString(), channels }));
+      fs.renameSync(tmp, file);  // 점검이 반쯤 쓴 파일을 읽지 않게
+      if (this.aliveFailing) this.logger.info(`생존 자국을 다시 씁니다 (${file})`);
+      this.aliveFailing = false;
+    } catch (error) {
+      if (!this.aliveFailing) this.logger.warn(`생존 자국을 못 썼습니다 (${file}) — 점검이 봇이 멈춘 것으로 볼 수 있습니다`, error);
+      this.aliveFailing = true;
     }
   }
 
