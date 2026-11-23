@@ -63,6 +63,14 @@ check('여러 줄 출력이면 마지막 JSON 줄만 봄', dmOf('경고 한 줄\
   } } };
   check('슬랙이 번호표를 거절하면 번호표 없이 바로 다시 보냄(알림은 안 잃음)',
     await postWithRetry(picky, 'D1', '글', 0, meta) === true && JSON.stringify(calls) === '[true,false]', calls);
+  const seen = [];
+  const scope = { chat: { postMessage: async (a) => {
+    seen.push(Boolean(a.metadata));
+    if (a.metadata) { const e = new Error('x'); e.data = { error: 'missing_scope' }; throw e; }
+    return { ok: true };
+  } } };
+  check('이름에 metadata 가 없는 거절이어도 두 번째는 번호표 없이 보냄(11/23 재검토)',
+    await postWithRetry(scope, 'D1', '글', 0, meta) === true && JSON.stringify(seen) === '[true,false]', seen);
   const src = fs.readFileSync(path.join(ROOT, 'src', 'sena-wake.ts'), 'utf8');
   check('타이머가 번호표를 실어 보냄', src.includes('refsMetadata(out)'));
 }

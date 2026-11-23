@@ -42,8 +42,20 @@ export const WAKE_REF_EVENT = 'sena_wake_dm';
 function refsOf(m: SlackMsg): string {
   if (m.metadata?.event_type !== WAKE_REF_EVENT) return '';
   const refs = m.metadata.event_payload?.refs;
-  return typeof refs === 'string' ? refs.trim().slice(0, 600) : '';
+  if (typeof refs !== 'string') return '';
+  // 줄 단위로 자른다 — 글자로 자르면 뒤 항목의 q- 번호가 반쯤 잘려 그 번호로는 보낼 수 없다(11/23 재검토). 쓰는 쪽 상한은
+  // 10줄 × 약 250자(`sena-wake.ts` `refsMetadata`)라 평소에는 다 들어간다
+  const kept: string[] = [];
+  let size = 0;
+  for (const line of refs.trim().split('\n')) {
+    if (size + line.length > REFS_MAX_CHARS) break;
+    kept.push(line);
+    size += line.length + 1;
+  }
+  return kept.join('\n');
 }
+
+export const REFS_MAX_CHARS = 2600;
 
 export interface UnseenOpts {
   /** 사람이 지금 보낸 글 — 이것은 붙이지 않는다 */
@@ -131,13 +143,14 @@ export function unseenBlock(msgs: SlackMsg[], o: UnseenOpts): string {
     lines.push(`- ${clock(p.sec)} ${tag}: ${body.replace(/\n+/g, ' / ')}${refs}`);
   }
   if (hidden) lines.push(`(개인 글이 든 ${hidden}건은 뺐다)`);
-  if (o.frame) return [...lines, ...o.frame.footer].join('\n');
+  // 밀린 요청을 다시 돌리는 길(frame)에도 같은 안내 — 번호표만 있고 쓰는 법이 없으면 이름으로 고르던 대로 돌아간다(11/23 재검토)
   if (shown.some((p) => p.refs)) {
     lines.push(
       '세나 글 뒤 [번호표] 는 그 글이 묻는 물음 번호(q-…)와 세션 앞 8자다. 사람 말이 그 물음에 답하는 것이면 대상은 이 번호로만 정한다 — '
       + '세션 목록에서 이름이나 폴더로 고르지 않는다(세션에 보낼 때 `stanley_send.py --question <q-…>`).',
     );
   }
+  if (o.frame) return [...lines, ...o.frame.footer].join('\n');
   lines.push(
     '아래 사람 말이 대상을 짚지 않았으면 **맨 아래 글(바로 위)에 대한 답으로 먼저 읽는다** — '
     + '그 글이 묻는 업무·메일에 반영하고, 이름이 비슷한 다른 대상을 짐작하지 않는다. '

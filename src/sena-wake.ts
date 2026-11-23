@@ -85,6 +85,8 @@ export async function postWithRetry(
         continue;
       }
       logger.warn(`세나 각성 DM 실패(${i + 1}/2)`, err);
+      // 두 번째는 번호표 없이 — 이름에 metadata 가 안 든 거절(missing_scope 같은 것)이 번호표 탓이어도 알림은 가게(11/23 재검토)
+      meta = undefined;
       if (i === 0) await new Promise((r) => setTimeout(r, waitMs));
     }
   }

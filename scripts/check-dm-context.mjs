@@ -120,6 +120,17 @@ eq('붙일 것 없으면 빈 문자열',
   const other = unseenBlock([bot(1000, '넛지', { metadata: { event_type: 'other', event_payload: { refs: 'q-x' } } })],
     { ...base, currentTs: '1100', isNewSession: false, sinceSec: 900 });
   ok('다른 이름의 표시 정보는 안 붙는다', !/q-x/.test(other) && !/번호표/.test(other));
+  // 11/23 재검토 — 밀린 요청을 다시 돌리는 길에도 쓰는 법이 붙고, 긴 번호표는 줄 경계에서 잘린다
+  const framed = unseenBlock([bot(1000, wake, { metadata: meta })],
+    { ...base, currentTs: '1100', isNewSession: false, sinceSec: 900, frame: { header: '[머리]', footer: ['[꼬리]'] } });
+  ok('frame 길에도 번호 안내가 붙는다', /이 번호로만 정한다/.test(framed) && framed.endsWith('[꼬리]'));
+  const many = Array.from({ length: 30 }, (_, i) => `「항목 ${i} ${"가".repeat(60)}」 → q-rv-${String(i).padStart(12, '0')}-000000(세션 ${String(i).padStart(8, 'a')})`);
+  const long = unseenBlock([bot(1000, '여러 건', { metadata: { event_type: 'sena_wake_dm', event_payload: { refs: many.join('\n') } } })],
+    { ...base, currentTs: '1100', isNewSession: false, sinceSec: 900 });
+  const shownRefs = (lines(long)[0].match(/q-rv-[0-9]+-000000\(세션 [0-9a]+\)/g) ?? []);
+  ok('긴 번호표는 줄 경계에서 잘린다 — 실린 번호는 다 온전함',
+    shownRefs.length > 0 && shownRefs.length < 30 && shownRefs.every((r, i) => r === many[i].split(' → ')[1])
+      && (lines(long)[0].match(/「항목 /g) ?? []).length === shownRefs.length);   // 반쯤 잘린 항목이 안 남음
 }
 
 // ── 슬랙 읽기 — 스레드면 replies · 아니면 history · 실패·지연은 빈 문자열 ────
