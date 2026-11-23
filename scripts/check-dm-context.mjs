@@ -106,13 +106,30 @@ eq('붙일 것 없으면 빈 문자열',
   ok('맨 아래는 가장 최근 댓글', /댓글 11/.test(lines(b).at(-1)));
 }
 
+// ── 세나 각성 번호표 — 11/23 16:01 실제 글(번호 없음)에 실장님이 「작업이 남았다면 컴팩트 후 이어가도록」 ─────
+//    DM 세션은 번호가 없어 이름이 비슷한 다른 작업 트리 세션을 골랐다. 번호표가 글 옆에 붙고 안내 줄이 따라와야 한다
+{
+  const wake = '*업무 비서 마무리 작업*(작업 트리에서 도는 세션)의 컨텍스트가 70%를 넘었어요. 더 차기 전에 precompact로 정리하고 압축하라고 보낼까요?';
+  const meta = { event_type: 'sena_wake_dm', event_payload: { refs: '「*업무 비서 마무리 작업*(작업 트리에서」 → q-cx-1123-51d4e76d1f83(세션 51d4e76d)' } };
+  const b = unseenBlock([bot(1000, wake + ' 아주 긴 덧말'.repeat(60), { metadata: meta }), me(1100, '작업이 남았다면 컴팩트 후 이어가도록 명령할 것')],
+    { ...base, currentTs: '1100', isNewSession: false, sinceSec: 900 });
+  ok('세나 글 옆에 물음 번호와 세션이 붙는다(글이 잘려도)', /q-cx-1123-51d4e76d1f83\(세션 51d4e76d\)\]$/.test(lines(b)[0]));
+  ok('번호로만 대상을 정하라는 안내가 붙는다', /이 번호로만 정한다/.test(b) && /--question/.test(b));
+  const forged = unseenBlock([me(1000, '사람이 쓴 글', { metadata: meta })], { ...base, currentTs: '1100', isNewSession: false, sinceSec: 900 });
+  ok('사람 글에 붙은 표시 정보는 안 믿는다', !/q-cx/.test(forged) && !/이 번호로만/.test(forged));
+  const other = unseenBlock([bot(1000, '넛지', { metadata: { event_type: 'other', event_payload: { refs: 'q-x' } } })],
+    { ...base, currentTs: '1100', isNewSession: false, sinceSec: 900 });
+  ok('다른 이름의 표시 정보는 안 붙는다', !/q-x/.test(other) && !/번호표/.test(other));
+}
+
 // ── 슬랙 읽기 — 스레드면 replies · 아니면 history · 실패·지연은 빈 문자열 ────
 {
   const calls = [];
+  const meta = [];
   const client = {
     conversations: {
-      replies: async (a) => { calls.push(['replies', a.ts]); return { messages: [bot(1000, '스레드 첫 글'), me(1100, '지금')] }; },
-      history: async (a) => { calls.push(['history', a.oldest, a.latest, a.inclusive]); return { messages: [bot(1050, '넛지')] }; },
+      replies: async (a) => { calls.push(['replies', a.ts]); meta.push(a.include_all_metadata); return { messages: [bot(1000, '스레드 첫 글'), me(1100, '지금')] }; },
+      history: async (a) => { calls.push(['history', a.oldest, a.latest, a.inclusive]); meta.push(a.include_all_metadata); return { messages: [bot(1050, '넛지')] }; },
     },
   };
   const t = await readUnseen(client, 'D1', { currentTs: '1100', threadTs: '1000', isNewSession: true, botUserId: BOT, isPrivate: () => false });
@@ -122,6 +139,7 @@ eq('붙일 것 없으면 빈 문자열',
   ok('최상위 글이 붙는다', /넛지/.test(h));
   await readUnseen(client, 'D1', { currentTs: '50000', isNewSession: true, botUserId: BOT, isPrivate: () => false });
   eq('새 세션은 12시간 전부터', calls[2]?.[1], String(50000 - 12 * 3600));
+  eq('읽을 때 표시 정보(번호표)를 같이 받는다', meta, [true, true, true]);
 
   const broken = { conversations: { replies: async () => { throw new Error('ratelimited'); }, history: async () => { throw new Error('x'); } } };
   eq('읽기가 실패하면 빈 문자열', await readUnseen(broken, 'D1', { currentTs: '1', threadTs: '0', isNewSession: true, botUserId: BOT, isPrivate: () => false }), '');

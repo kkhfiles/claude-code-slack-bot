@@ -26,6 +26,23 @@ export interface SlackMsg {
   text?: string;
   subtype?: string;
   thread_ts?: string;
+  /** 슬랙 글에 안 보이게 붙은 표시 정보 — 읽을 때 `include_all_metadata` 를 줘야 온다 */
+  metadata?: { event_type?: string; event_payload?: Record<string, unknown> };
+}
+
+/**
+ * 세나 각성 DM 의 번호표(2026-11-23) — 실장님 글에는 물음 번호와 세션 번호를 안 넣으므로(업무 비서 `sena_wake.py`), 봇이
+ * 글을 보낼 때 이 이름의 표시 정보로 붙이고(`sena-wake.ts`) 여기서 세나 글 옆에 적는다.
+ *
+ * 11/23 16:01 「*업무 비서 마무리 작업*(작업 트리에서 도는 세션)… precompact 보낼까요?」에 실장님이 답하자, DM 세션은
+ * 글에 번호가 없어 세션 목록에서 이름이 비슷한 다른 세션을 골라 「작업 중」이라 답하고 그 세션에 지시까지 보냈다.
+ */
+export const WAKE_REF_EVENT = 'sena_wake_dm';
+
+function refsOf(m: SlackMsg): string {
+  if (m.metadata?.event_type !== WAKE_REF_EVENT) return '';
+  const refs = m.metadata.event_payload?.refs;
+  return typeof refs === 'string' ? refs.trim().slice(0, 600) : '';
 }
 
 export interface UnseenOpts {
@@ -78,7 +95,7 @@ const kstDate = (sec: number): string => {
 export function unseenBlock(msgs: SlackMsg[], o: UnseenOpts): string {
   const now = Number(o.currentTs);
   const clock = o.clock ?? (o.frame?.withDate ? kstDate : kst);
-  const picked: { sec: number; who: string; text: string; head: boolean }[] = [];
+  const picked: { sec: number; who: string; text: string; head: boolean; refs: string }[] = [];
   let hidden = 0;
   const seen = new Set<string>();
   for (const m of msgs) {
@@ -93,8 +110,9 @@ export function unseenBlock(msgs: SlackMsg[], o: UnseenOpts): string {
     const head = Boolean(o.threadTs) && ts === o.threadTs;
     if (head ? !o.isNewSession : (o.sinceSec !== undefined && sec <= o.sinceSec)) continue;
     if (o.isPrivate(text)) { hidden += 1; continue; }
-    const who = (m.bot_id || (o.botUserId && m.user === o.botUserId)) ? '세나' : '사용자';
-    picked.push({ sec, who, text, head });
+    const mine = Boolean(m.bot_id || (o.botUserId && m.user === o.botUserId));
+    // 번호표는 봇 글의 것만 — 사람 글에 붙은 표시 정보는 안 믿는다
+    picked.push({ sec, who: mine ? '세나' : '사용자', text, head, refs: mine ? refsOf(m) : '' });
   }
   if (!picked.length && !hidden) return '';
   picked.sort((a, b) => a.sec - b.sec);
@@ -108,10 +126,18 @@ export function unseenBlock(msgs: SlackMsg[], o: UnseenOpts): string {
   for (const p of shown) {
     const body = p.text.length > MAX_CHARS ? `${p.text.slice(0, MAX_CHARS)}…` : p.text;
     const tag = p.head ? `${p.who}(스레드 첫 글 — 사람이 이 글에 댓글을 달았다)` : p.who;
-    lines.push(`- ${clock(p.sec)} ${tag}: ${body.replace(/\n+/g, ' / ')}`);
+    // 번호표는 글을 자른 뒤에 붙인다 — 긴 각성 글에 잘려 나가면 이 장치가 할 일이 없다
+    const refs = p.refs ? ` [번호표 — 슬랙 화면에는 안 보임: ${p.refs.replace(/\n+/g, ' / ')}]` : '';
+    lines.push(`- ${clock(p.sec)} ${tag}: ${body.replace(/\n+/g, ' / ')}${refs}`);
   }
   if (hidden) lines.push(`(개인 글이 든 ${hidden}건은 뺐다)`);
   if (o.frame) return [...lines, ...o.frame.footer].join('\n');
+  if (shown.some((p) => p.refs)) {
+    lines.push(
+      '세나 글 뒤 [번호표] 는 그 글이 묻는 물음 번호(q-…)와 세션 앞 8자다. 사람 말이 그 물음에 답하는 것이면 대상은 이 번호로만 정한다 — '
+      + '세션 목록에서 이름이나 폴더로 고르지 않는다(세션에 보낼 때 `stanley_send.py --question <q-…>`).',
+    );
+  }
   lines.push(
     '아래 사람 말이 대상을 짚지 않았으면 **맨 아래 글(바로 위)에 대한 답으로 먼저 읽는다** — '
     + '그 글이 묻는 업무·메일에 반영하고, 이름이 비슷한 다른 대상을 짐작하지 않는다. '
@@ -124,8 +150,8 @@ export function unseenBlock(msgs: SlackMsg[], o: UnseenOpts): string {
 
 interface HistoryClient {
   conversations: {
-    history(a: { channel: string; oldest?: string; latest?: string; limit?: number; inclusive?: boolean }): Promise<{ messages?: SlackMsg[] }>;
-    replies(a: { channel: string; ts: string; limit?: number }): Promise<{ messages?: SlackMsg[] }>;
+    history(a: { channel: string; oldest?: string; latest?: string; limit?: number; inclusive?: boolean; include_all_metadata?: boolean }): Promise<{ messages?: SlackMsg[] }>;
+    replies(a: { channel: string; ts: string; limit?: number; include_all_metadata?: boolean }): Promise<{ messages?: SlackMsg[] }>;
   };
 }
 
@@ -140,12 +166,13 @@ export async function readUnseen(
 ): Promise<string> {
   const read = (async () => {
     if (o.threadTs) {
-      const r = await client.conversations.replies({ channel, ts: o.threadTs, limit: 30 });
+      // 표시 정보(세나 각성 번호표)는 이 값을 줘야 온다
+      const r = await client.conversations.replies({ channel, ts: o.threadTs, limit: 30, include_all_metadata: true });
       return unseenBlock(r.messages ?? [], o);
     }
     const oldest = o.sinceSec ?? (Number(o.currentTs) - NEW_SESSION_LOOKBACK_SEC);
     const r = await client.conversations.history({
-      channel, oldest: String(oldest), latest: o.currentTs, inclusive: false, limit: 20,
+      channel, oldest: String(oldest), latest: o.currentTs, inclusive: false, limit: 20, include_all_metadata: true,
     });
     return unseenBlock(r.messages ?? [], { ...o, sinceSec: oldest });
   })();

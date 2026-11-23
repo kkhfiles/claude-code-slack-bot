@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { wakeEnabled, dmOf, postWithRetry, WAKE_POLL_MS, WAKE_TIMEOUT_MS } = require(path.join(ROOT, 'dist', 'sena-wake.js'));
+const { wakeEnabled, dmOf, postWithRetry, refsMetadata, WAKE_POLL_MS, WAKE_TIMEOUT_MS } = require(path.join(ROOT, 'dist', 'sena-wake.js'));
 
 let pass = 0;
 const fails = [];
@@ -41,6 +41,30 @@ check('여러 줄 출력이면 마지막 JSON 줄만 봄', dmOf('경고 한 줄\
   let sent;
   await postWithRetry({ chat: { postMessage: async (a) => { sent = a; return { ok: true }; } } }, 'D1', '<https://x.example|x>', 0);
   check('각성 DM 은 링크 미리보기를 끔', sent && sent.unfurl_links === false && sent.unfurl_media === false, sent);
+}
+{
+  // 11/23 오조준 — 「precompact 보낼까요」 글에 번호가 없어 DM 세션이 이름이 비슷한 다른 세션을 골랐다. 번호표는 안 보이는 표시 정보로
+  const tick = JSON.stringify({ dm: '*업무 비서 마무리 작업*(작업 트리에서 도는 세션)의 컨텍스트가 70%를 넘었어요.',
+    dm_refs: [{ head: '*업무 비서 마무리 작업*(작업 트리에서 도는 세션)의 컨텍스트가', ref: 'q-cx-1123-51d4e76d1f83(세션 51d4e76d)' },
+      { head: '다른 일', ref: '' }, 'x', null] });
+  const meta = refsMetadata(tick);
+  check('tick 의 dm_refs 를 번호표 표시 정보로 꺼냄(빈 번호와 깨진 항목은 뺌)',
+    meta && meta.event_type === 'sena_wake_dm'
+      && meta.event_payload.refs === '「*업무 비서 마무리 작업*(작업 트리에서 도는 세션)의 컨텍스트가」 → q-cx-1123-51d4e76d1f83(세션 51d4e76d)', meta);
+  check('번호표가 없으면 표시 정보도 없음', refsMetadata('{"dm": "글"}') === undefined && refsMetadata('깨짐') === undefined);
+  let got;
+  await postWithRetry({ chat: { postMessage: async (a) => { got = a; return { ok: true }; } } }, 'D1', '글', 0, meta);
+  check('번호표는 글이 아니라 metadata 로 실림 — 실장님 글은 그대로', got && got.text === '글' && got.metadata === meta, got);
+  const calls = [];
+  const picky = { chat: { postMessage: async (a) => {
+    calls.push(Boolean(a.metadata));
+    if (a.metadata) { const e = new Error('x'); e.data = { error: 'invalid_metadata_format' }; throw e; }
+    return { ok: true };
+  } } };
+  check('슬랙이 번호표를 거절하면 번호표 없이 바로 다시 보냄(알림은 안 잃음)',
+    await postWithRetry(picky, 'D1', '글', 0, meta) === true && JSON.stringify(calls) === '[true,false]', calls);
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'sena-wake.ts'), 'utf8');
+  check('타이머가 번호표를 실어 보냄', src.includes('refsMetadata(out)'));
 }
 {
   // 같은 결정 — 메일 후보 차례(남이 쓴 메일 본문이 든 차례)는 웹 도구를 막는다. 소스에서 이음새 셋을 센다
