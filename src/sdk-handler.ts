@@ -717,11 +717,18 @@ function mtimeOf(f: string): string {
   try { return String(Math.round(statSync(f).mtimeMs)); } catch { return '0'; }
 }
 
-/** 사용자 설정 내용의 지문 — `spinnerVerbs` 만 뺀다. 못 읽으면 수정 시각으로 돌아간다. */
+/**
+ * 화면 표시만 바꾸는 칸 — 세션 동작에 영향이 없어 견주지 않는다. 스피너 훅 둘이 어느 세션이든 말을 보낼 때마다 다시 쓴다
+ * (`spinner-pick-next.py` → spinnerVerbs, `spinner-tips-rotate.py` → spinnerTipsOverride). 2026-11-24 — 뒤 칸을 빼먹어
+ * 11/19~24 미리 띄운 세션 38번이 「옵션이 다름(user settings.json)」으로 버려졌다(찬 띄우기 중앙 8.2초).
+ */
+export const DISPLAY_ONLY_SETTINGS = ['spinnerVerbs', 'spinnerTipsOverride'];
+
+/** 사용자 설정 내용의 지문 — 화면 표시 칸(`DISPLAY_ONLY_SETTINGS`)은 뺀다. 못 읽으면 수정 시각으로 돌아간다. */
 export function settingsDigest(f: string): string {
   try {
     const value = JSON.parse(readFileSync(f, 'utf-8'));
-    if (value && typeof value === 'object') delete value.spinnerVerbs;
+    if (value && typeof value === 'object') for (const k of DISPLAY_ONLY_SETTINGS) delete value[k];
     return createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 16);
   } catch {
     return mtimeOf(f);

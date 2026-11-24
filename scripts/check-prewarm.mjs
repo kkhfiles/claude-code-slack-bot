@@ -173,6 +173,9 @@ eq('띄울 때 읽은 파일 중 어느 것이 달랐는지 낸다',
   const before = settingsDigest(f);
   fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [1] }, spinnerVerbs: { verbs: ['나', '다'] } }));
   eq('스피너 문구만 바뀌면 같다', settingsDigest(f), before);
+  // 2026-11-24 — 팁 회전 훅(`spinner-tips-rotate.py`)이 쓰는 칸도 화면 표시 전용. 빼먹어 미리 띄운 세션 38번을 버렸다
+  fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [1] }, spinnerVerbs: { verbs: ['다'] }, spinnerTipsOverride: { tips: ['팁'] } }));
+  eq('스피너 팁만 바뀌어도 같다', settingsDigest(f), before);
   fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [2] }, spinnerVerbs: { verbs: ['나'] } }));
   eq('훅이 바뀌면 다르다', settingsDigest(f) !== before, true);
   fs.writeFileSync(f, '{ 깨진');
