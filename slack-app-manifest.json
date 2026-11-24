@@ -37,7 +37,8 @@
       "bot_events": [
         "app_mention",
         "message.im",
-        "member_joined_channel"
+        "member_joined_channel",
+        "reaction_added"
       ]
     },
     "interactivity": {

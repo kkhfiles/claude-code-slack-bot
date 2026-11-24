@@ -53,6 +53,8 @@ import { readCard, refreshCard, prefetchNote, DRAWER_TURN } from './memory-card'
 import { boardLabel, event as recordEvent } from './board-queue';
 import { TurnTimer } from './turn-timing';
 import { readUnseen } from './dm-context';
+import type { SlackMsg } from './dm-context';
+import { REACTIONS, reactionTurn } from './alert-reaction';
 import { containsPrivate } from './privacy-guard';
 import { LABEL_HOOKS, finishTurn, noteText, wantGuard } from './internal-labels';
 import { ChannelGate, HOLD_SWEEP_MS, REPLAY_FRAME, buildHoldExtra, drainHeld, dropHeldFiles, holdV2On,
@@ -188,6 +190,9 @@ export function snapshotBootInflight(): void {
  * 메모리 감시기가 pid 로 찾는다.
  */
 interface TurnHandle { interrupt(): void; readonly pid?: number }
+
+/** 슬랙 reaction_added 이벤트에서 쓰는 칸만. */
+interface ReactionEvent { user?: string; reaction?: string; item?: { type?: string; channel?: string; ts?: string } }
 
 /** 대체 칸 한 차례(GPT · agy 두 칸)에 넘기는 것 — 대화 처리기가 모은 그대로. */
 interface FallbackArgs {
@@ -527,12 +532,18 @@ export class SlackHandler {
     // Initialize assistant scheduler if configured
     if (config.assistant.dmChannel && config.assistant.configDir) {
       this.assistantScheduler = new AssistantScheduler(
-        async (text, blocks?) => {
-          await this.app.client.chat.postMessage({
-            channel: config.assistant.dmChannel,
-            text,
-            ...(blocks ? { blocks } : {}),
-          });
+        async (text, blocks?, metadata?) => {
+          const base = { channel: config.assistant.dmChannel, text, ...(blocks ? { blocks } : {}) };
+          if (!metadata) { await this.app.client.chat.postMessage(base); return; }
+          // 번호표(알림 번호, 11/24)는 글에 안 보이는 덧붙임 — 슬랙이 거절하면 번호표 없이 다시 보내 알림 자체는 잃지 않는다
+          try {
+            await this.app.client.chat.postMessage({ ...base, metadata });
+          } catch (err) {
+            const why = String((err as { data?: { error?: string } })?.data?.error ?? (err as Error)?.message ?? err);
+            if (!/metadata/i.test(why)) throw err;   // 번호표 탓이 아니면 예전처럼 던진다 — 두 번 보내지 않게
+            this.logger.warn(`알림 번호표를 슬랙이 거절(${why}) — 번호표 없이 다시 보냄`);
+            await this.app.client.chat.postMessage(base);
+          }
         },
         async (prompt, opts) => this.runAssistantSession(prompt, opts),
         config.assistant.configDir,
@@ -1073,6 +1084,28 @@ export class SlackHandler {
       }
       await fn(args);
     });
+  }
+
+  /**
+   * 알림 DM 에 단 반응 이모지(2026-11-24 실장님 결정 슬랙답) — 실장님이 비서 방의 봇 글에 단 👀 ✅ ❌ 만 받는다. 그 글의 번호표로
+   * 세나에게 넘길 말을 짓고(`alert-reaction.ts`), 판에서 온 말과 같은 입구로 들여보낸다 — 방에는 「↩ 반응」 머리 줄 하나가 남는다.
+   * 번호표가 없는 글이나 다른 사람의 반응은 조용히 넘긴다.
+   */
+  private async onAlertReaction(e: ReactionEvent): Promise<void> {
+    const channel = config.assistant.dmChannel;
+    if (!channel || !e.item || e.item.type !== 'message' || e.item.channel !== channel || !e.item.ts) return;
+    if (!e.user || e.user !== config.bot.allowUsers[0] || !REACTIONS[e.reaction ?? '']) return;
+    // 최상위 글만 — 알림 DM 은 스레드 없이 올라간다
+    const got = await this.app.client.conversations.history({
+      channel, latest: e.item.ts, inclusive: true, limit: 1, include_all_metadata: true,
+    } as any);
+    const m = ((got as { messages?: SlackMsg[] }).messages ?? [])[0];
+    if (!m || m.ts !== e.item.ts) return;
+    if (!(m.bot_id || m.user === await this.getBotUserId())) return;
+    const turn = reactionTurn(e.reaction!, m);
+    if (!turn) return;
+    this.logger.info('알림 반응을 세나에 넘김', { reaction: e.reaction, ts: e.item.ts });
+    await this.askFromBoard(turn, `↩ 반응 ${REACTIONS[e.reaction!]}`, '');
   }
 
   /**
@@ -4635,6 +4668,13 @@ export class SlackHandler {
         this.logger.info('Handling file upload event');
         await this.handleMessage(event as MessageEvent, say);
       }
+    });
+
+    // 알림 DM 에 단 반응 이모지(2026-11-24 실장님 결정 슬랙답) — 👀 ✅ ❌ 를 그 알림에 단 짧은 답으로 세나에 넘긴다.
+    // 슬랙 앱 설정에 reaction_added 이벤트 구독이 있어야 온다(slack-app-manifest)
+    this.app.event('reaction_added', async ({ event }) => {
+      await this.onAlertReaction(event as unknown as ReactionEvent)
+        .catch((err) => this.logger.warn('알림 반응을 세나에 못 넘김', err));
     });
 
     // Handle bot being added to channels

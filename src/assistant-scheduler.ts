@@ -21,6 +21,7 @@ import { agyRungsOn, agyText } from './agy-turn';
 import { AGY_BRIEF_NOTE, AGY_FOCUS_NOTE, parseTaskList, parseFocusReply, runActions, validateActions } from './agy-actions';
 import type { QuickOutcome } from './work-assistant';
 import { personaNote } from './persona';
+import { alertRefMetadata } from './dm-context';
 
 /** 세나 정체성을 앞에 붙인 지시(2026-11-02 결정 F) — 정체성 파일을 못 읽으면 지시만 그대로. */
 export function withSena(rules: string): string {
@@ -997,7 +998,9 @@ export class AssistantScheduler {
   private holidays = new Holidays('KR');
 
   constructor(
-    private sendMessage: (text: string, blocks?: unknown[]) => Promise<void>,
+    // metadata — 글에 안 보이게 싣는 번호표(결과 DM 의 알림 번호 · `dm-context.ts` `alertRefMetadata`, 2026-11-24)
+    private sendMessage: (text: string, blocks?: unknown[],
+      metadata?: { event_type: string; event_payload: Record<string, string> }) => Promise<void>,
     private spawnSession: (prompt: string, opts: SpawnOpts) => Promise<SessionResult>,
     configDir: string,
     /**
@@ -2183,8 +2186,9 @@ export class AssistantScheduler {
 
   // 2분 점검이 보내는 네 갈래 — 함수 이름이 곧 활동 기록의 갈래 표지다. 이름을 바꾸면 `sena_notify_census.py` KINDS 도 같이
   private async remindTimed(text: string): Promise<void> { await this.sendMessage(text); }
-  private async remindResultAsk(text: string): Promise<void> { await this.sendMessage(text); }
-  private async remindResultNote(text: string): Promise<void> { await this.sendMessage(text); }
+  // 결과 DM 에는 그 알림 번호를 안 보이게 싣는다 — 스레드 답과 반응 이모지가 그 번호로 대상을 정함(2026-11-24 실장님 슬랙답)
+  private async remindResultAsk(text: string, alert = ''): Promise<void> { await this.sendMessage(text, undefined, alertRefMetadata(alert)); }
+  private async remindResultNote(text: string, alert = ''): Promise<void> { await this.sendMessage(text, undefined, alertRefMetadata(alert)); }
   private async remindCredit(text: string): Promise<void> { await this.sendMessage(text); }
   private async remindRelief(text: string): Promise<void> { await this.sendMessage(text); }
 
@@ -2211,7 +2215,7 @@ export class AssistantScheduler {
         const text = (it.plain ? it.title : `⏰ ${when} — ${it.title}`) + (it.next ? `\n다음 행동: ${it.next}` : '');
         // 갈래마다 다른 함수로 보낸다 — 활동 기록의 「부른곳」이 그 함수 이름이 되어 알림 계기판(`sena_notify_census.py`)이
         // 「섞임」 없이 센다(2026-11-23 실장님 결정 「알림줄이기 → 세기만」, 안 B). 보내는 글은 그대로
-        if (it.id.startsWith('result:')) await (it.ask ? this.remindResultAsk(text) : this.remindResultNote(text));
+        if (it.id.startsWith('result:')) await (it.ask ? this.remindResultAsk(text, it.alert) : this.remindResultNote(text, it.alert));
         else if (it.id.startsWith('credit:')) await this.remindCredit(text);
         else if (it.id.startsWith('relief:')) await this.remindRelief(text);
         else await this.remindTimed(text);

@@ -39,7 +39,32 @@ export interface SlackMsg {
  */
 export const WAKE_REF_EVENT = 'sena_wake_dm';
 
+/**
+ * 알림 번호표(2026-11-24 실장님 결정 슬랙답 「스레드와 이모지」) — 세션 지시 결과 DM 에 그 알림 번호(r-…)를 안 보이게 싣는다.
+ * 실장님이 그 글에 스레드로 답하거나 반응 이모지를 달면 세나가 이 번호로만 대상을 정한다(`sena_alerts.py who`). 글의 「자세히」
+ * 링크에도 번호가 있으나 긴 결과는 붙이는 글이 MAX_CHARS 에서 잘려 번호가 사라진다.
+ */
+export const ALERT_REF_EVENT = 'sena_alert_ref';
+const ALERT_ID = /^(r-[A-Za-z0-9._-]{1,38}|wk-\d{10}-\d{1,2}|pp-\d{10}-\d|[a-z0-9][a-z0-9_-]{0,39})$/;
+
+export function alertRefMetadata(id: string): { event_type: string; event_payload: Record<string, string> } | undefined {
+  return ALERT_ID.test(id) ? { event_type: ALERT_REF_EVENT, event_payload: { alert: id } } : undefined;
+}
+
+/** 봇 글에 실린 알림 번호 — 없거나 모양이 틀리면 ''. */
+export function alertRefOf(m: SlackMsg): string {
+  if (m.metadata?.event_type !== ALERT_REF_EVENT) return '';
+  const id = m.metadata.event_payload?.alert;
+  return typeof id === 'string' && ALERT_ID.test(id) ? id : '';
+}
+
 function refsOf(m: SlackMsg): string {
+  const alert = alertRefOf(m);
+  return alert ? `알림 ${alert}` : wakeRefsOf(m);
+}
+
+/** 각성 DM 번호표(q- 물음 번호와 세션 앞 8자) — 반응 이모지를 세나에 넘길 때도 쓴다. */
+export function wakeRefsOf(m: SlackMsg): string {
   if (m.metadata?.event_type !== WAKE_REF_EVENT) return '';
   const refs = m.metadata.event_payload?.refs;
   if (typeof refs !== 'string') return '';
@@ -144,10 +169,17 @@ export function unseenBlock(msgs: SlackMsg[], o: UnseenOpts): string {
   }
   if (hidden) lines.push(`(개인 글이 든 ${hidden}건은 뺐다)`);
   // 밀린 요청을 다시 돌리는 길(frame)에도 같은 안내 — 번호표만 있고 쓰는 법이 없으면 이름으로 고르던 대로 돌아간다(11/23 재검토)
-  if (shown.some((p) => p.refs)) {
+  if (shown.some((p) => p.refs && !p.refs.startsWith('알림 '))) {
     lines.push(
       '세나 글 뒤 [번호표] 는 그 글이 묻는 물음 번호(q-…)와 세션 앞 8자다. 사람 말이 그 물음에 답하는 것이면 대상은 이 번호로만 정한다 — '
       + '세션 목록에서 이름이나 폴더로 고르지 않는다(세션에 보낼 때 `stanley_send.py --question <q-…>`).',
+    );
+  }
+  // 알림 번호표(11/24) — 그 글에 단 사람 말은 서랍의 「알림 답」과 같다
+  if (shown.some((p) => p.refs.startsWith('알림 '))) {
+    lines.push(
+      '세나 글 뒤 [번호표 — 알림 r-…] 는 그 알림의 번호다. 사람 말이 그 글에 대한 답이면 `[알림 답]` 규칙대로 대상은 '
+      + '`bin/sena_alerts.py who --id <번호>` 로만 정한다 — 글이나 이름으로 짐작하지 않는다.',
     );
   }
   if (o.frame) return [...lines, ...o.frame.footer].join('\n');

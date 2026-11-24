@@ -22,6 +22,7 @@
     "check:agents-md": "node scripts/check-agents-md.mjs",
     "check:askback": "node scripts/check-askback-retry.mjs",
     "check:dmctx": "node scripts/check-dm-context.mjs",
+    "check:alertreact": "node scripts/check-alert-reaction.mjs",
     "check:bottalk": "node scripts/check-bot-talk.mjs",
     "check:marks": "node scripts/check-marks.mjs",
     "check:offdays": "node scripts/check-offdays.mjs",
