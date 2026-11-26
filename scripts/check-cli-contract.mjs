@@ -81,6 +81,10 @@ function findCalls(known, files) {
     for (const m of text.matchAll(/\[([^[\]\n]*)\]/g)) {
       // 글자 틀(`--이름=${값}`)도 낱말로 센다 — 이름은 아래에서 `=` 앞만 견준다.
       const toks = [...m[1].matchAll(/'([^']*)'|`([^`]*)`/g)].map((x) => x[1] ?? x[2]);
+      // 같은 줄에서 tasks.py 가 아닌 스크립트(`'bin/mail.py'` 등)를 넘기면 그 스크립트의 명령이다 — tasks.py 와 이름이 같아도
+      // 대조하지 않는다(2026-11-26 `mail.py quiet --mark` 를 tasks.py 의 quiet 로 읽어 막음)
+      const rest = text.slice(m.index + m[0].length, text.indexOf('\n', m.index + m[0].length));
+      if (/['`]bin\/(?!tasks\.py)[a-z_]+\.py['`]/.test(rest)) continue;
       if (toks.length && known.has(toks[0])) out.push({ file: f, toks });
     }
   }

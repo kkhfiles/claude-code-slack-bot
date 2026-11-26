@@ -50,6 +50,9 @@ const STATE_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'actions-check-state-'))
 process.env.ENGINE_STATE_FILE = path.join(STATE_TMP, 'engine-state.json');
 process.env.BRIEFING_DELIVERED_FILE = path.join(STATE_TMP, 'briefing-delivered.json');
 process.env.ANALYSIS_RETRY_FILE = path.join(STATE_TMP, 'analysis-retry.json');
+// 알림 정리 스위치는 끈 채로 잰다 — 운영 `.env` 에서 켜면(2026-11-26) 아침 🗂 요약이 한 줄로 바뀌어 요약 검사가 깨졌다.
+// 켠 쪽은 `check:alertroute` 가 잰다. dotenv 는 이미 있는 값을 안 덮으므로 불러오기 전에 둔다
+process.env.ALERT_ROUTE_DESK = 'off';
 const {
   ActionPipeline, buildDigestBlocks, buildReportReplyBlocks, decisionReply, markDecided, noticeReply, parseWindow,
 } = require(path.join(ROOT, 'dist', 'action-pipeline.js'));
