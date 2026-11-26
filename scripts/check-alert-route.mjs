@@ -97,7 +97,7 @@ const pipe = (hold) => {
   const b = pipe(undefined);
   await b.p.tell([NOTICE('urgent'), NOTICE('result')]);
   eq('hold 가 없으면 예전처럼 둘 다', b.posts.length, 2);
-  eq('결정 대기 수 · desk 주소', await a.p.digestCount(), { need: 2, site: 'https://desk.example' });
+  eq('결정 대기 수 · desk 주소', await a.p.digestCount(), { need: 2, stuck: 0, queued: 0, site: 'https://desk.example' });
   errorCollector.getAndClear();
   const bad = new ActionPipeline({ run: async () => ({ error: 'rc 1 · 시험' }), session: async () => ({}), post: async () => {} });
   eq('못 읽으면 null', await bad.digestCount(), null);
@@ -112,6 +112,10 @@ eq('둘 다 0 이면 안 보냄', buildDeskLine(0, 0, SITE), null);
 eq('못 읽은 것은 0 과 갈라 적음', buildDeskLine(null, null, SITE),
   '🗂 처리 제안 못 읽음 · 메일 처리 못 셈 — <https://desk.example/actions/|desk 에서 보기>');
 ok('한 줄 — 줄바꿈 없음', !buildDeskLine(25, 3, SITE).includes('\n'));
+eq('멈춤 · 검토 대기는 있을 때만(예전 요약 머리 줄의 두 신호)', buildDeskLine(0, 0, SITE, { stuck: 1, queued: 7 }),
+  '🗂 멈춤 1건 · 검토 대기 7건 — <https://desk.example/actions/|desk 에서 보기>');
+eq('멈춤 · 검토 대기가 0 이면 안 붙음', buildDeskLine(2, 0, SITE, { stuck: 0, queued: 0 }),
+  '🗂 처리 제안 2건 — <https://desk.example/actions/|desk 에서 보기>');
 
 const { AssistantScheduler } = require(path.join(ROOT, 'dist', 'assistant-scheduler.js'));
 const CFG = path.join(TMP, 'cfg');

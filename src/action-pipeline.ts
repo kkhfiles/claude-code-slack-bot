@@ -1228,14 +1228,15 @@ export class ActionPipeline {
    * 결정을 기다리는 제안 수와 desk 주소 — 아침 한 줄(`alert-route.ts` `buildDeskLine`)이 쓴다. 못 읽으면 null 로 물러나되
    * 「시스템 이슈」로 남긴다(못 읽은 날이 「없음」으로 읽히지 않게 — `digestBlocks` 와 같은 까닭).
    */
-  async digestCount(): Promise<{ need: number; site: string } | null> {
+  async digestCount(): Promise<{ need: number; stuck: number; queued: number; site: string } | null> {
     const d = await this.deps.run('flow', ['digest']);
     if (!d || d.error) {
       this.logger.warn(`처리 제안 요약을 못 읽음 — ${d?.error}`);
       errorCollector.add('처리 제안', `요약을 못 읽음 — ${String(d?.error ?? '답 없음').slice(0, 200)}`);
       return null;
     }
-    return { need: ((d as FlowDigest).need_you || []).length, site: (d as FlowDigest).site || '' };
+    const dg = d as FlowDigest;
+    return { need: (dg.need_you || []).length, stuck: (dg.stuck || []).length, queued: dg.counts?.queued || 0, site: dg.site || '' };
   }
 
   /** `-report` 답 블록. report-log 를 못 읽으면 null — 부르는 쪽이 그 사실을 알린다. */

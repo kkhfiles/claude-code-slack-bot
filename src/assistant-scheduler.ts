@@ -1738,7 +1738,8 @@ export class AssistantScheduler {
     try {
       const d = reportLogAvailable() ? await this.actionPipeline.digestCount() : null;
       const m = await mailQuiet();
-      const line = buildDeskLine(d ? d.need : null, m ? m.count : null, d?.site || DESK_SITE);
+      const line = buildDeskLine(d ? d.need : null, m ? m.count : null, d?.site || DESK_SITE,
+        { stuck: d?.stuck, queued: d?.queued });
       if (!line) return;
       await this.sendMessage(line);
       if (m?.newest && !(await mailQuietMark(m.newest))) {

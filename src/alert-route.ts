@@ -30,10 +30,14 @@ export function holdNotice(kind: string, env: NodeJS.ProcessEnv = process.env): 
  * 아침 한 줄 — 「🗂 처리 제안 N건 · 메일 처리 M건 — desk 에서 보기」. 둘 다 0 이면 null(안 보낸다).
  * `null` 값은 못 읽은 것 — 0 과 섞으면 못 읽은 날이 「없음」으로 읽혀서 따로 적는다.
  */
-export function buildDeskLine(proposals: number | null, mail: number | null, site: string): string | null {
+export function buildDeskLine(proposals: number | null, mail: number | null, site: string,
+                              extra: { stuck?: number; queued?: number } = {}): string | null {
   const parts: string[] = [];
   if (proposals === null) parts.push('처리 제안 못 읽음');
   else if (proposals > 0) parts.push(`처리 제안 ${proposals}건`);
+  // 멈춘 제안과 검토 대기는 0 이 아닐 때만 — 예전 요약 머리 줄이 싣던 두 신호(검토 대기가 아침마다 남으면 밤 검토가 멈춘 것)
+  if (extra.stuck) parts.push(`멈춤 ${extra.stuck}건`);
+  if (extra.queued) parts.push(`검토 대기 ${extra.queued}건`);
   if (mail === null) parts.push('메일 처리 못 셈');
   else if (mail > 0) parts.push(`메일 처리 ${mail}건`);
   if (!parts.length) return null;
