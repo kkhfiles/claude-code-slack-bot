@@ -286,6 +286,23 @@ const NARROW = { ...OPTS, tools: [], settingSources: [], skipMcp: true, appendSy
   eq('낡은 자리는 안 쓰고 산 자리는 쓴다', calls.length, 3);
 }
 
+// 19-1. **날짜가 바뀌면 안 쓴다** — 띄울 때의 오늘 날짜를 들고 있어 자정을 넘긴 차례가 어제로 답한다
+{
+  h = new SdkHandler(mcp);
+  calls.length = 0;
+  const realNow = Date.now;
+  const born = new Date(2026, 10, 26, 23, 30).getTime();
+  try {
+    Date.now = () => born;
+    h.prewarm(OPTS, 90 * 60_000);
+    Date.now = () => born + 40 * 60_000;     // 00:10 — 보관 시간 안이지만 날짜가 바뀜
+    h.runQuery('자정 넘은 차례', OPTS);
+  } finally { Date.now = realNow; }
+  eq('자정을 넘기면 새로 띄운다', calls.length, 2);
+  const { sameLocalDay } = require(MOD);
+  eq('같은 날 판정', [sameLocalDay(born, born + 20 * 60_000), sameLocalDay(born, born + 40 * 60_000)], [true, false]);
+}
+
 // 20. **메모리 문은 85% 에서 닫고 80% 이하 두 번에 연다** — 경계에서 띄웠다 버렸다를 막는다
 //     (GPT 6.1 sol 검토가 낸 순서 84→86→84→79→79).
 {

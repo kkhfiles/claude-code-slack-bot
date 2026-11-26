@@ -466,7 +466,8 @@ export class SdkHandler {
       : opts.env?.WORK_ASSISTANT_CAPTURE_FILE ? 'chat' : '';
     const w = this.warms.get(key);
     if (w) {
-      if (Date.now() - w.bornAt < w.ttlMs) {
+      // 날짜가 바뀌었으면 안 쓴다 — 띄울 때의 오늘 날짜를 들고 있어, 자정을 넘긴 차례가 어제로 답한다(90분 보관 재검토 2026-11-26)
+      if (Date.now() - w.bornAt < w.ttlMs && sameLocalDay(w.bornAt, Date.now())) {
         this.warms.delete(key);
         this.logger.info('미리 띄운 세션을 씀', { agedMs: Date.now() - w.bornAt });
         if (mode) recordEvent('prewarm', { hit: true, mode, aged_s: Math.round((Date.now() - w.bornAt) / 1000) });
@@ -675,6 +676,13 @@ export function pushableInput(): { stream: AsyncIterable<any>; send: (t: string)
       const w = wake; wake = null; w?.();
     },
   };
+}
+
+/** 두 시각(ms)이 이 PC 의 같은 날인가 — 미리 띄운 세션이 들고 있는 오늘 날짜가 아직 맞는지 본다. */
+export function sameLocalDay(a: number, b: number): boolean {
+  const x = new Date(a);
+  const y = new Date(b);
+  return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
 }
 
 /**
