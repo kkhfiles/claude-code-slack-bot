@@ -1732,13 +1732,14 @@ export class AssistantScheduler {
 
   /**
    * 아침 한 줄 — 「🗂 처리 제안 N건 · 메일 처리 M건 — desk 에서 보기」. 둘 다 0 이면 안 보낸다.
-   * 메일 몫은 조용히 넘긴 메일 차례(`mail.py quiet`)이고 **올린 뒤에** 표시를 옮긴다 — 못 올린 날은 다음 한 줄이 같이 센다.
+   * 메일 몫은 조용히 넘긴 메일 차례들이 실은 메일 스레드 수(`mail.py quiet` 의 `threads` — 차례 하나에 메일이 여럿일 수 있음)이고
+   * **올린 뒤에** 표시를 옮긴다 — 못 올린 날은 다음 한 줄이 같이 센다.
    */
   private async postDeskLine(): Promise<void> {
     try {
       const d = reportLogAvailable() ? await this.actionPipeline.digestCount() : null;
       const m = await mailQuiet();
-      const line = buildDeskLine(d ? d.need : null, m ? m.count : null, d?.site || DESK_SITE,
+      const line = buildDeskLine(d ? d.need : null, m ? m.threads : null, d?.site || DESK_SITE,
         { stuck: d?.stuck, queued: d?.queued });
       if (!line) return;
       await this.sendMessage(line);

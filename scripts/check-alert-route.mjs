@@ -138,7 +138,7 @@ try {
   process.env.ALERT_ROUTE_DESK = 'on';
   const on = sched();
   await on.s.postActionDigest();
-  eq('켜면 아침에 한 줄 한 통', on.sent.map((m) => m.text), ['🗂 처리 제안 25건 · 메일 처리 3건 — <https://desk.example/actions/|desk 에서 보기>']);
+  eq('켜면 아침에 한 줄 한 통', on.sent.map((m) => m.text), ['🗂 처리 제안 25건 · 메일 처리 4건 — <https://desk.example/actions/|desk 에서 보기>']);
   eq('켜면 예전 요약 · 카드는 안 감', on.sent.some((m) => m.text === 'OLD_DIGEST'), false);
   eq('올린 뒤 메일 몫 표시를 옮김', calls().filter((c) => c[0] === 'quiet').map((c) => c.join(' ')),
     ['quiet', 'quiet --mark 2026-11-26T10:00:00']);

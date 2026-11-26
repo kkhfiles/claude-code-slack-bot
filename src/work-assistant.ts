@@ -892,13 +892,13 @@ export async function mailRoute(captureId: string | undefined, reply: string): P
   }
 }
 
-/** 아침 한 줄이 셀 몫 — 표시 뒤 조용히 넘긴 메일 차례 수. 못 읽으면 null. */
-export async function mailQuiet(): Promise<{ count: number; newest: string } | null> {
+/** 아침 한 줄이 셀 몫 — 표시 뒤 조용히 넘긴 메일 차례 수(`count`)와 그 차례들이 실은 메일 스레드 수(`threads`). 못 읽으면 null. */
+export async function mailQuiet(): Promise<{ count: number; threads: number; newest: string } | null> {
   try {
     const { code, stdout } = await runTasks(['quiet'], 20_000, 'bin/mail.py');
     if (code !== 0) return null;
     const r = JSON.parse(stdout);
-    return { count: Number(r?.count) || 0, newest: String(r?.newest ?? '') };
+    return { count: Number(r?.count) || 0, threads: Number(r?.threads) || 0, newest: String(r?.newest ?? '') };
   } catch {
     return null;
   }
