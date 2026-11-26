@@ -1031,6 +1031,15 @@ try {
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
+// -engines 사용률 — 15분 넘은 값에는 언제 값인지 붙인다(11/25 낡은 「5시간 97%」)
+{
+  const now = 1_800_000_000;
+  eq('사용률: 방금 값은 그대로', dmf.utilText('5시간', 0.68, now - 60, now), '5시간 68%');
+  eq('사용률: 15분 넘은 값은 분', dmf.utilText('5시간', 0.97, now - 40 * 60, now), '5시간 97%(40분 전 값)');
+  eq('사용률: 두 시간 넘은 값은 시간', dmf.utilText('7일', 0.62, now - 5 * 3600, now), '7일 62%(5시간 전 값)');
+  eq('사용률: 값이 없으면 빈 칸', dmf.utilText('5시간', undefined, now, now), '');
+}
+
 if (fails.length) {
   console.error(`실패 ${fails.length}건\n`);
   for (const f of fails) console.error('  ✗ ' + f);

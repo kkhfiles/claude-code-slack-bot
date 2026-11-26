@@ -284,6 +284,9 @@ try {
     const u = fresh();
     new ClaudeTap(u).see({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', rateLimitType: 'seven_day', utilization: 0.7 } });
     eq('탭: 사용률을 적는다', u.load().engines.claude.util?.seven_day, 0.7);
+    // 창마다 읽은 시각을 따로 — 7일 사건이 5시간 값의 시각을 새로 찍으면 안 된다(11/25 낡은 0.97)
+    eq('탭: 7일 창 시각을 적는다', typeof u.load().engines.claude.util?.seven_day_at, 'number');
+    eq('탭: 안 온 5시간 창 시각은 비어 있다', u.load().engines.claude.util?.five_hour_at, undefined);
 
     let threw = null;
     const boom = { recordBlocked() { throw new Error('x'); }, recordOk() { throw new Error('x'); }, recordUtil() { throw new Error('x'); } };

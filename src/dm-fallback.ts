@@ -295,6 +295,16 @@ function drillLabel(d: Drill): string {
   return `연습 중(${parts.join(' · ')}${d.scope === 'all' ? ' · 예약 일 포함' : ''} · ${formatKst(d.expiresAt)}까지)`;
 }
 
+/** 사용률이 15분보다 오래 전에 읽은 값이면 언제 값인지 붙인다 — 파이썬 입구가 믿는 기한(`UTIL_STALE_S`)과 같다. */
+export const UTIL_FRESH_SEC = 15 * 60;
+export function utilText(label: string, v: number | undefined, at: number | undefined, nowSec: number): string {
+  if (typeof v !== 'number') return '';
+  const base = `${label} ${Math.round(v * 100)}%`;
+  if (typeof at !== 'number' || nowSec - at <= UTIL_FRESH_SEC) return base;
+  const min = Math.round((nowSec - at) / 60);
+  return `${base}(${min < 120 ? `${min}분` : `${Math.round(min / 60)}시간`} 전 값)`;
+}
+
 /** `-engines` 의 답 — 머리 한 줄 + 엔진 넷(막힘 · 풀리는 시각 · 마지막 성공 · 사용률). */
 export function engineStatusText(st: EngineStateData, nowSec: number, o: {
   fallback: boolean; notice: boolean; drill: Drill | null; ladder: readonly Engine[]; agy?: boolean;
@@ -310,8 +320,8 @@ export function engineStatusText(st: EngineStateData, nowSec: number, o: {
       : '막힘 없음';
     const ok = r.lastOkAt ? `마지막 성공 ${formatKst(r.lastOkAt)}` : '마지막 성공 없음';
     const util = [
-      typeof r.util?.five_hour === 'number' ? `5시간 ${Math.round(r.util.five_hour * 100)}%` : '',
-      typeof r.util?.seven_day === 'number' ? `7일 ${Math.round(r.util.seven_day * 100)}%` : '',
+      utilText('5시간', r.util?.five_hour, r.util?.five_hour_at ?? r.util?.at, nowSec),
+      utilText('7일', r.util?.seven_day, r.util?.seven_day_at ?? r.util?.at, nowSec),
     ].filter(Boolean);
     const off = o.ladder.includes(e) ? [] : ['DM 사다리 밖'];
     return `• ${SHORT[e]} — ${[state, ok, ...util, ...off].join(' · ')}`;

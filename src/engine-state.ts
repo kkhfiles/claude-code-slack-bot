@@ -64,7 +64,12 @@ export interface Block {
   step?: number;
 }
 
-export interface Util { five_hour?: number; seven_day?: number; at: number; }
+/**
+ * 창마다 언제 읽은 값인지를 따로 든다(`five_hour_at`, `seven_day_at`) — 공통 `at` 은 마지막으로 무엇이든 적은 시각이라,
+ * 7일 창 사건만 이어지면 낡은 5시간 값이 「방금 읽은 값」으로 보였다(2026-11-25 실장님 「0.97 아닌데? 68%인데」).
+ * 파이썬 입구(`llm_playbook.ladder.claude_usage`)가 창별 시각만 믿는다.
+ */
+export interface Util { five_hour?: number; seven_day?: number; five_hour_at?: number; seven_day_at?: number; at: number; }
 
 export interface EngineRecord {
   blocked: Block | null;
@@ -611,7 +616,8 @@ export class EngineState {
     if (u.limitType !== 'five_hour' && u.limitType !== 'seven_day') return;
     this.mutate((st) => {
       const r = st.engines[engine];
-      r.util = { ...(r.util ?? {}), [u.limitType]: u.utilization, at: this.nowSec() } as Util;
+      const now = this.nowSec();
+      r.util = { ...(r.util ?? {}), [u.limitType]: u.utilization, [`${u.limitType}_at`]: now, at: now } as Util;
     });
   }
 
