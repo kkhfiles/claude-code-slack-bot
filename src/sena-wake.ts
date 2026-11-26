@@ -11,7 +11,7 @@
  */
 import type { WebClient } from '@slack/web-api';
 import { config } from './config';
-import { every } from './recurring';
+import { every, type RunFailure } from './recurring';
 import { Logger } from './logger';
 import { isWorkAssistantEnabled, runTasks } from './work-assistant';
 import { WAKE_REF_EVENT } from './dm-context';
@@ -102,18 +102,19 @@ export function startSenaWake(client?: Pick<WebClient, 'chat'>): void {
   every({
     name: 'sena:wake',
     everyMs: WAKE_POLL_MS,
-    run: async () => {
+    run: async (): Promise<void | RunFailure> => {
       let r: Awaited<ReturnType<typeof runTasks>>;
       try {
         r = await runTasks(['tick'], WAKE_TIMEOUT_MS, 'bin/sena_wake.py');
       } catch (err) {
-        // 띄우기부터 실패(폴더 없음, spawn 오류) — 던지면 타이머 묶음이 처리 안 된 거부로 내보낸다. 로그만 남기고 다음 10분에
+        // 띄우기부터 실패(폴더 없음, spawn 오류) — 던지면 타이머 묶음이 처리 안 된 거부로 내보낸다. 로그를 남기고 실패로 적는다
         logger.warn('세나 각성을 못 띄움', err);
-        return;
+        return { ok: false, code: 'spawn' };
       }
       if (r.code !== 0) {
+        // 실패로 적는다 — 전에는 그냥 돌아가 타이머 기록에 성공으로 남았다(11/26 구조 검토 2-1)
         logger.warn(`세나 각성 실패 rc ${r.code}`, r.stderr.slice(-300));
-        return;
+        return { ok: false, code: 'rc' };
       }
       const out = r.stdout.trim();
       if (out && !out.includes('"skip"')) logger.info('세나 각성', out.slice(0, 300));

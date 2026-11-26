@@ -2152,19 +2152,24 @@ export class AssistantScheduler {
   }
 
   /** 한 차례 — 타이머와 시험이 부른다. **절대 던지지 않는다.** */
-  async runHeldPoll(): Promise<number> {
+  async runHeldPoll(): Promise<number | RunFailure> {
     if (this.heldBusy) return 0;
     this.heldBusy = true;
     try {
-      const done = await deliverHeld();
+      const { items: done, fail, errors } = await deliverHeld();
       if (done.length && !(await isQuietPeriod())) {
         await this.sendMessage(done.map((d) => `📨 ${d.line}`).join('\n'));
       }
       if (done.length) this.logger.info(`Held — ${done.length}건 처리`);
+      // 점검이 실패했거나 안쪽 일이 터졌으면 그 회차를 실패로 적는다(11/26 구조 검토 2-1 — 전에는 성공으로 남았다)
+      if (fail) {
+        this.logger.warn(`Held poll 실패 — ${fail}${errors?.length ? ` (${errors.join(', ')})` : ''}`);
+        return { ok: false, code: fail };
+      }
       return done.length;
     } catch (error) {
       this.logger.error('Held poll threw', error);
-      return 0;
+      return { ok: false, code: 'threw' };
     } finally {
       this.heldBusy = false;
     }
@@ -2193,7 +2198,7 @@ export class AssistantScheduler {
   private async remindRelief(text: string): Promise<void> { await this.sendMessage(text); }
 
   /** 한 판 돈다. **절대 던지지 않는다** — 여기서 터지면 조용히 안 울린다. */
-  private async runRemindPoll(): Promise<void> {
+  private async runRemindPoll(): Promise<void | RunFailure> {
     const h = new Date().getHours();
     if (h < REMIND_FROM_HOUR || h >= REMIND_TO_HOUR) return;
     // **쉬는 날과 「조용히」 기간에는 안 울린다** — 미는 것은 전부 멈춘다는 규칙을
@@ -2204,8 +2209,12 @@ export class AssistantScheduler {
     if (this.remindBusy) return;
     this.remindBusy = true;
     try {
-      const due = await remindDue();
-      if (!due.length) return;
+      const { items: due, fail, errors } = await remindDue();
+      // 점검이 실패했거나 안쪽 일(지시 결과, 저절로 닫기, 답 보내기, 메모리 정리)이 터졌으면 그 회차를 실패로 적는다 —
+      // 받은 알림은 그대로 울린다(11/26 구조 검토 2-1 — 전에는 빈 목록으로 성공이 남았다)
+      const failure: RunFailure | undefined = fail ? { ok: false, code: fail } : undefined;
+      if (fail) this.logger.warn(`Remind poll 실패 — ${fail}${errors?.length ? ` (${errors.join(', ')})` : ''}`);
+      if (!due.length) return failure;
       for (const it of due) {
         // 자국이 「그 값」이라 시각을 고치면 다시 울려야 한다 — 열쇠에 시각을 넣는다.
         const key = `${it.id}@${it.at}`;
@@ -2227,8 +2236,10 @@ export class AssistantScheduler {
         }
       }
       this.logger.info(`Remind — ${due.length}건 울림`);
+      return failure;
     } catch (error) {
       this.logger.error('Remind poll threw', error);
+      return { ok: false, code: 'threw' };
     } finally {
       this.remindBusy = false;
     }

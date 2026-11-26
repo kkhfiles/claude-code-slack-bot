@@ -595,15 +595,35 @@ export interface RemindItem {
  * 요청하기」), 되풀이는 정기 업무가 맡는다. 못 읽으면 빈 목록이라 그 회차는
  * 조용히 넘어간다 — 없는 것을 지어내 울리는 것보다 안 울리는 편이 싸다.
  */
-export async function remindDue(): Promise<RemindItem[]> {
+export async function remindDue(): Promise<Polled<RemindItem>> {
+  return pollJson<RemindItem>(['remind'], 60_000);
+}
+
+/**
+ * 2분 점검 한 차례의 결과 — 받은 줄과, 실패했으면 그 종류(2026-11-26 구조 검토 2-1).
+ * `fail` 은 rc 가 0 이 아님(`rc`), JSON 이 깨짐(`json`), 띄우기 실패(`spawn`), 안쪽 일이 터짐(`inner` · 파이썬이 `errors` 에 이름을 실음).
+ * 전에는 전부 빈 목록이라 타이머 기록에 성공으로 남았다 — 부르는 쪽이 `fail` 을 `RunFailure` 로 돌려준다.
+ */
+export interface Polled<T> { items: T[]; fail?: 'rc' | 'json' | 'spawn' | 'inner'; errors?: string[] }
+
+/** 줄 목록 JSON 을 내는 점검 하나를 부른다 — 안 던진다. 안쪽 일이 터졌어도 받은 줄은 그대로 돌려준다(보낼 것은 보낸다). */
+export async function pollJson<T>(args: string[], timeoutMs: number, script?: string): Promise<Polled<T>> {
+  let res: Awaited<ReturnType<typeof runTasks>>;
   try {
-    const { code, stdout } = await runTasks(['remind'], 60_000);
-    if (code !== 0) return [];
-    const r = JSON.parse(stdout) as { items?: RemindItem[] };
-    return Array.isArray(r.items) ? r.items : [];
+    res = await runTasks(args, timeoutMs, script);
   } catch {
-    return [];
+    return { items: [], fail: 'spawn' };
   }
+  if (res.code !== 0) return { items: [], fail: 'rc' };
+  let r: { items?: T[]; errors?: unknown };
+  try {
+    r = JSON.parse(res.stdout) as { items?: T[]; errors?: unknown };
+  } catch {
+    return { items: [], fail: 'json' };
+  }
+  const items = Array.isArray(r.items) ? r.items : [];
+  const errors = Array.isArray(r.errors) ? r.errors.filter((e): e is string => typeof e === 'string') : [];
+  return errors.length ? { items, fail: 'inner', errors } : { items };
 }
 
 /**
@@ -654,15 +674,8 @@ export interface HeldDelivery {
  * 엔진이 막혀 보류한 세션 지시 중 풀린 것을 보낸다(2026-11-03 · `stanley_send.py --deliver-held`).
  * 보낼 때가 아니거나 아직 막혔으면 빈 목록. 못 읽으면 빈 목록 — 보류 파일은 그대로 남아 다음 차례에 다시 본다.
  */
-export async function deliverHeld(): Promise<HeldDelivery[]> {
-  try {
-    const { code, stdout } = await runTasks(['--deliver-held', '--json'], 180_000, 'bin/stanley_send.py');
-    if (code !== 0) return [];
-    const r = JSON.parse(stdout) as { items?: HeldDelivery[] };
-    return Array.isArray(r.items) ? r.items : [];
-  } catch {
-    return [];
-  }
+export async function deliverHeld(): Promise<Polled<HeldDelivery>> {
+  return pollJson<HeldDelivery>(['--deliver-held', '--json'], 180_000, 'bin/stanley_send.py');
 }
 
 /** 요약을 다시 쓸 업무 하나. **뜻은 파이썬만 안다** — 여기서는 나르기만 한다. */
