@@ -215,7 +215,11 @@ const SESSION_OPTS = {
 {
   const src = fs.readFileSync(path.join(ROOT, 'dist', 'slack-handler.js'), 'utf8');
   const m = src.match(/sdkHandler\.prewarm\(([^)]*)\)/);
-  eq('미리 띄우기에 옵션을 그대로 넘긴다', m && m[1].trim(), 'sdkOptsForWarm');
+  // 둘째 인자(보관 시간)는 옵션이 아니라 지문에 안 든다 — 첫 인자만 본다
+  eq('미리 띄우기에 옵션을 그대로 넘긴다', m && m[1].split(',')[0].trim(), 'sdkOptsForWarm');
+  eq('세나 대화 차례 뒤 보관은 90분', m && /CHAT_WARM_TTL_MS/.test(m[1]), true);
+  const { SdkHandler: H } = require(MOD);
+  eq('세나 대화 보관 90분 · 기본 30분', [H.CHAT_WARM_TTL_MS, H.WARM_TTL_MS], [90 * 60_000, 30 * 60_000]);
 }
 
 // 15. **자리 둘이 같이 산다** — 대화형과 좁은 길형(2026-10-01).

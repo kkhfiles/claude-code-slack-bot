@@ -2673,7 +2673,7 @@ export class SlackHandler {
       // 옛 세션을 이어 간 차례(보류 v2) 뒤에는 안 띄운다 — 다음 차례는 원래 세션이라 지문이 안 맞는다.
       // Claude 가 막혀 GPT 가 받은 차례(DM 폴백) 뒤에도 안 띄운다 — 다음 차례도 Claude 를 건너뛰어 그냥 남는다.
       if (sdkOptsForWarm && !event.resumeSessionId && !claudeSkipped && !fallbackDone) {
-        this.sdkHandler.prewarm(sdkOptsForWarm);
+        this.sdkHandler.prewarm(sdkOptsForWarm, SdkHandler.CHAT_WARM_TTL_MS);
       }
 
       if (session?.sessionId) {
