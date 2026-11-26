@@ -869,6 +869,52 @@ export async function mailMark(ts: string): Promise<boolean> {
 }
 
 /**
+ * 메일 차례의 답을 지금 DM 으로 보내나(2026-11-26 「세나정리」 · `ALERT_ROUTE_DESK`). **판정은 파이썬**(`mail.py route`) —
+ * 그 차례가 남긴 메일 판정으로 가른다. 안 보내면 파이썬이 답 글을 조용히 넘긴 기록에 남긴다(아침 한 줄이 센다).
+ * **못 가르면 보낸다** — 명령 실패 · 깨진 JSON · 캡처 id 없음. 조용해지는 쪽으로 틀리면 묻는 메일을 못 듣는다.
+ */
+export async function mailRoute(captureId: string | undefined, reply: string): Promise<{ send: boolean; why: string }> {
+  if (!captureId) return { send: true, why: '캡처 id 없음' };
+  let dir = '';
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mail-route-'));
+    const file = path.join(dir, 'reply.txt');
+    fs.writeFileSync(file, reply, 'utf-8');
+    const { code, stdout, stderr } = await runTasks(
+      ['route', '--capture', captureId, '--reply-file', file], 30_000, 'bin/mail.py');
+    if (code !== 0) return { send: true, why: `판정 실패 — ${(stderr || stdout).trim().slice(0, 120)}` };
+    const r = JSON.parse(stdout);
+    return { send: r?.send !== false, why: String(r?.why ?? '') };
+  } catch (err) {
+    return { send: true, why: `판정 실패 — ${String(err).slice(0, 120)}` };
+  } finally {
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** 아침 한 줄이 셀 몫 — 표시 뒤 조용히 넘긴 메일 차례 수. 못 읽으면 null. */
+export async function mailQuiet(): Promise<{ count: number; newest: string } | null> {
+  try {
+    const { code, stdout } = await runTasks(['quiet'], 20_000, 'bin/mail.py');
+    if (code !== 0) return null;
+    const r = JSON.parse(stdout);
+    return { count: Number(r?.count) || 0, newest: String(r?.newest ?? '') };
+  } catch {
+    return null;
+  }
+}
+
+/** 여기까지 셌다고 표시 — **올린 뒤에** 부른다(먼저 옮기면 못 올린 날의 몫이 사라진다). */
+export async function mailQuietMark(ts: string): Promise<boolean> {
+  try {
+    const { code } = await runTasks(['quiet', '--mark', ts], 20_000, 'bin/mail.py');
+    return code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 판에서 누른 것의 출력 중 **사람이 봐야 하는 줄만** 남긴다.
  *
  * ✅ 줄과 칸반 링크는 판이 이미 보여 준다 — 같은 사실을 슬랙에 또 적으면 알림만

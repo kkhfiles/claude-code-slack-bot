@@ -82,6 +82,7 @@
     "check:episodes": "node scripts/check-episodes.mjs",
     "check:memorycard": "node scripts/check-memory-card.mjs",
     "check:singlemsg": "node scripts/check-single-message.mjs",
+    "check:alertroute": "node scripts/check-alert-route.mjs",
     "check:resumepoint": "node scripts/check-resume-point.mjs",
     "check:turnfailalert": "node scripts/check-turn-fail-alert.mjs",
     "check:issuesummary": "node scripts/check-issue-summary.mjs",

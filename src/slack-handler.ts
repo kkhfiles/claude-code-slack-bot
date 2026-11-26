@@ -45,7 +45,8 @@ import { decisionReply, noticeReply, reportLogAvailable } from './action-pipelin
 import type { ThreadApi } from './action-pipeline';
 import { captureToInbox, checkinMap, checkinNow, codexTurn, dropCapture, isWorkAssistantEnabled,
   markCaptureFailed, markCaptureReplayed, markCaptureTold, markCaptureTried, pendingCaptures,
-  pendingHeld, quickUpdate, sessionCodexModel, workAssistantRoot } from './work-assistant';
+  pendingHeld, quickUpdate, sessionCodexModel, workAssistantRoot, mailRoute } from './work-assistant';
+import { alertRouteOn } from './alert-route';
 import { personaNote, humorReminder, humorValueLine } from './persona';
 import { identityNotice, recordSnapshot } from './identity-note';
 import { startEpisode, endEpisode } from './episodes';
@@ -1120,7 +1121,7 @@ export class SlackHandler {
    * 이 방에서 이어 가던 대화와 갈라진다.
    */
   private async askFromBoard(text: string, lead?: string, shown?: string,
-                             captureId?: string, opts: { drawer?: boolean; single?: boolean; noWeb?: boolean } = {}): Promise<TurnOutcome & { lastText?: string }> {
+                             captureId?: string, opts: { drawer?: boolean; single?: boolean; noWeb?: boolean; mailRoute?: boolean } = {}): Promise<TurnOutcome & { lastText?: string }> {
     const channel = config.assistant.dmChannel;
     const user = config.bot.allowUsers[0];
     if (!channel || !user) throw new Error('비서 방 또는 사용자가 설정되지 않았습니다');
@@ -1167,6 +1168,17 @@ export class SlackHandler {
           if (marker) lastMarker = t; else lastText = t;
         }),
       );
+      // **실장님께 묻는 것이 없는 메일 답은 안 보낸다**(2026-11-26 「세나정리」 · `ALERT_ROUTE_DESK=on` 일 때만) — 판정은
+      // 파이썬(`mail.py route`)이 그 차례가 남긴 메일 판정으로 한다. 안 보낸 답은 파이썬이 기록에 남기고 아침 한 줄이 센다.
+      // 차례가 막히거나 터졌으면 판정하지 않고 보낸다 — 그 글은 소식이 아니라 오류다
+      if (opts.mailRoute && alertRouteOn() && (outcomeSink.outcome ?? 'ok') === 'ok') {
+        const r = await mailRoute(outcomeSink.captureId, [lastText, lastMarker].filter(Boolean).join('\n\n'));
+        if (!r.send) {
+          this.logger.info(`메일 차례 답을 안 보냄 — ${r.why} · 아침 한 줄이 셈`);
+          return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink };
+        }
+        this.logger.info(`메일 차례 답을 보냄 — ${r.why}`);
+      }
       await this.app.client.chat.postMessage(singleMessage(channel, head, lastText, lastMarker))
         .catch((err) => this.logger.warn('메일 차례의 한 통을 못 보냄', err));
       return { outcome: 'ok', engine: 'claude', steps: [], writeRan: false, ...outcomeSink };

@@ -101,6 +101,11 @@ export interface PipelineDeps {
   thread?: ThreadApi;
   /** 한도 회복 뒤 이어 간 검토가 끝났을 때 — 스케줄러가 요약 DM 을 보낸다(`-actions review` 와 같은 끝맺음). */
   afterResume?: () => Promise<void>;
+  /**
+   * 이 갈래의 즉시 알림은 보내지 않는다 — 참이면 `tell` 이 건너뛴다(2026-11-26 「세나정리」 · `alert-route.ts`).
+   * 제안 기록은 report-log 에 그대로 남고 desk 와 아침 한 줄이 보여 준다.
+   */
+  hold?: (kind: string) => boolean;
 }
 
 /**
@@ -954,6 +959,10 @@ export class ActionPipeline {
 
   private async tell(notes?: FlowNotice[]): Promise<void> {
     for (const n of notes || []) {
+      if (this.deps.hold?.(n.kind)) {
+        this.logger.info(`${n.id} ${n.kind} 알림은 안 보냄 — desk 와 아침 한 줄로`);
+        continue;
+      }
       try {
         let done = false;
         if (this.deps.thread) {
@@ -1213,6 +1222,20 @@ export class ActionPipeline {
       this.logger.warn('처리 제안 요약의 링크를 못 채움', err);
     }
     return 'sent';
+  }
+
+  /**
+   * 결정을 기다리는 제안 수와 desk 주소 — 아침 한 줄(`alert-route.ts` `buildDeskLine`)이 쓴다. 못 읽으면 null 로 물러나되
+   * 「시스템 이슈」로 남긴다(못 읽은 날이 「없음」으로 읽히지 않게 — `digestBlocks` 와 같은 까닭).
+   */
+  async digestCount(): Promise<{ need: number; site: string } | null> {
+    const d = await this.deps.run('flow', ['digest']);
+    if (!d || d.error) {
+      this.logger.warn(`처리 제안 요약을 못 읽음 — ${d?.error}`);
+      errorCollector.add('처리 제안', `요약을 못 읽음 — ${String(d?.error ?? '답 없음').slice(0, 200)}`);
+      return null;
+    }
+    return { need: ((d as FlowDigest).need_you || []).length, site: (d as FlowDigest).site || '' };
   }
 
   /** `-report` 답 블록. report-log 를 못 읽으면 null — 부르는 쪽이 그 사실을 알린다. */

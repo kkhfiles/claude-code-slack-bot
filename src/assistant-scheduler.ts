@@ -14,12 +14,13 @@ import { isWorkAssistantEnabled, briefNudge, quickUpdate,
   noteUpdate, stageUpdate, summaryCandidates, summaryApply,
   refreshBoardIfChanged, isQuietPeriod, sessionFocusWithin, currentStore,
   offsitePush, commitHarvest, remindDue, remindDone, deliverHeld, finishDrawerTurn, closeDrawerCapture, captureToInbox,
-  workAssistantRoot, mailCandidates, mailMark, boardOutputToTell, dropCapture,
+  workAssistantRoot, mailCandidates, mailMark, mailQuiet, mailQuietMark, boardOutputToTell, dropCapture,
   offDays, ymd, narrowTask, narrowCard, narrowApply, narrowCodex, codexTurn, codexWritableDirs, commitVaultLeftovers,
   improveGather, improveAccept, improveShow, improvePosted, improveDecide, runTasks } from './work-assistant';
 import { agyRungsOn, agyText } from './agy-turn';
 import { AGY_BRIEF_NOTE, AGY_FOCUS_NOTE, parseTaskList, parseFocusReply, runActions, validateActions } from './agy-actions';
 import type { QuickOutcome } from './work-assistant';
+import { alertRouteOn, buildDeskLine, holdNotice, DESK_SITE } from './alert-route';
 import { personaNote } from './persona';
 import { alertRefMetadata } from './dm-context';
 
@@ -1008,7 +1009,7 @@ export class AssistantScheduler {
      * 큐에 남는다 — 짧은 문법과 달리 다시 만들 수 없는 글이라 버리지 않는다.
      */
     private askFromBoard?: (text: string, lead?: string, shown?: string,
-                            opts?: { drawer?: boolean; single?: boolean; noWeb?: boolean; captureId?: string }) => Promise<(TurnOutcome & { lastText?: string }) | void>,
+                            opts?: { drawer?: boolean; single?: boolean; noWeb?: boolean; mailRoute?: boolean; captureId?: string }) => Promise<(TurnOutcome & { lastText?: string }) | void>,
     deps: SchedulerDeps = {},
   ) {
     this.reportLog = deps.reportLog ?? runReportLog;
@@ -1026,6 +1027,8 @@ export class AssistantScheduler {
       post: (text, blocks) => this.sendMessage(text, blocks),
       thread: deps.actionThreads,
       afterResume: () => this.postActionDigest(),
+      // 새로 생긴 제안의 즉시 알림은 `ALERT_ROUTE_DESK=on` 이면 안 보낸다 — desk 와 아침 한 줄로(2026-11-26 「세나정리」)
+      hold: (kind) => holdNotice(kind),
     });
   }
 
@@ -1710,6 +1713,12 @@ export class AssistantScheduler {
    * **실패는 「시스템 이슈」로 남긴다** — 요약이 안 온 날이 「결정할 것 없음」과 똑같아 보이지 않게.
    */
   private async postActionDigest(): Promise<void> {
+    // **켜져 있으면 요약 · 카드 · 결정 요청 대신 한 줄**(2026-11-26 실장님 「세나정리」 · `ALERT_ROUTE_DESK=on`) — 결정은
+    // desk 에서. 11/11 뒤 처리 제안 결정 0건인데 요약이 아침마다 카드 서너 통을 달았다
+    if (alertRouteOn()) {
+      await this.postDeskLine();
+      return;
+    }
     try {
       // 요약 한 통 + 카드는 그 스레드(2026-11-09 실장 결정 V1). 통로가 없거나 요약을 못 올리면 예전 길로.
       if (reportLogAvailable() && (await this.actionPipeline.postDigest()) !== 'fallback') return;
@@ -1718,6 +1727,26 @@ export class AssistantScheduler {
     } catch (err) {
       this.logger.warn('처리 제안 요약 실패', err);
       errorCollector.add('처리 제안', `아침 요약을 못 보냄 — ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * 아침 한 줄 — 「🗂 처리 제안 N건 · 메일 처리 M건 — desk 에서 보기」. 둘 다 0 이면 안 보낸다.
+   * 메일 몫은 조용히 넘긴 메일 차례(`mail.py quiet`)이고 **올린 뒤에** 표시를 옮긴다 — 못 올린 날은 다음 한 줄이 같이 센다.
+   */
+  private async postDeskLine(): Promise<void> {
+    try {
+      const d = reportLogAvailable() ? await this.actionPipeline.digestCount() : null;
+      const m = await mailQuiet();
+      const line = buildDeskLine(d ? d.need : null, m ? m.count : null, d?.site || DESK_SITE);
+      if (!line) return;
+      await this.sendMessage(line);
+      if (m?.newest && !(await mailQuietMark(m.newest))) {
+        this.logger.warn(`아침 한 줄 — 메일 처리 표시를 못 옮김 · 다음 한 줄이 또 셈 (${m.newest})`);
+      }
+    } catch (err) {
+      this.logger.warn('아침 한 줄 실패', err);
+      errorCollector.add('처리 제안', `아침 한 줄을 못 보냄 — ${(err as Error).message}`);
     }
   }
 
@@ -2299,7 +2328,7 @@ export class AssistantScheduler {
       // **한 통으로**(2026-11-09 실장 결정 V2) — 머리 줄과 답을 끝에 한 메시지로(`single`).
       const out = await this.askFromBoard(
         `[메일] 후보 ${r.threads.length}건\n${r.text}`,
-        r.lead || `📬 메일 후보 ${r.threads.length}건`, '', { single: true, noWeb: true });
+        r.lead || `📬 메일 후보 ${r.threads.length}건`, '', { single: true, noWeb: true, mailRoute: true });
       // **막혀 끝났으면 표시를 안 옮긴다**(2026-10-14) — 풀린 뒤 첫 회차가 같은 메일을 그때의 목록으로
       // 다시 읽는다. 그러면 이번 차례의 캡처는 **버린다** — 남겨 두면 회복 때 드레인이 옛 목록을 한 번
       // 더 넘겨 같은 후보가 두 번 나간다. 쓰기가 돈 뒤 막힌 것(일하다 끊김)은 표시를 옮기고 캡처가
