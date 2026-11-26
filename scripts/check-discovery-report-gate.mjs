@@ -43,6 +43,22 @@ try {
     async () => ({ code: 0, stdout: '{"ok":true}' }));
   assert.equal(result.ok, true);
 
+  const enabled = { ...settings, publication: { enabled: true, repoRoot: tmp, safetyChecker: path.join(tmp, 'checker.py') } };
+  let launches = 0;
+  const publish = async (_file, args, cwd) => {
+    launches++;
+    assert.equal(cwd, tmp);
+    assert.equal(args[2], path.join(tmp, 'tools', 'publish_b2a_weekly_tests.py'));
+    assert.ok(args.includes(slot));
+    return { code: 0, stdout: JSON.stringify({ slot, status: 'published', commit: '1'.repeat(40) }) };
+  };
+  assert.equal(await helper.publishDiscoveryRound(slot, settings, publish), 'disabled');
+  assert.equal(launches, 0);
+  assert.equal(await helper.publishDiscoveryRound(slot, enabled, publish), 'published');
+  assert.equal(launches, 1);
+  assert.equal(await helper.publishDiscoveryRound(slot, enabled,
+    async () => ({ code: 0, stdout: '{"status":"merged"}' })), 'failed');
+
   // Actual execFile bridge, using a tiny deterministic CLI in a temporary repo.
   const batch = path.join(tmp, 'mycelium', 'batch');
   fs.mkdirSync(batch, { recursive: true });
@@ -68,7 +84,14 @@ try {
   scheduler.config = { analysis: { types: { 'discovery-improvement': { discovery: settings } } } };
   let gateCalls = 0;
   const original = helper.gateDiscoveryReport;
+  const originalPublish = helper.publishDiscoveryRound;
+  const publications = [];
   try {
+    helper.publishDiscoveryRound = async (date, received) => {
+      assert.deepEqual(received, settings);
+      publications.push(date);
+      return 'disabled';
+    };
     helper.gateDiscoveryReport = async (_root, run, received) => {
       gateCalls++;
       assert.equal(run.slot, slot);
@@ -79,14 +102,18 @@ try {
     assert.equal((await scheduler.commitReportRun(run, false, 'claude')).status, 'partial');
     assert.ok(commits.at(-1).includes('--partial'));
     assert.equal(gateCalls, 1);
+    assert.equal(publications.length, 0);
     helper.gateDiscoveryReport = async () => ({ ok: true, errors: [] });
     assert.equal((await scheduler.commitReportRun(run, false, 'claude')).status, 'complete');
+    assert.deepEqual(publications, [slot]);
     // An already partial session must stay partial even when evidence is valid.
     assert.equal((await scheduler.commitReportRun(run, true, 'claude')).status, 'partial');
     helper.gateDiscoveryReport = async () => { throw Error('other types must not call discovery gate'); };
     assert.equal((await scheduler.commitReportRun({ ...run, type: 'kg-regression' }, false, 'claude')).status, 'complete');
+    assert.deepEqual(publications, [slot]);
   } finally {
     helper.gateDiscoveryReport = original;
+    helper.publishDiscoveryRound = originalPublish;
   }
   console.log('discovery helper + scheduler commit consumer passed');
 } finally {
