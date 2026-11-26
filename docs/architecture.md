@@ -24,6 +24,7 @@
 | `src/engine-recovery.ts` | 회복 타이머: 가장 이른 회복 시각 1분 뒤에 드레인, 기동 시 파일에서 다시 설정 |
 | `src/codex-quota.ts` | codex 한도 조회(5분 캐시): 사용률과 소진을 엔진 상태에 기록, 못 읽으면 모름 |
 | `src/engine-notice.ts` | DM 담당 엔진이 바뀔 때 보내는 한 줄 안내 (기본 꺼짐, `ENGINE_NOTICE=on`일 때만 전송) |
+| `src/alert-route.ts` | 정할 것 없는 알림을 DM 대신 desk 와 아침 한 줄로: 새 처리 제안 즉시 알림과 아침 요약 카드, 묻는 것 없는 메일 답 (기본 꺼짐, `ALERT_ROUTE_DESK=on`일 때만) |
 | `src/rate-limit-until.ts` | 옛 함수 이름을 유지하는 호환 계층 (엔진 상태의 Claude 항목을 읽고 씀) |
 | `src/process-memory-watchdog.ts` | 시스템 메모리 워치독 — 커밋 메모리 감시, 프로세스 kill, Slack 확인 UI |
 | `src/report-server.ts` | 로컬 HTTP 서버 — 업무 칸반 · 수동 분석 실행, 127.0.0.1, 토큰 인증 |
