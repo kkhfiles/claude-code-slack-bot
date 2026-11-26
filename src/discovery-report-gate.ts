@@ -11,6 +11,7 @@ export interface DiscoverySettings {
   runRoot?: string;
   repetitions?: number;
   minimumUnits?: number;
+  publication?: { enabled: boolean; repoRoot?: string; safetyChecker?: string };
 }
 
 export interface DiscoveryGateResult { ok: boolean; errors: string[]; unknown?: boolean }
@@ -24,6 +25,13 @@ export function discoverySettings(value: unknown): DiscoverySettings {
   }
   for (const key of ['repetitions', 'minimumUnits'] as const) {
     if (typeof source[key] === 'number' && Number.isSafeInteger(source[key]) && source[key] > 0) result[key] = source[key];
+  }
+  if (source.publication && typeof source.publication === 'object' && !Array.isArray(source.publication)) {
+    const publication = source.publication as Record<string, unknown>;
+    result.publication = { enabled: publication.enabled === true };
+    for (const key of ['repoRoot', 'safetyChecker'] as const) {
+      if (typeof publication[key] === 'string') result.publication[key] = publication[key];
+    }
   }
   return result;
 }
@@ -47,13 +55,33 @@ export function discoveryRunnerArgs(value: unknown): string[] {
   return args;
 }
 
-type Command = (file: string, args: string[], cwd: string) => Promise<{ code: number; stdout: string }>;
-const command: Command = (file, args, cwd) => new Promise(resolve => {
-  execFile(file, args, { cwd, timeout: 60_000, windowsHide: true, shell: false,
+type Command = (file: string, args: string[], cwd: string, timeout?: number) => Promise<{ code: number; stdout: string }>;
+const command: Command = (file, args, cwd, timeout = 60_000) => new Promise(resolve => {
+  execFile(file, args, { cwd, timeout, windowsHide: true, shell: false,
     encoding: 'utf8', maxBuffer: 1024 * 1024,
     env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONIOENCODING: 'utf-8' } },
   (error, stdout) => resolve({ code: error ? 1 : 0, stdout: stdout || '' }));
 });
+
+export async function publishDiscoveryRound(
+  slot: string, value: unknown, execute: Command = command,
+): Promise<'disabled' | 'published' | 'already-current' | 'failed'> {
+  const settings = discoverySettings(value);
+  const publication = settings.publication;
+  if (!publication?.enabled) return 'disabled';
+  const { repoRoot, safetyChecker } = publication;
+  if (!repoRoot || !safetyChecker || !settings.runRoot || !/^\d{4}-\d{2}-\d{2}$/.test(slot)
+      || ![repoRoot, safetyChecker, settings.runRoot].every(value => path.isAbsolute(value))) return 'failed';
+  try {
+    const response = await execute(pythonCommand('python'), ['-X', 'utf8',
+      path.join(repoRoot, 'tools', 'publish_b2a_weekly_tests.py'), '--slot', slot,
+      '--runs', settings.runRoot, '--safety-checker', safetyChecker], repoRoot, 20 * 60_000);
+    const result = JSON.parse(response.stdout.trim());
+    if (response.code === 0 && result.slot === slot && /^[a-f0-9]{40}$/.test(result.commit)
+        && (result.status === 'published' || result.status === 'already-current')) return result.status;
+  } catch { /* Report storage stays complete; the scheduler reports publication failure separately. */ }
+  return 'failed';
+}
 
 function restorePending(out: string): void {
   try {

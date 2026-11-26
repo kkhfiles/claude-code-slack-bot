@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { spawn, execSync } from 'child_process';
 import { pythonCommand } from './python-command';
-import { discoveryRunnerArgs, gateDiscoveryReport } from './discovery-report-gate';
+import { discoveryRunnerArgs, gateDiscoveryReport, publishDiscoveryRound } from './discovery-report-gate';
 import Holidays from 'date-holidays';
 import { Logger } from './logger';
 import { CalendarPoller } from './calendar-poller';
@@ -3870,9 +3870,9 @@ export class AssistantScheduler {
    * 회차가 열린 채 남으므로 정리 작업(`sweep`)이 임시 파일을 받아 저장한다.
    */
   private async commitReportRun(run: ReportRun, partial: boolean, backend: Backend): Promise<any> {
+    const discovery = this.config?.analysis.types[run.type]?.discovery;
     if (run.type === 'discovery-improvement') {
-      const gate = await gateDiscoveryReport(this.workingDir, run,
-        this.config?.analysis.types[run.type]?.discovery);
+      const gate = await gateDiscoveryReport(this.workingDir, run, discovery);
       if (!gate.ok) {
         partial = true;
         this.logger.warn('Discovery acceptance incomplete', { slot: run.slot, errors: gate.errors, unknown: gate.unknown });
@@ -3897,6 +3897,16 @@ export class AssistantScheduler {
     if (r.register_error) {
       errorCollector.add('AssistantScheduler',
         `권고 등록 실패 (${run.type} ${run.slot}): ${String(r.register_error).slice(0, 200)} — 처리 제안이 안 생김`);
+    }
+    if (run.type === 'discovery-improvement' && !partial && r.status === 'complete') {
+      const publication = await publishDiscoveryRound(run.slot, discovery);
+      if (publication !== 'disabled') {
+        this.appendAnalysisJournal('saturday-00:00', { kind: 'discovery-publication', slot: run.slot, status: publication });
+      }
+      if (publication === 'failed') {
+        this.logger.error('Discovery publication failed', { slot: run.slot });
+        errorCollector.add('AssistantScheduler', `주간 시험 페이지 갱신 실패 (${run.slot})`);
+      }
     }
     return r;
   }
