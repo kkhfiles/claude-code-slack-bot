@@ -42,27 +42,11 @@
 
 ## Build & Run
 
-```bash
-npm install                    # macOS / Linux
-npm install --ignore-scripts   # Windows (플랫폼 체크 우회)
-npm run build                  # TypeScript → dist/
-
-# 초기 설정 (전제 조건 체크 + 의존성 + .env + pm2 + 빌드)
-./setup.sh                    # macOS / Linux
-setup.bat                     # Windows
-
-# 실행
-./start.sh                    # macOS / Linux
-start.bat                     # Windows (pm2로 빌드+실행)
-./stop.sh / stop.bat          # 중지
-
-# 업데이트 (git pull + npm install + 빌드 + pm2 재시작)
-./update.sh                   # macOS / Linux
-update.bat                    # Windows
-```
-
-- pm2 프로세스명: `claude-slack-bot`
-- 로그: `pm2 logs claude-slack-bot`
+- 초기 설정: `./setup.sh` (macOS/Linux), `setup.bat` (Windows)
+- 실행: `./start.sh` 또는 `start.bat`. 중지: `./stop.sh` 또는 `stop.bat`
+- 업데이트: `./update.sh` 또는 `update.bat`
+- 수동 빌드: `npm install` (Windows는 `npm install --ignore-scripts`) 후 `npm run build`
+- pm2 로그: `pm2 logs claude-slack-bot`
 
 ### 재시작은 `npm run restart` 로 — `pm2 restart` 를 직접 치지 않는다
 
