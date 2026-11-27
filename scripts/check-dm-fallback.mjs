@@ -889,7 +889,14 @@ try {
     // 가짜 키 — 소스에 키 모양 글자를 두지 않는다(공개 저장소 검사가 자격 증명으로 본다).
     const KEY = ['sk', 'ant', 'check', 'only', 'k'.repeat(40)].join('-');
     fs.writeFileSync(keyFile, KEY, 'utf-8');
-    process.env.CLAUDE_API_KEY_FILE = keyFile;
+    // 크레딧 장부 명령은 바꿔 끼운다 — 이 칸은 「크레딧 명시」(`pick --credits true`)로 묻는다(`credit-route.ts`)
+    const cr = require(path.join(ROOT, 'dist', 'credit-route.js'));
+    const realRun = cr.runner.run;
+    cr.runner.run = (args, sync) => {
+      const out = args[0] === 'pick' && args.includes('--credits') ? JSON.stringify({ name: 'max', key_file: keyFile }) : 'null';
+      return sync ? out : Promise.resolve(out);
+    };
+    cr.forget();
     const apiCalls = () => claudeCalls.filter((c) => c.options?.env?.ANTHROPIC_API_KEY);
     try {
       eq('API 칸 — 사다리가 표에서 읽힘', dmf.dmLadder({ DM_FALLBACK: 'on' }), ['claude', 'claude-api', 'codex']);
@@ -927,6 +934,8 @@ try {
       eq('크레딧 소진 — API 칸만 사용량 막힘(시각 모름)',
         [engineState.blocked('claude-api')?.kind, engineState.blocked('claude-api')?.untilKnown], ['usage', false]);
       ok('크레딧 소진 — 한도 글은 안 올림', !allText(s.posts).includes('Credit balance'));
+      // 크레딧 소진은 그 키도 막는다(이 프로세스) — 뒤 장면이 같은 키를 다시 쓰게 표시를 지운다
+      cr.forget();
 
       // 막힌 API 칸은 다음 차례에 건너뜀
       s = await scenario({ claude: 'ok', before: () => { blockClaude(); engineState.recordBlocked('claude-api', { kind: 'usage' }); } });
@@ -958,7 +967,8 @@ try {
       eq('키 파일 없음 — 안 띄우고 GPT · 인증 막힘', [claudeCalls.length, s.codex.length, engineState.blocked('claude-api')?.kind], [0, 1, 'auth']);
     } finally {
       apiScript = 'api-ok';
-      delete process.env.CLAUDE_API_KEY_FILE;
+      cr.runner.run = realRun;
+      cr.forget();
       if (before === undefined) delete process.env.LLM_PLAYBOOK_MODELS;
       else process.env.LLM_PLAYBOOK_MODELS = before;
     }

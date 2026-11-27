@@ -61,3 +61,10 @@ if (!process.env.ENGINE_STATE_FILE && !process.env.RATE_LIMIT_UNTIL_FILE) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'check-engine-state-'));
   process.env.ENGINE_STATE_FILE = path.join(dir, '.engine-state.json');
 }
+
+// **검사는 운영 크레딧 장부를 안 읽고 안 쓴다**(2026-11-27) — SDK 처리기를 지나는 검사가 진짜 장부의 키를 골라 세션 환경에 넣거나
+// 쓴 금액 · 막힘을 적으면 안 된다. 없는 장부를 가리키면 장부 명령(`pick`)이 `null`(구독)을 준다. 장부를 직접 정하는 검사는 덮어쓴다.
+if (!process.env.LLM_PLAYBOOK_CREDITS) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'check-credits-'));
+  process.env.LLM_PLAYBOOK_CREDITS = path.join(dir, 'none', 'api-credits.json');
+}

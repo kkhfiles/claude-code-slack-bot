@@ -39,6 +39,7 @@
     "check:fresh": "node scripts/check-fresh-dist.mjs",
     "check:limit": "node scripts/check-limit-detection.mjs",
     "check:noaccounts": "node scripts/check-no-accounts.mjs",
+    "check:creditroute": "node scripts/check-credit-route.mjs",
     "prepare": "git config core.hooksPath .githooks",
     "check:quiet": "node scripts/check-quiet-rooms.mjs",
     "check:activity": "node scripts/check-activity-log.mjs",

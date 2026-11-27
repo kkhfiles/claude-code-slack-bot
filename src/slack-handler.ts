@@ -3251,7 +3251,7 @@ export class SlackHandler {
    */
   /**
    * 월 API 크레딧 칸 한 차례(2026-10-21 사용자 결정) — 구독 Claude 가 막힌 DM 차례를 같은 계열의 Sonnet 이 이어 받는다.
-   * 키는 `billing: 'api'` 가 키 파일에서 넣고(`child-env.ts` `withApiKey`) 엔진 상태는 `claude-api` 에 적힌다.
+   * 키는 `billing: 'api'` 가 크레딧 장부에서 골라 넣고(`credit-route.ts` · 물길과 상관없이 장부가 켜져 있으면) 엔진 상태는 `claude-api` 에 적힌다.
    *
    * - 세션 — 이 차례의 Claude 옵션 그대로(규칙 파일 · 도구 · 권한)에 **새 세션** · 모델 `sonnet` · 차례당 상한
    *   `CLAUDE_API_TURN_BUDGET_USD`. 원래 세션을 잇지 않는 까닭 — 긴 세션을 통째로 다시 보내면 그 길이만큼 크레딧이 든다

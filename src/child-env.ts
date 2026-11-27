@@ -1,5 +1,4 @@
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import SESSION_ENV from './session-env.json';
 
@@ -52,11 +51,6 @@ export function withoutAutoMemory(env: Record<string, string>, cwd: string | und
   return norm(cwd) === norm(root) ? { ...env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : env;
 }
 
-/** 월 API 크레딧 키 파일 — llm-playbook 과 같은 파일(`claude_api.DEFAULT_KEY_FILE`). 시험은 `CLAUDE_API_KEY_FILE` 로 옮긴다. */
-export function apiKeyFile(): string {
-  return process.env.CLAUDE_API_KEY_FILE || path.join(os.homedir(), '.config', 'llm-playbook', '.anthropic-api-key');
-}
-
 /** 키 파일을 못 읽었거나 모양이 틀림 — 오류 글에 키 값을 싣지 않는다. */
 export class ApiKeyFileError extends Error {}
 
@@ -64,13 +58,12 @@ export class ApiKeyFileError extends Error {}
 const OTHER_AUTH = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']);
 
 /**
- * **월 API 크레딧 세션 전용**(2026-10-21 사용자 결정 · `claude-api` 칸) — 키 파일을 읽어 `ANTHROPIC_API_KEY` 로 넣고
- * 구독 토큰(`CLAUDE_CODE_OAUTH_TOKEN`)과 다른 인증 변수는 뺀다. 크레딧은 Agent SDK 세션에 적용된다(2026-10-21
- * 실측 · `apiKeySource: ANTHROPIC_API_KEY`). **이 함수를 부르는 곳은 `sdk-handler.ts` 의 `billing: 'api'` 하나**
- * — 다른 곳에서 부르면 그 길이 구독 대신 과금된다(`npm run check:noaccounts`).
+ * **API 크레딧 세션 전용** — 크레딧 장부가 고른 키 파일(`credit-route.ts`)을 읽어 그 키를 넣고 구독 토큰(`CLAUDE_CODE_OAUTH_TOKEN`)과
+ * 다른 인증 변수는 뺀다. 크레딧은 Agent SDK 세션에 적용된다(2026-10-21 실측 · `apiKeySource` 가 키를 가리킴).
+ * **이 함수를 부르는 곳은 `credit-route.ts` 의 `creditEnv` 하나** — 다른 곳에서 부르면 그 길이 장부를 안 거치고 과금된다
+ * (`npm run check:noaccounts`).
  */
-export function withApiKey(env: Record<string, string | undefined>): Record<string, string> {
-  const file = apiKeyFile();
+export function withApiKey(env: Record<string, string | undefined>, file: string): Record<string, string> {
   let key: string;
   try {
     key = fs.readFileSync(file, 'utf-8').trim();

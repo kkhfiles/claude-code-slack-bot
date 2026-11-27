@@ -13,7 +13,8 @@ import { Logger } from './logger';
 import { McpManager } from './mcp-manager';
 import { errorCollector } from './error-collector';
 import { event as recordEvent } from './board-queue';
-import { withApiKey, withoutApiKey, withoutAutoMemory } from './child-env';
+import { withoutAutoMemory } from './child-env';
+import { callerOf, creditEnv, creditStream, type Billing, type CreditPick } from './credit-route';
 import { config } from './config';
 import { ClaudeTap } from './engine-tap';
 import { engineState, type Engine } from './engine-state';
@@ -265,12 +266,11 @@ export interface SdkRunOptions {
   /** 엔진 연습을 받는 차례인가 — 대화 차례는 `interactive`(생략하면 예약 일 · `engine-drill.ts`). */
   drillScope?: DrillScope;
   /**
-   * `'api'` — 구독 토큰 대신 월 API 크레딧 키로 띄운다(`claude-api` 칸 · 2026-10-21 사용자 결정). 미리 띄운 세션과
-   * 엔진 연습을 안 쓰고(둘 다 구독 환경으로 뜬다) 엔진 상태는 `claude-api` 에 적는다. 키 파일을 못 읽으면 던진다
-   * (`ApiKeyFileError`). **생략하면 늘 구독** — 크레딧 장부(`~/.config/llm-playbook/api-credits.json`)는 안 읽는다
-   * (2026-11-05 사용자 결정 「크레딧은 Mycelium 사이트만 쓴다」 · 봇의 DM · 예약 일 · 달력 판정 · 폴백은 구독만).
+   * 어느 돈으로 띄우나 — **생략하면 크레딧 장부의 물길대로**(2026-11-27 사용자 결정 「크레딧물꼬」 · 판단은 `credit-route.ts` 한 곳).
+   * `'api'` 는 크레딧을 명시한 길(`claude-api` 칸 · 미리 띄운 세션과 엔진 연습을 안 쓰고 엔진 상태는 `claude-api`, 쓸 키가 없으면
+   * 던진다), `'subscription'` 은 늘 구독(크레딧 오류 뒤 같은 차례를 다시 띄울 때).
    */
-  billing?: 'api';
+  billing?: Billing;
   /**
    * SDK 훅(봇 프로세스 안에서 도는 함수) — 지금은 세나 DM 의 내부 번호 점검 Stop 훅 하나(`internal-labels.ts`).
    * 늘 같은 객체를 넘겨야 미리 띄우기 지문이 안 흔들린다(함수는 지문에서 `null` 로 찍힌다).
@@ -366,7 +366,8 @@ export class SdkHandler {
    * 반영의 일부가 아니다.
    */
   prewarm(opts: SdkRunOptions, ttlMs: number = SdkHandler.WARM_TTL_MS): void {
-    // 월 API 크레딧 세션은 미리 띄우지 않는다 — 키를 든 프로세스가 대기 자리에 남지 않게. 폴백 차례는 드물어 맞을 일도 없다.
+    // 크레딧을 명시한 칸(`claude-api`)은 미리 띄우지 않는다 — 폴백 차례는 드물어 맞을 일이 없다. 장부가 키를 준 보통 차례는
+    // 미리 띄운다: 같은 `buildOptions` 를 지나 키가 지문(환경)에 들어가므로, 키가 바뀌거나 구독으로 돌면 그 자리는 안 맞고 새로 뜬다.
     if (opts.billing === 'api') return;
     // 메모리를 잴 수단이 있으면 재고 띄운다(비동기) · 없으면 곧바로(시험이 이 길이다).
     if (this.memorySample) {
@@ -434,9 +435,18 @@ export class SdkHandler {
   get warmCount(): number { return this.warms.size; }
 
   runQuery(prompt: string, opts: SdkRunOptions): SdkProcess {
+    // 크레딧으로 띄운 흐름 — 쓴 금액 · 크레딧 오류는 `credit-route.ts` 가 본다. 보통 길은 내보내기 전의 크레딧 오류를 구독으로 한 번 다시
+    const credited = (q: Query, b: { sdkOptions: any; abortController: AbortController; credit: CreditPick | null }): Query =>
+      creditStream(q, b.credit, {
+        signal: b.abortController.signal, resumed: !!(b.sdkOptions.resume || b.sdkOptions.continue), caller: callerOf(opts),
+        retry: opts.billing === 'api' ? undefined : () => {
+          const s = this.buildOptions(prompt, { ...opts, billing: 'subscription' });
+          return { q: SdkHandler.queryFn({ prompt, options: s.sdkOptions }), ac: s.abortController };
+        },
+      }) as Query;
     if (opts.billing === 'api') {
       const built = this.buildOptions(prompt, opts);
-      return new SdkProcess(SdkHandler.queryFn({ prompt, options: built.sdkOptions }), built.abortController, 'claude-api');
+      return new SdkProcess(credited(SdkHandler.queryFn({ prompt, options: built.sdkOptions }), built), built.abortController, 'claude-api');
     }
     // 엔진 연습(`engine-drill.ts`) — 막힌 모양을 재생한다. 처음부터 막힌 갈래는 진짜를 안 띄우고,
     // `usage-after-tool` 은 진짜 차례(미리 띄운 것 포함)를 첫 도구 결과까지 돌린 뒤 꼬리를 끼운다.
@@ -450,7 +460,7 @@ export class SdkHandler {
     // 이어 갈 지점을 못 찾으면 그 지점 없이 다시 띄우는 길(`SdkProcess.again`) — 지점을 준 차례에만
     const retry = built.sdkOptions.resumeSessionAt ? () => {
       const b = this.buildOptions(prompt, { ...opts, session: { ...opts.session!, lastAssistantUuid: undefined } });
-      return { q: SdkHandler.queryFn({ prompt, options: b.sdkOptions }), ac: b.abortController };
+      return { q: credited(SdkHandler.queryFn({ prompt, options: b.sdkOptions }), b), ac: b.abortController };
     } : undefined;
     const wrap = (q: Query, ac: AbortController): SdkProcess => (drill === 'usage-after-tool'
       ? new SdkProcess(afterFirstToolResult(q, () => ac.abort(), () => limitTail(sid)) as unknown as Query, ac)
@@ -472,7 +482,7 @@ export class SdkHandler {
         this.logger.info('미리 띄운 세션을 씀', { agedMs: Date.now() - w.bornAt });
         if (mode) recordEvent('prewarm', { hit: true, mode, aged_s: Math.round((Date.now() - w.bornAt) / 1000) });
         w.send(prompt);
-        return wrap(w.q, w.abortController);
+        return wrap(credited(w.q, { ...built, abortController: w.abortController }), w.abortController);
       }
       this.logger.info('미리 띄운 것을 못 씀 — 새로 띄웁니다', { reason: '낡음' });
       if (mode) recordEvent('prewarm', { hit: false, mode, why: 'stale' });
@@ -491,11 +501,11 @@ export class SdkHandler {
     }
 
     const q = SdkHandler.queryFn({ prompt, options: built.sdkOptions });
-    return wrap(q, built.abortController);
+    return wrap(credited(q, built), built.abortController);
   }
 
   private buildOptions(prompt: string, opts: SdkRunOptions):
-      { sdkOptions: any; abortController: AbortController } {
+      { sdkOptions: any; abortController: AbortController; credit: CreditPick | null } {
     const abortController = new AbortController();
 
     // 'default' would prompt the user for risky tool calls, but background
@@ -549,10 +559,10 @@ export class SdkHandler {
     // subprocess keeps standard env and only opts.env overrides on top.
     // **`opts.env` 가 없어도 늘 넘긴다** — 안 넘기면 SDK 가 `process.env` 를 그대로 써서
     // PC 에 남은 API 키가 세션으로 샌다(`child-env.ts`).
-    // **크레딧 장부는 안 본다**(2026-11-05 사용자 결정) — 키를 넣는 것은 `billing: 'api'` 한 길뿐이다.
-    sdkOptions.env = opts.billing === 'api'
-      ? withApiKey({ ...process.env, ...opts.env })
-      : withoutApiKey({ ...process.env, ...opts.env });
+    // **구독이냐 크레딧이냐는 장부가 정한다**(`credit-route.ts` · 2026-11-27) — 키를 주면 그 키, 아니면 구독(API 키를 뺌).
+    // 미리 띄운 세션도 이 길을 지나므로 키가 바뀌면 지문이 달라져 그 자리는 안 맞는다.
+    const route = creditEnv({ ...process.env, ...opts.env }, opts.billing);
+    sdkOptions.env = route.env;
     // 세나는 Claude 자동 메모리를 안 쓴다(11/11 실장님) — 업무 비서 폴더에서 도는 세션만. 미리 띄운 세션도 이 길을 지나 같은 값이다
     sdkOptions.env = withoutAutoMemory(sdkOptions.env, opts.workingDirectory, config.workAssistant.root || undefined);
     if (opts.canUseTool) sdkOptions.canUseTool = opts.canUseTool;
@@ -640,7 +650,7 @@ export class SdkHandler {
       effort: sdkOptions.effort,
     });
 
-    return { sdkOptions, abortController };
+    return { sdkOptions, abortController, credit: route.credit };
   }
 }
 
