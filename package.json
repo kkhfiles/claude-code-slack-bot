@@ -99,7 +99,8 @@
     "check:limitsamples": "node scripts/check-limit-samples.mjs",
     "check:engineshare": "node scripts/check-engine-share.mjs",
     "check:servladder": "node scripts/check-service-ladder.mjs",
-    "check:labels": "node scripts/check-internal-labels.mjs"
+    "check:labels": "node scripts/check-internal-labels.mjs",
+    "check:interim": "node scripts/check-interim-text.mjs"
   },
   "keywords": [],
   "author": "",

@@ -57,7 +57,8 @@ import { readUnseen } from './dm-context';
 import type { SlackMsg } from './dm-context';
 import { REACTIONS, reactionTurn } from './alert-reaction';
 import { containsPrivate } from './privacy-guard';
-import { LABEL_HOOKS, finishTurn, noteText, wantGuard } from './internal-labels';
+import { LABEL_HOOKS, finishTurn, forgetHeld, noteText, wantGuard } from './internal-labels';
+import { ReplyBuffer } from './interim-text';
 import { ChannelGate, HOLD_SWEEP_MS, REPLAY_FRAME, buildHoldExtra, drainHeld, dropHeldFiles, holdV2On,
   leadText, markChoice, needsCanary, oldListMessage, receivedSec, replayNote, replayTarget,
   type HeldFile, type HeldItem } from './hold-replay';
@@ -1887,6 +1888,8 @@ export class SlackHandler {
     // 내부 번호 점검(`internal-labels.ts`) — 이 차례에 거르나, 어느 세나 세션인가. `finally` 가 기록을 지운다
     let labelWant = false;
     let labelSid = '';
+    // DM 은 마지막 답만 — 도구 호출 앞의 중간 글(속생각)은 버린다(`interim-text.ts`, 사고 ic-20261127-2)
+    const replyBuf = new ReplyBuffer();
     // **`try` 밖에 둔다** — 차례가 터졌을 때 `catch` 에서도 캡처에 표시를 남겨야
     // 한다. 안에 두면 그 자리에서 안 보여, 정작 실패한 차례가 자국을 못 남긴다.
     const captureId = capture?.id ?? '';
@@ -2251,6 +2254,11 @@ export class SlackHandler {
             if (toolContent) {
               await say({ text: toolContent, thread_ts: replyTs });
             }
+            // 쥐고 있던 글 뒤에 도구 호출이 왔다 — 중간 글이라 버린다. 내부 번호 문이 붙잡은 것이면 거기서도 뺀다
+            // (안 빼면 Stop 훅이 중간 글을 다시 쓰라고 돌려보내고, 못 풀면 차례 끝에 그대로 올린다)
+            const dropped = replyBuf.tool();
+            for (const d of dropped) if (d.held) forgetHeld(labelSid, d.text);
+            if (dropped.length) this.logger.info('DM 중간 글을 올리지 않습니다', { n: dropped.length, chars: dropped.map((d) => d.text.length) });
           } else {
             const content = this.extractTextFromContent(contentParts);
             if (content && limitSeen) {
@@ -2275,9 +2283,10 @@ export class SlackHandler {
               // 내부 번호가 든 세나 글은 올리지 않고 맡긴다 — Stop 훅이 같은 차례 안에서 풀어 다시 쓰게 한다.
               // `currentMessages` 에는 넣어 둔다 — 아래 결과 글(같은 글)이 다시 올리지 않게
               labelSid = assistantEvent.session_id || labelSid;
-              if (noteText(labelSid, content, labelWant, text || '') === 'post') {
-                await say({ text: this.formatMessage(content, false), thread_ts: replyTs });
-              }
+              const decision = noteText(labelSid, content, labelWant, text || '');
+              // DM 은 바로 안 올리고 쥔다 — 뒤에 도구 호출이 오면 중간 글, 차례가 끝나면 답(`interim-text.ts`)
+              if (isDM) replyBuf.text(content, decision === 'hold');
+              else if (decision === 'post') await say({ text: this.formatMessage(content, false), thread_ts: replyTs });
             }
           }
         } else if (event.type === 'result') {
@@ -2337,6 +2346,9 @@ export class SlackHandler {
           // 막힌 차례의 결과 글(한도 글 그대로)도 안 올린다 — 위 어시스턴트 글과 같은 까닭. 글로 읽는 것은
           // 오류 결과뿐이다(`rateLimitMessageText` 는 `is_error` 일 때만 선다).
           const limited = limitSeen || !!rateLimitMessageText;
+          // DM 에서 쥐고 있던 마지막 도구 뒤의 글 — 이것이 답이다. 막힌 뒤의 글은 애초에 안 쥐므로(위) 거절 전의
+          // 글만 남는다 — 예전처럼 올린다(check:dmfallback 「거절 전의 Claude 글은 올린다」)
+          for (const t of replyBuf.flush()) await say({ text: this.formatMessage(t, false), thread_ts: replyTs });
           if (resultEvent.subtype === 'success' && resultEvent.result && !limited) {
             if (!currentMessages.includes(resultEvent.result)
               && noteText(resultEvent.session_id || labelSid, resultEvent.result, labelWant, text || '') === 'post') {
@@ -2348,6 +2360,8 @@ export class SlackHandler {
         }
       }
       tmark('스트림 닫힘');
+      // 결과 이벤트 없이 끝난 차례도 쥐고 있던 답을 잃지 않는다(결과에서 이미 올렸으면 빈 목록)
+      for (const t of replyBuf.flush()) await say({ text: this.formatMessage(t, false), thread_ts: replyTs });
       // 붙잡았는데 훅이 돌려보내지 못한 글은 그대로 올린다 — 답을 잃는 것보다 번호가 나가는 것이 낫다(`internal-labels.ts`)
       if (labelSid) {
         const leftover = finishTurn(labelSid);

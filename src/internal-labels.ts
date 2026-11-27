@@ -135,6 +135,14 @@ export function noteText(sessionId: string, text: string, want: boolean, questio
   return 'hold';
 }
 
+/** 붙잡은 글이 중간 글이었다(뒤에 도구 호출이 옴, `interim-text.ts`) — 다시 쓰게 하지도, 차례 끝에 올리지도 않는다. */
+export function forgetHeld(sessionId: string, text: string): void {
+  const g = guards.get(sessionId);
+  if (!g) return;
+  const t = norm(text);
+  g.held = g.held.filter((h) => h !== t);
+}
+
 /** 차례 끝 — 훅이 돌려보내지 못한 붙잡은 글(그대로 올릴 것)을 돌려주고 이 세션의 기록을 지운다. */
 export function finishTurn(sessionId: string): string[] {
   const g = guards.get(sessionId);
