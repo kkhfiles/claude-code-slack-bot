@@ -16,7 +16,8 @@
 | `src/messages.ts` | i18n 번역 카탈로그 (`t()` 함수, `Locale` 타입) |
 | `src/mcp-manager.ts` | MCP 서버 설정 로드/관리 |
 | `src/account-manager.ts` | OAuth 토큰 하나의 저장, 갱신, 터미널(`.credentials.json`)과의 양방향 동기화 |
-| `src/child-env.ts` | 봇이 띄우는 세션의 환경 변수에서 API 키를 뺌 (`withoutApiKey()`, SDK와 CLI 두 길 공통). 월 API 크레딧 칸만 키 파일의 키를 넣음 (`withApiKey()`) |
+| `src/child-env.ts` | 봇이 띄우는 세션의 환경 변수에서 API 키를 뺌 (`withoutApiKey()`, SDK와 CLI 두 길 공통). 크레딧 장부가 고른 키 파일의 키를 넣는 함수 (`withApiKey()` — `credit-route.ts` 만 부름) |
+| `src/credit-route.ts` | API 크레딧 물길 — 장부(`llm_playbook.credits pick`)의 답으로 세션 환경을 고르고, 쓴 금액 기록, 크레딧 오류 때 키 막기와 구독으로 다시 띄우기 |
 | `src/version.ts` | 버전 정보 + 업데이트 체크 (`getVersionInfo()`, `checkForUpdates()`) |
 | `src/rate-limit-utils.ts` | 공유 rate limit 감지 유틸 (`isRateLimitText()`, `isRateLimitError()`), 엔진 상태에 적을 막힘 판정 (`classifyClaudeEvent()`, `classifyClaudeErrorText()`, codex 쪽 `classifyCodexErrorText()`) |
 | `src/engine-state.ts` | 엔진 상태의 정본: 엔진별 막힘, 회복 시각, 사용률, 안내 키 (`.engine-state.json`) |

@@ -30,8 +30,7 @@
     - `-account`: 계정 전환
     - `-apikey`, `-limit`: API 키 전환과 사용 한도
     - `-schedule`: 세션 자동 시작(인사 예약)
-  - **API 키 차단**: 봇이 띄우는 세션 환경에서 `ANTHROPIC_API_KEY` 는 늘 뺌 (`src/child-env.ts`, 검사 `npm run check:noaccounts`)
-    - 예외: 월 API 크레딧 칸(`claude-api`, 2026-10-21)만 키 파일의 키를 넣음 (`withApiKey()`, 상세 `docs/engine-fallback.md` 「월 API 크레딧 칸」)
+  - **API 키**: 크레딧 장부가 키를 줄 때만 넣고 아니면 늘 뺌 (`src/credit-route.ts`, 검사 `npm run check:noaccounts`와 `check:creditroute`, 상세 `docs/engine-fallback.md` 「API 크레딧 물길」)
 - `-briefing`/`-br`/`브리핑`: 모닝 브리핑 즉시 실행 (`AssistantScheduler.runBriefing()`)
   - 캐시된 캘린더 데이터 사용 (MCP 미호출), 캐시 날짜가 오늘이 아니면 `refreshCache()` 호출 후 사용, 실패 시 MCP fallback
   - `ErrorCollector`에 수집된 봇 에러를 `⚠️ 시스템 이슈` 섹션으로 일괄 보고

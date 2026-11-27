@@ -105,7 +105,7 @@ npm test        # 빌드 + check:* 전부
   - 토큰 만료 90분 전 자동 갱신 (OAuth refresh), 갱신 실패 시 `null` 반환 (만료 토큰 사용 방지)
   - **토큰 공유**: 봇은 터미널과 같은 토큰 사슬을 씀 — 터미널 토큰을 옮겨 받기만 하고 따로 새 사슬을 만들지 않음 (독립 refresh 가 토큰 체인 파괴 원인이었음)
   - **터미널 보호**: 터미널이 같은 계정으로 로그인해 있으면 선제적 갱신 건너뜀 (OAuth rotation이 터미널 인메모리 refresh token 무효화 방지), 토큰 실제 만료 시에만 갱신
-  - **계정은 하나** — 계정 전환과 「API 키로 계속」은 2026-10-14 사용자 결정으로 걷음. 봇이 띄우는 세션 환경에서 `ANTHROPIC_API_KEY` 는 늘 뺌(`src/child-env.ts`). 크레딧 장부는 안 읽음(2026-11-05, `docs/engine-fallback.md`). 검사 `npm run check:noaccounts`
+  - **계정은 하나** — 계정 전환과 「API 키로 계속」은 2026-10-14 사용자 결정으로 걷음. 봇 세션은 크레딧 장부의 물길(`route`)이 키를 주면 그 키, 아니면 구독. 크레딧 판단은 `src/credit-route.ts` 한 곳에만 둠(2026-11-27, `docs/engine-fallback.md`). 검사 `check:noaccounts`, `check:creditroute`
   - `notifyAt` 보정 (`clampNotifyAt`): "upcoming" 알림의 `notifyAt`이 `eventStart - beforeMinutes`보다 이르면 강제 보정 (AI 판단 오류 안전장치)
   - 분석 회차와 보고서 저장 — report-log 5단계(쓰는 쪽). **저장 주체는 스탠리 하나** · 설계 정본은 report-log `docs/stage5-plan.md` 「쓰는 흐름」 · 검사 `npm run check:reportrun`
   - 처리 백엔드: `SessionResult.servedBy`(`spawnOrFallback` 이 붙임) · agy 위임 경로(`ANALYSIS_AGY_TYPES`)는 없앰 — agy 는 도구 없는 회차의 폴백 사다리에서만 씀
@@ -198,7 +198,7 @@ Claude 사용량이 바닥나도 스탠리가 멈추지 않게 하는 사다리(
 
 - **호출 기준**: 전역 `~/.claude/skills/claude-cli-spawn/SKILL.md` 적용
 - **실행 전환**: 대화와 예약 작업 모두 SDK 사용. 환경 변수로 직접 CLI 실행에 복귀하는 경로를 추가하지 않음
-- **환경 변수**: `{...process.env, ...opts.env}`를 병합하고 `withoutApiKey()` 적용. 호출자가 환경을 생략해도 API 키 제외
+- **환경 변수**: `{...process.env, ...opts.env}`를 병합하고 `creditEnv()`(`credit-route.ts`) 적용 — 장부가 키를 주면 그 키, 아니면 API 키 제외. 호출자가 환경을 생략해도 같음
 - **시스템 지시**: `systemPrompt` 문자열은 교체, `preset: 'claude_code'`와 `append`는 기존 지시에 추가
 - **도구**: `tools`로 가용 도구 제한, `allowedTools`로 자동 승인 목록 지정
 - **설정 출처**: 제공한 입력만 처리하는 작업은 `settingSources: []`, 프로젝트 작업은 필요한 출처 유지

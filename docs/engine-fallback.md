@@ -64,18 +64,26 @@
 - **재시작에 끊김** — 처리 중 기록에 「GPT 명령 — 무엇을 했는지 모름」(쓰기)을 넣어 둠, 보류 v2 가 `partial` 로 이어 감
   - 지난 기동의 처리 중 기록은 생성자에서 떠 둠(`snapshotBootInflight`) — 알림(기동 12초 뒤) 전에 같은 열쇠(DM 맨 위는 `direct`)의 새 차례가 덮어도 끊긴 차례를 잃지 않음
 
-## 봇은 API 크레딧을 안 씀(2026-11-05 사용자 결정)
+## API 크레딧 물길 — 장부 스위치 하나(2026-11-27 사용자 결정 「크레딧물꼬」)
 
-- **결정** — API 크레딧 장부(`~/.config/llm-playbook/api-credits.json`)의 크레딧은 Mycelium 사이트(llm-playbook 사다리 `kb-chat`, `kb-chat-high`)만 사용. 봇의 DM, 예약 일, 좁은 길, 달력 판정, 폴백은 구독으로만 실행
-- **동작** — 봇은 장부를 읽지도 쓰지도 않음. 장부가 켜져 있고 쓸 키가 있어도 세션 환경에서 `ANTHROPIC_API_KEY` 를 뺌(`withoutApiKey()`)
-- **Claude 막힘 판단** — 구독 Claude 의 엔진 상태(`engineState.isBlocked('claude')`)만 봄. DM 사다리의 막힘 표, 좁은 길, 예약 세션, 달력 판정, 한도 재시도, 메일 폴러, 보류 드레인이 같은 기준
-- **걷은 것** — 2026-10-22 ~ 11-05 의 「크레딧 먼저」(`src/api-credits.ts`, 장부 키로 세션 띄우기, 사용액 기록, 키 막기, 도중 소진 시 다시 띄우기, 「Claude API(크레딧)로 이어 갑니다」 안내, `check:apicredits`)
-- **검사** — `check:noaccounts` 「크레딧은 안 쓴다」(켜진 장부와 쓸 키를 두고 키 없이 뜨는지, 장부를 안 고치는지, 막힘 판단이 구독만 따르는지)
-- **남은 길** — 아래 「월 API 크레딧 칸」은 `models.json` 의 `ladders.dm` 에 `claude_api` 칸을 넣을 때만 도는 옛 경로이고, 그 칸은 기본 키 파일(크레딧 키)로 뜸. 2026-11-05 결정에 따라 이 칸을 표에 다시 넣지 않음
+- **결정** — 크레딧을 쓸지는 크레딧 장부(`~/.config/llm-playbook/api-credits.json`)의 물길(`route`: `site` | `all`) 하나가 정함. 켜고 끄려고 봇을 고치지 않음
+- **판단 정본** — 파이썬 `python -m llm_playbook.credits pick`(만료, 부여, 막힘을 모두 봄). 봇은 같은 판단을 다시 짜지 않고 답만 받음
+- **봇 쪽 한 곳** — `src/credit-route.ts`. 부르는 곳은 `sdk-handler.ts` 의 `buildOptions`(세션 환경 `creditEnv`)와 `runQuery`(흐름 `creditStream`) 둘뿐
+- **고르기** — 처음 한 번은 기다려 묻고 그 뒤로는 60초마다 뒤에서 다시 물음. 명령이 실패하거나 시간을 넘기면 `null`(구독)
+- **적용 범위** — `SdkHandler.runQuery` 로 띄우는 모든 세션(DM, 서랍, 판에서 온 차례, 메일 차례, 좁은 길, 예약 일, 처리 제안, 분석, 달력 판정). `billing` 을 안 준 세션은 물길대로
+- **쓴 금액** — 크레딧 세션의 결과마다 늘어난 만큼 `credits record --key <이름> --caller bot:<갈래>`(차례를 안 붙잡음). 이 프로세스가 처음 보는 이어 받은 세션은 크레딧 몫을 몰라 안 셈(재시작 직후 덜 셈)
+- **크레딧 오류**(소진, 지출 한도, 키 거부 중 하나) — `credits block` 으로 그 키를 막음. 구독 Claude 의 막힘(엔진 상태 `claude`)으로 안 적음
+  - 아무것도 내보내기 전(크레딧 오류는 첫 API 호출에서 옴) — 같은 차례를 구독으로 한 번 다시 띄움. 시작 알림은 들고 있다가 버림
+  - 글이나 도구 호출이 하나라도 나간 뒤 — 다시 안 띄움(쓰기가 두 번 들어감). 결과 글을 한도 낱말 없는 글로 바꿔 보통 오류로 끝남
+- **미리 띄우기** — 같은 `buildOptions` 를 지나 키가 지문(환경)에 들어감. 키가 바뀌거나 구독으로 돌면 그 자리는 안 맞고 새로 뜸. 크레딧을 명시한 칸(`billing: 'api'`)은 안 띄움
+- **Claude 막힘 판단** — 그대로 구독 Claude 의 엔진 상태(`engineState.isBlocked('claude')`)만 봄. 크레딧 세션이 된 차례는 `claude` 의 「됐다」로 적힘
+- **검사** — `check:creditroute`(장면), `check:noaccounts`(크레딧 판단이 `credit-route.ts` 밖에 없는지)
+- **옛 경위** — 2026-10-22 ~ 11-05 「크레딧 먼저」(같은 판단을 TypeScript `src/api-credits.ts` 로 다시 짬), 11-05 ~ 11-27 「봇은 크레딧을 안 씀」
 
 ## 월 API 크레딧 칸 — `runClaudeApiFallback`(2026-10-21 사용자 결정, 10-22 사다리에서 뺌)
 
 - **무엇** — 구독 Claude 가 막힌 DM 차례를 GPT 보다 먼저 받는 칸. 모델은 Claude API 의 Sonnet
+- **키** — 크레딧 장부에 크레딧 명시로 물음(`pick --credits true`, 물길이 `site` 여도 장부가 켜져 있으면 키). 쓸 키가 없으면 띄우지 않고 인증 막힘(2026-11-27)
 - **비용** — Max 구독에 딸린 월 API 크레딧(Max 5x 는 $100, 이월 없음)
 
 - **켜는 법** — `models.json` 의 `ladders.dm` 에서 `claude` 바로 다음에 `claude_api` 칸을 넣음. 표에 없으면 이 칸은 안 돎
