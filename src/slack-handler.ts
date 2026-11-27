@@ -2592,6 +2592,12 @@ export class SlackHandler {
       }
     } catch (error: any) {
       this.logger.error('Error handling message', error);
+      // 마지막 답을 쥔 채 결과 이벤트 전에 터졌으면 그 답부터 올린다 — 예전에는 받자마자 올려서 이 길에서도
+      // 나갔다(`interim-text.ts`). 이미 올렸으면 빈 목록이고, 올리다 터진 것이면 다시 안 올린다
+      for (const t of replyBuf.flush()) {
+        try { await say({ text: this.formatMessage(t, false), thread_ts: replyTs }); }
+        catch (e) { this.logger.warn('터진 차례의 쥐고 있던 답을 못 올림', e); }
+      }
 
       // Rate limit detection from error
       // 스트림에서 본 한도 글이면 Claude 의 것이 확실하다. 던진 오류는 슬랙 같은 남의 실패일 수 있어

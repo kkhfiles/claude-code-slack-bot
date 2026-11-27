@@ -90,6 +90,12 @@ ok('배선: 도구 호출에 버린다', /const dropped = replyBuf\.tool\(\);/.t
 ok('배선: 붙잡은 중간 글을 문에서 뺀다', /if \(d\.held\) forgetHeld\(labelSid, d\.text\)/.test(src));
 ok('배선: 결과와 스트림 끝 두 곳에서 올린다',
   (src.match(/for \(const t of replyBuf\.flush\(\)\) await say\(/g) ?? []).length === 2);
+// 터진 차례 — 마지막 답을 쥔 채 결과 전에 끊기면 catch 가 그 답을 올린다(재검토에서 찾음: 이 길이 없으면 답을 잃음)
+{
+  const c = src.indexOf("this.logger.error('Error handling message', error);");
+  const f = src.indexOf('for (const t of replyBuf.flush()) {', c);
+  ok('배선: 터진 차례도 쥐고 있던 답을 올린다', c > 0 && f > c && f - c < 400);
+}
 ok('배선: 막힌 뒤의 글은 안 쥔다(쥐는 자리가 한도 분기 뒤)',
   src.indexOf("this.logger.info('막힌 뒤의 Claude 글을 올리지 않습니다')") < src.indexOf('if (isDM) replyBuf.text('));
 ok('배선: 옛 길(받자마자 noteText 로 올림) 없음',
