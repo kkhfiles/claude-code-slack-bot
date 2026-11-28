@@ -2,9 +2,11 @@ import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
+import Holidays from 'date-holidays';
 import { Logger } from './logger';
 import { caught, every, type Task } from './recurring';
 import { pythonCommand } from './python-command';
+import { offDays, ymd } from './work-assistant';
 
 const execFileAsync = promisify(execFile);
 
@@ -15,6 +17,8 @@ type UpdateMessageFn = (ts: string, text: string, blocks?: any[]) => Promise<voi
 const ALERT_ID = 'daou-session';
 export const ACTION_ID = 'daou_login';
 const NOTICE_FILE = 'daou-login-notice.json';
+/** 업무일에도 이 시각 전에는 안 알린다 — 자정 keepalive 가 찾은 만료가 새벽 DM 이 되지 않게. */
+const NOTIFY_FROM_HOUR = 8;
 
 /** 메시지에 찍는 시각은 이 PC 시각 — `toISOString` 은 UTC 라 「해소 (01:23)」로 나갔다(2026-09-21 시연). */
 const localHHMM = (): string =>
@@ -39,17 +43,34 @@ interface Notice {
  * - 5분 안에 로그인이 없으면 창을 닫고 버튼을 **그대로 남긴다** — 다시 누르면 다시 연다.
  * - 마커가 사라지면(다른 길로 로그인) 알림 메시지를 「해소」로 고쳐 낡은 🔴 가 안 남게 한다.
  * - 같은 만료에 두 번 누르면 두 창이 뜨지 않게 진행 중 표시를 둔다.
+ * - **쉬는 날과 업무일 08시 전에는 안 알린다** (사고 ic-20261128-1 — 토요일 10:03 에 DM 이
+ *   나갔다). 쉬는 날에는 로그인할 사람이 없다. 표시를 안 남기므로 다음 업무일 08시 첫 점검이
+ *   그대로 한 번 알리고, 그사이 다른 길로 로그인해 마커가 걷혔으면 아무 말도 안 한다.
  */
 export class DaouLoginNotifier {
   private logger = new Logger('DaouLogin');
   private inFlight = false;
   private timer: Task | null = null;
+  private holidays = new Holidays('KR');
+  private now: () => Date;
 
   constructor(
     private sendMessage: SendMessageFn,
     private updateMessage: UpdateMessageFn,
     private intervalSec = 300,
-  ) {}
+    opts: { now?: () => Date } = {},
+  ) {
+    this.now = opts.now ?? (() => new Date());
+  }
+
+  /** 쉬는 날 달력은 스케줄러(`isNonWorkingDay`)와 같다 — 주말, 한국 공휴일, `config.json` 의 개인 휴가. */
+  private isWorkday(d: Date): boolean {
+    const day = d.getDay();
+    if (day === 0 || day === 6) return false;
+    if (offDays().has(ymd(d))) return false;
+    const h = this.holidays.isHoliday(d);
+    return !(Array.isArray(h) && h.some((x) => x.type === 'public'));
+  }
 
   /**
    * 메모리 감시기와 같은 위치(봇 기동)에서 한 번 등록한다 — 스케줄러의
@@ -145,6 +166,8 @@ export class DaouLoginNotifier {
 
     const key = `${ALERT_ID}:${alert.since || 'unknown'}`;
     if (notice && notice.key === key) return;   // 이 만료는 이미 알렸다
+    const now = this.now();
+    if (!this.isWorkday(now) || now.getHours() < NOTIFY_FROM_HOUR) return;   // 다음 업무일 08시에
 
     const text = [
       '🔴 *다우 세션 만료* — 그룹웨어 적재 멈춤',
